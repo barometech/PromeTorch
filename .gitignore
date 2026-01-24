@@ -1,0 +1,34 @@
+build*/
+build_*/
+*.obj
+*.exe
+*.dll
+*.lib
+*.exp
+*.pdb
+*.pyd
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+nul
+
+# Build logs
+*_output.txt
+*_out.txt
+build_log.txt
+build_error.log
+cmake_output.txt
+
+# IDE
+.vscode/
+.idea/
+*.suo
+*.user
+
+# Data files (large)
+data/mnist/
+*.ubyte
+
+# Temp
+.claude/
