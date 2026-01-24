@@ -1,0 +1,41 @@
+# CUDA Dockerfile for PromeTorch - A100 optimized
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04
+
+# Install build tools
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    cmake \
+    ninja-build \
+    git \
+    wget \
+    curl \
+    dos2unix \
+    libomp-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set CUDA architecture for A100 (sm_80)
+ENV TORCH_CUDA_ARCH_LIST="8.0"
+
+WORKDIR /app
+
+# Copy source files
+COPY . .
+
+# Convert line endings
+RUN find . -type f \( -name "*.h" -o -name "*.cpp" -o -name "*.cu" -o -name "*.cmake" -o -name "CMakeLists.txt" \) -exec dos2unix {} \;
+
+# Build with CUDA support
+RUN mkdir -p build && cd build && \
+    cmake .. -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DPT_USE_CUDA=ON \
+        -DPT_BUILD_TESTS=OFF \
+        -DCMAKE_CUDA_ARCHITECTURES=80 && \
+    ninja
+
+# Download Shakespeare dataset
+RUN mkdir -p data && \
+    wget -O data/shakespeare.txt https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
+
+# Default command - run training
+CMD ["./build/examples/pir/train_pir", "--data", "data/shakespeare.txt", "--epochs", "100"]

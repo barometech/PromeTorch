@@ -32,3 +32,16 @@ data/mnist/
 
 # Temp
 .claude/
+
+# Build scripts (local)
+*.bat
+*.ps1
+
+# Output files
+*.png
+output.txt
+
+# Test directories
+test/
+PIR/
+tools/
