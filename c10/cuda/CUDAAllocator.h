@@ -11,6 +11,7 @@
 #include <vector>
 #include <memory>
 #include <algorithm>
+#include <iostream>
 
 // Export/Import macro for CUDA allocator (part of aten_cuda library)
 // ATEN_CUDA_EXPORTS is defined only when building aten_cuda.dll
@@ -212,14 +213,38 @@ public:
     // Users should NOT create instances directly - use get() instead!
     CUDACachingAllocator() = default;
     ~CUDACachingAllocator() {
-        // Clean up on destruction
-        empty_cache();
+        // Don't do cleanup in destructor - user should call shutdown() before exit
+        // This prevents crashes during static destruction order issues
+    }
 
-        // Free allocated blocks (this shouldn't happen in normal use)
-        for (auto& pair : ptr_to_block_) {
-            cudaFree(pair.second->ptr);
-            delete pair.second;
-        }
+    // Call this before program exit to prevent heap corruption during cleanup
+    // Following PyTorch pattern: DO NOT actually free CUDA memory on shutdown!
+    // The CUDA driver will clean up when the process exits.
+    // Calling cudaFree() during shutdown can cause crashes due to:
+    // 1. CUDA driver already being partially unloaded
+    // 2. Race conditions with other CUDA cleanup
+    // 3. Static destruction order issues
+    void shutdown() {
+        std::cerr << "[SHUTDOWN] marking allocator as shutdown (NOT freeing memory)" << std::endl;
+        std::lock_guard<std::mutex> lock(mutex_);
+        is_shutdown_ = true;
+
+        // Just synchronize - don't free anything
+        cudaDeviceSynchronize();
+
+        // Clear the tracking structures but DON'T call cudaFree or delete Block*
+        // This is intentional - the CUDA driver handles cleanup at process exit
+        // Attempting to free here causes heap corruption due to CUDA driver state
+        free_blocks_.clear();
+        ptr_to_block_.clear();
+        cached_bytes_ = 0;
+        allocated_bytes_ = 0;
+
+        std::cerr << "[SHUTDOWN] done (memory will be freed by CUDA driver at exit)" << std::endl;
+    }
+
+    bool is_shutdown() const {
+        return is_shutdown_;
     }
 
 private:
@@ -344,6 +369,7 @@ private:
     std::set<Block*> free_blocks_;
     size_t allocated_bytes_ = 0;
     size_t cached_bytes_ = 0;
+    bool is_shutdown_ = false;
 };
 
 // ============================================================================
@@ -408,6 +434,14 @@ inline void cuda_set_device(int device) {
 // Implemented in CUDAAllocator.cpp to ensure single registration point
 
 ATEN_CUDA_API void register_cuda_allocator();
+
+// ============================================================================
+// Shutdown CUDA - MUST be called before program exit to prevent crashes!
+// ============================================================================
+// This function cleans up all CUDA resources before static destructors run.
+// Call this at the end of main() before return.
+
+ATEN_CUDA_API void cuda_shutdown();
 
 } // namespace cuda
 } // namespace c10
