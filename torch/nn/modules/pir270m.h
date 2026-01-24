@@ -205,6 +205,9 @@ public:
     ) {
         eval();  // Set to eval mode
 
+        // CRITICAL: Disable autograd for inference to prevent memory leak!
+        torch::autograd::NoGradGuard no_grad;
+
         std::vector<int64_t> tokens = prompt;
         std::random_device rd;
         std::mt19937 gen(rd());

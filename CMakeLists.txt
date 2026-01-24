@@ -214,14 +214,27 @@ if(PT_USE_CUDA)
         aten/src/ATen/cuda/CUDABlas.cu
         aten/src/ATen/cuda/CUDAConv.cu
         aten/src/ATen/cuda/FlashAttention.cu
+        # CRITICAL: CUDAAllocator singleton must be in a .cpp file (not header)
+        # to avoid DLL boundary issues on Windows. Each DLL must use the SAME
+        # allocator instance, otherwise heap corruption occurs.
+        c10/cuda/CUDAAllocator.cpp
     )
 
     set(ATEN_CUDA_HEADERS
         aten/src/ATen/cuda/CUDAOps.h
     )
 
-    # Build CUDA library
-    add_library(aten_cuda STATIC ${ATEN_CUDA_SOURCES})
+    # Build CUDA library as SHARED to properly export CUDACachingAllocator singleton
+    # CRITICAL: Must be SHARED (DLL) to ensure single allocator instance across all code!
+    if(PT_BUILD_SHARED_LIBS)
+        add_library(aten_cuda SHARED ${ATEN_CUDA_SOURCES})
+        # Define ATEN_CUDA_EXPORTS so ATEN_CUDA_API exports symbols (dllexport)
+        # When other targets include CUDAOps.h, ATEN_CUDA_EXPORTS is NOT defined,
+        # so ATEN_CUDA_API becomes dllimport - correct behavior!
+        target_compile_definitions(aten_cuda PRIVATE ATEN_CUDA_EXPORTS PT_BUILD_SHARED_LIBS)
+    else()
+        add_library(aten_cuda STATIC ${ATEN_CUDA_SOURCES})
+    endif()
 
     target_include_directories(aten_cuda PUBLIC
         $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}>

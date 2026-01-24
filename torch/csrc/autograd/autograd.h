@@ -31,6 +31,19 @@ namespace autograd {
 using at::Tensor;
 using at::Scalar;
 
+// GradMode, NoGradGuard, EnableGradGuard are defined in grad_mode.h
+// and included via node.h
+
+// Helper function to check if grad tracking should be enabled for an operation
+// (convenience wrappers that mirror compute_requires_grad)
+inline bool should_compute_grad(const Tensor& t) {
+    return compute_requires_grad(t);
+}
+
+inline bool should_compute_grad(const Tensor& a, const Tensor& b) {
+    return compute_requires_grad(a, b);
+}
+
 // ============================================================================
 // Implementations deferred from headers (to avoid circular dependencies)
 // ============================================================================

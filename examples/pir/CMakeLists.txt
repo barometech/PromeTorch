@@ -43,3 +43,21 @@ endif()
 if(PT_USE_OPENMP AND OpenMP_CXX_FOUND)
     target_link_libraries(test_mem_leak PRIVATE OpenMP::OpenMP_CXX)
 endif()
+
+# CUDA Isolation Test - for debugging CUDA crash
+if(PT_USE_CUDA)
+    add_executable(cuda_isolation_test ${CMAKE_SOURCE_DIR}/examples/cuda_isolation_test.cpp)
+
+    target_link_libraries(cuda_isolation_test
+        PRIVATE
+        c10
+        aten_cuda
+    )
+
+    # CRITICAL: Add PT_USE_CUDA definition
+    target_compile_definitions(cuda_isolation_test PRIVATE PT_USE_CUDA)
+
+    if(MSVC)
+        target_link_options(cuda_isolation_test PRIVATE /STACK:10485760)
+    endif()
+endif()

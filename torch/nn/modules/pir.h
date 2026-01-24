@@ -248,8 +248,8 @@ public:
             }
         }
 
-        // Set up autograd
-        if (x.requires_grad()) {
+        // Set up autograd (only if grad mode is enabled)
+        if (torch::autograd::should_compute_grad(x)) {
             auto backward_fn = std::make_shared<torch::autograd::RotaryEmbeddingBackward>(
                 cos_cache, sin_cache, seq_len, dim_, batch_first
             );
@@ -347,8 +347,8 @@ inline Tensor dynamic_parallel_scan(
         }
     }
 
-    // Set up autograd
-    if (x.requires_grad() || gate_logits.requires_grad()) {
+    // Set up autograd (only if grad mode is enabled)
+    if (torch::autograd::should_compute_grad(x, gate_logits)) {
         auto backward_fn = std::make_shared<torch::autograd::ParallelScanBackward>(
             x, gates, gate_logits, base_decay, output,
             x.requires_grad(), gate_logits.requires_grad()

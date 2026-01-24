@@ -12,6 +12,18 @@
 #include <memory>
 #include <algorithm>
 
+// Export/Import macro for CUDA allocator (part of aten_cuda library)
+// ATEN_CUDA_EXPORTS is defined only when building aten_cuda.dll
+#if defined(PT_PLATFORM_WINDOWS)
+    #if defined(ATEN_CUDA_EXPORTS)
+        #define ATEN_CUDA_API __declspec(dllexport)
+    #else
+        #define ATEN_CUDA_API __declspec(dllimport)
+    #endif
+#else
+    #define ATEN_CUDA_API __attribute__((visibility("default")))
+#endif
+
 namespace c10 {
 namespace cuda {
 
@@ -130,13 +142,15 @@ struct Block {
 // ============================================================================
 // CUDA Caching Allocator
 // ============================================================================
+// IMPORTANT: The singleton is implemented in CUDAAllocator.cpp to avoid
+// DLL boundary issues. Each DLL must use the SAME allocator instance,
+// otherwise allocating in one DLL and freeing in another causes heap corruption.
 
-class CUDACachingAllocator : public Allocator {
+class ATEN_CUDA_API CUDACachingAllocator : public Allocator {
 public:
-    static CUDACachingAllocator& get() {
-        static CUDACachingAllocator allocator;
-        return allocator;
-    }
+    // Singleton accessor - implemented in CUDAAllocator.cpp
+    // DO NOT make this inline - it MUST return the same instance across all DLLs!
+    static CUDACachingAllocator& get();
 
     DataPtr allocate(size_t nbytes) override {
         return allocate_impl(nbytes, 0, nullptr);
@@ -194,7 +208,8 @@ public:
         }
     }
 
-private:
+    // Constructor/Destructor - public for singleton creation in CUDAAllocator.cpp
+    // Users should NOT create instances directly - use get() instead!
     CUDACachingAllocator() = default;
     ~CUDACachingAllocator() {
         // Clean up on destruction
@@ -206,6 +221,8 @@ private:
             delete pair.second;
         }
     }
+
+private:
 
     DataPtr allocate_impl(size_t nbytes, int device, cudaStream_t stream) {
         if (nbytes == 0) {
@@ -315,17 +332,12 @@ private:
         cached_bytes_ = 0;
     }
 
-    static void deleter(void* /*data*/, void* ctx) {
-        if (ctx == nullptr) return;
-        Block* block = static_cast<Block*>(ctx);
-        CUDACachingAllocator::get().free_block(block);
-    }
-
-    static void Delete(void* data, void* ctx) {
-        deleter(data, ctx);
-    }
-
-    static void null_deleter(void*, void*) {}
+    // Static deleters - implemented in CUDAAllocator.cpp
+    // These MUST be in .cpp because they call get() which must resolve to
+    // the global singleton, not a per-DLL instance.
+    static void deleter(void* data, void* ctx);
+    static void Delete(void* data, void* ctx);
+    static void null_deleter(void* data, void* ctx);
 
     mutable std::mutex mutex_;
     std::map<void*, Block*> ptr_to_block_;
@@ -393,17 +405,9 @@ inline void cuda_set_device(int device) {
 // ============================================================================
 // Register CUDA Allocator
 // ============================================================================
+// Implemented in CUDAAllocator.cpp to ensure single registration point
 
-inline void register_cuda_allocator() {
-    static bool registered = false;
-    if (!registered) {
-        AllocatorRegistry::get().registerAllocator(
-            DeviceType::CUDA,
-            &CUDACachingAllocator::get()
-        );
-        registered = true;
-    }
-}
+ATEN_CUDA_API void register_cuda_allocator();
 
 } // namespace cuda
 } // namespace c10

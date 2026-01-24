@@ -2,12 +2,25 @@
 
 #include <cuda_runtime.h>
 #include <cstdint>
+#include "c10/macros/Macros.h"
 
 // ============================================================================
 // CUDA Operation Declarations for PromeTorch
 // ============================================================================
 // These functions launch CUDA kernels - include this header in C++ code
 // to dispatch operations to GPU
+
+// Export/Import macro for aten_cuda library
+// ATEN_CUDA_EXPORTS is defined only when building aten_cuda.dll
+#if defined(PT_PLATFORM_WINDOWS)
+    #if defined(ATEN_CUDA_EXPORTS)
+        #define ATEN_CUDA_API __declspec(dllexport)
+    #else
+        #define ATEN_CUDA_API __declspec(dllimport)
+    #endif
+#else
+    #define ATEN_CUDA_API __attribute__((visibility("default")))
+#endif
 
 namespace at {
 namespace cuda {
@@ -16,46 +29,46 @@ namespace cuda {
 // Element-wise Unary Operations
 // ============================================================================
 
-void launch_neg(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
-void launch_abs(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
-void launch_sqrt(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
-void launch_rsqrt(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
-void launch_square(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
-void launch_exp(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
-void launch_log(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
-void launch_sin(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
-void launch_cos(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
-void launch_tanh(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
-void launch_sigmoid(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
-void launch_relu(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
-void launch_leaky_relu(const float* input, float* output, float alpha, int64_t n, cudaStream_t stream = nullptr);
-void launch_silu(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
-void launch_gelu(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_neg(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_abs(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_sqrt(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_rsqrt(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_square(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_exp(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_log(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_sin(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_cos(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_tanh(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_sigmoid(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_relu(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_leaky_relu(const float* input, float* output, float alpha, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_silu(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_gelu(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
 
 // ============================================================================
 // Element-wise Binary Operations
 // ============================================================================
 
-void launch_add(const float* a, const float* b, float* out, int64_t n, cudaStream_t stream = nullptr);
-void launch_add_scalar(const float* a, float scalar, float* out, int64_t n, cudaStream_t stream = nullptr);
-void launch_sub(const float* a, const float* b, float* out, int64_t n, cudaStream_t stream = nullptr);
-void launch_mul(const float* a, const float* b, float* out, int64_t n, cudaStream_t stream = nullptr);
-void launch_mul_scalar(const float* a, float scalar, float* out, int64_t n, cudaStream_t stream = nullptr);
-void launch_mul_broadcast_row(const float* a, const float* b, float* out, int64_t outer_size, int64_t inner_size, cudaStream_t stream = nullptr);
-void launch_mul_broadcast_col(const float* a, const float* b, float* out, int64_t outer_size, int64_t inner_size, cudaStream_t stream = nullptr);
-void launch_div(const float* a, const float* b, float* out, int64_t n, cudaStream_t stream = nullptr);
-void launch_div_scalar(const float* a, float scalar, float* out, int64_t n, cudaStream_t stream = nullptr);
-void launch_pow(const float* a, const float* b, float* out, int64_t n, cudaStream_t stream = nullptr);
-void launch_pow_scalar(const float* a, float exp, float* out, int64_t n, cudaStream_t stream = nullptr);
-void launch_maximum(const float* a, const float* b, float* out, int64_t n, cudaStream_t stream = nullptr);
-void launch_minimum(const float* a, const float* b, float* out, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_add(const float* a, const float* b, float* out, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_add_scalar(const float* a, float scalar, float* out, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_sub(const float* a, const float* b, float* out, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_mul(const float* a, const float* b, float* out, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_mul_scalar(const float* a, float scalar, float* out, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_mul_broadcast_row(const float* a, const float* b, float* out, int64_t outer_size, int64_t inner_size, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_mul_broadcast_col(const float* a, const float* b, float* out, int64_t outer_size, int64_t inner_size, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_div(const float* a, const float* b, float* out, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_div_scalar(const float* a, float scalar, float* out, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_pow(const float* a, const float* b, float* out, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_pow_scalar(const float* a, float exp, float* out, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_maximum(const float* a, const float* b, float* out, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_minimum(const float* a, const float* b, float* out, int64_t n, cudaStream_t stream = nullptr);
 
 // ============================================================================
 // Fill and Copy
 // ============================================================================
 
-void launch_fill(float* data, float value, int64_t n, cudaStream_t stream = nullptr);
-void launch_copy(const float* src, float* dst, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_fill(float* data, float value, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_copy(const float* src, float* dst, int64_t n, cudaStream_t stream = nullptr);
 
 // ============================================================================
 // Comparison Operations
@@ -67,37 +80,37 @@ void launch_copy(const float* src, float* dst, int64_t n, cudaStream_t stream = 
 // Conditional Operations
 // ============================================================================
 
-void launch_clamp(const float* input, float* output, float min_val, float max_val, int64_t n, cudaStream_t stream = nullptr);
-void launch_where(const bool* cond, const float* a, const float* b, float* out, int64_t n, cudaStream_t stream = nullptr);
-void launch_masked_fill(float* data, const bool* mask, float value, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_clamp(const float* input, float* output, float min_val, float max_val, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_where(const bool* cond, const float* a, const float* b, float* out, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_masked_fill(float* data, const bool* mask, float value, int64_t n, cudaStream_t stream = nullptr);
 
 // ============================================================================
 // Softmax
 // ============================================================================
 
-void launch_softmax(const float* input, float* output, int64_t outer_size, int64_t dim_size, int64_t inner_size, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_softmax(const float* input, float* output, int64_t outer_size, int64_t dim_size, int64_t inner_size, cudaStream_t stream = nullptr);
 
 // ============================================================================
 // Reduction Operations
 // ============================================================================
 
-void launch_sum(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
-void launch_sum_dim(const float* input, float* output, int64_t outer_size, int64_t reduce_size, int64_t inner_size, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_sum(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_sum_dim(const float* input, float* output, int64_t outer_size, int64_t reduce_size, int64_t inner_size, cudaStream_t stream = nullptr);
 
-void launch_mean(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
-void launch_mean_dim(const float* input, float* output, int64_t outer_size, int64_t reduce_size, int64_t inner_size, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_mean(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_mean_dim(const float* input, float* output, int64_t outer_size, int64_t reduce_size, int64_t inner_size, cudaStream_t stream = nullptr);
 
-void launch_max(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
-void launch_max_dim(const float* input, float* output, int64_t* indices, int64_t outer_size, int64_t reduce_size, int64_t inner_size, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_max(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_max_dim(const float* input, float* output, int64_t* indices, int64_t outer_size, int64_t reduce_size, int64_t inner_size, cudaStream_t stream = nullptr);
 
-void launch_min(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
-void launch_min_dim(const float* input, float* output, int64_t* indices, int64_t outer_size, int64_t reduce_size, int64_t inner_size, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_min(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_min_dim(const float* input, float* output, int64_t* indices, int64_t outer_size, int64_t reduce_size, int64_t inner_size, cudaStream_t stream = nullptr);
 
-void launch_l1_norm(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
-void launch_l2_norm(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_l1_norm(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_l2_norm(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
 
-void launch_argmax(const float* input, int64_t* output, int64_t n, cudaStream_t stream = nullptr);
-void launch_argmin(const float* input, int64_t* output, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_argmax(const float* input, int64_t* output, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_argmin(const float* input, int64_t* output, int64_t n, cudaStream_t stream = nullptr);
 
 // ============================================================================
 // Linear Algebra / BLAS Operations
@@ -106,7 +119,7 @@ void launch_argmin(const float* input, int64_t* output, int64_t n, cudaStream_t 
 // General matrix multiplication: C = alpha * op(A) @ op(B) + beta * C
 // trans_a: if true, A is transposed
 // trans_b: if true, B is transposed
-void launch_gemm(
+ATEN_CUDA_API void launch_gemm(
     const float* A, const float* B, float* C,
     int M, int N, int K,
     float alpha, float beta,
@@ -115,7 +128,7 @@ void launch_gemm(
 );
 
 // Batched GEMM: batch matrix multiplications
-void launch_batched_gemm(
+ATEN_CUDA_API void launch_batched_gemm(
     const float* A, const float* B, float* C,
     int batch, int M, int N, int K,
     float alpha, float beta,
@@ -123,35 +136,35 @@ void launch_batched_gemm(
 );
 
 // Matrix-vector: y = A @ x
-void launch_gemv(
+ATEN_CUDA_API void launch_gemv(
     const float* A, const float* x, float* y,
     int M, int N,
     cudaStream_t stream = nullptr
 );
 
 // Vector dot product
-void launch_dot(
+ATEN_CUDA_API void launch_dot(
     const float* a, const float* b, float* result,
     int64_t n,
     cudaStream_t stream = nullptr
 );
 
 // Outer product: C = a @ b^T
-void launch_outer(
+ATEN_CUDA_API void launch_outer(
     const float* a, const float* b, float* C,
     int M, int N,
     cudaStream_t stream = nullptr
 );
 
 // Matrix transpose
-void launch_transpose(
+ATEN_CUDA_API void launch_transpose(
     const float* input, float* output,
     int rows, int cols,
     cudaStream_t stream = nullptr
 );
 
 // Addmm: C = beta * C + alpha * A @ B
-void launch_addmm(
+ATEN_CUDA_API void launch_addmm(
     const float* A, const float* B, float* C,
     int M, int N, int K,
     float alpha, float beta,
@@ -163,7 +176,7 @@ void launch_addmm(
 // Convolution Operations
 // ============================================================================
 
-void launch_conv2d_forward(
+ATEN_CUDA_API void launch_conv2d_forward(
     const float* input,
     const float* weight,
     const float* bias,  // can be nullptr
@@ -191,7 +204,7 @@ void launch_conv2d_forward(
 // Pooling Operations
 // ============================================================================
 
-void launch_max_pool2d_forward(
+ATEN_CUDA_API void launch_max_pool2d_forward(
     const float* input,
     float* output,
     int batch_size,
@@ -209,7 +222,7 @@ void launch_max_pool2d_forward(
     cudaStream_t stream = nullptr
 );
 
-void launch_avg_pool2d_forward(
+ATEN_CUDA_API void launch_avg_pool2d_forward(
     const float* input,
     float* output,
     int batch_size,
@@ -228,7 +241,7 @@ void launch_avg_pool2d_forward(
     cudaStream_t stream = nullptr
 );
 
-void launch_adaptive_avg_pool2d_forward(
+ATEN_CUDA_API void launch_adaptive_avg_pool2d_forward(
     const float* input,
     float* output,
     int batch_size,
@@ -244,7 +257,7 @@ void launch_adaptive_avg_pool2d_forward(
 // Batch Normalization
 // ============================================================================
 
-void launch_batch_norm2d_forward(
+ATEN_CUDA_API void launch_batch_norm2d_forward(
     const float* input,
     const float* gamma,
     const float* beta,
@@ -268,7 +281,7 @@ void launch_batch_norm2d_forward(
 // targets: (batch_size,) - class indices as float
 // output: scalar (Mean/Sum reduction) or (batch_size,) for None reduction
 // reduction: 0=None, 1=Mean, 2=Sum
-void launch_cross_entropy_loss(
+ATEN_CUDA_API void launch_cross_entropy_loss(
     const float* logits,
     const float* targets,
     float* output,
@@ -281,7 +294,7 @@ void launch_cross_entropy_loss(
 // NLL loss: -log_probs[target]
 // log_probs: (batch_size, num_classes) - already log softmax
 // targets: (batch_size,) - class indices as float
-void launch_nll_loss(
+ATEN_CUDA_API void launch_nll_loss(
     const float* log_probs,
     const float* targets,
     float* output,
@@ -319,7 +332,7 @@ inline void launch_bmm(
 
 // Parallel recurrent scan: h[t] = gate[t] * h[t-1] + x[t]
 // Runs on GPU without CPU transfer
-void launch_parallel_scan(
+ATEN_CUDA_API void launch_parallel_scan(
     const float* x,           // [B, T, D] input
     const float* gate_logits, // [B, T, D] gate logits
     const float* base_decay,  // [D] base decay values
@@ -330,7 +343,7 @@ void launch_parallel_scan(
 );
 
 // Rotary positional embedding application
-void launch_rotary_embedding(
+ATEN_CUDA_API void launch_rotary_embedding(
     const float* x,           // [B, T, D] input
     const float* cos_cache,   // [max_seq, D] precomputed cos
     const float* sin_cache,   // [max_seq, D] precomputed sin
