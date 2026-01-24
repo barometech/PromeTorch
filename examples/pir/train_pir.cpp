@@ -468,47 +468,87 @@ int main(int argc, char* argv[]) {
     std::cout << "  Block size: " << block_size << std::endl;
     std::cout << "  Batch size: " << batch_size << std::endl;
 
-    PIR270MConfig config;
-    config.vocab_size = tokenizer.vocab_size();
-    config.n_embd = n_embd;
-    config.n_layers = n_layers;
-    config.n_pir_layers = n_pir_layers;
-    config.block_size = block_size;
-    config.dropout = 0.0;
-    config.tie_weights = true;
+    // Wrap all tensor-owning objects in a block so they are destroyed
+    // BEFORE cuda_shutdown() is called
+    {
+        PIR270MConfig config;
+        config.vocab_size = tokenizer.vocab_size();
+        config.n_embd = n_embd;
+        config.n_layers = n_layers;
+        config.n_pir_layers = n_pir_layers;
+        config.block_size = block_size;
+        config.dropout = 0.0;
+        config.tie_weights = true;
 
-    PIR270M model(config);
+        PIR270M model(config);
 
-    // Move model to device (GPU if configured)
+        // Move model to device (GPU if configured)
 #ifdef PT_USE_CUDA
-    if (g_device.is_cuda()) {
-        std::cout << "Moving model to CUDA..." << std::endl;
-        model.to(g_device);
-        std::cout << "Model moved to CUDA" << std::endl;
-    }
+        if (g_device.is_cuda()) {
+            std::cout << "Moving model to CUDA..." << std::endl;
+            model.to(g_device);
+            std::cout << "Model moved to CUDA" << std::endl;
+        }
 #endif
 
-    // Create data loader
-    TextDataLoader train_loader(data, batch_size, block_size);
+        // Create data loader
+        TextDataLoader train_loader(data, batch_size, block_size);
 
-    // Create optimizer
-    AdamWOptions opts(learning_rate);
-    opts.betas(0.9, 0.95);
-    opts.weight_decay_(0.1);
-    AdamW optimizer(model.parameters(), opts);
+        // Create optimizer
+        AdamWOptions opts(learning_rate);
+        opts.betas(0.9, 0.95);
+        opts.weight_decay_(0.1);
+        AdamW optimizer(model.parameters(), opts);
 
-    // Train
-    train(model, train_loader, optimizer, num_iterations, log_interval, 0);
+        // Train
+        train(model, train_loader, optimizer, num_iterations, log_interval, 0);
 
-    // Generate sample text
-    std::string prompt = text.substr(0, std::min(static_cast<size_t>(50), text.size()));
-    generate_text(model, tokenizer, prompt, 200);
+        // Generate sample text
+        std::string prompt = text.substr(0, std::min(static_cast<size_t>(50), text.size()));
+        generate_text(model, tokenizer, prompt, 200);
 
-    // Try generating from a simple prompt
-    std::string simple_prompt = text.substr(0, 10);
-    generate_text(model, tokenizer, simple_prompt, 300);
+        // Try generating from a simple prompt
+        std::string simple_prompt = text.substr(0, 10);
+        generate_text(model, tokenizer, simple_prompt, 300);
 
-    std::cout << "\n=== Training Complete ===" << std::endl;
+        std::cout << "\n=== Training Complete ===" << std::endl;
+
+        // Explicit cleanup before objects go out of scope
+        std::cout << "Cleaning up..." << std::endl;
+
+        // Clear optimizer state (contains CUDA tensors)
+        optimizer.zero_grad();
+
+        // Clear all parameter gradients
+        model.zero_grad();
+
+        // Clear all parameters' grad_fn to break autograd graph cycles
+        for (auto* param : model.parameters()) {
+            if (param && param->defined()) {
+                at::Tensor& data = param->data();
+                if (data.defined()) {
+                    torch::autograd::clear_grad_fn(data);
+                    param->set_grad(at::Tensor());  // Clear gradient tensor
+                }
+            }
+        }
+
+        std::cout << "Cleanup done, destroying objects..." << std::endl;
+        std::cout.flush();
+        std::cerr.flush();
+
+    } // model, optimizer, train_loader destroyed here - BEFORE cuda_shutdown
+    std::cout << "Objects destroyed successfully!" << std::endl;
+    std::cout.flush();
+
+#ifdef PT_USE_CUDA
+    // CRITICAL: Shutdown CUDA AFTER all tensors are destroyed
+    // but BEFORE static destructors run
+    if (g_device.is_cuda()) {
+        c10::cuda::cuda_shutdown();
+        std::cout << "CUDA shutdown complete" << std::endl;
+    }
+#endif
 
     return 0;
 }
