@@ -39,14 +39,11 @@ ATEN_CUDA_API void CUDACachingAllocator::deleter(void* /*data*/, void* ctx) {
     if (ctx == nullptr) return;
     // Check if allocator was shutdown - if so, memory is already freed
     if (g_cuda_allocator.is_shutdown()) {
-        std::cerr << "[CUDA] deleter skipped - shutdown" << std::endl;
         return;  // Don't try to free - allocator already cleaned up
     }
     Block* block = static_cast<Block*>(ctx);
-    std::cerr << "[CUDA] deleter block=" << (void*)block << " ptr=" << block->ptr << " size=" << block->size << std::endl;
     // CRITICAL: Use the global singleton, not a local static!
     g_cuda_allocator.free_block(block);
-    std::cerr << "[CUDA] deleter done" << std::endl;
 }
 
 ATEN_CUDA_API void CUDACachingAllocator::Delete(void* data, void* ctx) {
@@ -78,15 +75,11 @@ ATEN_CUDA_API void register_cuda_allocator() {
 // ============================================================================
 
 ATEN_CUDA_API void cuda_shutdown() {
-    std::cerr << "[CUDA] cuda_shutdown() called" << std::endl;
-
     // Synchronize all GPU operations first
     cudaDeviceSynchronize();
-    std::cerr << "[CUDA] cudaDeviceSynchronize done" << std::endl;
 
     // Shutdown the caching allocator
     g_cuda_allocator.shutdown();
-    std::cerr << "[CUDA] allocator.shutdown() done" << std::endl;
 
     // Note: cudaDeviceReset() is NOT called here because it can cause crashes
     // if there are any remaining CUDA resources (streams, events, etc.)

@@ -580,19 +580,12 @@ public:
     }
 
     Tensor forward(const Tensor& x) override {
-        std::cout << "BLK: norm1" << std::endl; std::cout.flush();
         Tensor x_norm = norm1_->forward(x);
-        std::cout << "BLK: pir" << std::endl; std::cout.flush();
         Tensor pir_out = pir_->forward(x_norm);
-        std::cout << "BLK: add1" << std::endl; std::cout.flush();
         Tensor h = torch::autograd::add_autograd(x, pir_out);
-        std::cout << "BLK: norm2" << std::endl; std::cout.flush();
         Tensor h_norm = norm2_->forward(h);
-        std::cout << "BLK: ffn" << std::endl; std::cout.flush();
         Tensor ffn_out = ffn_->forward(h_norm);
-        std::cout << "BLK: add2" << std::endl; std::cout.flush();
         h = torch::autograd::add_autograd(h, ffn_out);
-        std::cout << "BLK: done" << std::endl; std::cout.flush();
         return h;
     }
 

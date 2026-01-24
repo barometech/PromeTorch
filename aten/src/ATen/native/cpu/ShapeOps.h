@@ -4,6 +4,11 @@
 #include "aten/src/ATen/core/TensorFactory.h"
 #include <numeric>
 
+#ifdef PT_USE_CUDA
+#include "aten/src/ATen/cuda/CUDAOps.h"
+#include "c10/cuda/CUDAAllocator.h"
+#endif
+
 namespace at {
 namespace native {
 
@@ -468,8 +473,50 @@ inline Tensor contiguous(const Tensor& self) {
         return self;
     }
 
-    // For CUDA tensors, use CPU fallback (until CUDA strided copy kernel)
     bool is_cuda = self.is_cuda();
+
+#ifdef PT_USE_CUDA
+    // Fast path for CUDA transposed 2D tensors - use GPU transpose kernel
+    if (is_cuda && self.dim() == 2 &&
+        self.stride(0) == 1 && self.stride(1) == self.size(0)) {
+        // This is a simple 2D transpose: physical [N, K] -> logical [K, N]
+        // Use CUDA transpose kernel (no CPU roundtrip!)
+        int64_t logical_rows = self.size(0);  // K (rows in logical view)
+        int64_t logical_cols = self.size(1);  // N (cols in logical view)
+        // Physical layout is [N, K], so transpose from [N, K] to [K, N]
+        int64_t phys_rows = logical_cols;  // N
+        int64_t phys_cols = logical_rows;  // K
+
+        // Allocate output tensor on CUDA
+        size_t nbytes = static_cast<size_t>(self.numel() * c10::elementSize(self.dtype()));
+        c10::DataPtr data_ptr = c10::cuda::CUDACachingAllocator::get().allocate(nbytes);
+        c10::Allocator* cuda_alloc = &c10::cuda::CUDACachingAllocator::get();
+        c10::Storage storage(nbytes, std::move(data_ptr), cuda_alloc, false);
+
+        // Compute contiguous strides for [K, N] output
+        std::vector<int64_t> out_strides = {logical_cols, 1};  // row-major: [N, 1]
+
+        auto impl = std::make_shared<c10::TensorImpl>(
+            std::move(storage),
+            self.dtype(),
+            self.sizes(),
+            out_strides,
+            0  // storage_offset
+        );
+        Tensor result(impl);
+
+        at::cuda::launch_transpose(
+            self.data_ptr<float>(), result.mutable_data_ptr<float>(),
+            static_cast<int>(phys_rows), static_cast<int>(phys_cols), nullptr);
+
+        if (self.requires_grad()) {
+            result.set_requires_grad(true);
+        }
+        return result;
+    }
+#endif
+
+    // CPU fallback for non-transposed or non-CUDA tensors
     Tensor self_cpu = self;
 #ifdef PT_USE_CUDA
     if (is_cuda) {
