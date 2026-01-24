@@ -408,17 +408,33 @@ inline Tensor sum_dim(const Tensor& input, int64_t dim, bool keepdim = false) {
     return output;
 }
 
-// Matrix multiplication
+// Helper to check if tensor is transposed (row-major vs col-major)
+inline bool is_transposed_2d(const Tensor& t) {
+    if (t.dim() != 2) return false;
+    // Transposed: stride[0] == 1, stride[1] == size[0]
+    // Normal:     stride[0] == size[1], stride[1] == 1
+    return t.stride(0) == 1 && t.stride(1) == t.size(0);
+}
+
+// Matrix multiplication - use contiguous for now
+// TODO: Add GEMM transpose detection to avoid CPU roundtrip
 inline Tensor mm(const Tensor& a, const Tensor& b) {
     PT_CHECK_MSG(a.dim() == 2 && b.dim() == 2, "mm expects 2D tensors");
     PT_CHECK_MSG(a.size(1) == b.size(0), "Matrix dimensions incompatible for multiplication");
 
-    int M = a.size(0);
-    int K = a.size(1);
-    int N = b.size(1);
+    // Make contiguous if needed (this is slow for transposed views)
+    Tensor a_contig = a.is_contiguous() ? a : a.contiguous();
+    Tensor b_contig = b.is_contiguous() ? b : b.contiguous();
+
+    int M = a_contig.size(0);
+    int K = a_contig.size(1);
+    int N = b_contig.size(1);
 
     auto output = empty_cuda({M, N}, a.dtype(), a.device().index());
-    at::cuda::launch_mm(a.data_ptr<float>(), b.data_ptr<float>(), output.mutable_data_ptr<float>(), M, N, K, nullptr);
+    at::cuda::launch_gemm(
+        a_contig.data_ptr<float>(), b_contig.data_ptr<float>(), output.mutable_data_ptr<float>(),
+        M, N, K, 1.0f, 0.0f, false, false, nullptr
+    );
     return output;
 }
 
@@ -428,13 +444,18 @@ inline Tensor bmm(const Tensor& a, const Tensor& b) {
     PT_CHECK_MSG(a.size(0) == b.size(0), "Batch sizes must match");
     PT_CHECK_MSG(a.size(2) == b.size(1), "Matrix dimensions incompatible");
 
-    int batch = a.size(0);
-    int M = a.size(1);
-    int K = a.size(2);
-    int N = b.size(2);
+    // For bmm, require contiguous for now (batched transpose detection is complex)
+    // TODO: Add batched GEMM with transpose support
+    Tensor a_contig = a.is_contiguous() ? a : a.contiguous();
+    Tensor b_contig = b.is_contiguous() ? b : b.contiguous();
 
-    auto output = empty_cuda({batch, M, N}, a.dtype(), a.device().index());
-    at::cuda::launch_bmm(a.data_ptr<float>(), b.data_ptr<float>(), output.mutable_data_ptr<float>(), batch, M, N, K, nullptr);
+    int batch = a_contig.size(0);
+    int M = a_contig.size(1);
+    int K = a_contig.size(2);
+    int N = b_contig.size(2);
+
+    auto output = empty_cuda({batch, M, N}, a_contig.dtype(), a_contig.device().index());
+    at::cuda::launch_bmm(a_contig.data_ptr<float>(), b_contig.data_ptr<float>(), output.mutable_data_ptr<float>(), batch, M, N, K, nullptr);
     return output;
 }
 
@@ -443,11 +464,15 @@ inline Tensor mv(const Tensor& mat, const Tensor& vec) {
     PT_CHECK_MSG(mat.dim() == 2 && vec.dim() == 1, "mv expects 2D matrix and 1D vector");
     PT_CHECK_MSG(mat.size(1) == vec.size(0), "Matrix and vector dimensions incompatible");
 
-    int M = mat.size(0);
-    int N = mat.size(1);
+    // IMPORTANT: CUDA kernels require contiguous memory layout!
+    Tensor mat_contig = mat.is_contiguous() ? mat : mat.contiguous();
+    Tensor vec_contig = vec.is_contiguous() ? vec : vec.contiguous();
 
-    auto output = empty_cuda({M}, mat.dtype(), mat.device().index());
-    at::cuda::launch_gemv(mat.data_ptr<float>(), vec.data_ptr<float>(), output.mutable_data_ptr<float>(), M, N, nullptr);
+    int M = mat_contig.size(0);
+    int N = mat_contig.size(1);
+
+    auto output = empty_cuda({M}, mat_contig.dtype(), mat_contig.device().index());
+    at::cuda::launch_gemv(mat_contig.data_ptr<float>(), vec_contig.data_ptr<float>(), output.mutable_data_ptr<float>(), M, N, nullptr);
     return output;
 }
 

@@ -311,21 +311,11 @@ inline variable_list Engine::execute(
     }
 
     // Process nodes in reverse topological order
-    int node_count = 0;
     while (!ready_queue.empty()) {
         NodeTask node_task = std::move(const_cast<NodeTask&>(ready_queue.top()));
         ready_queue.pop();
-
-        std::cout << "[BACKWARD] Node " << node_count++ << ": " << node_task.fn->name()
-                  << " queue_size=" << ready_queue.size() << std::endl;
-        std::cout.flush();
-
         execute_node(task, node_task, ready_queue);
-
-        std::cout << "[BACKWARD] Node done" << std::endl;
-        std::cout.flush();
     }
-    std::cout << "[BACKWARD] Complete, total nodes: " << node_count << std::endl;
 
     // Collect results for requested inputs
     variable_list result;

@@ -137,7 +137,6 @@ public:
         const Tensor& idx,
         const Tensor& targets = Tensor()
     ) {
-        std::cout << "FWD: start" << std::endl; std::cout.flush();
         auto sizes = idx.sizes().vec();
         int64_t B = sizes[0];
         int64_t T = sizes[1];
@@ -150,39 +149,26 @@ public:
         }
 
         // Token embeddings: [B, T] -> [B, T, n_embd]
-        std::cout << "FWD: embed_tokens" << std::endl; std::cout.flush();
         Tensor x = embed_tokens(idx);
-        std::cout << "FWD: embed done, x shape: [" << x.size(0) << "," << x.size(1) << "," << x.size(2) << "]" << std::endl; std::cout.flush();
 
         // Apply RoPE
-        std::cout << "FWD: rope" << std::endl; std::cout.flush();
         x = rope_->apply(x, T, true);
-        std::cout << "FWD: rope done" << std::endl; std::cout.flush();
 
         // Transformer blocks
-        std::cout << "FWD: blocks (" << blocks_.size() << ")" << std::endl; std::cout.flush();
         for (size_t i = 0; i < blocks_.size(); ++i) {
-            std::cout << "FWD: block " << i << std::endl; std::cout.flush();
             x = blocks_[i]->forward(x);
         }
-        std::cout << "FWD: blocks done" << std::endl; std::cout.flush();
 
         // Output normalization
-        std::cout << "FWD: norm_out" << std::endl; std::cout.flush();
         x = norm_out_->forward(x);
-        std::cout << "FWD: norm_out done" << std::endl; std::cout.flush();
 
         // Language model head: [B, T, n_embd] -> [B, T, vocab_size]
-        std::cout << "FWD: project_to_vocab" << std::endl; std::cout.flush();
         Tensor logits = project_to_vocab(x);
-        std::cout << "FWD: project done" << std::endl; std::cout.flush();
 
         // Compute loss if targets provided
         Tensor loss;
         if (targets.defined()) {
-            std::cout << "FWD: cross_entropy" << std::endl; std::cout.flush();
             loss = cross_entropy_loss(logits, targets);
-            std::cout << "FWD: loss done" << std::endl; std::cout.flush();
         }
 
         return {logits, loss};

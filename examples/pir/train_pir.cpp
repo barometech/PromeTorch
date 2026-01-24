@@ -183,57 +183,28 @@ void train(
         torch::autograd::g_meta_create_count = 0;
         torch::autograd::g_meta_upgrade_count = 0;
 
-        // Memory checkpoint at start of each iteration
-#ifdef PT_USE_CUDA
-        if (g_device.is_cuda()) {
-            size_t cuda_used = 0, cuda_total = 0;
-            cudaMemGetInfo(&cuda_used, &cuda_total);
-            cuda_used = cuda_total - cuda_used;  // GetInfo returns free, not used
-            std::cout << "[MEM iter " << iter << "] CUDA: " << (cuda_used / 1048576.0) << " MB used" << std::endl;
-        }
-#endif
-        std::cout << "DBG: iter " << iter << " - get_batch" << std::endl;
-        std::cout.flush();
         // Get batch
         auto [inputs, targets] = train_loader.get_batch();
-        std::cout << "DBG: inputs shape [" << inputs.size(0) << ", " << inputs.size(1) << "]" << std::endl;
-        std::cout.flush();
 
         // Zero gradients
-        std::cout << "DBG: zero_grad" << std::endl;
-        std::cout.flush();
         optimizer.zero_grad();
 
         // Forward pass
-        std::cout << "DBG: forward_with_loss" << std::endl;
-        std::cout.flush();
         auto [logits, loss] = model.forward_with_loss(inputs, targets);
-        std::cout << "DBG: forward done" << std::endl;
-        std::cout.flush();
 
         // Copy loss to CPU for reading
-        std::cout << "DBG: copy loss to CPU" << std::endl;
-        std::cout.flush();
         Tensor loss_cpu = loss;
 #ifdef PT_USE_CUDA
         if (loss.is_cuda()) {
             loss_cpu = at::to_cpu(loss);
         }
 #endif
-        std::cout << "DBG: read loss val" << std::endl;
-        std::cout.flush();
         float loss_val = loss_cpu.data_ptr<float>()[0];
         running_loss += loss_val;
         loss_count++;
-        std::cout << "DBG: loss_val=" << loss_val << std::endl;
-        std::cout.flush();
 
         // Backward pass
-        std::cout << "DBG: backward" << std::endl;
-        std::cout.flush();
         torch::autograd::backward({loss});
-        std::cout << "DBG: backward done" << std::endl;
-        std::cout.flush();
 
         // CRITICAL: Clear autograd graph to prevent memory leak!
         // Without this, backward functions accumulate and cause heap corruption
@@ -249,48 +220,10 @@ void train(
         targets = Tensor();
 
         // Gradient clipping
-        std::cout << "DBG: clip_grad_norm_" << std::endl;
-        std::cout.flush();
         clip_grad_norm_(model, 1.0);
-        std::cout << "DBG: clip_grad_norm_ done" << std::endl;
-        std::cout.flush();
 
         // Update weights
-        std::cout << "DBG: optimizer.step()" << std::endl;
-        std::cout.flush();
         optimizer.step();
-        std::cout << "DBG: optimizer.step() done" << std::endl;
-        std::cout.flush();
-
-#ifdef PT_USE_CUDA
-        // Synchronize CUDA and free cached memory periodically
-        if (g_device.is_cuda()) {
-            c10::cuda::cuda_synchronize();
-            // Free cached memory EVERY iteration to prevent heap corruption
-            c10::cuda::CUDACachingAllocator::get().empty_cache();
-        }
-#endif
-
-        // DEBUG: Print node statistics every iteration
-        torch::autograd::print_node_stats();
-        torch::autograd::print_weak_ptr_stats();
-        torch::autograd::print_meta_stats();
-
-        // DEBUG: Check if parameter gradients have requires_grad
-        int grads_with_grad = 0;
-        for (auto* param : model.parameters()) {
-            if (param->grad().defined() && param->grad().requires_grad()) {
-                grads_with_grad++;
-            }
-            // Also check if grad has grad_fn (non-leaf)
-            auto* meta = torch::autograd::get_autograd_meta(param->grad());
-            if (meta && meta->grad_fn) {
-                std::cout << "[LEAK] Gradient has grad_fn!" << std::endl;
-            }
-        }
-        if (grads_with_grad > 0) {
-            std::cout << "[WARN] " << grads_with_grad << " gradients have requires_grad=true" << std::endl;
-        }
 
         // Logging
         if (iter % log_interval == 0) {
