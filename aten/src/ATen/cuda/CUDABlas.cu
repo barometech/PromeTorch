@@ -6,6 +6,9 @@
 #include <cuda_runtime.h>
 #include <cmath>
 
+// Include the header to get ATEN_CUDA_API macro for proper DLL export
+#include "aten/src/ATen/cuda/CUDAOps.h"
+
 namespace at {
 namespace cuda {
 

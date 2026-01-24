@@ -8,6 +8,9 @@
 #include <cmath>
 #include <cfloat>
 
+// Include the header to get ATEN_CUDA_API macro for proper DLL export
+#include "aten/src/ATen/cuda/CUDAOps.h"
+
 namespace at {
 namespace cuda {
 

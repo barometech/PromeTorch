@@ -1,6 +1,7 @@
 #pragma once
 
 #include "torch/csrc/autograd/edge.h"
+#include "torch/csrc/autograd/grad_mode.h"
 #include "aten/src/ATen/core/Tensor.h"
 #include "torch/csrc/autograd/autograd_meta.h"
 #include <vector>
@@ -260,16 +261,20 @@ inline bool any_requires_grad(const variable_list& tensors) {
 }
 
 // Compute requires_grad for output based on inputs
+// IMPORTANT: Returns false if GradMode is disabled!
 inline bool compute_requires_grad(const variable_list& inputs) {
+    if (!GradMode::is_enabled()) return false;
     return any_requires_grad(inputs);
 }
 
 inline bool compute_requires_grad(const Tensor& a) {
+    if (!GradMode::is_enabled()) return false;
     return a.defined() && a.requires_grad();
 }
 
 inline bool compute_requires_grad(const Tensor& a, const Tensor& b) {
-    return compute_requires_grad(a) || compute_requires_grad(b);
+    if (!GradMode::is_enabled()) return false;
+    return (a.defined() && a.requires_grad()) || (b.defined() && b.requires_grad());
 }
 
 } // namespace autograd
