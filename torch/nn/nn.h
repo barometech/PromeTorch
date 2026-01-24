@@ -1,0 +1,204 @@
+#pragma once
+
+// ============================================================================
+// PromeTorch Neural Network Module
+// ============================================================================
+// This is the main header file for the torch::nn namespace.
+// It provides all the building blocks needed to construct neural networks.
+//
+// Usage:
+//   #include "torch/nn/nn.h"
+//
+//   using namespace torch::nn;
+//
+//   // Create a simple network
+//   auto model = std::make_shared<Sequential>();
+//   model->add(std::make_shared<Linear>(784, 256));
+//   model->add(std::make_shared<ReLU>());
+//   model->add(std::make_shared<Linear>(256, 10));
+//
+//   // Forward pass
+//   Tensor output = model->forward(input);
+// ============================================================================
+
+// Core module components
+#include "parameter.h"
+#include "module.h"
+#include "init.h"
+
+// Container modules
+#include "modules/container.h"
+
+// Layer modules
+#include "modules/linear.h"
+#include "modules/conv.h"
+#include "modules/pooling.h"
+#include "modules/normalization.h"
+#include "modules/dropout.h"
+#include "modules/activation.h"
+#include "modules/sparse.h"
+
+// Attention and Transformer modules
+#include "modules/attention.h"
+#include "modules/transformer.h"
+
+// PIR (Parallel Information Routing) modules
+#include "modules/pir.h"
+#include "modules/pir270m.h"
+
+// Loss functions
+#include "modules/loss.h"
+
+namespace torch {
+namespace nn {
+
+// ============================================================================
+// Convenient type aliases
+// ============================================================================
+
+using ModulePtr = std::shared_ptr<Module>;
+
+// ============================================================================
+// Module printing utilities
+// ============================================================================
+
+inline std::string module_repr(const Module& module, int indent = 0) {
+    std::string indent_str(indent * 2, ' ');
+    std::string result = indent_str + "(" + module.name() + ")";
+
+    // Check for parameters
+    auto params = const_cast<Module&>(module).named_parameters("", false);
+    if (!params.empty()) {
+        result += " [";
+        bool first = true;
+        for (const auto& [name, param] : params) {
+            if (!first) result += ", ";
+            first = false;
+
+            std::vector<int64_t> sizes = param->data().sizes().vec();
+            result += name + ": ";
+            if (sizes.empty()) {
+                result += "scalar";
+            } else {
+                result += "(";
+                for (size_t i = 0; i < sizes.size(); ++i) {
+                    if (i > 0) result += ", ";
+                    result += std::to_string(sizes[i]);
+                }
+                result += ")";
+            }
+        }
+        result += "]";
+    }
+
+    return result;
+}
+
+// ============================================================================
+// Count parameters utility
+// ============================================================================
+
+inline int64_t count_parameters(Module& module, bool only_trainable = true) {
+    int64_t count = 0;
+    for (auto* param : module.parameters()) {
+        if (!only_trainable || param->requires_grad()) {
+            count += param->data().numel();
+        }
+    }
+    return count;
+}
+
+// ============================================================================
+// Freeze/Unfreeze utilities
+// ============================================================================
+
+inline void freeze(Module& module) {
+    for (auto* param : module.parameters()) {
+        param->set_requires_grad(false);
+    }
+}
+
+inline void unfreeze(Module& module) {
+    for (auto* param : module.parameters()) {
+        param->set_requires_grad(true);
+    }
+}
+
+// ============================================================================
+// Gradient clipping utilities
+// ============================================================================
+
+inline double clip_grad_norm_(Module& module, double max_norm, double norm_type = 2.0) {
+    std::vector<Parameter*> params = module.parameters();
+    if (params.empty()) return 0.0;
+
+    double total_norm = 0.0;
+
+    if (norm_type == std::numeric_limits<double>::infinity()) {
+        // Max norm
+        for (auto* param : params) {
+            if (param->grad().defined()) {
+                // Move grad to CPU for computing norm
+                Tensor grad_cpu = param->grad();
+#ifdef PT_USE_CUDA
+                if (grad_cpu.is_cuda()) {
+                    grad_cpu = at::to_cpu(grad_cpu);
+                }
+#endif
+                const float* grad_data = grad_cpu.data_ptr<float>();
+                int64_t numel = grad_cpu.numel();
+                for (int64_t i = 0; i < numel; ++i) {
+                    total_norm = std::max(total_norm, static_cast<double>(std::abs(grad_data[i])));
+                }
+            }
+        }
+    } else {
+        // Lp norm
+        for (auto* param : params) {
+            if (param->grad().defined()) {
+                // Move grad to CPU for computing norm
+                Tensor grad_cpu = param->grad();
+#ifdef PT_USE_CUDA
+                if (grad_cpu.is_cuda()) {
+                    grad_cpu = at::to_cpu(grad_cpu);
+                }
+#endif
+                const float* grad_data = grad_cpu.data_ptr<float>();
+                int64_t numel = grad_cpu.numel();
+                for (int64_t i = 0; i < numel; ++i) {
+                    total_norm += std::pow(std::abs(grad_data[i]), norm_type);
+                }
+            }
+        }
+        total_norm = std::pow(total_norm, 1.0 / norm_type);
+    }
+
+    double clip_coef = max_norm / (total_norm + 1e-6);
+    if (clip_coef < 1.0) {
+        for (auto* param : params) {
+            if (param->grad().defined()) {
+                // mul_ with Scalar has CUDA dispatch
+                param->grad().mul_(at::Scalar(clip_coef));
+            }
+        }
+    }
+
+    return total_norm;
+}
+
+inline void clip_grad_value_(Module& module, double clip_value) {
+    for (auto* param : module.parameters()) {
+        if (param->grad().defined()) {
+            float* grad_data = param->grad().mutable_data_ptr<float>();
+            int64_t numel = param->grad().numel();
+            float clip_val = static_cast<float>(clip_value);
+
+            for (int64_t i = 0; i < numel; ++i) {
+                grad_data[i] = std::max(-clip_val, std::min(clip_val, grad_data[i]));
+            }
+        }
+    }
+}
+
+} // namespace nn
+} // namespace torch

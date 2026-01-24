@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PromeTorch - Российский Deep Learning Framework</title>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+</head>
+<body>
+    <!-- Language Switcher -->
+    <div class="lang-switcher">
+        <button class="lang-btn active" data-lang="ru">RU</button>
+        <button class="lang-btn" data-lang="en">EN</button>
+    </div>
+
+    <!-- Navigation -->
+    <nav class="nav-bar">
+        <div class="nav-logo">
+            <span class="logo-text">PROME<span class="accent">TORCH</span></span>
+        </div>
+        <div class="nav-links">
+            <a href="#hero" data-ru="ГЛАВНАЯ" data-en="HOME">ГЛАВНАЯ</a>
+            <a href="#about" data-ru="О ПРОЕКТЕ" data-en="ABOUT">О ПРОЕКТЕ</a>
+            <a href="#features" data-ru="ВОЗМОЖНОСТИ" data-en="FEATURES">ВОЗМОЖНОСТИ</a>
+            <a href="#architecture" data-ru="АРХИТЕКТУРА" data-en="ARCHITECTURE">АРХИТЕКТУРА</a>
+            <a href="#phases" data-ru="РАЗРАБОТКА" data-en="DEVELOPMENT">РАЗРАБОТКА</a>
+            <a href="#code" data-ru="КОД" data-en="CODE">КОД</a>
+        </div>
+    </nav>
+
+    <!-- Global Pixel Backgrounds -->
+    <div class="pixel-bg-container">
+        <div class="pixel-bg pixel-bg-1"></div>
+        <div class="pixel-bg pixel-bg-2"></div>
+        <div class="pixel-bg pixel-bg-3"></div>
+        <div class="pixel-bg pixel-bg-4"></div>
+        <div class="pixel-bg pixel-bg-5"></div>
+        <div class="pixel-bg pixel-bg-6"></div>
+        <div class="pixel-bg pixel-bg-7"></div>
+        <div class="pixel-bg pixel-bg-8"></div>
+        <div class="pixel-bg pixel-bg-9"></div>
+        <div class="pixel-bg pixel-bg-10"></div>
+        <div class="pixel-bg pixel-bg-11"></div>
+        <div class="pixel-bg pixel-bg-12"></div>
+        <div class="pixel-bg pixel-bg-13"></div>
+        <div class="pixel-bg pixel-bg-14"></div>
+        <div class="pixel-bg pixel-bg-15"></div>
+        <div class="pixel-bg pixel-bg-16"></div>
+        <div class="pixel-bg pixel-bg-17"></div>
+        <div class="pixel-bg pixel-bg-18"></div>
+        <div class="pixel-bg pixel-bg-19"></div>
+        <div class="pixel-bg pixel-bg-20"></div>
+    </div>
+
+    <!-- Hero Section -->
+    <section id="hero" class="section hero">
+        <div class="hero-content">
+            <h1 class="glitch" data-text="PROMETHORCH">PROMETHORCH</h1>
+            <p class="subtitle" data-ru="РОССИЙСКИЙ ФРЕЙМВОРК ГЛУБОКОГО ОБУЧЕНИЯ" data-en="RUSSIAN DEEP LEARNING FRAMEWORK">РОССИЙСКИЙ ФРЕЙМВОРК ГЛУБОКОГО ОБУЧЕНИЯ</p>
+            <p class="version">v1.0 // 2026</p>
+            <div class="hero-stats">
+                <div class="stat">
+                    <span class="stat-num">14</span>
+                    <span class="stat-label" data-ru="ФАЗ ЗАВЕРШЕНО" data-en="PHASES COMPLETE">ФАЗ ЗАВЕРШЕНО</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-num">50+</span>
+                    <span class="stat-label" data-ru="МОДУЛЕЙ" data-en="MODULES">МОДУЛЕЙ</span>
+                </div>
+                <div class="stat">
+                    <span class="stat-num">100%</span>
+                    <span class="stat-label" data-ru="НЕЗАВИСИМОСТЬ" data-en="INDEPENDENCE">НЕЗАВИСИМОСТЬ</span>
+                </div>
+            </div>
+            <a href="#about" class="cta-btn" data-ru="[ УЗНАТЬ БОЛЬШЕ ]" data-en="[ LEARN MORE ]">[ УЗНАТЬ БОЛЬШЕ ]</a>
+        </div>
+        <div class="scroll-indicator">
+            <span>▼</span>
+        </div>
+    </section>
+
+    <!-- About Section -->
+    <section id="about" class="section about">
+        <div class="container">
+            <h2 class="section-title" data-ru="// О ПРОЕКТЕ" data-en="// ABOUT PROJECT">// О ПРОЕКТЕ</h2>
+
+            <div class="about-grid">
+                <div class="about-card">
+                    <div class="card-icon">⚡</div>
+                    <h3 data-ru="ЧТО ЭТО?" data-en="WHAT IS IT?">ЧТО ЭТО?</h3>
+                    <p data-ru="PromeTorch — полностью независимый фреймворк глубокого обучения, созданный с нуля на C++ и CUDA. Это не форк, не обёртка, не копия PyTorch. Каждая строка кода написана заново."
+                       data-en="PromeTorch is a fully independent deep learning framework built from scratch in C++ and CUDA. It's not a fork, not a wrapper, not a copy of PyTorch. Every line of code is written from scratch.">
+                        PromeTorch — полностью независимый фреймворк глубокого обучения, созданный с нуля на C++ и CUDA. Это не форк, не обёртка, не копия PyTorch. Каждая строка кода написана заново.
+                    </p>
+                </div>
+
+                <div class="about-card highlight-red">
+                    <div class="card-icon">🇷🇺</div>
+                    <h3 data-ru="ЗАЧЕМ РОССИИ?" data-en="WHY FOR RUSSIA?">ЗАЧЕМ РОССИИ?</h3>
+                    <p data-ru="Технологическая независимость — вопрос национальной безопасности. Зависимость от иностранных библиотек в критической инфраструктуре (ИИ, оборона, медицина) недопустима. PromeTorch — шаг к суверенитету в области ИИ."
+                       data-en="Technological independence is a matter of national security. Dependence on foreign libraries in critical infrastructure (AI, defense, medicine) is unacceptable. PromeTorch is a step towards AI sovereignty.">
+                        Технологическая независимость — вопрос национальной безопасности. Зависимость от иностранных библиотек в критической инфраструктуре (ИИ, оборона, медицина) недопустима. PromeTorch — шаг к суверенитету в области ИИ.
+                    </p>
+                </div>
+
+                <div class="about-card highlight-green">
+                    <div class="card-icon">✓</div>
+                    <h3 data-ru="ПОЧЕМУ НЕ КОПИЯ?" data-en="WHY NOT A COPY?">ПОЧЕМУ НЕ КОПИЯ?</h3>
+                    <p data-ru="Копирование создаёт зависимость от оригинала. Мы изучили архитектуру PyTorch, но реализовали всё независимо: свой TensorImpl, свой Autograd Engine, свои CUDA-кернелы. Полный контроль над кодом."
+                       data-en="Copying creates dependency on the original. We studied PyTorch architecture but implemented everything independently: our own TensorImpl, Autograd Engine, CUDA kernels. Full control over the code.">
+                        Копирование создаёт зависимость от оригинала. Мы изучили архитектуру PyTorch, но реализовали всё независимо: свой TensorImpl, свой Autograd Engine, свои CUDA-кернелы. Полный контроль над кодом.
+                    </p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Features Section -->
+    <section id="features" class="section features">
+                <div class="container">
+            <h2 class="section-title" data-ru="// ВОЗМОЖНОСТИ" data-en="// FEATURES">// ВОЗМОЖНОСТИ</h2>
+
+            <div class="features-list">
+                <div class="feature-item">
+                    <div class="feature-icon green">▶</div>
+                    <div class="feature-text">
+                        <h4 data-ru="TENSOR OPERATIONS" data-en="TENSOR OPERATIONS">TENSOR OPERATIONS</h4>
+                        <p data-ru="Полная поддержка многомерных тензоров с broadcasting, strided views, type promotion"
+                           data-en="Full support for multidimensional tensors with broadcasting, strided views, type promotion">
+                            Полная поддержка многомерных тензоров с broadcasting, strided views, type promotion
+                        </p>
+                    </div>
+                </div>
+
+                <div class="feature-item">
+                    <div class="feature-icon green">▶</div>
+                    <div class="feature-text">
+                        <h4 data-ru="AUTOGRAD ENGINE" data-en="AUTOGRAD ENGINE">AUTOGRAD ENGINE</h4>
+                        <p data-ru="Автоматическое дифференцирование с динамическим графом вычислений, backward pass, gradient accumulation"
+                           data-en="Automatic differentiation with dynamic computation graph, backward pass, gradient accumulation">
+                            Автоматическое дифференцирование с динамическим графом вычислений, backward pass, gradient accumulation
+                        </p>
+                    </div>
+                </div>
+
+                <div class="feature-item">
+                    <div class="feature-icon green">▶</div>
+                    <div class="feature-text">
+                        <h4 data-ru="NEURAL NETWORKS" data-en="NEURAL NETWORKS">NEURAL NETWORKS</h4>
+                        <p data-ru="50+ слоёв: Linear, Conv1d/2d/3d, BatchNorm, LayerNorm, Transformer, Attention, PIR"
+                           data-en="50+ layers: Linear, Conv1d/2d/3d, BatchNorm, LayerNorm, Transformer, Attention, PIR">
+                            50+ слоёв: Linear, Conv1d/2d/3d, BatchNorm, LayerNorm, Transformer, Attention, PIR
+                        </p>
+                    </div>
+                </div>
+
+                <div class="feature-item">
+                    <div class="feature-icon green">▶</div>
+                    <div class="feature-text">
+                        <h4 data-ru="CUDA BACKEND" data-en="CUDA BACKEND">CUDA BACKEND</h4>
+                        <p data-ru="Собственные CUDA-кернелы: GEMM, редукции, element-wise ops, FlashAttention O(N)"
+                           data-en="Custom CUDA kernels: GEMM, reductions, element-wise ops, FlashAttention O(N)">
+                            Собственные CUDA-кернелы: GEMM, редукции, element-wise ops, FlashAttention O(N)
+                        </p>
+                    </div>
+                </div>
+
+                <div class="feature-item">
+                    <div class="feature-icon green">▶</div>
+                    <div class="feature-text">
+                        <h4 data-ru="MIXED PRECISION" data-en="MIXED PRECISION">MIXED PRECISION</h4>
+                        <p data-ru="AMP (Automatic Mixed Precision): GradScaler, autocast, FP16/BF16 training"
+                           data-en="AMP (Automatic Mixed Precision): GradScaler, autocast, FP16/BF16 training">
+                            AMP (Automatic Mixed Precision): GradScaler, autocast, FP16/BF16 training
+                        </p>
+                    </div>
+                </div>
+
+                <div class="feature-item">
+                    <div class="feature-icon green">▶</div>
+                    <div class="feature-text">
+                        <h4 data-ru="PYTHON BINDINGS" data-en="PYTHON BINDINGS">PYTHON BINDINGS</h4>
+                        <p data-ru="pybind11 интеграция: import promethorch as pt — знакомый PyTorch-подобный API"
+                           data-en="pybind11 integration: import promethorch as pt — familiar PyTorch-like API">
+                            pybind11 интеграция: import promethorch as pt — знакомый PyTorch-подобный API
+                        </p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Architecture Section -->
+    <section id="architecture" class="section architecture">
+        <div class="container">
+            <h2 class="section-title" data-ru="// АРХИТЕКТУРА" data-en="// ARCHITECTURE">// АРХИТЕКТУРА</h2>
+
+            <div class="arch-diagram">
+                <div class="arch-layer layer-top">
+                    <div class="arch-box python">
+                        <span>Python API</span>
+                        <small>promethorch</small>
+                    </div>
+                </div>
+
+                <div class="arch-arrow">▼</div>
+
+                <div class="arch-layer layer-mid">
+                    <div class="arch-box torch">
+                        <span>torch/</span>
+                        <small>nn, optim, data, amp</small>
+                    </div>
+                </div>
+
+                <div class="arch-arrow">▼</div>
+
+                <div class="arch-layer layer-mid">
+                    <div class="arch-box aten">
+                        <span>ATen</span>
+                        <small>Tensor, Operations</small>
+                    </div>
+                    <div class="arch-box autograd">
+                        <span>Autograd</span>
+                        <small>Engine, Nodes</small>
+                    </div>
+                </div>
+
+                <div class="arch-arrow">▼</div>
+
+                <div class="arch-layer layer-bottom">
+                    <div class="arch-box c10">
+                        <span>c10</span>
+                        <small>Core: Device, Allocator, TensorImpl</small>
+                    </div>
+                </div>
+
+                <div class="arch-arrow">▼</div>
+
+                <div class="arch-layer layer-hardware">
+                    <div class="arch-box cpu">
+                        <span>CPU</span>
+                        <small>AVX2/AVX-512</small>
+                    </div>
+                    <div class="arch-box cuda">
+                        <span>CUDA</span>
+                        <small>Custom Kernels</small>
+                    </div>
+                    <div class="arch-box cudnn">
+                        <span>cuDNN</span>
+                        <small>Optional</small>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Development Phases -->
+    <section id="phases" class="section phases">
+        <div class="container">
+            <h2 class="section-title" data-ru="// ФАЗЫ РАЗРАБОТКИ" data-en="// DEVELOPMENT PHASES">// ФАЗЫ РАЗРАБОТКИ</h2>
+
+            <div class="timeline">
+                <div class="timeline-item complete">
+                    <div class="timeline-marker">✓</div>
+                    <div class="timeline-content">
+                        <h4>Phase 1: c10 Core</h4>
+                        <p data-ru="Device, Allocator, Storage, TensorImpl, ScalarType" data-en="Device, Allocator, Storage, TensorImpl, ScalarType">Device, Allocator, Storage, TensorImpl, ScalarType</p>
+                    </div>
+                </div>
+
+                <div class="timeline-item complete">
+                    <div class="timeline-marker">✓</div>
+                    <div class="timeline-content">
+                        <h4>Phase 2: ATen</h4>
+                        <p data-ru="Tensor class, Factory functions, Math/Reduce/Shape ops" data-en="Tensor class, Factory functions, Math/Reduce/Shape ops">Tensor class, Factory functions, Math/Reduce/Shape ops</p>
+                    </div>
+                </div>
+
+                <div class="timeline-item complete">
+                    <div class="timeline-marker">✓</div>
+                    <div class="timeline-content">
+                        <h4>Phase 3: Autograd</h4>
+                        <p data-ru="Node, Edge, Engine, Backward functions для всех операций" data-en="Node, Edge, Engine, Backward functions for all operations">Node, Edge, Engine, Backward functions для всех операций</p>
+                    </div>
+                </div>
+
+                <div class="timeline-item complete">
+                    <div class="timeline-marker">✓</div>
+                    <div class="timeline-content">
+                        <h4>Phase 4: NN Modules</h4>
+                        <p data-ru="Module, Linear, Conv, BatchNorm, Dropout, Loss, 50+ слоёв" data-en="Module, Linear, Conv, BatchNorm, Dropout, Loss, 50+ layers">Module, Linear, Conv, BatchNorm, Dropout, Loss, 50+ слоёв</p>
+                    </div>
+                </div>
+
+                <div class="timeline-item complete">
+                    <div class="timeline-marker">✓</div>
+                    <div class="timeline-content">
+                        <h4>Phase 5-6: Optimizers & Schedulers</h4>
+                        <p data-ru="SGD, Adam, AdamW, RMSprop + 10 LR schedulers" data-en="SGD, Adam, AdamW, RMSprop + 10 LR schedulers">SGD, Adam, AdamW, RMSprop + 10 LR schedulers</p>
+                    </div>
+                </div>
+
+                <div class="timeline-item complete">
+                    <div class="timeline-marker">✓</div>
+                    <div class="timeline-content">
+                        <h4>Phase 7: Data Loading</h4>
+                        <p data-ru="Dataset, Sampler, DataLoader, batch processing" data-en="Dataset, Sampler, DataLoader, batch processing">Dataset, Sampler, DataLoader, batch processing</p>
+                    </div>
+                </div>
+
+                <div class="timeline-item complete">
+                    <div class="timeline-marker">✓</div>
+                    <div class="timeline-content">
+                        <h4>Phase 8-9: Transformer & PIR</h4>
+                        <p data-ru="MultiheadAttention, TransformerEncoder/Decoder, PIR 270M" data-en="MultiheadAttention, TransformerEncoder/Decoder, PIR 270M">MultiheadAttention, TransformerEncoder/Decoder, PIR 270M</p>
+                    </div>
+                </div>
+
+                <div class="timeline-item complete">
+                    <div class="timeline-marker">✓</div>
+                    <div class="timeline-content">
+                        <h4>Phase 10: CUDA Backend</h4>
+                        <p data-ru="CUDAKernels, CUDAReduce, CUDABlas, CachingAllocator" data-en="CUDAKernels, CUDAReduce, CUDABlas, CachingAllocator">CUDAKernels, CUDAReduce, CUDABlas, CachingAllocator</p>
+                    </div>
+                </div>
+
+                <div class="timeline-item complete">
+                    <div class="timeline-marker">✓</div>
+                    <div class="timeline-content">
+                        <h4>Phase 11: Python Bindings</h4>
+                        <p data-ru="pybind11: Tensor, nn.Module, optim, autograd" data-en="pybind11: Tensor, nn.Module, optim, autograd">pybind11: Tensor, nn.Module, optim, autograd</p>
+                    </div>
+                </div>
+
+                <div class="timeline-item complete">
+                    <div class="timeline-marker">✓</div>
+                    <div class="timeline-content">
+                        <h4>Phase 12: cuDNN Integration</h4>
+                        <p data-ru="Conv, Pooling, BatchNorm, Activations через cuDNN" data-en="Conv, Pooling, BatchNorm, Activations via cuDNN">Conv, Pooling, BatchNorm, Activations через cuDNN</p>
+                    </div>
+                </div>
+
+                <div class="timeline-item complete">
+                    <div class="timeline-marker">✓</div>
+                    <div class="timeline-content">
+                        <h4>Phase 13: Mixed Precision (AMP)</h4>
+                        <p data-ru="GradScaler, autocast, FP16/BF16 training" data-en="GradScaler, autocast, FP16/BF16 training">GradScaler, autocast, FP16/BF16 training</p>
+                    </div>
+                </div>
+
+                <div class="timeline-item complete">
+                    <div class="timeline-marker">✓</div>
+                    <div class="timeline-content">
+                        <h4>Phase 14: FlashAttention</h4>
+                        <p data-ru="O(N) memory attention, tiled algorithm, online softmax" data-en="O(N) memory attention, tiled algorithm, online softmax">O(N) memory attention, tiled algorithm, online softmax</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Code Examples -->
+    <section id="code" class="section code-section">
+        <div class="container">
+            <h2 class="section-title" data-ru="// ПРИМЕРЫ КОДА" data-en="// CODE EXAMPLES">// ПРИМЕРЫ КОДА</h2>
+
+            <div class="code-tabs">
+                <button class="code-tab active" data-tab="python">Python</button>
+                <button class="code-tab" data-tab="cpp">C++</button>
+            </div>
+
+            <div class="code-content" id="python-code">
+                <pre><code><span class="comment"># PromeTorch Python API</span>
+<span class="keyword">import</span> promethorch <span class="keyword">as</span> pt
+
+<span class="comment"># Создание тензоров</span>
+x = pt.randn([<span class="number">32</span>, <span class="number">784</span>])
+y = pt.randint(<span class="number">0</span>, <span class="number">10</span>, [<span class="number">32</span>])
+
+<span class="comment"># Нейронная сеть</span>
+model = pt.nn.Sequential(
+    pt.nn.Linear(<span class="number">784</span>, <span class="number">256</span>),
+    pt.nn.ReLU(),
+    pt.nn.Linear(<span class="number">256</span>, <span class="number">10</span>)
+)
+
+<span class="comment"># Оптимизатор</span>
+optimizer = pt.optim.Adam(
+    model.parameters(),
+    lr=<span class="number">0.001</span>
+)
+
+<span class="comment"># Training loop</span>
+<span class="keyword">for</span> epoch <span class="keyword">in</span> range(<span class="number">100</span>):
+    logits = model(x)
+    loss = pt.nn.functional.cross_entropy(logits, y)
+
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+
+    <span class="keyword">print</span>(<span class="string">f"Loss: {loss.item():.4f}"</span>)</code></pre>
+            </div>
+
+            <div class="code-content hidden" id="cpp-code">
+                <pre><code><span class="comment">// PromeTorch C++ API</span>
+<span class="keyword">#include</span> <span class="string">&lt;ATen/ATen.h&gt;</span>
+<span class="keyword">#include</span> <span class="string">&lt;torch/nn/nn.h&gt;</span>
+<span class="keyword">#include</span> <span class="string">&lt;torch/optim/optim.h&gt;</span>
+
+<span class="keyword">int</span> main() {
+    <span class="comment">// Создание тензоров</span>
+    <span class="keyword">auto</span> x = torch::randn({<span class="number">32</span>, <span class="number">784</span>});
+    <span class="keyword">auto</span> y = torch::randint(<span class="number">0</span>, <span class="number">10</span>, {<span class="number">32</span>});
+
+    <span class="comment">// Нейронная сеть</span>
+    <span class="keyword">auto</span> linear1 = std::make_shared&lt;nn::Linear&gt;(<span class="number">784</span>, <span class="number">256</span>);
+    <span class="keyword">auto</span> linear2 = std::make_shared&lt;nn::Linear&gt;(<span class="number">256</span>, <span class="number">10</span>);
+
+    <span class="comment">// Оптимизатор</span>
+    optim::Adam optimizer(
+        {linear1->parameters(), linear2->parameters()},
+        optim::AdamOptions(<span class="number">0.001</span>)
+    );
+
+    <span class="comment">// Training loop</span>
+    <span class="keyword">for</span> (<span class="keyword">int</span> epoch = <span class="number">0</span>; epoch < <span class="number">100</span>; ++epoch) {
+        <span class="keyword">auto</span> h = linear1->forward(x).relu();
+        <span class="keyword">auto</span> logits = linear2->forward(h);
+        <span class="keyword">auto</span> loss = F::cross_entropy(logits, y);
+
+        optimizer.zero_grad();
+        loss.backward();
+        optimizer.step();
+
+        std::cout << <span class="string">"Loss: "</span> << loss.item() << std::endl;
+    }
+}</code></pre>
+            </div>
+        </div>
+    </section>
+
+    <!-- Stats Section -->
+    <section id="stats" class="section stats-section">
+        <div class="container">
+            <h2 class="section-title" data-ru="// СТАТИСТИКА ПРОЕКТА" data-en="// PROJECT STATISTICS">// СТАТИСТИКА ПРОЕКТА</h2>
+
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-number">~15,000</div>
+                    <div class="stat-desc" data-ru="СТРОК C++ КОДА" data-en="LINES OF C++ CODE">СТРОК C++ КОДА</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-number">~2,000</div>
+                    <div class="stat-desc" data-ru="СТРОК CUDA КОДА" data-en="LINES OF CUDA CODE">СТРОК CUDA КОДА</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-number">80+</div>
+                    <div class="stat-desc" data-ru="ЗАГОЛОВОЧНЫХ ФАЙЛОВ" data-en="HEADER FILES">ЗАГОЛОВОЧНЫХ ФАЙЛОВ</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-number">14</div>
+                    <div class="stat-desc" data-ru="ФАЗ РАЗРАБОТКИ" data-en="DEVELOPMENT PHASES">ФАЗ РАЗРАБОТКИ</div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Footer -->
+    <footer class="footer">
+        <div class="container">
+            <div class="footer-content">
+                <div class="footer-logo">
+                    <span class="logo-text">PROME<span class="accent">TORCH</span></span>
+                    <p data-ru="Российский Deep Learning Framework" data-en="Russian Deep Learning Framework">Российский Deep Learning Framework</p>
+                </div>
+                <div class="footer-info">
+                    <p>2026 // <span data-ru="Технологическая независимость" data-en="Technological Independence">Технологическая независимость</span></p>
+                    <p class="tech-stack">C++ • CUDA • Python • pybind11</p>
+                </div>
+            </div>
+            <div class="footer-bottom">
+                <div class="pixel-line"></div>
+                <p data-ru="[ СДЕЛАНО В РОССИИ ]" data-en="[ MADE IN RUSSIA ]">[ СДЕЛАНО В РОССИИ ]</p>
+            </div>
+        </div>
+    </footer>
+
+    <script src="script.js"></script>
+</body>
+</html>

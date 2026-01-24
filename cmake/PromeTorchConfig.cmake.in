@@ -1,0 +1,10 @@
+@PACKAGE_INIT@
+
+include("${CMAKE_CURRENT_LIST_DIR}/PromeTorchTargets.cmake")
+
+check_required_components(PromeTorch)
+
+# Set variables for find_package
+set(PROMETORCH_INCLUDE_DIRS "@PACKAGE_INCLUDE_INSTALL_DIR@")
+set(PROMETORCH_LIBRARIES PromeTorch::c10)
+set(PROMETORCH_VERSION "@PROJECT_VERSION@")
