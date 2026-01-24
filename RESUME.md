@@ -2,6 +2,9 @@
 
 **Дата:** 2026-01-24
 **Ветка:** `feature/memory-leak-fix`
+**Коммиты:**
+- `50640d2` - Initial commit: PromeTorch v0.1.0 (117 files, 85K lines)
+- `6b64252` - Add Docker support and update gitignore
 
 ## Что это
 
