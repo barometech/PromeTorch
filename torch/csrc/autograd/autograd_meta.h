@@ -88,18 +88,6 @@ inline AutogradMetaImpl* ensure_autograd_meta_impl(at::Tensor& tensor) {
     // It's base c10::AutogradMeta - need to upgrade
     g_meta_upgrade_count++;
 
-    // DEBUG: Print tensor info on upgrade
-    std::cout << "[META UPGRADE #" << g_meta_upgrade_count.load() << "] "
-              << "shape=[";
-    auto sizes = tensor.sizes();
-    for (size_t i = 0; i < sizes.size(); i++) {
-        if (i > 0) std::cout << ",";
-        std::cout << sizes[i];
-    }
-    std::cout << "] is_leaf=" << (raw_meta->is_leaf_ ? "true" : "false")
-              << " req_grad=" << (raw_meta->requires_grad_ ? "true" : "false")
-              << std::endl;
-
     // Copy fields from old metadata
     auto new_meta = std::make_unique<AutogradMetaImpl>();
     new_meta->grad_ = raw_meta->grad_;

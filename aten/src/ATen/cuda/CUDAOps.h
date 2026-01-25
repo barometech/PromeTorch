@@ -56,6 +56,7 @@ ATEN_CUDA_API void launch_mul(const float* a, const float* b, float* out, int64_
 ATEN_CUDA_API void launch_mul_scalar(const float* a, float scalar, float* out, int64_t n, cudaStream_t stream = nullptr);
 ATEN_CUDA_API void launch_mul_broadcast_row(const float* a, const float* b, float* out, int64_t outer_size, int64_t inner_size, cudaStream_t stream = nullptr);
 ATEN_CUDA_API void launch_mul_broadcast_col(const float* a, const float* b, float* out, int64_t outer_size, int64_t inner_size, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_add_broadcast_col(const float* a, const float* b, float* out, int64_t outer_size, int64_t inner_size, cudaStream_t stream = nullptr);
 ATEN_CUDA_API void launch_div(const float* a, const float* b, float* out, int64_t n, cudaStream_t stream = nullptr);
 ATEN_CUDA_API void launch_div_scalar(const float* a, float scalar, float* out, int64_t n, cudaStream_t stream = nullptr);
 ATEN_CUDA_API void launch_pow(const float* a, const float* b, float* out, int64_t n, cudaStream_t stream = nullptr);

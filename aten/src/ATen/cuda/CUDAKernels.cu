@@ -388,6 +388,17 @@ __global__ void mul_broadcast_col_kernel(const T* a, const T* b, T* out, int64_t
     }
 }
 
+// [outer, inner] + [inner] -> broadcast second operand across outer dimension (for bias)
+template<typename T>
+__global__ void add_broadcast_col_kernel(const T* a, const T* b, T* out, int64_t outer_size, int64_t inner_size) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total = outer_size * inner_size;
+    if (idx < total) {
+        int64_t inner_idx = idx % inner_size;
+        out[idx] = a[idx] + b[inner_idx];
+    }
+}
+
 // ============================================================================
 // Softmax Kernel
 // ============================================================================
@@ -606,6 +617,13 @@ void launch_mul_broadcast_col(const float* a, const float* b, float* out, int64_
     int64_t total = outer_size * inner_size;
     int blocks = get_num_blocks(total);
     mul_broadcast_col_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(a, b, out, outer_size, inner_size);
+}
+
+// Broadcasting add: [outer, inner] + [inner] (for bias addition)
+void launch_add_broadcast_col(const float* a, const float* b, float* out, int64_t outer_size, int64_t inner_size, cudaStream_t stream) {
+    int64_t total = outer_size * inner_size;
+    int blocks = get_num_blocks(total);
+    add_broadcast_col_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(a, b, out, outer_size, inner_size);
 }
 
 // ============================================================================

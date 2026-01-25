@@ -45,3 +45,18 @@ output.txt
 test/
 PIR/
 tools/
+
+# Temporary build/debug logs (root directory)
+*.txt
+!CLAUDE.md
+!RESUME.md
+!BUILD_GUIDE.md
+!TECHNICAL_SPECIFICATION.md
+!CUDA_CRASH_INVESTIGATION.md
+
+# Temporary test files
+test_*.cpp
+pytorch_*.py
+benchmark_*.py
+fix_*.py
+run_*.py

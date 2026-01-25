@@ -348,6 +348,23 @@ inline Tensor mul_broadcast(const Tensor& a, const Tensor& b) {
     return output;
 }
 
+// Broadcasting add: [outer, inner] + [inner] (for bias addition)
+inline Tensor add_broadcast(const Tensor& a, const Tensor& b) {
+    // a is [outer, inner], b is [inner] (bias vector)
+    PT_CHECK_MSG(a.dim() == 2, "add_broadcast: first tensor must be 2D");
+    PT_CHECK_MSG(b.dim() == 1 && b.size(0) == a.size(1), "add_broadcast: second tensor must be 1D with size matching last dim");
+
+    int64_t outer = a.size(0);
+    int64_t inner = a.size(1);
+
+    auto output = empty_cuda(a.sizes().vec(), a.dtype(), a.device().index());
+    at::cuda::launch_add_broadcast_col(
+        a.data_ptr<float>(), b.data_ptr<float>(), output.mutable_data_ptr<float>(),
+        outer, inner, nullptr);
+
+    return output;
+}
+
 // Reductions
 inline Tensor sum(const Tensor& input) {
     auto output = empty_cuda({1}, input.dtype(), input.device().index());
@@ -435,6 +452,7 @@ inline Tensor mm(const Tensor& a, const Tensor& b) {
         a_contig.data_ptr<float>(), b_contig.data_ptr<float>(), output.mutable_data_ptr<float>(),
         M, N, K, 1.0f, 0.0f, false, false, nullptr
     );
+    c10::cuda::cuda_synchronize();
     return output;
 }
 
@@ -784,6 +802,7 @@ inline Tensor relu(const Tensor&) { PT_CHECK_MSG(false, "CUDA not enabled"); ret
 inline Tensor silu(const Tensor&) { PT_CHECK_MSG(false, "CUDA not enabled"); return Tensor(); }
 inline Tensor gelu(const Tensor&) { PT_CHECK_MSG(false, "CUDA not enabled"); return Tensor(); }
 inline Tensor add(const Tensor&, const Tensor&) { PT_CHECK_MSG(false, "CUDA not enabled"); return Tensor(); }
+inline Tensor add_broadcast(const Tensor&, const Tensor&) { PT_CHECK_MSG(false, "CUDA not enabled"); return Tensor(); }
 inline Tensor sub(const Tensor&, const Tensor&) { PT_CHECK_MSG(false, "CUDA not enabled"); return Tensor(); }
 inline Tensor mul(const Tensor&, const Tensor&) { PT_CHECK_MSG(false, "CUDA not enabled"); return Tensor(); }
 inline Tensor div(const Tensor&, const Tensor&) { PT_CHECK_MSG(false, "CUDA not enabled"); return Tensor(); }
