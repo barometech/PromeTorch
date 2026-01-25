@@ -129,28 +129,18 @@ private:
 class MNISTMLP : public Module {
 public:
     MNISTMLP() : Module("MNISTMLP") {
-        // Simple 2-layer network to debug gradient explosion
-        // Input: 784 (28x28 flattened)
-        fc1 = std::make_shared<Linear>(784, 128);  // Hidden layer
-        fc2 = std::make_shared<Linear>(128, 10);   // Output layer
-
-        relu = std::make_shared<ReLU>();
-
-        register_module("fc1", fc1);
-        register_module("fc2", fc2);
+        // SIMPLEST POSSIBLE: just one Linear layer 784 -> 10
+        fc = std::make_shared<Linear>(784, 10);
+        register_module("fc", fc);
     }
 
     Tensor forward(const Tensor& x) override {
-        // x: [B, 784] (already flattened)
-        Tensor h = fc1->forward(x);
-        h = relu->forward(h);
-        h = fc2->forward(h);  // [B, 10]
-        return h;
+        // x: [B, 784] -> [B, 10]
+        return fc->forward(x);
     }
 
 private:
-    std::shared_ptr<Linear> fc1, fc2;
-    std::shared_ptr<ReLU> relu;
+    std::shared_ptr<Linear> fc;
 };
 
 // ============================================================================
@@ -461,11 +451,11 @@ int main(int argc, char* argv[]) {
     }
 #endif
 
-    // Optimizer - Pure SGD (no momentum) to debug
+    // Optimizer - Simple SGD without momentum for clean baseline
     SGDOptions opts(lr);
-    opts.momentum_(0.0);  // No momentum
+    opts.momentum_(0.0);  // NO momentum to avoid accumulation issues
     SGD optimizer(model->parameters(), opts);
-    std::cout << "SGD optimizer created (lr=" << lr << ", no momentum)" << std::endl;
+    std::cout << "SGD optimizer (NO momentum) created (lr=" << lr << ")" << std::endl;
 
     // Loss
     CrossEntropyLoss criterion;
@@ -565,8 +555,8 @@ int main(int argc, char* argv[]) {
                 std::cout << std::endl;
             }
 
-            // Strict gradient clipping to prevent explosion
-            double grad_norm = clip_grad_norm_(*model, 1.0);  // Aggressive clipping
+            // Gradient clipping (disabled to see raw behavior)
+            double grad_norm = clip_grad_norm_(*model, 100.0);  // Very loose clipping
             if (batches_processed % 100 == 0) {
                 std::cout << "[CLIP] total_grad_norm_before_clip=" << grad_norm << std::endl;
 

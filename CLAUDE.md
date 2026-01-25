@@ -898,6 +898,101 @@ Exit code: 0
 
 ---
 
+### 2026-01-24: ОПТИМИЗАЦИЯ GPU ЗАГРУЗКИ — Удаление Debug Output
+
+**ПРОБЛЕМА:**
+При обучении PIR модели наблюдались спайки GPU загрузки (7% base → 50% spikes) вместо ровной высокой загрузки.
+
+**ПРИЧИНЫ СПАЙКОВ:**
+1. Массивный debug output с `std::cout.flush()` после каждой операции
+2. `cudaDeviceSynchronize()` в training loop каждую итерацию
+3. Отладочные счётчики и статистика nodes/weak_ptr/meta
+
+**РЕШЕНИЕ:**
+Удалён весь debug output из production кода:
+- `examples/pir/train_pir.cpp` — убраны DBG: выводы, MEM checkpoint, node stats
+- `torch/nn/modules/pir.h` — убраны BLK: выводы из PIREncoderLayer::forward()
+- `torch/nn/modules/pir270m.h` — убраны FWD: выводы из forward_with_loss()
+- `torch/csrc/autograd/engine.h` — убраны BACKWARD: выводы из execute()
+- `c10/cuda/CUDAAllocator.cpp` — убраны [CUDA] deleter выводы
+
+**РЕЗУЛЬТАТ:**
+- GPU загрузка теперь РОВНАЯ ~10% с batch=32
+- Увеличение batch_size до 128 должно дать ~40% загрузку
+- Нет спайков — pipeline работает без sync points
+
+**ОПТИМАЛЬНЫЕ ПАРАМЕТРЫ ДЛЯ A100:**
+```
+batch_size=128    # Для ~40% GPU
+n_embd=384        # Размер модели 21.3M параметров
+n_layers=8        # 8 PIR блоков
+block_size=256    # Длина контекста
+```
+
+**СТАТУС:** ✅ GPU загрузка оптимизирована, обучение стабильно
+
+---
+
+### 2026-01-25: ИССЛЕДОВАНИЕ MNIST TRAINING — Gradient Bug Hunt
+
+**ПРОБЛЕМА:**
+MNIST MLP обучение не работает корректно:
+- С lr=0.01: веса ВЗРЫВАЮТСЯ (3.15 → 17.6), loss растёт (2.59 → 7.2)
+- С lr=0.0001: веса стабильны, но модель НЕ УЧИТСЯ (accuracy ~11% = random)
+
+**ПРОТИВОРЕЧИЕ:**
+- Single step gradient descent test ПРОХОДИТ (loss 3.29 → 3.28)
+- Но при обучении loss РАСТЁТ вместо уменьшения
+
+**GRADIENT CHECK:**
+```
+w[0]: numerical=0.0572 analytical=0.0574 rel_error=0.00134 ✓
+w[1]: numerical=0.0465 analytical=0.0460 rel_error=0.00522 ✓
+...
+w[3920]: numerical=0.0191 analytical=0.0198 rel_error=0.0185 MISMATCH!
+```
+Один градиент имеет ошибку > 1% threshold.
+
+**НАБЛЮДЕНИЯ ИЗ ЛОГОВ (lr=0.01):**
+```
+batch=0:   fc1.w weight_sum=3.15, grad_norm=3.78
+batch=100: fc1.w weight_sum=3.43, grad_norm=3.87  (weights GROWING!)
+batch=200: fc1.w weight_sum=3.91, grad_norm=3.80
+...
+batch=900: fc1.w weight_sum=17.6, grad_norm=4.35  (EXPLOSION!)
+```
+
+**ГИПОТЕЗЫ:**
+1. Ошибка знака в backward (градиенты указывают в неправильном направлении)
+2. Проблема с нормализацией в CrossEntropyBackward
+3. Ошибка накопления градиентов между батчами
+4. Проблема с конкретным весом w[3920] влияет на всю оптимизацию
+
+**МОДИФИКАЦИИ ADAM (torch/optim/adam.h):**
+- Добавлен eps ВНУТРИ sqrt: `sqrt(v_hat + eps)` вместо `sqrt(v_hat) + eps`
+- Добавлено total update norm clipping (не per-parameter)
+- max_update_norm = lr для matching SGD behavior
+
+**УПРОЩЕНИЯ ДЛЯ ОТЛАДКИ:**
+- Модель упрощена до одного слоя: 784 → 10 (без hidden layers)
+- Используется plain SGD без momentum
+- Gradient clipping установлен на 100.0 (loose)
+
+**ФАЙЛЫ ИЗМЕНЕНЫ:**
+- `torch/optim/adam.h` — total update norm clipping
+- `torch/optim/sgd.h` — отладочный вывод
+- `examples/mnist/train_mnist_mlp.cpp` — упрощённая модель, debug output
+
+**СЛЕДУЮЩИЕ ШАГИ:**
+- [ ] Проверить CrossEntropyBackward на ошибку знака
+- [ ] Исследовать почему w[3920] имеет gradient mismatch
+- [ ] Сравнить наш backward с PyTorch reference implementation
+- [ ] Проверить деление на batch_size в backward
+
+**СТАТУС:** 🔍 В ИССЛЕДОВАНИИ
+
+---
+
 ### Статус проекта
 - **Фаза 1** (c10 core): ✅ ЗАВЕРШЕНО
 - **Фаза 2** (ATen tensor ops): ✅ ЗАВЕРШЕНО

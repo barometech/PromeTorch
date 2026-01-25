@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../module.h"
+#include "torch/csrc/autograd/autograd.h"
 #include <cmath>
 #include <algorithm>
 #include <limits>
@@ -642,7 +643,7 @@ public:
         }
 
 #ifdef PT_USE_CUDA
-        // Use CUDA kernel for GPU tensors
+        // Use CUDA kernel for GPU tensors WITH autograd support
         if (input.is_cuda()) {
             // Convert reduction enum to int: None=0, Mean=1, Sum=2
             int reduction_int = 1;  // Default: Mean
@@ -652,7 +653,26 @@ public:
             // Ensure target is on same device
             Tensor target_cuda = target.is_cuda() ? target : at::to_cuda(target);
 
-            return at::cuda_ops::cross_entropy_loss(input, target_cuda, reduction_int);
+            // Compute softmax for backward (needed for gradient computation)
+            Tensor softmax_cuda = at::cuda_ops::softmax(input, /*dim=*/1);
+
+            // Compute loss using CUDA kernel
+            Tensor loss = at::cuda_ops::cross_entropy_loss(input, target_cuda, reduction_int);
+
+            // Setup autograd if input requires grad
+            if (torch::autograd::compute_requires_grad(input)) {
+                int64_t batch_size = input.size(0);
+                int64_t num_classes = input.size(1);
+                int64_t num_valid = batch_size;  // Simplified: assume all samples valid
+
+                auto grad_fn = std::make_shared<torch::autograd::CrossEntropyBackward>(
+                    softmax_cuda, target_cuda, ignore_index_, num_classes, num_valid, /*output_cuda=*/true);
+                grad_fn->add_input_metadata(input);
+                torch::autograd::set_grad_fn(loss, grad_fn);
+                loss.set_requires_grad(true);
+            }
+
+            return loss;
         }
 #endif
 
@@ -847,6 +867,44 @@ public:
 
         Tensor output = at::empty({});
         output.mutable_data_ptr<float>()[0] = static_cast<float>(sum);
+
+        // CRITICAL: Setup autograd for CPU if input requires grad
+        if (torch::autograd::compute_requires_grad(input)) {
+            // Compute softmax for backward (needed for gradient computation)
+            Tensor softmax_cpu = at::empty(input.sizes());
+            float* softmax_data = softmax_cpu.mutable_data_ptr<float>();
+
+            for (int64_t i = 0; i < total_elements; ++i) {
+                int64_t b = i / spatial_size;
+                int64_t s = i % spatial_size;
+
+                float max_val = -std::numeric_limits<float>::infinity();
+                for (int64_t c = 0; c < num_classes; ++c) {
+                    int64_t idx = b * num_classes * spatial_size + c * spatial_size + s;
+                    max_val = std::max(max_val, input_data[idx]);
+                }
+
+                double sum_exp = 0.0;
+                for (int64_t c = 0; c < num_classes; ++c) {
+                    int64_t idx = b * num_classes * spatial_size + c * spatial_size + s;
+                    sum_exp += std::exp(input_data[idx] - max_val);
+                }
+
+                for (int64_t c = 0; c < num_classes; ++c) {
+                    int64_t idx = b * num_classes * spatial_size + c * spatial_size + s;
+                    softmax_data[idx] = static_cast<float>(std::exp(input_data[idx] - max_val) / sum_exp);
+                }
+            }
+
+            int64_t num_valid = count > 0 ? count : 1;
+
+            auto grad_fn = std::make_shared<torch::autograd::CrossEntropyBackward>(
+                softmax_cpu, target_cpu, ignore_index_, num_classes, num_valid, /*output_cuda=*/false);
+            grad_fn->add_input_metadata(input);
+            torch::autograd::set_grad_fn(output, grad_fn);
+            output.set_requires_grad(true);
+        }
+
         return output;
     }
 

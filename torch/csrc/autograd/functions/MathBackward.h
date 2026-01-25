@@ -282,11 +282,39 @@ struct ReluBackward : public Node {
     variable_list apply(variable_list&& grads) override {
         auto& grad = grads[0];
         if (!grad.defined()) return {Tensor()};
+
         // grad * (self > 0)
-        // Create zeros on same device by multiplying grad by 0
-        auto mask = self_.gt(Scalar(0.0));
-        auto zeros_t = grad.mul(Scalar(0.0));
-        auto result = at::native::where(mask, grad, zeros_t);
+        // Work on CPU for safety, then move back if needed
+        bool was_cuda = false;
+#ifdef PT_USE_CUDA
+        was_cuda = self_.is_cuda();
+#endif
+
+        Tensor self_cpu = self_;
+        Tensor grad_cpu = grad;
+#ifdef PT_USE_CUDA
+        if (was_cuda) {
+            self_cpu = at::to_cpu(self_);
+            grad_cpu = at::to_cpu(grad);
+        }
+#endif
+
+        // grad * (self > 0)
+        Tensor result = at::empty(grad_cpu.sizes(), grad_cpu.dtype());
+        const float* self_data = self_cpu.data_ptr<float>();
+        const float* grad_data = grad_cpu.data_ptr<float>();
+        float* result_data = result.mutable_data_ptr<float>();
+
+        for (int64_t i = 0; i < result.numel(); ++i) {
+            result_data[i] = (self_data[i] > 0.0f) ? grad_data[i] : 0.0f;
+        }
+
+#ifdef PT_USE_CUDA
+        if (was_cuda) {
+            result = at::to_cuda(result);
+        }
+#endif
+
         self_ = Tensor();  // Release saved tensor
         return {result};
     }
