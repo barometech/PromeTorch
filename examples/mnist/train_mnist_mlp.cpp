@@ -129,18 +129,37 @@ private:
 class MNISTMLP : public Module {
 public:
     MNISTMLP() : Module("MNISTMLP") {
-        // SIMPLEST POSSIBLE: just one Linear layer 784 -> 10
-        fc = std::make_shared<Linear>(784, 10);
-        register_module("fc", fc);
+        // Full 4-layer MLP: 784 -> 512 -> 256 -> 128 -> 10
+        fc1 = std::make_shared<Linear>(784, 512);
+        fc2 = std::make_shared<Linear>(512, 256);
+        fc3 = std::make_shared<Linear>(256, 128);
+        fc4 = std::make_shared<Linear>(128, 10);
+
+        relu1 = std::make_shared<ReLU>();
+        relu2 = std::make_shared<ReLU>();
+        relu3 = std::make_shared<ReLU>();
+
+        register_module("fc1", fc1);
+        register_module("fc2", fc2);
+        register_module("fc3", fc3);
+        register_module("fc4", fc4);
     }
 
     Tensor forward(const Tensor& x) override {
-        // x: [B, 784] -> [B, 10]
-        return fc->forward(x);
+        // x: [B, 784] -> fc1 -> relu -> fc2 -> relu -> fc3 -> relu -> fc4 -> [B, 10]
+        Tensor h = fc1->forward(x);
+        h = relu1->forward(h);
+        h = fc2->forward(h);
+        h = relu2->forward(h);
+        h = fc3->forward(h);
+        h = relu3->forward(h);
+        h = fc4->forward(h);
+        return h;
     }
 
 private:
-    std::shared_ptr<Linear> fc;
+    std::shared_ptr<Linear> fc1, fc2, fc3, fc4;
+    std::shared_ptr<ReLU> relu1, relu2, relu3;
 };
 
 // ============================================================================
@@ -152,7 +171,7 @@ int main(int argc, char* argv[]) {
     std::string device_str = "cpu";
     int64_t batch_size = 64;
     int64_t epochs = 5;
-    float lr = 0.0001f;  // Very small LR to debug
+    float lr = 0.001f;  // Standard learning rate for MLP
 
     // Parse args
     for (int i = 1; i < argc; ++i) {
@@ -521,13 +540,14 @@ int main(int argc, char* argv[]) {
             // Backward
             torch::autograd::backward({loss});
 
-            // DEBUG: Check gradient and weight scale every 10 batches
-            if (batches_processed % 100 == 0) {
+            // DEBUG: Check gradient and weight scale EVERY batch for first 10, then every 100
+            if (batches_processed < 10 || batches_processed % 100 == 0) {
                 auto params = model->parameters();
                 std::cout << "[DBG] batch=" << batches_processed;
 
                 // Check all layer gradients and weights
                 const char* names[] = {"fc1.w", "fc1.b", "fc2.w", "fc2.b", "fc3.w", "fc3.b", "fc4.w", "fc4.b"};
+                std::cout << "\n";
                 for (size_t i = 0; i < params.size() && i < 8; ++i) {
                     Tensor g = params[i]->grad();
                     Tensor w = params[i]->data();
@@ -549,15 +569,16 @@ int main(int argc, char* argv[]) {
                         }
                         w_norm = std::sqrt(w_norm);
 
-                        std::cout << " " << names[i] << "=(g:" << g_norm << ",w:" << w_norm << ")";
+                        std::cout << "  " << names[i] << "=(g:" << g_norm << ",w:" << w_norm << ")\n";
+                    } else {
+                        std::cout << "  " << names[i] << "=(NO GRADIENT!)\n";
                     }
                 }
-                std::cout << std::endl;
             }
 
             // Gradient clipping (disabled to see raw behavior)
             double grad_norm = clip_grad_norm_(*model, 100.0);  // Very loose clipping
-            if (batches_processed % 100 == 0) {
+            if (batches_processed < 10 || batches_processed % 100 == 0) {
                 std::cout << "[CLIP] total_grad_norm_before_clip=" << grad_norm << std::endl;
 
                 // Verify clipping worked
@@ -580,10 +601,23 @@ int main(int argc, char* argv[]) {
 
             // Stats
             Tensor loss_cpu = move_to_cpu(loss);
-            if (batches_processed == 0) {
-                std::cout << "[DEBUG] loss tensor value: " << loss_cpu.data_ptr<float>()[0] << std::endl;
+            float batch_loss = loss_cpu.data_ptr<float>()[0];
+            if (batches_processed < 10) {
+                std::cout << "[LOSS] batch=" << batches_processed << " loss=" << batch_loss << std::endl;
+
+                // Print weight sum after step
+                auto params = model->parameters();
+                if (!params.empty()) {
+                    Tensor w_cpu = move_to_cpu(params[0]->data());
+                    float w_sum = 0;
+                    const float* wd = w_cpu.data_ptr<float>();
+                    for (int64_t j = 0; j < w_cpu.numel(); ++j) {
+                        w_sum += wd[j];
+                    }
+                    std::cout << "[WEIGHT_AFTER] weight_sum=" << w_sum << std::endl;
+                }
             }
-            epoch_loss += loss_cpu.data_ptr<float>()[0] * B;
+            epoch_loss += batch_loss * B;
 
             // Accuracy
             Tensor logits_cpu = move_to_cpu(logits);
@@ -607,7 +641,7 @@ int main(int argc, char* argv[]) {
             }
 
             batches_processed++;
-            if (batches_processed % 100 == 0) {
+            if (batches_processed <= 10 || batches_processed % 100 == 0) {
                 std::cout << "  Batch " << batches_processed << "/" << (n_train / batch_size)
                           << " loss=" << (epoch_loss / total)
                           << " acc=" << (100.0f * correct / total) << "%" << std::endl;

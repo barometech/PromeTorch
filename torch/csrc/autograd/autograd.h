@@ -61,7 +61,6 @@ inline void Node::add_input_metadata(const Tensor& tensor) {
 inline variable_list AccumulateGrad::apply(variable_list&& grads) {
     auto impl_ptr = weak_impl_.lock();
     if (!impl_ptr) {
-        // Tensor was freed, nothing to do
         return {};
     }
 

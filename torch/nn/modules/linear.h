@@ -82,7 +82,8 @@ public:
         // y = xW^T + b
         // Use autograd-tracked operations for gradient computation
         auto* weight = get_parameter("weight");
-        Tensor weight_t = weight->data().t();
+        // CRITICAL: Use t_autograd() to maintain gradient flow through transpose!
+        Tensor weight_t = torch::autograd::t_autograd(weight->data());
         Tensor output;
 
         if (input.dim() == 1) {

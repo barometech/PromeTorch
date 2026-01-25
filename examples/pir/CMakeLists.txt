@@ -19,6 +19,22 @@ endif()
 # Simple MLP Training Example (proof of autograd working)
 add_executable(train_mlp train_mlp.cpp)
 
+# MLP Char Model for GPU utilization comparison
+add_executable(train_mlp_char train_mlp_char.cpp)
+
+target_link_libraries(train_mlp_char
+    PRIVATE
+    torch_data
+)
+
+if(MSVC)
+    target_link_options(train_mlp_char PRIVATE /STACK:10485760)
+endif()
+
+if(PT_USE_OPENMP AND OpenMP_CXX_FOUND)
+    target_link_libraries(train_mlp_char PRIVATE OpenMP::OpenMP_CXX)
+endif()
+
 target_link_libraries(train_mlp
     PRIVATE
     torch_data

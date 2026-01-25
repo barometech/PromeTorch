@@ -27,7 +27,8 @@ public:
             // This is safe because inplace flag indicates caller expects modification
             return const_cast<Tensor&>(input).relu_();
         }
-        return input.relu();
+        // Use autograd-aware relu to maintain gradient flow
+        return torch::autograd::relu_autograd(input);
     }
 
     std::string extra_repr() const override {

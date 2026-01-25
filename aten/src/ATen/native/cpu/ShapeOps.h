@@ -477,7 +477,8 @@ inline Tensor contiguous(const Tensor& self) {
 
 #ifdef PT_USE_CUDA
     // Fast path for CUDA transposed 2D tensors - use GPU transpose kernel
-    if (is_cuda && self.dim() == 2 &&
+    // TEMPORARILY DISABLED - debugging crash
+    if (false && is_cuda && self.dim() == 2 &&
         self.stride(0) == 1 && self.stride(1) == self.size(0)) {
         // This is a simple 2D transpose: physical [N, K] -> logical [K, N]
         // Use CUDA transpose kernel (no CPU roundtrip!)
@@ -508,6 +509,9 @@ inline Tensor contiguous(const Tensor& self) {
         at::cuda::launch_transpose(
             self.data_ptr<float>(), result.mutable_data_ptr<float>(),
             static_cast<int>(phys_rows), static_cast<int>(phys_cols), nullptr);
+
+        // Synchronize to ensure transpose completes before result is used
+        c10::cuda::cuda_synchronize();
 
         if (self.requires_grad()) {
             result.set_requires_grad(true);
