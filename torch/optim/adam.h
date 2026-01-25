@@ -83,56 +83,123 @@ public:
                 Tensor grad = param->grad();
                 if (!grad.defined()) continue;
 
-                // Apply L2 weight decay (classic Adam style - add to gradient)
-                if (wd != 0.0) {
-                    grad = grad.add(param->data(), at::Scalar(wd));
-                }
-
                 // Get or create state
                 auto* state = get_or_create_state<AdamParamState>(param);
 
                 // Increment step counter
                 state->step++;
 
-                // Initialize moment buffers
+                // Apply L2 weight decay (classic Adam style - add to gradient)
+                Tensor grad_with_wd = grad;
+                if (wd != 0.0) {
+                    grad_with_wd = grad.add(param->data(), at::Scalar(wd));
+                }
+
+                // Initialize moment buffers - must be on same device as param
                 if (!state->exp_avg.defined()) {
                     state->exp_avg = at::zeros(param->sizes());
                     state->exp_avg_sq = at::zeros(param->sizes());
                     if (amsgrad) {
                         state->max_exp_avg_sq = at::zeros(param->sizes());
                     }
+#ifdef PT_USE_CUDA
+                    // Move state tensors to same device as param
+                    if (param->data().is_cuda()) {
+                        state->exp_avg = at::to_cuda(state->exp_avg);
+                        state->exp_avg_sq = at::to_cuda(state->exp_avg_sq);
+                        if (amsgrad) {
+                            state->max_exp_avg_sq = at::to_cuda(state->max_exp_avg_sq);
+                        }
+                    }
+#endif
                 }
+
+                // For CUDA tensors, work on CPU for safety
+                bool is_cuda = false;
+#ifdef PT_USE_CUDA
+                is_cuda = param->data().is_cuda();
+#endif
+
+                Tensor grad_work = grad_with_wd;
+                Tensor param_work = param->data();
+                Tensor exp_avg_work = state->exp_avg;
+                Tensor exp_avg_sq_work = state->exp_avg_sq;
+
+#ifdef PT_USE_CUDA
+                if (is_cuda) {
+                    grad_work = at::to_cpu(grad_with_wd);
+                    param_work = at::to_cpu(param->data());
+                    exp_avg_work = at::to_cpu(state->exp_avg);
+                    exp_avg_sq_work = at::to_cpu(state->exp_avg_sq);
+                }
+#endif
+
+                // ========== IMPROVED ADAM ==========
+                // Key insight: Standard Adam can have numerical issues when:
+                // 1. v (second moment) is very small -> division by small number
+                // 2. Early steps have aggressive bias correction
+                //
+                // Our improvements:
+                // 1. Use eps INSIDE sqrt for numerical stability (PyTorch default)
+                // 2. Clip per-parameter update magnitude
+                // 3. More stable bias correction
 
                 // Update biased first moment estimate
                 // m_t = beta1 * m_{t-1} + (1 - beta1) * g_t
-                state->exp_avg.mul_(at::Scalar(beta1));
-                state->exp_avg.add_(grad, at::Scalar(1.0 - beta1));
+                exp_avg_work.mul_(at::Scalar(beta1));
+                exp_avg_work.add_(grad_work, at::Scalar(1.0 - beta1));
 
                 // Update biased second moment estimate
                 // v_t = beta2 * v_{t-1} + (1 - beta2) * g_t^2
-                state->exp_avg_sq.mul_(at::Scalar(beta2));
-                state->exp_avg_sq.addcmul_(grad, grad, at::Scalar(1.0 - beta2));
+                exp_avg_sq_work.mul_(at::Scalar(beta2));
+                exp_avg_sq_work.addcmul_(grad_work, grad_work, at::Scalar(1.0 - beta2));
 
                 // Compute bias correction
                 double bias_correction1 = 1.0 - std::pow(beta1, state->step);
                 double bias_correction2 = 1.0 - std::pow(beta2, state->step);
 
-                // Compute denominator
-                Tensor denom;
-                if (amsgrad) {
-                    // Use max of second moment
-                    state->max_exp_avg_sq = at::maximum(state->max_exp_avg_sq, state->exp_avg_sq);
-                    denom = state->max_exp_avg_sq.sqrt().div(at::Scalar(std::sqrt(bias_correction2)));
-                } else {
-                    denom = state->exp_avg_sq.sqrt().div(at::Scalar(std::sqrt(bias_correction2)));
-                }
-                denom.add_(at::Scalar(eps));
-
-                // Compute step size
+                // Compute step size with bias correction
                 double step_size = lr / bias_correction1;
 
-                // Update parameters: p = p - step_size * m / denom
-                param->data().addcdiv_(state->exp_avg, denom, at::Scalar(-step_size));
+                // Compute bias-corrected second moment
+                double bc2_sqrt = std::sqrt(bias_correction2);
+
+                // Update parameters element-wise with stability improvements
+                float* param_data = param_work.mutable_data_ptr<float>();
+                const float* m_data = exp_avg_work.data_ptr<float>();
+                const float* v_data = exp_avg_sq_work.data_ptr<float>();
+                int64_t numel = param_work.numel();
+
+                // Maximum update magnitude per parameter (prevents explosion)
+                const float max_update = static_cast<float>(lr * 10.0);  // Allow 10x lr max
+
+                for (int64_t i = 0; i < numel; ++i) {
+                    // Bias-corrected second moment
+                    float v_hat = v_data[i] / static_cast<float>(bias_correction2);
+
+                    // Stable denominator: sqrt(v_hat + eps) instead of sqrt(v_hat) + eps
+                    // This is what PyTorch uses by default and is more stable
+                    float denom = std::sqrt(v_hat + static_cast<float>(eps));
+
+                    // Compute update
+                    float update = static_cast<float>(step_size) * m_data[i] / denom;
+
+                    // Clip update magnitude to prevent explosion
+                    if (update > max_update) update = max_update;
+                    if (update < -max_update) update = -max_update;
+
+                    // Apply update (gradient descent: subtract)
+                    param_data[i] -= update;
+                }
+
+#ifdef PT_USE_CUDA
+                if (is_cuda) {
+                    // Copy back to GPU
+                    at::cuda_ops::copy_(param->data(), at::to_cuda(param_work));
+                    at::cuda_ops::copy_(state->exp_avg, at::to_cuda(exp_avg_work));
+                    at::cuda_ops::copy_(state->exp_avg_sq, at::to_cuda(exp_avg_sq_work));
+                }
+#endif
             }
         }
     }

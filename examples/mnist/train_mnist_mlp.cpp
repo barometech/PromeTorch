@@ -9,6 +9,7 @@
 #include "torch/csrc/autograd/autograd.h"
 #ifdef PT_USE_CUDA
 #include "aten/src/ATen/cuda/CUDADispatch.h"
+#include "c10/cuda/CUDAAllocator.h"
 #endif
 #include <fstream>
 #include <iostream>
@@ -108,42 +109,47 @@ std::vector<uint8_t> load_mnist_labels(const std::string& path) {
 // Simple MLP Model (GPU-Compatible - no Conv2d)
 // ============================================================================
 
+// Simple single-layer model for gradient testing
+class SimpleLinear : public Module {
+public:
+    SimpleLinear() : Module("SimpleLinear") {
+        // Just one linear layer: 784 -> 10
+        fc = std::make_shared<Linear>(784, 10);
+        register_module("fc", fc);
+    }
+
+    Tensor forward(const Tensor& x) override {
+        return fc->forward(x);  // [B, 10]
+    }
+
+private:
+    std::shared_ptr<Linear> fc;
+};
+
 class MNISTMLP : public Module {
 public:
     MNISTMLP() : Module("MNISTMLP") {
+        // Simple 2-layer network to debug gradient explosion
         // Input: 784 (28x28 flattened)
-        // Hidden layers with ReLU
-        fc1 = std::make_shared<Linear>(784, 512);
-        fc2 = std::make_shared<Linear>(512, 256);
-        fc3 = std::make_shared<Linear>(256, 128);
-        fc4 = std::make_shared<Linear>(128, 10);
+        fc1 = std::make_shared<Linear>(784, 128);  // Hidden layer
+        fc2 = std::make_shared<Linear>(128, 10);   // Output layer
 
         relu = std::make_shared<ReLU>();
 
         register_module("fc1", fc1);
         register_module("fc2", fc2);
-        register_module("fc3", fc3);
-        register_module("fc4", fc4);
     }
 
     Tensor forward(const Tensor& x) override {
         // x: [B, 784] (already flattened)
         Tensor h = fc1->forward(x);
         h = relu->forward(h);
-
-        h = fc2->forward(h);
-        h = relu->forward(h);
-
-        h = fc3->forward(h);
-        h = relu->forward(h);
-
-        h = fc4->forward(h);  // [B, 10]
-
+        h = fc2->forward(h);  // [B, 10]
         return h;
     }
 
 private:
-    std::shared_ptr<Linear> fc1, fc2, fc3, fc4;
+    std::shared_ptr<Linear> fc1, fc2;
     std::shared_ptr<ReLU> relu;
 };
 
@@ -156,7 +162,7 @@ int main(int argc, char* argv[]) {
     std::string device_str = "cpu";
     int64_t batch_size = 64;
     int64_t epochs = 5;
-    float lr = 0.001f;
+    float lr = 0.0001f;  // Very small LR to debug
 
     // Parse args
     for (int i = 1; i < argc; ++i) {
@@ -201,6 +207,249 @@ int main(int argc, char* argv[]) {
     int64_t n_train = train_images.size();
     int64_t n_test = test_images.size();
 
+    // =========== NUMERICAL GRADIENT CHECK ===========
+    std::cout << "\n=== Running Numerical Gradient Check ===\n";
+    {
+        // Create simple one-layer model for testing
+        auto test_model = std::make_shared<SimpleLinear>();
+        CrossEntropyLoss test_criterion;
+
+        // Create small test batch - use batch=1 to eliminate batch averaging issues
+        int64_t test_B = 1;
+        Tensor test_inputs = at::empty({test_B, 784});
+        Tensor test_targets = at::empty({test_B});
+        float* in_ptr = test_inputs.mutable_data_ptr<float>();
+        float* tgt_ptr = test_targets.mutable_data_ptr<float>();
+
+        // Fill with random data
+        for (int64_t i = 0; i < test_B * 784; ++i) {
+            in_ptr[i] = static_cast<float>(rand()) / RAND_MAX;
+        }
+        for (int64_t i = 0; i < test_B; ++i) {
+            tgt_ptr[i] = static_cast<float>(rand() % 10);
+        }
+
+        // Get first weight parameter from the model's parameters list
+        auto params = test_model->parameters();
+        if (params.empty()) {
+            std::cout << "ERROR: No parameters found in model!\n";
+            return 1;
+        }
+        auto* weight_param = params[0];  // First parameter is weight
+        std::cout << "Weight shape: [" << weight_param->size(0) << ", " << weight_param->size(1) << "]\n";
+
+        Tensor weight = weight_param->data();
+        float* w_ptr = weight.mutable_data_ptr<float>();
+
+        // Compute analytical gradient
+        std::cout << "Running forward pass...\n";
+        Tensor logits = test_model->forward(test_inputs);
+        std::cout << "Computing loss...\n";
+        Tensor loss = test_criterion.forward(logits, test_targets);
+        float loss_val = loss.data_ptr<float>()[0];
+        std::cout << "Initial loss: " << loss_val << std::endl;
+
+        std::cout << "Running backward pass...\n";
+        torch::autograd::backward({loss});
+        std::cout << "Getting gradient...\n";
+        Tensor analytical_grad = weight_param->grad();
+        if (!analytical_grad.defined()) {
+            std::cout << "ERROR: Gradient is not defined after backward!\n";
+            return 1;
+        }
+        std::cout << "Gradient shape: [" << analytical_grad.size(0) << ", " << analytical_grad.size(1) << "]\n";
+
+        // Compute numerical gradient for first few weights
+        float eps = 1e-4f;
+        std::cout << "Batch size: " << test_B << std::endl;
+        std::cout << "Input shape: [" << test_inputs.size(0) << ", " << test_inputs.size(1) << "]\n";
+        std::cout << "Checking 10 weights (across different rows):\n";
+        bool grad_ok = true;
+        // Check indices from different parts of the weight matrix
+        std::vector<int> indices_to_check = {0, 1, 2, 784, 785, 1568, 2352, 3136, 3920, 7839};
+        for (int idx = 0; idx < (int)indices_to_check.size(); ++idx) {
+            int i = indices_to_check[idx];
+            float orig = w_ptr[i];
+
+            // f(w + eps)
+            w_ptr[i] = orig + eps;
+            Tensor logits_plus = test_model->forward(test_inputs);
+            Tensor loss_plus = test_criterion.forward(logits_plus, test_targets);
+            float loss_p = loss_plus.data_ptr<float>()[0];
+
+            // f(w - eps)
+            w_ptr[i] = orig - eps;
+            Tensor logits_minus = test_model->forward(test_inputs);
+            Tensor loss_minus = test_criterion.forward(logits_minus, test_targets);
+            float loss_m = loss_minus.data_ptr<float>()[0];
+
+            // Restore
+            w_ptr[i] = orig;
+
+            float numerical = (loss_p - loss_m) / (2 * eps);
+            float analytical = analytical_grad.data_ptr<float>()[i];
+            float rel_error = std::abs(numerical - analytical) / (std::abs(numerical) + std::abs(analytical) + 1e-8f);
+
+            std::cout << "  w[" << i << "]: numerical=" << numerical
+                      << " analytical=" << analytical
+                      << " rel_error=" << rel_error;
+            if (rel_error > 0.01f) {
+                std::cout << " MISMATCH!";
+                grad_ok = false;
+            }
+            std::cout << std::endl;
+        }
+
+        if (!grad_ok) {
+            std::cout << "\n*** GRADIENT CHECK FAILED! ***\n";
+            std::cout << "There is a bug in the gradient computation.\n\n";
+        } else {
+            std::cout << "\n*** GRADIENT CHECK PASSED! ***\n\n";
+        }
+    }
+    // =========== END GRADIENT CHECK ===========
+
+    // =========== SINGLE STEP TEST ===========
+    // Verify that one gradient step reduces loss
+    std::cout << "\n=== Single Step Gradient Descent Test ===\n";
+    {
+        auto test_model = std::make_shared<SimpleLinear>();
+
+        // Create test batch
+        int64_t test_B = 32;
+        Tensor test_inputs = at::empty({test_B, 784});
+        Tensor test_targets = at::empty({test_B});
+        float* in_ptr = test_inputs.mutable_data_ptr<float>();
+        float* tgt_ptr = test_targets.mutable_data_ptr<float>();
+
+        // Fill with normalized random data
+        for (int64_t i = 0; i < test_B * 784; ++i) {
+            float pixel = static_cast<float>(rand()) / RAND_MAX;
+            in_ptr[i] = (pixel - 0.1307f) / 0.3081f;
+        }
+        for (int64_t i = 0; i < test_B; ++i) {
+            tgt_ptr[i] = static_cast<float>(rand() % 10);
+        }
+
+        CrossEntropyLoss test_criterion;
+
+        // Compute initial loss
+        Tensor logits1 = test_model->forward(test_inputs);
+        Tensor loss1 = test_criterion.forward(logits1, test_targets);
+        float loss1_val = loss1.data_ptr<float>()[0];
+        std::cout << "Initial loss: " << loss1_val << std::endl;
+
+        // Compute gradients
+        torch::autograd::backward({loss1});
+
+        // Manual SGD step with very small lr
+        float tiny_lr = 0.0001f;
+        for (auto* param : test_model->parameters()) {
+            if (param->grad().defined()) {
+                Tensor g = param->grad();
+                Tensor w = param->data();
+
+                // Check gradient stats
+                float g_sum = 0, w_sum = 0;
+                const float* gd = g.data_ptr<float>();
+                const float* wd = w.data_ptr<float>();
+                for (int64_t i = 0; i < g.numel(); ++i) {
+                    g_sum += gd[i];
+                    w_sum += wd[i];
+                }
+                std::cout << "Param: numel=" << g.numel()
+                          << ", grad_sum=" << g_sum
+                          << ", weight_sum=" << w_sum << std::endl;
+
+                // Update: w = w - lr * g
+                w.sub_(g, at::Scalar(tiny_lr));
+            }
+        }
+
+        // Compute loss after update (need fresh forward pass)
+        test_model->zero_grad();
+        Tensor logits2 = test_model->forward(test_inputs);
+        Tensor loss2 = test_criterion.forward(logits2, test_targets);
+        float loss2_val = loss2.data_ptr<float>()[0];
+        std::cout << "Loss after step: " << loss2_val << std::endl;
+
+        if (loss2_val < loss1_val) {
+            std::cout << "*** PASS: Loss decreased by " << (loss1_val - loss2_val) << " ***\n\n";
+        } else {
+            std::cout << "*** FAIL: Loss INCREASED by " << (loss2_val - loss1_val) << " ***\n";
+            std::cout << "This indicates gradient direction is WRONG!\n\n";
+        }
+    }
+    // =========== END SINGLE STEP TEST ===========
+
+    // =========== ADAM vs SGD TEST ===========
+    // Compare Adam and SGD on same problem
+    std::cout << "\n=== Adam vs SGD Comparison Test ===\n";
+    {
+        // Simple quadratic: L = sum(w^2) / 2, grad = w
+        // Optimal w = 0
+
+        // Test with Adam
+        std::cout << "Testing ADAM:" << std::endl;
+        {
+            Tensor w_data = at::ones({10});  // Start at 1
+            Parameter w(w_data);
+            AdamOptions opts(0.001);
+            Adam optimizer({&w}, opts);
+
+            for (int step = 1; step <= 10; ++step) {
+                // Compute grad = w
+                Tensor grad = w.data().clone();
+                w.set_grad(grad);
+
+                float w0 = w.data().data_ptr<float>()[0];
+                float loss = 0;
+                for (int i = 0; i < 10; ++i) {
+                    float wi = w.data().data_ptr<float>()[i];
+                    loss += wi * wi;
+                }
+                loss /= 2;
+
+                optimizer.step();
+
+                float w0_new = w.data().data_ptr<float>()[0];
+                std::cout << "  Step " << step << ": w[0]=" << w0 << " -> " << w0_new
+                          << ", loss=" << loss << std::endl;
+            }
+        }
+
+        // Test with SGD
+        std::cout << "Testing SGD:" << std::endl;
+        {
+            Tensor w_data = at::ones({10});  // Start at 1
+            Parameter w(w_data);
+            SGDOptions opts(0.001);
+            SGD optimizer({&w}, opts);
+
+            for (int step = 1; step <= 10; ++step) {
+                // Compute grad = w
+                Tensor grad = w.data().clone();
+                w.set_grad(grad);
+
+                float w0 = w.data().data_ptr<float>()[0];
+                float loss = 0;
+                for (int i = 0; i < 10; ++i) {
+                    float wi = w.data().data_ptr<float>()[i];
+                    loss += wi * wi;
+                }
+                loss /= 2;
+
+                optimizer.step();
+
+                float w0_new = w.data().data_ptr<float>()[0];
+                std::cout << "  Step " << step << ": w[0]=" << w0 << " -> " << w0_new
+                          << ", loss=" << loss << std::endl;
+            }
+        }
+        std::cout << std::endl;
+    }
+    // =========== END ADAM vs SGD TEST ===========
+
     // Create model
     auto model = std::make_shared<MNISTMLP>();
     std::cout << "MLP Model created (784->512->256->128->10)" << std::endl;
@@ -212,10 +461,11 @@ int main(int argc, char* argv[]) {
     }
 #endif
 
-    // Optimizer
-    AdamOptions opts(lr);
-    Adam optimizer(model->parameters(), opts);
-    std::cout << "Adam optimizer created (lr=" << lr << ")" << std::endl;
+    // Optimizer - Pure SGD (no momentum) to debug
+    SGDOptions opts(lr);
+    opts.momentum_(0.0);  // No momentum
+    SGD optimizer(model->parameters(), opts);
+    std::cout << "SGD optimizer created (lr=" << lr << ", no momentum)" << std::endl;
 
     // Loss
     CrossEntropyLoss criterion;
@@ -251,16 +501,22 @@ int main(int argc, char* argv[]) {
             // Create batch tensors - FLATTENED for MLP
             Tensor inputs = at::empty({B, 784});  // Flattened 28x28
             Tensor targets = at::empty({B});
-
             float* in_ptr = inputs.mutable_data_ptr<float>();
             float* tgt_ptr = targets.mutable_data_ptr<float>();
+
+            // MNIST normalization constants (from PyTorch official example)
+            // mean = 0.1307, std = 0.3081
+            // normalized = (pixel/255 - mean) / std
+            constexpr float MNIST_MEAN = 0.1307f;
+            constexpr float MNIST_STD = 0.3081f;
 
             for (int64_t i = 0; i < B; ++i) {
                 int64_t idx = indices[batch_start + i];
                 tgt_ptr[i] = static_cast<float>(train_labels[idx]);
 
                 for (int j = 0; j < 784; ++j) {
-                    in_ptr[i * 784 + j] = train_images[idx][j] / 255.0f;
+                    float pixel = train_images[idx][j] / 255.0f;
+                    in_ptr[i * 784 + j] = (pixel - MNIST_MEAN) / MNIST_STD;
                 }
             }
 
@@ -274,10 +530,69 @@ int main(int argc, char* argv[]) {
 
             // Backward
             torch::autograd::backward({loss});
+
+            // DEBUG: Check gradient and weight scale every 10 batches
+            if (batches_processed % 100 == 0) {
+                auto params = model->parameters();
+                std::cout << "[DBG] batch=" << batches_processed;
+
+                // Check all layer gradients and weights
+                const char* names[] = {"fc1.w", "fc1.b", "fc2.w", "fc2.b", "fc3.w", "fc3.b", "fc4.w", "fc4.b"};
+                for (size_t i = 0; i < params.size() && i < 8; ++i) {
+                    Tensor g = params[i]->grad();
+                    Tensor w = params[i]->data();
+
+                    if (g.defined()) {
+                        Tensor g_cpu = move_to_cpu(g);
+                        float g_norm = 0;
+                        const float* gd = g_cpu.data_ptr<float>();
+                        for (int64_t j = 0; j < g_cpu.numel(); ++j) {
+                            g_norm += gd[j] * gd[j];
+                        }
+                        g_norm = std::sqrt(g_norm);
+
+                        Tensor w_cpu = move_to_cpu(w);
+                        float w_norm = 0;
+                        const float* wd = w_cpu.data_ptr<float>();
+                        for (int64_t j = 0; j < w_cpu.numel(); ++j) {
+                            w_norm += wd[j] * wd[j];
+                        }
+                        w_norm = std::sqrt(w_norm);
+
+                        std::cout << " " << names[i] << "=(g:" << g_norm << ",w:" << w_norm << ")";
+                    }
+                }
+                std::cout << std::endl;
+            }
+
+            // Strict gradient clipping to prevent explosion
+            double grad_norm = clip_grad_norm_(*model, 1.0);  // Aggressive clipping
+            if (batches_processed % 100 == 0) {
+                std::cout << "[CLIP] total_grad_norm_before_clip=" << grad_norm << std::endl;
+
+                // Verify clipping worked
+                auto params = model->parameters();
+                float total_clipped = 0;
+                for (auto* p : params) {
+                    if (p->grad().defined()) {
+                        Tensor g = move_to_cpu(p->grad());
+                        const float* gd = g.data_ptr<float>();
+                        for (int64_t j = 0; j < g.numel(); ++j) {
+                            total_clipped += gd[j] * gd[j];
+                        }
+                    }
+                }
+                std::cout << "[AFTER_CLIP] total_grad_norm=" << std::sqrt(total_clipped) << std::endl;
+            }
+
+            // Optimizer step
             optimizer.step();
 
             // Stats
             Tensor loss_cpu = move_to_cpu(loss);
+            if (batches_processed == 0) {
+                std::cout << "[DEBUG] loss tensor value: " << loss_cpu.data_ptr<float>()[0] << std::endl;
+            }
             epoch_loss += loss_cpu.data_ptr<float>()[0] * B;
 
             // Accuracy
@@ -328,10 +643,15 @@ int main(int argc, char* argv[]) {
             Tensor inputs = at::empty({B, 784});  // Flattened
             float* in_ptr = inputs.mutable_data_ptr<float>();
 
+            // Same MNIST normalization for test data
+            constexpr float MNIST_MEAN = 0.1307f;
+            constexpr float MNIST_STD = 0.3081f;
+
             for (int64_t i = 0; i < B; ++i) {
                 int64_t idx = batch_start + i;
                 for (int j = 0; j < 784; ++j) {
-                    in_ptr[i * 784 + j] = test_images[idx][j] / 255.0f;
+                    float pixel = test_images[idx][j] / 255.0f;
+                    in_ptr[i * 784 + j] = (pixel - MNIST_MEAN) / MNIST_STD;
                 }
             }
 
@@ -360,6 +680,29 @@ int main(int argc, char* argv[]) {
     }
 
     std::cout << "=== Training Complete ===" << std::endl;
+
+#ifdef PT_USE_CUDA
+    // CRITICAL: Shutdown CUDA AFTER all tensors are destroyed
+    if (g_device.is_cuda()) {
+        // Clear optimizer and model gradients
+        optimizer.zero_grad();
+        model->zero_grad();
+
+        // Clear parameter grad_fn
+        for (auto* param : model->parameters()) {
+            if (param && param->defined()) {
+                at::Tensor& data = param->data();
+                if (data.defined()) {
+                    torch::autograd::clear_grad_fn(data);
+                    param->set_grad(at::Tensor());
+                }
+            }
+        }
+
+        c10::cuda::cuda_shutdown();
+        std::cout << "CUDA shutdown complete" << std::endl;
+    }
+#endif
 
     return 0;
 }

@@ -73,14 +73,16 @@ public:
                 if (!param->defined()) continue;
 
                 Tensor grad = param->grad();
-                if (!grad.defined()) continue;
+                if (!grad.defined()) {
+                    continue;
+                }
 
                 // Apply weight decay
                 if (wd != 0.0) {
                     grad = grad.add(param->data(), at::Scalar(wd));
                 }
 
-                // Get or create momentum buffer
+                // Get or create momentum buffer - SKIP FOR NOW since no momentum
                 if (momentum != 0.0) {
                     auto* state = get_or_create_state<SGDParamState>(param);
 
