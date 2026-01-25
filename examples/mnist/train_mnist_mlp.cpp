@@ -6,6 +6,7 @@
 
 #include "torch/nn/nn.h"
 #include "torch/optim/optim.h"
+#include "torch/optim/adamkiller.h"
 #include "torch/csrc/autograd/autograd.h"
 #ifdef PT_USE_CUDA
 #include "aten/src/ATen/cuda/CUDADispatch.h"
@@ -391,9 +392,9 @@ int main(int argc, char* argv[]) {
     }
     // =========== END SINGLE STEP TEST ===========
 
-    // =========== ADAM vs SGD TEST ===========
-    // Compare Adam and SGD on same problem
-    std::cout << "\n=== Adam vs SGD Comparison Test ===\n";
+    // =========== ADAM vs SGD vs ADAMKILLER TEST ===========
+    // Compare Adam, SGD and AdamKiller on same problem
+    std::cout << "\n=== Adam vs SGD vs AdamKiller Comparison Test ===\n";
     {
         // Simple quadratic: L = sum(w^2) / 2, grad = w
         // Optimal w = 0
@@ -455,9 +456,65 @@ int main(int argc, char* argv[]) {
                           << ", loss=" << loss << std::endl;
             }
         }
+
+        // Test with AdamKiller (AGGRESSIVE mode for max speed)
+        std::cout << "Testing ADAMKILLER (aggressive):" << std::endl;
+        {
+            Tensor w_data = at::ones({10});  // Start at 1
+            Parameter w(w_data);
+            AdamKiller optimizer = make_adamkiller_aggressive({&w}, 0.001);
+
+            for (int step = 1; step <= 10; ++step) {
+                // Compute grad = w
+                Tensor grad = w.data().clone();
+                w.set_grad(grad);
+
+                float w0 = w.data().data_ptr<float>()[0];
+                float loss = 0;
+                for (int i = 0; i < 10; ++i) {
+                    float wi = w.data().data_ptr<float>()[i];
+                    loss += wi * wi;
+                }
+                loss /= 2;
+
+                optimizer.step();
+
+                float w0_new = w.data().data_ptr<float>()[0];
+                std::cout << "  Step " << step << ": w[0]=" << w0 << " -> " << w0_new
+                          << ", loss=" << loss << std::endl;
+            }
+        }
+
+        // Test with AdamKiller (STABLE mode)
+        std::cout << "Testing ADAMKILLER (stable):" << std::endl;
+        {
+            Tensor w_data = at::ones({10});  // Start at 1
+            Parameter w(w_data);
+            AdamKiller optimizer = make_adamkiller_stable({&w}, 0.001);
+
+            for (int step = 1; step <= 10; ++step) {
+                // Compute grad = w
+                Tensor grad = w.data().clone();
+                w.set_grad(grad);
+
+                float w0 = w.data().data_ptr<float>()[0];
+                float loss = 0;
+                for (int i = 0; i < 10; ++i) {
+                    float wi = w.data().data_ptr<float>()[i];
+                    loss += wi * wi;
+                }
+                loss /= 2;
+
+                optimizer.step();
+
+                float w0_new = w.data().data_ptr<float>()[0];
+                std::cout << "  Step " << step << ": w[0]=" << w0 << " -> " << w0_new
+                          << ", loss=" << loss << std::endl;
+            }
+        }
         std::cout << std::endl;
     }
-    // =========== END ADAM vs SGD TEST ===========
+    // =========== END OPTIMIZER COMPARISON TEST ===========
 
     // Create model
     auto model = std::make_shared<MNISTMLP>();
@@ -470,11 +527,9 @@ int main(int argc, char* argv[]) {
     }
 #endif
 
-    // Optimizer - Simple SGD without momentum for clean baseline
-    SGDOptions opts(lr);
-    opts.momentum_(0.0);  // NO momentum to avoid accumulation issues
-    SGD optimizer(model->parameters(), opts);
-    std::cout << "SGD optimizer (NO momentum) created (lr=" << lr << ")" << std::endl;
+    // Optimizer - AdamKiller (aggressive mode for fast convergence)
+    AdamKiller optimizer = make_adamkiller_aggressive(model->parameters(), lr);
+    std::cout << "AdamKiller optimizer (aggressive) created (lr=" << lr << ")" << std::endl;
 
     // Loss
     CrossEntropyLoss criterion;
