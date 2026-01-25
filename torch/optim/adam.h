@@ -164,32 +164,44 @@ public:
                 // Compute bias-corrected second moment
                 double bc2_sqrt = std::sqrt(bias_correction2);
 
-                // Update parameters element-wise with stability improvements
+                // Update parameters with TOTAL UPDATE NORM CLIPPING
+                // This is critical because Adam's per-parameter updates can have
+                // total norm of lr * sqrt(N), which is huge for large N
                 float* param_data = param_work.mutable_data_ptr<float>();
                 const float* m_data = exp_avg_work.data_ptr<float>();
                 const float* v_data = exp_avg_sq_work.data_ptr<float>();
                 int64_t numel = param_work.numel();
 
-                // Maximum update magnitude per parameter (prevents explosion)
-                const float max_update = static_cast<float>(lr * 10.0);  // Allow 10x lr max
+                // First pass: compute all updates and their total norm
+                std::vector<float> updates(numel);
+                double update_norm_sq = 0.0;
 
                 for (int64_t i = 0; i < numel; ++i) {
                     // Bias-corrected second moment
                     float v_hat = v_data[i] / static_cast<float>(bias_correction2);
 
                     // Stable denominator: sqrt(v_hat + eps) instead of sqrt(v_hat) + eps
-                    // This is what PyTorch uses by default and is more stable
                     float denom = std::sqrt(v_hat + static_cast<float>(eps));
 
-                    // Compute update
-                    float update = static_cast<float>(step_size) * m_data[i] / denom;
+                    // Compute raw update
+                    updates[i] = static_cast<float>(step_size) * m_data[i] / denom;
+                    update_norm_sq += updates[i] * updates[i];
+                }
 
-                    // Clip update magnitude to prevent explosion
-                    if (update > max_update) update = max_update;
-                    if (update < -max_update) update = -max_update;
+                // Clip TOTAL update norm to match SGD-like behavior
+                // Max total update norm = lr (like SGD with clipped gradients)
+                double update_norm = std::sqrt(update_norm_sq);
+                double max_update_norm = lr;  // Match SGD behavior
+                double scale = 1.0;
 
-                    // Apply update (gradient descent: subtract)
-                    param_data[i] -= update;
+                if (update_norm > max_update_norm && update_norm > 1e-12) {
+                    scale = max_update_norm / update_norm;
+                }
+
+                // Second pass: apply scaled updates
+                for (int64_t i = 0; i < numel; ++i) {
+                    float scaled_update = static_cast<float>(updates[i] * scale);
+                    param_data[i] -= scaled_update;
                 }
 
 #ifdef PT_USE_CUDA

@@ -27,16 +27,21 @@ PromeTorch - полностью независимый фреймворк глу
 - Mixed Precision (AMP)
 - Python Bindings (pybind11)
 
-### В работе: Утечка GPU памяти
+### В работе: Утечка GPU памяти — ROOT CAUSE НАЙДЕН!
 
-**Проблема:** При обучении PIR модели на CUDA память растёт ~2GB/итерация.
+**Проблема:** При обучении PIR модели на CUDA crash на первой итерации (heap corruption).
 
-**Диагностика:**
-- Создан `examples/test_mem_leak.cpp` - минимальный MLP для тестирования
-- **CPU:** Работает без утечек (created=destroyed, alive=0)
-- **CUDA:** Crash на первой итерации (heap corruption -1073740791)
+**Root Cause:** DLL Singleton Problem!
+`CUDACachingAllocator::get()` была inline функция со static переменной.
+На Windows каждая DLL получала СВОЙ instance allocator'а.
+Allocation в одном модуле + deallocation в другом = heap corruption.
 
-**Вывод:** Проблема специфична для CUDA-кода, не для autograd.
+**РЕШЕНИЕ (2026-01-24):**
+1. Создан `c10/cuda/CUDAAllocator.cpp` с единственным singleton
+2. `get()` теперь exported function, не inline
+3. `aten_cuda` теперь SHARED library (не STATIC)
+
+**СТАТУС:** ⚠️ Требует пересборки и тестирования
 
 ## Рабочие директории сборки
 
@@ -72,9 +77,34 @@ examples\pir\test_mem_leak.exe --device cpu --iterations 20
 
 ## Следующие шаги
 
-1. **Отладить CUDA crash** - найти где происходит heap corruption
-2. **Проверить CUDA kernels** - возможно проблема в gemm или reduce
-3. **Добавить CUDA sync** - возможно race condition
+1. **[DONE] Найти root cause CUDA crash** — DLL Singleton Problem
+2. **[TODO] Пересобрать проект** с новым CUDAAllocator.cpp
+3. **[TODO] Протестировать** test_mem_leak.exe --device cuda
+
+## Команды для тестирования фикса
+
+```batch
+REM 1. Очистить старую сборку
+cd C:\Users\paper\Desktop\promethorch
+rmdir /s /q build_cuda_examples
+
+REM 2. Создать новую сборку
+mkdir build_cuda_examples
+cd build_cuda_examples
+
+REM 3. Открыть Developer Command Prompt for VS 2019 и выполнить:
+call "C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64
+
+REM 4. Конфигурация с CUDA
+cmake .. -DPT_USE_CUDA=ON -DPT_BUILD_SHARED_LIBS=ON
+
+REM 5. Сборка
+nmake test_mem_leak
+
+REM 6. Тест
+set PATH=%CD%;C:\ProgramData\anaconda3\Library\bin;%PATH%
+examples\pir\test_mem_leak.exe --device cuda --iterations 20
+```
 
 ## Важные находки
 
