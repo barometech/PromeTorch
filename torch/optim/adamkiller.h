@@ -261,7 +261,9 @@ public:
                 // ============================================================
                 // STEP 8: Parameter update with trust region
                 // ============================================================
-                double step_size = layer_lr / bc1;
+                // NOTE: step_size should be just layer_lr, NOT layer_lr / bc1
+                // because m_hat already includes the bc1 correction
+                double step_size = layer_lr;
                 double update_norm_sq = 0.0;
                 std::vector<float> updates(numel);
 

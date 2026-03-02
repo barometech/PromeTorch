@@ -527,9 +527,14 @@ int main(int argc, char* argv[]) {
     }
 #endif
 
-    // Optimizer - AdamKiller (aggressive mode for fast convergence)
-    AdamKiller optimizer = make_adamkiller_aggressive(model->parameters(), lr);
-    std::cout << "AdamKiller optimizer (aggressive) created (lr=" << lr << ")" << std::endl;
+    // Optimizer - Use vanilla SGD for fair comparison with PyTorch
+    // AdamKiller optimizer = make_adamkiller_aggressive(model->parameters(), lr);
+    // std::cout << "AdamKiller optimizer (aggressive) created (lr=" << lr << ")" << std::endl;
+
+    // Use SGD (no momentum) to match PyTorch test exactly
+    SGDOptions sgd_opts(lr);
+    SGD optimizer(model->parameters(), sgd_opts);
+    std::cout << "SGD optimizer (no momentum) created (lr=" << lr << ")" << std::endl;
 
     // Loss
     CrossEntropyLoss criterion;

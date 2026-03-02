@@ -20,16 +20,23 @@ inline Tensor mm(const Tensor& self, const Tensor& other) {
         self.size(0), "x", self.size(1), " and ",
         other.size(0), "x", other.size(1), ")");
 
-    int64_t M = self.size(0);
-    int64_t K = self.size(1);
-    int64_t N = other.size(1);
+    // CRITICAL FIX: Make tensors contiguous before computation!
+    // transpose() creates a VIEW with swapped strides but doesn't rearrange data.
+    // The loop below assumes contiguous layout (stride [K,1] for A, [N,1] for B).
+    // Without this, mm(input, weight.t()) computes WRONG values!
+    Tensor A = self.contiguous();
+    Tensor B = other.contiguous();
 
-    c10::ScalarType result_dtype = c10::promoteTypes(self.dtype(), other.dtype());
-    Tensor result = zeros({M, N}, TensorOptions().dtype(result_dtype).device(self.device()));
+    int64_t M = A.size(0);
+    int64_t K = A.size(1);
+    int64_t N = B.size(1);
+
+    c10::ScalarType result_dtype = c10::promoteTypes(A.dtype(), B.dtype());
+    Tensor result = zeros({M, N}, TensorOptions().dtype(result_dtype).device(A.device()));
 
     PT_DISPATCH_FLOATING_TYPES(result_dtype, "mm", [&] {
-        const scalar_t* A = self.data_ptr<scalar_t>();
-        const scalar_t* B = other.data_ptr<scalar_t>();
+        const scalar_t* A_data = A.data_ptr<scalar_t>();
+        const scalar_t* B_data = B.data_ptr<scalar_t>();
         scalar_t* C = result.mutable_data_ptr<scalar_t>();
 
         // Basic matrix multiplication with OpenMP parallelization
@@ -38,7 +45,7 @@ inline Tensor mm(const Tensor& self, const Tensor& other) {
             for (int64_t j = 0; j < N; ++j) {
                 scalar_t sum = 0;
                 for (int64_t k = 0; k < K; ++k) {
-                    sum += A[i * K + k] * B[k * N + j];
+                    sum += A_data[i * K + k] * B_data[k * N + j];
                 }
                 C[i * N + j] = sum;
             }
@@ -59,21 +66,25 @@ inline Tensor mv(const Tensor& self, const Tensor& vec) {
     PT_CHECK_MSG(self.size(1) == vec.size(0),
         "mv: matrix and vector shapes cannot be multiplied");
 
-    int64_t M = self.size(0);
-    int64_t N = self.size(1);
+    // Make tensors contiguous for correct memory access
+    Tensor A = self.contiguous();
+    Tensor x = vec.contiguous();
 
-    c10::ScalarType result_dtype = c10::promoteTypes(self.dtype(), vec.dtype());
-    Tensor result = zeros({M}, TensorOptions().dtype(result_dtype).device(self.device()));
+    int64_t M = A.size(0);
+    int64_t N = A.size(1);
+
+    c10::ScalarType result_dtype = c10::promoteTypes(A.dtype(), x.dtype());
+    Tensor result = zeros({M}, TensorOptions().dtype(result_dtype).device(A.device()));
 
     PT_DISPATCH_FLOATING_TYPES(result_dtype, "mv", [&] {
-        const scalar_t* A = self.data_ptr<scalar_t>();
-        const scalar_t* x = vec.data_ptr<scalar_t>();
+        const scalar_t* A_data = A.data_ptr<scalar_t>();
+        const scalar_t* x_data = x.data_ptr<scalar_t>();
         scalar_t* y = result.mutable_data_ptr<scalar_t>();
 
         for (int64_t i = 0; i < M; ++i) {
             scalar_t sum = 0;
             for (int64_t j = 0; j < N; ++j) {
-                sum += A[i * N + j] * x[j];
+                sum += A_data[i * N + j] * x_data[j];
             }
             y[i] = sum;
         }
@@ -95,22 +106,26 @@ inline Tensor bmm(const Tensor& self, const Tensor& other) {
     PT_CHECK_MSG(self.size(2) == other.size(1),
         "bmm: matrix dimensions cannot be multiplied");
 
-    int64_t batch = self.size(0);
-    int64_t M = self.size(1);
-    int64_t K = self.size(2);
-    int64_t N = other.size(2);
+    // Make tensors contiguous for correct memory access
+    Tensor A = self.contiguous();
+    Tensor B = other.contiguous();
 
-    c10::ScalarType result_dtype = c10::promoteTypes(self.dtype(), other.dtype());
-    Tensor result = zeros({batch, M, N}, TensorOptions().dtype(result_dtype).device(self.device()));
+    int64_t batch = A.size(0);
+    int64_t M = A.size(1);
+    int64_t K = A.size(2);
+    int64_t N = B.size(2);
+
+    c10::ScalarType result_dtype = c10::promoteTypes(A.dtype(), B.dtype());
+    Tensor result = zeros({batch, M, N}, TensorOptions().dtype(result_dtype).device(A.device()));
 
     PT_DISPATCH_FLOATING_TYPES(result_dtype, "bmm", [&] {
-        const scalar_t* A = self.data_ptr<scalar_t>();
-        const scalar_t* B = other.data_ptr<scalar_t>();
+        const scalar_t* A_data = A.data_ptr<scalar_t>();
+        const scalar_t* B_data = B.data_ptr<scalar_t>();
         scalar_t* C = result.mutable_data_ptr<scalar_t>();
 
         for (int64_t b = 0; b < batch; ++b) {
-            const scalar_t* A_b = A + b * M * K;
-            const scalar_t* B_b = B + b * K * N;
+            const scalar_t* A_b = A_data + b * M * K;
+            const scalar_t* B_b = B_data + b * K * N;
             scalar_t* C_b = C + b * M * N;
 
             for (int64_t i = 0; i < M; ++i) {
@@ -138,17 +153,21 @@ inline Tensor dot(const Tensor& self, const Tensor& other) {
     PT_CHECK_MSG(self.size(0) == other.size(0),
         "dot: vectors must have same size");
 
-    int64_t n = self.size(0);
-    c10::ScalarType result_dtype = c10::promoteTypes(self.dtype(), other.dtype());
-    Tensor result = zeros({}, TensorOptions().dtype(result_dtype).device(self.device()));
+    // Make tensors contiguous for correct memory access
+    Tensor a = self.contiguous();
+    Tensor b = other.contiguous();
+
+    int64_t n = a.size(0);
+    c10::ScalarType result_dtype = c10::promoteTypes(a.dtype(), b.dtype());
+    Tensor result = zeros({}, TensorOptions().dtype(result_dtype).device(a.device()));
 
     PT_DISPATCH_FLOATING_TYPES(result_dtype, "dot", [&] {
-        const scalar_t* a = self.data_ptr<scalar_t>();
-        const scalar_t* b = other.data_ptr<scalar_t>();
+        const scalar_t* a_data = a.data_ptr<scalar_t>();
+        const scalar_t* b_data = b.data_ptr<scalar_t>();
         scalar_t sum = 0;
 
         for (int64_t i = 0; i < n; ++i) {
-            sum += a[i] * b[i];
+            sum += a_data[i] * b_data[i];
         }
 
         result.mutable_data_ptr<scalar_t>()[0] = sum;
@@ -302,20 +321,24 @@ inline Tensor outer(const Tensor& self, const Tensor& other) {
     PT_CHECK_MSG(self.dim() == 1, "outer requires 1D tensors");
     PT_CHECK_MSG(other.dim() == 1, "outer requires 1D tensors");
 
-    int64_t M = self.size(0);
-    int64_t N = other.size(0);
+    // Make tensors contiguous for correct memory access
+    Tensor a = self.contiguous();
+    Tensor b = other.contiguous();
 
-    c10::ScalarType result_dtype = c10::promoteTypes(self.dtype(), other.dtype());
-    Tensor result = empty({M, N}, TensorOptions().dtype(result_dtype).device(self.device()));
+    int64_t M = a.size(0);
+    int64_t N = b.size(0);
+
+    c10::ScalarType result_dtype = c10::promoteTypes(a.dtype(), b.dtype());
+    Tensor result = empty({M, N}, TensorOptions().dtype(result_dtype).device(a.device()));
 
     PT_DISPATCH_ALL_TYPES(result_dtype, "outer", [&] {
-        const scalar_t* a = self.data_ptr<scalar_t>();
-        const scalar_t* b = other.data_ptr<scalar_t>();
+        const scalar_t* a_data = a.data_ptr<scalar_t>();
+        const scalar_t* b_data = b.data_ptr<scalar_t>();
         scalar_t* out = result.mutable_data_ptr<scalar_t>();
 
         for (int64_t i = 0; i < M; ++i) {
             for (int64_t j = 0; j < N; ++j) {
-                out[i * N + j] = a[i] * b[j];
+                out[i * N + j] = a_data[i] * b_data[j];
             }
         }
     });
@@ -338,11 +361,15 @@ inline Tensor addmm(
     PT_CHECK_MSG(mat1.dim() == 2, "addmm: mat1 must be 2D");
     PT_CHECK_MSG(mat2.dim() == 2, "addmm: mat2 must be 2D");
 
-    int64_t M = mat1.size(0);
-    int64_t K = mat1.size(1);
-    int64_t N = mat2.size(1);
+    // Make tensors contiguous for correct memory access
+    Tensor A = mat1.contiguous();
+    Tensor B = mat2.contiguous();
 
-    PT_CHECK_MSG(K == mat2.size(0), "addmm: mat1 and mat2 shapes cannot be multiplied");
+    int64_t M = A.size(0);
+    int64_t K = A.size(1);
+    int64_t N = B.size(1);
+
+    PT_CHECK_MSG(K == B.size(0), "addmm: mat1 and mat2 shapes cannot be multiplied");
 
     // Broadcast self to result shape
     Tensor result = self.expand({M, N}).clone();
@@ -351,8 +378,8 @@ inline Tensor addmm(
         scalar_t beta_val = beta.to<scalar_t>();
         scalar_t alpha_val = alpha.to<scalar_t>();
 
-        const scalar_t* A = mat1.data_ptr<scalar_t>();
-        const scalar_t* B = mat2.data_ptr<scalar_t>();
+        const scalar_t* A_data = A.data_ptr<scalar_t>();
+        const scalar_t* B_data = B.data_ptr<scalar_t>();
         scalar_t* C = result.mutable_data_ptr<scalar_t>();
 
         // Scale existing values by beta
@@ -366,7 +393,7 @@ inline Tensor addmm(
             for (int64_t j = 0; j < N; ++j) {
                 scalar_t sum = 0;
                 for (int64_t k = 0; k < K; ++k) {
-                    sum += A[i * K + k] * B[k * N + j];
+                    sum += A_data[i * K + k] * B_data[k * N + j];
                 }
                 C[i * N + j] += alpha_val * sum;
             }

@@ -50,11 +50,11 @@ public:
     }
 
     void reset_parameters() override {
-        // Kaiming uniform initialization
-        // Same as PyTorch's default
+        // PyTorch Linear uses simple uniform initialization:
+        // bound = 1 / sqrt(fan_in)
+        // NOT Kaiming uniform (which uses sqrt(3) * 1/sqrt(fan_in))
         double fan_in = static_cast<double>(in_features_);
-        double std = 1.0 / std::sqrt(fan_in);
-        double bound = std::sqrt(3.0) * std;
+        double bound = 1.0 / std::sqrt(fan_in);
 
         // Uniform(-bound, bound)
         auto* weight = get_parameter("weight");
