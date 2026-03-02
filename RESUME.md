@@ -1,34 +1,56 @@
 # PromeTorch - Resume Point
 
-**Дата:** 2026-01-25
-**Ветка:** `research/cuda-crash-investigation`
-**Статус:** ✅ AUTOGRAD РАБОТАЕТ, MNIST ОБУЧАЕТСЯ
+**Дата:** 2026-03-02
+**Ветка:** `fix/adam-optimizer`
+**Статус:** ✅ MNIST РАБОТАЕТ — Test Accuracy 88.94%
 
 ---
 
-## КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ (2026-01-25)
+## ИСПРАВЛЕНО (2026-03-02): mm() contiguous fix
 
-### Проблема: "backward: 0 nodes"
-При обучении MNIST backward pass находил 0 узлов, модель не обучалась.
+### Root cause
+`mm()` в `LinearAlgebra.h` читала `data_ptr<>()` с контигуозными индексами, но `tensor.t()` создаёт VIEW с транспонированными strides. Fix: `.contiguous()` перед вычислениями.
 
-### Root Cause: AutogradMeta Factory Registration
-1. `c10/core/TensorImpl.cpp` имел default factory создающий BASE `AutogradMeta`
-2. `torch/csrc/autograd/autograd_meta.h` должен регистрировать factory для `AutogradMetaImpl`
-3. При `transpose()` создавался новый TensorImpl с base AutogradMeta вместо AutogradMetaImpl
-4. `gradient_edge()` возвращал null потому что base AutogradMeta не имеет `grad_fn`
+### Результат
+- **Test Accuracy: 88.94%** (1 epoch, SGD lr=0.01, batch 64)
+- Loss: 2.30 → 1.12
+- Train Acc: 71.05%
 
-### Решение:
-1. Factory registration в `autograd_meta.h` работает корректно
-2. `c10::set_autograd_meta_factory()` вызывается при старте программы
-3. Все операции теперь создают `AutogradMetaImpl` с полной поддержкой autograd
+### Ранее исправлено:
+1. **Linear initialization**: `bound = 1/sqrt(fan_in)` (не Kaiming)
+2. **AdamKiller bias correction**: `step_size = layer_lr`
 
-### Результат:
+---
+
+## КРИТИЧНО: Сборка
+
+### Правильный CMake (ИСПОЛЬЗОВАТЬ ТОЛЬКО ЭТОТ!):
 ```
-Epoch 1/1 - Loss: 2.31896 - Train Acc: 14.88% - Test Acc: 14.86%
+C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe
 ```
-- Loss снижается (2.35 → 2.32)
-- Все 8 параметров (fc1-fc4 weights и biases) получают градиенты
-- Accuracy выше random (14.86% vs ~10%)
+
+### НЕ использовать CMake из Anaconda:
+```
+C:\ProgramData\anaconda3\Lib\site-packages\cmake\data\bin\cmake.exe  # НЕПРАВИЛЬНО!
+```
+
+### Проблема с bash:
+При запуске batch файлов из bash, `rc.exe` не находится. Решение:
+- Использовать Developer Command Prompt for VS 2019
+- Или использовать существующие сборки
+
+### Рабочие сборки (CPU):
+- `build_final3/examples/mnist/train_mnist_mlp.exe` - от 25 янв 11:49
+- `build_examples/examples/mnist/train_mnist_mlp.exe` - от 25 янв 10:04
+
+---
+
+## ТЕСТЫ ТОЛЬКО НА CPU!
+
+GPU занят, все тесты выполнять на CPU:
+```bash
+./train_mnist_mlp.exe --device cpu --epochs 1 --lr 0.01 --batch_size 64
+```
 
 ---
 
@@ -126,3 +148,4 @@ PATH="/c/Users/paper/Desktop/promethorch/build_examples:$PATH" ./train_mnist_mlp
 
 Полная документация: `CLAUDE.md`
 Гайд по сборке: `BUILD_GUIDE.md`
+**КРИТИЧНО: `AVOIDRECURSION.md` - ЧИТАТЬ ПЕРЕД ЛЮБЫМ ДЕЙСТВИЕМ!**
