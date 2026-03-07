@@ -281,43 +281,56 @@ inline Tensor gelu(const Tensor& input) {
 }
 
 // Binary operations
+// IMPORTANT: All element-wise CUDA ops read data_ptr sequentially, so inputs
+// MUST be contiguous. Non-contiguous tensors (e.g., transposed views from t())
+// have different physical vs logical layout and would produce wrong results.
 inline Tensor add(const Tensor& a, const Tensor& b) {
     PT_CHECK_MSG(a.numel() == b.numel(), "Tensors must have same number of elements");
-    auto output = empty_cuda(a.sizes().vec(), a.dtype(), a.device().index());
-    at::cuda::launch_add(a.data_ptr<float>(), b.data_ptr<float>(), output.mutable_data_ptr<float>(), a.numel(), nullptr);
+    Tensor ac = a.is_contiguous() ? a : a.contiguous();
+    Tensor bc = b.is_contiguous() ? b : b.contiguous();
+    auto output = empty_cuda(ac.sizes().vec(), ac.dtype(), ac.device().index());
+    at::cuda::launch_add(ac.data_ptr<float>(), bc.data_ptr<float>(), output.mutable_data_ptr<float>(), ac.numel(), nullptr);
     return output;
 }
 
 inline Tensor sub(const Tensor& a, const Tensor& b) {
     PT_CHECK_MSG(a.numel() == b.numel(), "Tensors must have same number of elements");
-    auto output = empty_cuda(a.sizes().vec(), a.dtype(), a.device().index());
-    at::cuda::launch_sub(a.data_ptr<float>(), b.data_ptr<float>(), output.mutable_data_ptr<float>(), a.numel(), nullptr);
+    Tensor ac = a.is_contiguous() ? a : a.contiguous();
+    Tensor bc = b.is_contiguous() ? b : b.contiguous();
+    auto output = empty_cuda(ac.sizes().vec(), ac.dtype(), ac.device().index());
+    at::cuda::launch_sub(ac.data_ptr<float>(), bc.data_ptr<float>(), output.mutable_data_ptr<float>(), ac.numel(), nullptr);
     return output;
 }
 
 inline Tensor mul(const Tensor& a, const Tensor& b) {
     PT_CHECK_MSG(a.numel() == b.numel(), "Tensors must have same number of elements");
-    auto output = empty_cuda(a.sizes().vec(), a.dtype(), a.device().index());
-    at::cuda::launch_mul(a.data_ptr<float>(), b.data_ptr<float>(), output.mutable_data_ptr<float>(), a.numel(), nullptr);
+    Tensor ac = a.is_contiguous() ? a : a.contiguous();
+    Tensor bc = b.is_contiguous() ? b : b.contiguous();
+    auto output = empty_cuda(ac.sizes().vec(), ac.dtype(), ac.device().index());
+    at::cuda::launch_mul(ac.data_ptr<float>(), bc.data_ptr<float>(), output.mutable_data_ptr<float>(), ac.numel(), nullptr);
     return output;
 }
 
 inline Tensor div(const Tensor& a, const Tensor& b) {
     PT_CHECK_MSG(a.numel() == b.numel(), "Tensors must have same number of elements");
-    auto output = empty_cuda(a.sizes().vec(), a.dtype(), a.device().index());
-    at::cuda::launch_div(a.data_ptr<float>(), b.data_ptr<float>(), output.mutable_data_ptr<float>(), a.numel(), nullptr);
+    Tensor ac = a.is_contiguous() ? a : a.contiguous();
+    Tensor bc = b.is_contiguous() ? b : b.contiguous();
+    auto output = empty_cuda(ac.sizes().vec(), ac.dtype(), ac.device().index());
+    at::cuda::launch_div(ac.data_ptr<float>(), bc.data_ptr<float>(), output.mutable_data_ptr<float>(), ac.numel(), nullptr);
     return output;
 }
 
 inline Tensor mul_scalar(const Tensor& a, float scalar) {
-    auto output = empty_cuda(a.sizes().vec(), a.dtype(), a.device().index());
-    at::cuda::launch_mul_scalar(a.data_ptr<float>(), scalar, output.mutable_data_ptr<float>(), a.numel(), nullptr);
+    Tensor ac = a.is_contiguous() ? a : a.contiguous();
+    auto output = empty_cuda(ac.sizes().vec(), ac.dtype(), ac.device().index());
+    at::cuda::launch_mul_scalar(ac.data_ptr<float>(), scalar, output.mutable_data_ptr<float>(), ac.numel(), nullptr);
     return output;
 }
 
 inline Tensor add_scalar(const Tensor& a, float scalar) {
-    auto output = empty_cuda(a.sizes().vec(), a.dtype(), a.device().index());
-    at::cuda::launch_add_scalar(a.data_ptr<float>(), scalar, output.mutable_data_ptr<float>(), a.numel(), nullptr);
+    Tensor ac = a.is_contiguous() ? a : a.contiguous();
+    auto output = empty_cuda(ac.sizes().vec(), ac.dtype(), ac.device().index());
+    at::cuda::launch_add_scalar(ac.data_ptr<float>(), scalar, output.mutable_data_ptr<float>(), ac.numel(), nullptr);
     return output;
 }
 

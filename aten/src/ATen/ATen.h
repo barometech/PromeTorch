@@ -31,6 +31,18 @@ namespace at {
 inline Scalar Tensor::item() const {
     PT_CHECK_MSG(numel() == 1, "item() requires tensor with single element");
 
+#ifdef PT_USE_CUDA
+    if (is_cuda()) {
+        // Move to CPU first to read the value
+        Tensor cpu_copy = to_cpu(*this);
+        Scalar result;
+        PT_DISPATCH_ALL_TYPES(dtype(), "item", [&] {
+            result = Scalar(static_cast<double>(cpu_copy.data_ptr<scalar_t>()[0]));
+        });
+        return result;
+    }
+#endif
+
     Scalar result;
     PT_DISPATCH_ALL_TYPES(dtype(), "item", [&] {
         result = Scalar(static_cast<double>(data_ptr<scalar_t>()[0]));
@@ -74,6 +86,14 @@ inline Tensor Tensor::contiguous() const {
     return native::contiguous(*this);
 }
 
+inline Tensor Tensor::contiguous(c10::MemoryFormat memory_format) const {
+    return native::contiguous(*this, memory_format);
+}
+
+inline Tensor Tensor::to(c10::MemoryFormat memory_format) const {
+    return native::contiguous(*this, memory_format);
+}
+
 inline Tensor& Tensor::copy_(const Tensor& src) {
     PT_CHECK(defined() && src.defined());
     PT_CHECK_MSG(sizes() == src.sizes(), "copy_: sizes must match");
@@ -81,13 +101,28 @@ inline Tensor& Tensor::copy_(const Tensor& src) {
     if (src.is_contiguous() && is_contiguous()) {
         std::memcpy(data_ptr(), src.data_ptr(), nbytes());
     } else {
-        // Strided copy
+        // Stride-aware copy: convert flat index → multi-dim index → physical offset
         PT_DISPATCH_ALL_TYPES(dtype(), "copy_", [&] {
-            scalar_t* dst = mutable_data_ptr<scalar_t>();
-            const scalar_t* s = src.data_ptr<scalar_t>();
+            scalar_t* dst_base = mutable_data_ptr<scalar_t>();
+            const scalar_t* src_base = src.data_ptr<scalar_t>();
             int64_t n = numel();
-            for (int64_t i = 0; i < n; ++i) {
-                dst[i] = s[i];
+            int64_t ndim = dim();
+            auto dst_sizes = sizes();
+            auto dst_strides = strides();
+            auto src_strides = src.strides();
+
+            for (int64_t flat = 0; flat < n; ++flat) {
+                // Convert flat index to multi-dim indices, then to physical offsets
+                int64_t dst_offset = 0;
+                int64_t src_offset = 0;
+                int64_t remainder = flat;
+                for (int64_t d = ndim - 1; d >= 0; --d) {
+                    int64_t idx = remainder % dst_sizes[d];
+                    remainder /= dst_sizes[d];
+                    dst_offset += idx * dst_strides[d];
+                    src_offset += idx * src_strides[d];
+                }
+                dst_base[dst_offset] = src_base[src_offset];
             }
         });
     }
@@ -272,7 +307,15 @@ inline Tensor& Tensor::zero_() {
 #endif
     return native::zero_(*this);
 }
-inline Tensor& Tensor::fill_(Scalar value) { return native::fill_(*this, value); }
+inline Tensor& Tensor::fill_(Scalar value) {
+#ifdef PT_USE_CUDA
+    if (is_cuda()) {
+        cuda_ops::fill_(*this, static_cast<float>(value.toDouble()));
+        return *this;
+    }
+#endif
+    return native::fill_(*this, value);
+}
 
 // Binary operations with device dispatch
 inline Tensor Tensor::add(const Tensor& other, Scalar alpha) const {
@@ -354,9 +397,21 @@ inline Tensor Tensor::div(Scalar other) const {
 inline Tensor& Tensor::add_(const Tensor& other, Scalar alpha) {
 #ifdef PT_USE_CUDA
     if (is_cuda()) {
-        // CUDA: compute result and copy back
-        Tensor result = cuda_ops::add(*this, other);  // Ignores alpha for simplicity
-        cuda_ops::copy_(*this, result);
+        // CUDA element-wise ops read data_ptr sequentially — must be contiguous
+        Tensor other_c = other.is_contiguous() ? other : other.contiguous();
+        Tensor self_c = is_contiguous() ? *this : contiguous();
+        // CUDA: self += alpha * other
+        Tensor scaled = (alpha.toDouble() != 1.0)
+            ? cuda_ops::mul_scalar(other_c, static_cast<float>(alpha.toDouble()))
+            : other_c;
+        // Handle broadcasting for bias addition
+        if (numel() != scaled.numel() && dim() == 2 && scaled.dim() == 1 && scaled.size(0) == size(1)) {
+            Tensor result = cuda_ops::add_broadcast(self_c, scaled);
+            cuda_ops::copy_(*this, result);
+        } else {
+            Tensor result = cuda_ops::add(self_c, scaled);
+            cuda_ops::copy_(*this, result);
+        }
         return *this;
     }
 #endif
@@ -365,8 +420,14 @@ inline Tensor& Tensor::add_(const Tensor& other, Scalar alpha) {
 inline Tensor& Tensor::sub_(const Tensor& other, Scalar alpha) {
 #ifdef PT_USE_CUDA
     if (is_cuda()) {
-        // CUDA: compute result and copy back
-        Tensor result = cuda_ops::sub(*this, other);  // Ignores alpha for simplicity
+        // CUDA element-wise ops read data_ptr sequentially — must be contiguous
+        Tensor other_c = other.is_contiguous() ? other : other.contiguous();
+        Tensor self_c = is_contiguous() ? *this : contiguous();
+        // CUDA: param -= alpha * other
+        Tensor scaled = (alpha.toDouble() != 1.0)
+            ? cuda_ops::mul_scalar(other_c, static_cast<float>(alpha.toDouble()))
+            : other_c;
+        Tensor result = cuda_ops::sub(self_c, scaled);
         cuda_ops::copy_(*this, result);
         return *this;
     }
@@ -376,7 +437,9 @@ inline Tensor& Tensor::sub_(const Tensor& other, Scalar alpha) {
 inline Tensor& Tensor::mul_(const Tensor& other) {
 #ifdef PT_USE_CUDA
     if (is_cuda()) {
-        Tensor result = cuda_ops::mul(*this, other);
+        Tensor other_c = other.is_contiguous() ? other : other.contiguous();
+        Tensor self_c = is_contiguous() ? *this : contiguous();
+        Tensor result = cuda_ops::mul(self_c, other_c);
         cuda_ops::copy_(*this, result);
         return *this;
     }
@@ -386,7 +449,9 @@ inline Tensor& Tensor::mul_(const Tensor& other) {
 inline Tensor& Tensor::div_(const Tensor& other) {
 #ifdef PT_USE_CUDA
     if (is_cuda()) {
-        Tensor result = cuda_ops::div(*this, other);
+        Tensor other_c = other.is_contiguous() ? other : other.contiguous();
+        Tensor self_c = is_contiguous() ? *this : contiguous();
+        Tensor result = cuda_ops::div(self_c, other_c);
         cuda_ops::copy_(*this, result);
         return *this;
     }
@@ -465,16 +530,40 @@ inline Tensor Tensor::sum(int64_t dim, bool keepdim) const {
 #endif
     return native::sum(*this, dim, keepdim);
 }
-inline Tensor Tensor::mean() const { return native::mean(*this); }
+inline Tensor Tensor::mean() const {
+#ifdef PT_USE_CUDA
+    if (is_cuda()) { return cuda_ops::mean(*this); }
+#endif
+    return native::mean(*this);
+}
 inline Tensor Tensor::mean(int64_t dim, bool keepdim) const {
+#ifdef PT_USE_CUDA
+    if (is_cuda()) {
+        // Use CUDA sum_dim then divide
+        Tensor s = cuda_ops::sum_dim(*this, dim, keepdim);
+        int64_t actual_dim = dim < 0 ? dim + this->dim() : dim;
+        float reduce_size = static_cast<float>(this->size(actual_dim));
+        return cuda_ops::mul_scalar(s, 1.0f / reduce_size);
+    }
+#endif
     return native::mean(*this, dim, keepdim);
 }
 inline Tensor Tensor::prod() const { return native::prod(*this); }
-inline Tensor Tensor::max() const { return native::max(*this); }
+inline Tensor Tensor::max() const {
+#ifdef PT_USE_CUDA
+    if (is_cuda()) { return cuda_ops::max(*this); }
+#endif
+    return native::max(*this);
+}
 inline std::tuple<Tensor, Tensor> Tensor::max(int64_t dim, bool keepdim) const {
     return native::max(*this, dim, keepdim);
 }
-inline Tensor Tensor::min() const { return native::min(*this); }
+inline Tensor Tensor::min() const {
+#ifdef PT_USE_CUDA
+    if (is_cuda()) { return cuda_ops::min(*this); }
+#endif
+    return native::min(*this);
+}
 inline std::tuple<Tensor, Tensor> Tensor::min(int64_t dim, bool keepdim) const {
     return native::min(*this, dim, keepdim);
 }

@@ -219,6 +219,16 @@ public:
         return impl_->is_contiguous();
     }
 
+    bool is_contiguous(c10::MemoryFormat format) const {
+        PT_CHECK(defined());
+        return impl_->is_contiguous(format);
+    }
+
+    c10::MemoryFormat suggest_memory_format() const {
+        PT_CHECK(defined());
+        return impl_->suggest_memory_format();
+    }
+
     // ========================================================================
     // Data access
     // ========================================================================
@@ -293,6 +303,8 @@ public:
     Tensor clone() const;
     Tensor detach() const;
     Tensor contiguous() const;
+    Tensor contiguous(c10::MemoryFormat memory_format) const;
+    Tensor to(c10::MemoryFormat memory_format) const;
 
     // Copy data from another tensor
     Tensor& copy_(const Tensor& src);

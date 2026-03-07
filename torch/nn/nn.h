@@ -46,6 +46,9 @@
 #include "modules/pir.h"
 #include "modules/pir270m.h"
 
+// Recurrent modules
+#include "modules/rnn.h"
+
 // Loss functions
 #include "modules/loss.h"
 

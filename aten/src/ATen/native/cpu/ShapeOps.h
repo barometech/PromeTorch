@@ -477,8 +477,7 @@ inline Tensor contiguous(const Tensor& self) {
 
 #ifdef PT_USE_CUDA
     // Fast path for CUDA transposed 2D tensors - use GPU transpose kernel
-    // TEMPORARILY DISABLED - debugging crash
-    if (false && is_cuda && self.dim() == 2 &&
+    if (is_cuda && self.dim() == 2 &&
         self.stride(0) == 1 && self.stride(1) == self.size(0)) {
         // This is a simple 2D transpose: physical [N, K] -> logical [K, N]
         // Use CUDA transpose kernel (no CPU roundtrip!)
@@ -521,34 +520,38 @@ inline Tensor contiguous(const Tensor& self) {
 #endif
 
     // CPU fallback for non-transposed or non-CUDA tensors
+    // IMPORTANT: Save original strides BEFORE to_cpu (to_cpu creates contiguous strides!)
+    auto original_strides = self.strides().vec();
+    auto original_sizes = self.sizes().vec();
+
     Tensor self_cpu = self;
 #ifdef PT_USE_CUDA
     if (is_cuda) {
-        // Move to CPU for strided copy operation
+        // Move raw data to CPU (preserving physical layout)
         self_cpu = at::to_cpu(self);
     }
 #endif
 
-    Tensor result = empty(self_cpu.sizes(), TensorOptions().dtype(self_cpu.dtype()));
+    Tensor result = empty(original_sizes, TensorOptions().dtype(self_cpu.dtype()));
 
-    // Copy data in contiguous order (CPU computation)
+    // Copy data in contiguous order using ORIGINAL strides (not self_cpu strides!)
     PT_DISPATCH_ALL_TYPES(self_cpu.dtype(), "contiguous", [&] {
         const scalar_t* src = self_cpu.data_ptr<scalar_t>();
         scalar_t* dst = result.mutable_data_ptr<scalar_t>();
 
-        int64_t ndim = self_cpu.dim();
+        int64_t ndim = static_cast<int64_t>(original_sizes.size());
         int64_t total = self_cpu.numel();
 
-        // Use strided copy
+        // Use strided copy with ORIGINAL strides
         for (int64_t i = 0; i < total; ++i) {
-            // Convert contiguous index to strided index
+            // Convert contiguous index to strided index using original strides
             int64_t remaining = i;
             int64_t src_idx = 0;
 
             for (int64_t d = ndim - 1; d >= 0; --d) {
-                int64_t idx_in_dim = remaining % self_cpu.size(d);
-                remaining /= self_cpu.size(d);
-                src_idx += idx_in_dim * self_cpu.stride(d);
+                int64_t idx_in_dim = remaining % original_sizes[d];
+                remaining /= original_sizes[d];
+                src_idx += idx_in_dim * original_strides[d];
             }
 
             dst[i] = src[src_idx];
@@ -561,6 +564,94 @@ inline Tensor contiguous(const Tensor& self) {
         result = at::to_cuda(result);
     }
 #endif
+
+    if (self.requires_grad()) {
+        result.set_requires_grad(true);
+    }
+
+    return result;
+}
+
+// ============================================================================
+// Contiguous with MemoryFormat
+// ============================================================================
+
+inline Tensor contiguous(const Tensor& self, c10::MemoryFormat memory_format) {
+    if (memory_format == c10::MemoryFormat::Contiguous || memory_format == c10::MemoryFormat::Preserve) {
+        return contiguous(self);
+    }
+
+    // Check if already in desired format
+    if (self.is_contiguous(memory_format)) {
+        return self;
+    }
+
+    // Convert to channels-last (NHWC) or channels-last-3d (NDHWC)
+    int64_t ndim = self.dim();
+
+    if (memory_format == c10::MemoryFormat::ChannelsLast) {
+        PT_CHECK_MSG(ndim == 4, "ChannelsLast requires 4D tensor, got ", ndim, "D");
+    } else if (memory_format == c10::MemoryFormat::ChannelsLast3d) {
+        PT_CHECK_MSG(ndim == 5, "ChannelsLast3d requires 5D tensor, got ", ndim, "D");
+    }
+
+    // Compute new strides for desired layout
+    std::vector<int64_t> new_strides(ndim);
+
+    if (memory_format == c10::MemoryFormat::ChannelsLast) {
+        // NHWC strides for [N, C, H, W]: {C*H*W, 1, W*C, C}
+        int64_t C = self.size(1), H = self.size(2), W = self.size(3);
+        new_strides[0] = C * H * W;  // N
+        new_strides[1] = 1;          // C (innermost)
+        new_strides[2] = W * C;      // H
+        new_strides[3] = C;          // W
+    } else {
+        // NDHWC: {C*D*H*W, 1, H*W*C, W*C, C}
+        int64_t C = self.size(1), D = self.size(2), H = self.size(3), W = self.size(4);
+        new_strides[0] = C * D * H * W;
+        new_strides[1] = 1;
+        new_strides[2] = H * W * C;
+        new_strides[3] = W * C;
+        new_strides[4] = C;
+    }
+
+    // Create result tensor with new strides and copy data
+    Tensor result = empty(self.sizes(), TensorOptions().dtype(self.dtype()).device(self.device()));
+
+    // Set channels-last strides
+    result.unsafeGetTensorImpl()->set_sizes_and_strides(self.sizes(), new_strides);
+
+    // Copy data from source using strided access
+    PT_DISPATCH_ALL_TYPES(self.dtype(), "contiguous_channels_last", [&] {
+        const scalar_t* src = self.data_ptr<scalar_t>();
+        scalar_t* dst = result.mutable_data_ptr<scalar_t>();
+
+        int64_t total = self.numel();
+
+        for (int64_t i = 0; i < total; ++i) {
+            // Convert from dst (channels-last) linear index to multi-dim coords
+            int64_t remaining = i;
+            int64_t src_idx = 0;
+            int64_t dst_idx = 0;
+
+            // Compute multi-dim coords from dst's linear traversal order
+            // For channels-last, the traversal goes N, H, W, C
+            // We need to convert this to source strides
+            std::vector<int64_t> coords(ndim);
+            for (int64_t d = ndim - 1; d >= 0; --d) {
+                // Traverse in order of decreasing dst stride
+                coords[d] = remaining % self.size(d);
+                remaining /= self.size(d);
+            }
+
+            for (int64_t d = 0; d < ndim; ++d) {
+                src_idx += coords[d] * self.stride(d);
+                dst_idx += coords[d] * new_strides[d];
+            }
+
+            dst[dst_idx] = src[src_idx];
+        }
+    });
 
     if (self.requires_grad()) {
         result.set_requires_grad(true);

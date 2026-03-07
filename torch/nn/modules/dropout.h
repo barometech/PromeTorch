@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../module.h"
+#include "torch/csrc/autograd/autograd.h"
 #include <random>
 
 namespace torch {
@@ -13,6 +14,8 @@ namespace nn {
 // with probability p using samples from a Bernoulli distribution.
 // The outputs are scaled by a factor of 1/(1-p) during training.
 // This means that during evaluation the module simply computes an identity function.
+//
+// AUTOGRAD: Uses mul_autograd with a mask tensor so gradients flow through.
 
 class Dropout : public Module {
 private:
@@ -36,30 +39,33 @@ public:
         }
 
         if (p_ == 1.0) {
-            Tensor output = inplace_ ? input : at::zeros(input.sizes());
-            if (inplace_) {
-                output.zero_();
-            }
+            Tensor output = at::zeros(input.sizes());
+#ifdef PT_USE_CUDA
+            if (input.is_cuda()) return at::to_cuda(output);
+#endif
             return output;
         }
 
-        Tensor output = inplace_ ? input : at::empty(input.sizes());
-        const float* in_data = input.data_ptr<float>();
-        float* out_data = output.mutable_data_ptr<float>();
+        // Generate mask on CPU (random number generation)
+        Tensor mask = at::empty(input.sizes());
+        float* mask_data = mask.mutable_data_ptr<float>();
         int64_t numel = input.numel();
 
         std::bernoulli_distribution dist(1.0 - p_);
         float scale = static_cast<float>(1.0 / (1.0 - p_));
 
         for (int64_t i = 0; i < numel; ++i) {
-            if (dist(gen_)) {
-                out_data[i] = in_data[i] * scale;
-            } else {
-                out_data[i] = 0.0f;
-            }
+            mask_data[i] = dist(gen_) ? scale : 0.0f;
         }
 
-        return output;
+#ifdef PT_USE_CUDA
+        if (input.is_cuda()) {
+            mask = at::to_cuda(mask);
+        }
+#endif
+
+        // Use mul_autograd so gradients flow through dropout
+        return torch::autograd::mul_autograd(input, mask);
     }
 
     std::string name() const override { return "Dropout"; }

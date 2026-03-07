@@ -24,6 +24,7 @@
 #include "torch/csrc/autograd/functions/ReduceBackward.h"
 #include "torch/csrc/autograd/functions/LinearAlgebraBackward.h"
 #include "torch/csrc/autograd/functions/ShapeBackward.h"
+#include "torch/csrc/autograd/functions/IndexBackward.h"
 
 namespace torch {
 namespace autograd {
@@ -75,14 +76,21 @@ inline variable_list AccumulateGrad::apply(variable_list&& grads) {
         return {};
     }
 
+    // CRITICAL: Make gradient contiguous before storing!
+    // Backward ops like TBackward return transposed views (non-contiguous).
+    // CUDA element-wise ops (add, sub, mul_scalar) read data_ptr sequentially
+    // and ignore strides, so non-contiguous gradients produce wrong results
+    // in gradient accumulation and SGD updates.
+    Tensor grad_contig = grad.is_contiguous() ? grad : grad.contiguous();
+
     // Accumulate gradient (using base class grad_ field)
     if (!raw_meta->grad_) {
-        // First gradient - just copy
-        raw_meta->grad_ = grad.getIntrusivePtr();
+        // First gradient - just copy (contiguous)
+        raw_meta->grad_ = grad_contig.getIntrusivePtr();
     } else {
         // Accumulate: grad_ = grad_ + grad
         Tensor existing_grad(raw_meta->grad_);
-        Tensor accumulated = existing_grad.add(grad);
+        Tensor accumulated = existing_grad.add(grad_contig);
         raw_meta->grad_ = accumulated.getIntrusivePtr();
     }
 
@@ -454,6 +462,56 @@ inline Tensor t_autograd(const Tensor& self) {
     Tensor result = at::native::t(self);
     if (compute_requires_grad(self)) {
         auto grad_fn = std::make_shared<TBackward>();
+        grad_fn->add_input_metadata(self);
+        set_grad_fn(result, grad_fn);
+        result.set_requires_grad(true);
+    }
+    return result;
+}
+
+inline Tensor narrow_autograd(const Tensor& self, int64_t dim, int64_t start, int64_t length) {
+    Tensor result = at::native::narrow(self, dim, start, length);
+    if (compute_requires_grad(self)) {
+        auto grad_fn = std::make_shared<NarrowBackward>(self.sizes(), dim, start);
+        grad_fn->add_input_metadata(self);
+        set_grad_fn(result, grad_fn);
+        result.set_requires_grad(true);
+    }
+    return result;
+}
+
+inline Tensor select_autograd(const Tensor& self, int64_t dim, int64_t index) {
+    Tensor result = at::native::select(self, dim, index);
+    if (compute_requires_grad(self)) {
+        auto grad_fn = std::make_shared<SelectBackward>(self.sizes(), dim, index);
+        grad_fn->add_input_metadata(self);
+        set_grad_fn(result, grad_fn);
+        result.set_requires_grad(true);
+    }
+    return result;
+}
+
+// ============================================================================
+// Index Operations with Autograd
+// ============================================================================
+
+inline Tensor index_with_tensor_autograd(const Tensor& self, int64_t dim, const Tensor& index) {
+    Tensor result = at::native::index_with_tensor(self, dim, index);
+    if (compute_requires_grad(self)) {
+        auto grad_fn = std::make_shared<IndexWithTensorBackward>(
+            self.sizes().vec(), index, dim, self.dtype());
+        grad_fn->add_input_metadata(self);
+        set_grad_fn(result, grad_fn);
+        result.set_requires_grad(true);
+    }
+    return result;
+}
+
+inline Tensor boolean_index_autograd(const Tensor& self, const Tensor& mask) {
+    Tensor result = at::native::boolean_index(self, mask);
+    if (compute_requires_grad(self)) {
+        auto grad_fn = std::make_shared<BooleanIndexBackward>(
+            self.sizes().vec(), mask, self.dtype());
         grad_fn->add_input_metadata(self);
         set_grad_fn(result, grad_fn);
         result.set_requires_grad(true);

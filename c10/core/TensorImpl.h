@@ -15,6 +15,17 @@
 
 namespace c10 {
 
+// ============================================================================
+// MemoryFormat - Describes memory layout of tensors
+// ============================================================================
+
+enum class MemoryFormat : int8_t {
+    Contiguous = 0,      // NCHW (default row-major)
+    ChannelsLast = 1,    // NHWC (channel dim is innermost)
+    ChannelsLast3d = 2,  // NDHWC (3D channels-last)
+    Preserve = 3         // Keep existing format
+};
+
 // Forward declarations
 class TensorImpl;
 struct AutogradMeta;
@@ -484,6 +495,52 @@ public:
 
     bool is_contiguous() const { return is_contiguous_; }
 
+    // Check contiguity with specific memory format
+    bool is_contiguous(MemoryFormat format) const {
+        switch (format) {
+            case MemoryFormat::Contiguous:
+                return is_contiguous_;
+            case MemoryFormat::ChannelsLast:
+                return is_channels_last_contiguous();
+            case MemoryFormat::ChannelsLast3d:
+                return is_channels_last_3d_contiguous();
+            case MemoryFormat::Preserve:
+                return is_contiguous_;
+            default:
+                return is_contiguous_;
+        }
+    }
+
+    // Check if tensor is in NHWC layout (4D only)
+    bool is_channels_last_contiguous() const {
+        if (dim() != 4) return false;
+        // NHWC strides: {C*H*W, 1, W*C, C}
+        // Channel stride = 1 (innermost)
+        int64_t N = sizes_[0], C = sizes_[1], H = sizes_[2], W = sizes_[3];
+        return strides_[0] == C * H * W &&
+               strides_[1] == 1 &&
+               strides_[2] == W * C &&
+               strides_[3] == C;
+    }
+
+    // Check if tensor is in NDHWC layout (5D only)
+    bool is_channels_last_3d_contiguous() const {
+        if (dim() != 5) return false;
+        int64_t N = sizes_[0], C = sizes_[1], D = sizes_[2], H = sizes_[3], W = sizes_[4];
+        return strides_[0] == C * D * H * W &&
+               strides_[1] == 1 &&
+               strides_[2] == H * W * C &&
+               strides_[3] == W * C &&
+               strides_[4] == C;
+    }
+
+    // Suggest the memory format of this tensor
+    MemoryFormat suggest_memory_format() const {
+        if (is_channels_last_contiguous()) return MemoryFormat::ChannelsLast;
+        if (is_channels_last_3d_contiguous()) return MemoryFormat::ChannelsLast3d;
+        return MemoryFormat::Contiguous;
+    }
+
     // Set sizes (computes contiguous strides)
     void set_sizes_contiguous(IntArrayRef sizes) {
         sizes_.resize(sizes.size());
@@ -677,6 +734,34 @@ protected:
         for (size_t i = 0; i < sizes_.size(); ++i) {
             numel_ *= sizes_[i];
         }
+    }
+
+    // Compute strides for channels-last (NHWC) format
+    void compute_channels_last_strides() {
+        if (sizes_.size() != 4) {
+            compute_contiguous_strides();
+            return;
+        }
+        // NHWC: strides for [N, C, H, W] = {C*H*W, 1, W*C, C}
+        strides_.resize(4);
+        strides_[1] = 1;            // C is innermost
+        strides_[3] = sizes_[1];    // W stride = C
+        strides_[2] = strides_[3] * sizes_[3]; // H stride = W*C
+        strides_[0] = strides_[2] * sizes_[2]; // N stride = H*W*C
+    }
+
+    // Compute strides for channels-last 3D (NDHWC) format
+    void compute_channels_last_3d_strides() {
+        if (sizes_.size() != 5) {
+            compute_contiguous_strides();
+            return;
+        }
+        strides_.resize(5);
+        strides_[1] = 1;                       // C
+        strides_[4] = sizes_[1];               // W stride = C
+        strides_[3] = strides_[4] * sizes_[4]; // H stride = W*C
+        strides_[2] = strides_[3] * sizes_[3]; // D stride = H*W*C
+        strides_[0] = strides_[2] * sizes_[2]; // N stride = D*H*W*C
     }
 
     void compute_contiguous_strides() {
