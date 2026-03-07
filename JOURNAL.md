@@ -4,6 +4,56 @@
 
 ---
 
+## 2026-03-08: Phase 2 — linalg, FFT, tensor ops, ConvTranspose2d, INT8 quantization
+
+**~3700 строк нового кода, 16 файлов, 39/39 тестов пройдены.**
+
+### torch.linalg (LinearAlgebra.h + backward + autograd)
+- `lu()` — Gaussian elimination + partial pivoting → L, U, P
+- `inverse()` — через LU → solve(A, I)
+- `solve(A, b)` — forward/backward substitution через LU
+- `det()` — sign(P) * prod(diag(U))
+- `cholesky()` — L@L^T decomposition для SPD матриц
+- `qr()` — Householder reflections
+- `trace()`, `cross()`, `matrix_norm()` (1/inf/Frobenius)
+- Backward: InverseBackward, DetBackward, CholeskyBackward, TraceBackward
+
+### Tensor ops (ShapeOps.h + backward)
+- `flip()`, `roll()`, `meshgrid()`, `repeat_interleave()`, `unique()`
+- `tril_indices()`, `triu_indices()`
+- Backward: FlipBackward, RollBackward, RepeatInterleaveBackward
+
+### FFT (новый FFTOps.h, 445 строк)
+- Cooley-Tukey radix-2 DIT, O(N log N)
+- `fft/ifft/rfft/irfft/fft2/ifft2/fftfreq/rfftfreq/fftshift/ifftshift`
+- Complex format: `[..., 2]` (last dim = [real, imag])
+
+### ConvTranspose2d — реальная реализация (был STUB)
+- scatter-based transposed convolution, groups support
+- Проверено: output != zeros, правильная shape
+
+### Generalized pad (functional.h)
+- 4 режима: constant, reflect, replicate, circular
+- Любая размерность (1D-5D)
+
+### Unfold/Fold (im2col/col2im)
+- `unfold_im2col()`: N,C,H,W → N,C*kH*kW,L
+- `fold_col2im()`: обратная операция
+
+### INT8 Quantization (4 новых файла)
+- `QuantizedTensor` + `quantize_per_tensor/per_channel` + `dequantize()`
+- Observers: MinMaxObserver, HistogramObserver, PerChannelMinMaxObserver
+- QuantizedLinear, QuantizedConv2d (fake quant forward)
+- Pipeline: prepare → calibrate → convert → quantize_model
+
+### Тесты
+- Phase 2 test_phase2.exe: **39/39 PASS**
+- 10 models CPU: ALL PASS (MNIST 97%, LSTM 98.44%, GRU 95.3%)
+- 10 models CUDA (A100): ALL PASS (MNIST 97.78%, LSTM 93.75%, GRU 98.44%)
+- PIR CUDA: 7.2M params, 50 iter, 35s, loss 3.07
+
+---
+
 ## 2026-03-07: Unary ops non-contiguous fix — LSTM WORKS!
 
 **Root cause**: `DEFINE_UNARY_OP` (sigmoid, tanh, exp, etc.) в MathOps.h использовал `data_ptr()[i]` последовательный доступ без учёта strides. Когда LSTM делит gates через `narrow_autograd(gates, 1, offset, H)`, результат — view с strides `[4*H, 1]` вместо contiguous `[H, 1]`. Sequential access `in[0], in[1], ...` читает данные из ЧУЖИХ gates для batch > 0.
