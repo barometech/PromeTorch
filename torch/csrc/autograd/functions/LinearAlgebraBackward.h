@@ -467,5 +467,221 @@ struct TransposeBackward : public Node {
     std::string name() const override { return "TransposeBackward"; }
 };
 
+// ============================================================================
+// Einsum Backward
+// ============================================================================
+// Backward of einsum is computed via einsum with rearranged subscripts
+
+struct EinsumBackward : public Node {
+    std::string equation_;
+    std::vector<Tensor> saved_tensors_;
+    std::vector<std::vector<int64_t>> input_shapes_;
+
+    EinsumBackward(const std::string& equation, const std::vector<Tensor>& tensors)
+        : equation_(equation), saved_tensors_(tensors) {
+        for (const auto& t : tensors) {
+            input_shapes_.push_back(t.sizes().vec());
+        }
+    }
+
+    void release_saved_tensors() override {
+        saved_tensors_.clear();
+    }
+
+    variable_list apply(variable_list&& grads) override {
+        auto& grad = grads[0];
+        if (!grad.defined()) {
+            variable_list result(saved_tensors_.size());
+            return result;
+        }
+
+        // Parse equation to build backward equations
+        size_t arrow = equation_.find("->");
+        std::string lhs = equation_.substr(0, arrow);
+        std::string rhs = equation_.substr(arrow + 2);
+
+        std::vector<std::string> input_subs;
+        std::string current;
+        for (char c : lhs) {
+            if (c == ',') {
+                input_subs.push_back(current);
+                current.clear();
+            } else {
+                current += c;
+            }
+        }
+        input_subs.push_back(current);
+
+        variable_list result;
+
+        // For each input, compute gradient via einsum
+        // grad_i = einsum(rhs + "," + other_subs + "->" + input_subs[i], grad, other_tensors)
+        for (size_t i = 0; i < saved_tensors_.size(); ++i) {
+            if (saved_tensors_.size() == 2) {
+                size_t other = 1 - i;
+                std::string backward_eq = rhs + "," + input_subs[other] + "->" + input_subs[i];
+                result.push_back(at::native::einsum(backward_eq, {grad, saved_tensors_[other]}));
+            } else if (saved_tensors_.size() == 1) {
+                // Single operand: grad of reduction or permutation
+                // For permutation (ij->ji): backward is same permutation
+                // For reduction (ij->i): backward is expand
+                std::string backward_eq = rhs + "->" + input_subs[i];
+                if (rhs.size() < input_subs[i].size()) {
+                    // Reduction case: need to unsqueeze and expand
+                    Tensor g = grad;
+                    // Add missing dims
+                    for (size_t d = 0; d < input_subs[i].size(); ++d) {
+                        if (rhs.find(input_subs[i][d]) == std::string::npos) {
+                            g = g.unsqueeze(d);
+                        }
+                    }
+                    result.push_back(g.expand(input_shapes_[i]));
+                } else {
+                    result.push_back(at::native::einsum(backward_eq, {grad}));
+                }
+            }
+        }
+
+        saved_tensors_.clear();
+        return result;
+    }
+
+    std::string name() const override { return "EinsumBackward"; }
+};
+
+// ============================================================================
+// Inverse Backward
+// grad_A = -A^{-T} @ grad @ A^{-T}
+// ============================================================================
+
+struct InverseBackward : public Node {
+    Tensor result_;  // A^{-1}
+
+    explicit InverseBackward(const Tensor& result) : result_(result) {}
+
+    void release_saved_tensors() override { result_ = Tensor(); }
+
+    variable_list apply(variable_list&& grads) override {
+        auto& grad = grads[0];
+        if (!grad.defined()) return {Tensor()};
+
+        // grad_A = -A^{-T} @ grad @ A^{-T}
+        Tensor inv_t = result_.t();
+        Tensor result = inv_t.mm(grad).mm(inv_t).neg();
+
+        result_ = Tensor();
+        return {result};
+    }
+
+    std::string name() const override { return "InverseBackward"; }
+};
+
+// ============================================================================
+// Determinant Backward
+// grad_A = grad * det(A) * A^{-T}
+// ============================================================================
+
+struct DetBackward : public Node {
+    Tensor self_;
+    Tensor det_val_;
+
+    DetBackward(const Tensor& self, const Tensor& det_val)
+        : self_(self), det_val_(det_val) {}
+
+    void release_saved_tensors() override {
+        self_ = Tensor();
+        det_val_ = Tensor();
+    }
+
+    variable_list apply(variable_list&& grads) override {
+        auto& grad = grads[0];
+        if (!grad.defined()) return {Tensor()};
+
+        double grad_val = grad.item().toDouble();
+        double det_val = det_val_.item().toDouble();
+
+        // grad_A = grad * det(A) * A^{-T}
+        Tensor inv_t = at::native::inverse(self_).t();
+        Tensor result = inv_t.mul(at::Scalar(grad_val * det_val));
+
+        self_ = Tensor();
+        det_val_ = Tensor();
+        return {result};
+    }
+
+    std::string name() const override { return "DetBackward"; }
+};
+
+// ============================================================================
+// Cholesky Backward
+// Uses Phi operator (lower triangular part of symmetric gradient)
+// ============================================================================
+
+struct CholeskyBackward : public Node {
+    Tensor L_;
+
+    explicit CholeskyBackward(const Tensor& L) : L_(L) {}
+
+    void release_saved_tensors() override { L_ = Tensor(); }
+
+    variable_list apply(variable_list&& grads) override {
+        auto& grad = grads[0];
+        if (!grad.defined()) return {Tensor()};
+
+        // Simplified Cholesky backward using inverse
+        // grad_A = L^{-T} @ (L^T @ grad_L) tril @ L^{-1}
+        // More precisely: grad_A = 0.5 * (S + S^T) where S = L^{-T} @ Phi(L^T @ grad_L) @ L^{-1}
+        Tensor Lt = L_.t();
+        Tensor S = Lt.mm(grad);
+
+        // Phi operator: keep lower triangle, halve diagonal
+        int64_t n = S.size(0);
+        Tensor phi = at::native::tril(S);
+        PT_DISPATCH_FLOATING_TYPES(S.dtype(), "cholesky_bwd", [&] {
+            scalar_t* d = phi.mutable_data_ptr<scalar_t>();
+            for (int64_t i = 0; i < n; ++i) d[i * n + i] *= 0.5;
+        });
+
+        Tensor L_inv = at::native::inverse(L_);
+        Tensor L_inv_t = L_inv.t();
+        Tensor result = L_inv_t.mm(phi).mm(L_inv);
+
+        // Symmetrize
+        result = result.add(result.t()).mul(at::Scalar(0.5));
+
+        L_ = Tensor();
+        return {result};
+    }
+
+    std::string name() const override { return "CholeskyBackward"; }
+};
+
+// ============================================================================
+// Trace Backward
+// grad_A = grad_scalar * I
+// ============================================================================
+
+struct TraceBackward : public Node {
+    int64_t rows_, cols_;
+
+    TraceBackward(int64_t rows, int64_t cols) : rows_(rows), cols_(cols) {}
+
+    variable_list apply(variable_list&& grads) override {
+        auto& grad = grads[0];
+        if (!grad.defined()) return {Tensor()};
+
+        double g = grad.item().toDouble();
+        int64_t n = std::min(rows_, cols_);
+        Tensor result = at::zeros({rows_, cols_});
+        float* data = result.mutable_data_ptr<float>();
+        for (int64_t i = 0; i < n; ++i) {
+            data[i * cols_ + i] = static_cast<float>(g);
+        }
+        return {result};
+    }
+
+    std::string name() const override { return "TraceBackward"; }
+};
+
 } // namespace autograd
 } // namespace torch

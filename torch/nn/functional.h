@@ -411,11 +411,11 @@ inline Tensor linear(const Tensor& input, const Tensor& weight, const Tensor* bi
     Tensor weight_t = weight.t();
 
     // Use matmul which has CUDA dispatch
-    Tensor output = at::mm(input_2d, weight_t);
+    Tensor output = at::native::mm(input_2d, weight_t);
 
     // Add bias if present
     if (bias) {
-        output = at::add(output, *bias);
+        output = output + *bias;
     }
 
     // Reshape output back to original batch dimensions
@@ -682,57 +682,166 @@ inline Tensor pad(
     const std::string& mode = "constant",
     double value = 0.0
 ) {
-    // Padding format: (left, right, top, bottom, front, back, ...)
-    // For 2D: (left, right, top, bottom)
-
-    if (input.dim() < 2) {
-        throw std::runtime_error("pad requires at least 2D input");
+    // Padding format: pairs from last dim to first: (left, right, top, bottom, ...)
+    if (input.dim() < 1) {
+        throw std::runtime_error("pad requires at least 1D input");
     }
 
-    std::vector<int64_t> new_shape = input.sizes().vec();
     int64_t ndim = input.dim();
-
-    // Apply padding to last dimensions
     size_t num_pad_dims = padding.size() / 2;
+
+    // Compute new shape
+    std::vector<int64_t> new_shape = input.sizes().vec();
     for (size_t i = 0; i < num_pad_dims; ++i) {
-        int64_t dim_idx = ndim - 1 - i;
-        new_shape[dim_idx] += padding[2 * i] + padding[2 * i + 1];
-    }
-
-    Tensor output = at::full(new_shape, static_cast<float>(value));
-
-    // Copy input data to appropriate location
-    // This is simplified for 2D case
-    if (input.dim() == 4 && padding.size() == 4) {
-        int64_t batch = input.size(0);
-        int64_t channels = input.size(1);
-        int64_t height = input.size(2);
-        int64_t width = input.size(3);
-
-        int64_t pad_left = padding[0];
-        int64_t pad_top = padding[2];
-
-        const float* in_data = input.data_ptr<float>();
-        float* out_data = output.mutable_data_ptr<float>();
-
-        int64_t new_height = new_shape[2];
-        int64_t new_width = new_shape[3];
-
-        #pragma omp parallel for collapse(4)
-        for (int64_t b = 0; b < batch; ++b) {
-            for (int64_t c = 0; c < channels; ++c) {
-                for (int64_t h = 0; h < height; ++h) {
-                    for (int64_t w = 0; w < width; ++w) {
-                        int64_t in_idx = ((b * channels + c) * height + h) * width + w;
-                        int64_t out_idx = ((b * channels + c) * new_height + (h + pad_top)) * new_width + (w + pad_left);
-                        out_data[out_idx] = in_data[in_idx];
-                    }
-                }
-            }
+        int64_t dim_idx = ndim - 1 - static_cast<int64_t>(i);
+        if (dim_idx >= 0) {
+            new_shape[dim_idx] += padding[2 * i] + padding[2 * i + 1];
         }
     }
 
+    Tensor output = at::full(new_shape, static_cast<float>(value));
+    Tensor inp = input.contiguous();
+
+    // Build pad_before array for each dimension
+    std::vector<int64_t> pad_before(ndim, 0);
+    for (size_t i = 0; i < num_pad_dims; ++i) {
+        int64_t dim_idx = ndim - 1 - static_cast<int64_t>(i);
+        if (dim_idx >= 0) {
+            pad_before[dim_idx] = padding[2 * i];
+        }
+    }
+
+    int64_t total = inp.numel();
+    auto in_sizes = inp.sizes();
+
+    if (mode == "constant") {
+        // Copy input to padded position
+        const float* in_data = inp.data_ptr<float>();
+        float* out_data = output.mutable_data_ptr<float>();
+
+        for (int64_t idx = 0; idx < total; ++idx) {
+            // Convert flat index to multi-dim coords
+            int64_t remaining = idx;
+            std::vector<int64_t> coords(ndim);
+            for (int64_t d = ndim - 1; d >= 0; --d) {
+                coords[d] = remaining % in_sizes[d];
+                remaining /= in_sizes[d];
+            }
+
+            // Shift by padding
+            int64_t out_idx = 0;
+            int64_t stride = 1;
+            for (int64_t d = ndim - 1; d >= 0; --d) {
+                out_idx += (coords[d] + pad_before[d]) * stride;
+                stride *= new_shape[d];
+            }
+
+            out_data[out_idx] = in_data[idx];
+        }
+    } else if (mode == "reflect") {
+        float* out_data = output.mutable_data_ptr<float>();
+        const float* in_data = inp.data_ptr<float>();
+        int64_t out_total = output.numel();
+
+        for (int64_t idx = 0; idx < out_total; ++idx) {
+            int64_t remaining = idx;
+            std::vector<int64_t> out_coords(ndim);
+            for (int64_t d = ndim - 1; d >= 0; --d) {
+                out_coords[d] = remaining % new_shape[d];
+                remaining /= new_shape[d];
+            }
+
+            // Map output coord to input coord with reflection
+            int64_t in_idx = 0;
+            int64_t stride = 1;
+            bool valid = true;
+            for (int64_t d = ndim - 1; d >= 0; --d) {
+                int64_t c = out_coords[d] - pad_before[d];
+                int64_t s = in_sizes[d];
+                // Reflect
+                if (c < 0) c = -c;
+                if (c >= s) c = 2 * s - 2 - c;
+                if (c < 0 || c >= s) { valid = false; break; }
+                in_idx += c * stride;
+                stride *= in_sizes[d];
+            }
+
+            out_data[idx] = valid ? in_data[in_idx] : 0.0f;
+        }
+    } else if (mode == "replicate") {
+        float* out_data = output.mutable_data_ptr<float>();
+        const float* in_data = inp.data_ptr<float>();
+        int64_t out_total = output.numel();
+
+        for (int64_t idx = 0; idx < out_total; ++idx) {
+            int64_t remaining = idx;
+            std::vector<int64_t> out_coords(ndim);
+            for (int64_t d = ndim - 1; d >= 0; --d) {
+                out_coords[d] = remaining % new_shape[d];
+                remaining /= new_shape[d];
+            }
+
+            int64_t in_idx = 0;
+            int64_t stride = 1;
+            for (int64_t d = ndim - 1; d >= 0; --d) {
+                int64_t c = out_coords[d] - pad_before[d];
+                c = std::max((int64_t)0, std::min(c, in_sizes[d] - 1));
+                in_idx += c * stride;
+                stride *= in_sizes[d];
+            }
+
+            out_data[idx] = in_data[in_idx];
+        }
+    } else if (mode == "circular") {
+        float* out_data = output.mutable_data_ptr<float>();
+        const float* in_data = inp.data_ptr<float>();
+        int64_t out_total = output.numel();
+
+        for (int64_t idx = 0; idx < out_total; ++idx) {
+            int64_t remaining = idx;
+            std::vector<int64_t> out_coords(ndim);
+            for (int64_t d = ndim - 1; d >= 0; --d) {
+                out_coords[d] = remaining % new_shape[d];
+                remaining /= new_shape[d];
+            }
+
+            int64_t in_idx = 0;
+            int64_t stride = 1;
+            for (int64_t d = ndim - 1; d >= 0; --d) {
+                int64_t c = out_coords[d] - pad_before[d];
+                c = ((c % in_sizes[d]) + in_sizes[d]) % in_sizes[d];
+                in_idx += c * stride;
+                stride *= in_sizes[d];
+            }
+
+            out_data[idx] = in_data[in_idx];
+        }
+    } else {
+        throw std::runtime_error("pad: unsupported mode '" + mode + "'. Use constant, reflect, replicate, or circular.");
+    }
+
     return output;
+}
+
+// ============================================================================
+// Unfold (im2col) and Fold (col2im)
+// ============================================================================
+
+inline Tensor unfold(const Tensor& input,
+                     std::array<int64_t, 2> kernel_size,
+                     std::array<int64_t, 2> dilation = {1, 1},
+                     std::array<int64_t, 2> padding = {0, 0},
+                     std::array<int64_t, 2> stride = {1, 1}) {
+    return at::native::unfold_im2col(input, kernel_size, dilation, padding, stride);
+}
+
+inline Tensor fold(const Tensor& input,
+                   std::array<int64_t, 2> output_size,
+                   std::array<int64_t, 2> kernel_size,
+                   std::array<int64_t, 2> dilation = {1, 1},
+                   std::array<int64_t, 2> padding = {0, 0},
+                   std::array<int64_t, 2> stride = {1, 1}) {
+    return at::native::fold_col2im(input, output_size, kernel_size, dilation, padding, stride);
 }
 
 // ============================================================================
@@ -1041,6 +1150,134 @@ inline Tensor nll_loss(
     Tensor output = at::empty({});
     output.mutable_data_ptr<float>()[0] = static_cast<float>(sum);
     return output;
+}
+
+// ============================================================================
+// Interpolate — Resize tensor (nearest or bilinear)
+// ============================================================================
+// Input: (N, C, H, W) or (C, H, W) or (H, W)
+// Output: resized to target size or scaled by scale_factor
+
+inline Tensor interpolate(const Tensor& input,
+                           std::vector<int64_t> size = {},
+                           std::vector<double> scale_factor = {},
+                           const std::string& mode = "nearest",
+                           bool align_corners = false) {
+    int64_t ndim = input.dim();
+    PT_CHECK_MSG(ndim >= 2, "interpolate: input must have at least 2 dimensions");
+
+    // Determine spatial dimensions (last 2)
+    int64_t in_h = input.size(ndim - 2);
+    int64_t in_w = input.size(ndim - 1);
+
+    int64_t out_h, out_w;
+
+    if (!size.empty()) {
+        PT_CHECK(size.size() == 2);
+        out_h = size[0];
+        out_w = size[1];
+    } else if (!scale_factor.empty()) {
+        if (scale_factor.size() == 1) {
+            out_h = static_cast<int64_t>(in_h * scale_factor[0]);
+            out_w = static_cast<int64_t>(in_w * scale_factor[0]);
+        } else {
+            PT_CHECK(scale_factor.size() == 2);
+            out_h = static_cast<int64_t>(in_h * scale_factor[0]);
+            out_w = static_cast<int64_t>(in_w * scale_factor[1]);
+        }
+    } else {
+        PT_CHECK_MSG(false, "interpolate: either size or scale_factor must be provided");
+        out_h = out_w = 0;
+    }
+
+    // Build output shape
+    std::vector<int64_t> out_shape = input.sizes().vec();
+    out_shape[ndim - 2] = out_h;
+    out_shape[ndim - 1] = out_w;
+
+    Tensor result = at::empty(out_shape, at::TensorOptions().dtype(input.dtype()).device(input.device()));
+    Tensor in_contig = input.contiguous();
+
+    // Number of outer elements (batch * channels or just channels)
+    int64_t outer = 1;
+    for (int64_t d = 0; d < ndim - 2; ++d) {
+        outer *= input.size(d);
+    }
+
+    if (mode == "nearest") {
+        PT_DISPATCH_FLOATING_TYPES(input.dtype(), "interpolate_nearest", [&] {
+            const scalar_t* src = in_contig.data_ptr<scalar_t>();
+            scalar_t* dst = result.mutable_data_ptr<scalar_t>();
+
+            for (int64_t o = 0; o < outer; ++o) {
+                for (int64_t oh = 0; oh < out_h; ++oh) {
+                    int64_t ih = static_cast<int64_t>(std::floor(
+                        static_cast<double>(oh) * in_h / out_h));
+                    ih = std::min(ih, in_h - 1);
+
+                    for (int64_t ow = 0; ow < out_w; ++ow) {
+                        int64_t iw = static_cast<int64_t>(std::floor(
+                            static_cast<double>(ow) * in_w / out_w));
+                        iw = std::min(iw, in_w - 1);
+
+                        dst[o * out_h * out_w + oh * out_w + ow] =
+                            src[o * in_h * in_w + ih * in_w + iw];
+                    }
+                }
+            }
+        });
+    } else if (mode == "bilinear") {
+        PT_DISPATCH_FLOATING_TYPES(input.dtype(), "interpolate_bilinear", [&] {
+            const scalar_t* src = in_contig.data_ptr<scalar_t>();
+            scalar_t* dst = result.mutable_data_ptr<scalar_t>();
+
+            for (int64_t o = 0; o < outer; ++o) {
+                for (int64_t oh = 0; oh < out_h; ++oh) {
+                    double src_h;
+                    if (align_corners && out_h > 1) {
+                        src_h = static_cast<double>(oh) * (in_h - 1) / (out_h - 1);
+                    } else {
+                        src_h = (static_cast<double>(oh) + 0.5) * in_h / out_h - 0.5;
+                    }
+
+                    int64_t h0 = std::max(static_cast<int64_t>(std::floor(src_h)), (int64_t)0);
+                    int64_t h1 = std::min(h0 + 1, in_h - 1);
+                    double dh = src_h - h0;
+                    if (dh < 0) dh = 0;
+
+                    for (int64_t ow = 0; ow < out_w; ++ow) {
+                        double src_w;
+                        if (align_corners && out_w > 1) {
+                            src_w = static_cast<double>(ow) * (in_w - 1) / (out_w - 1);
+                        } else {
+                            src_w = (static_cast<double>(ow) + 0.5) * in_w / out_w - 0.5;
+                        }
+
+                        int64_t w0 = std::max(static_cast<int64_t>(std::floor(src_w)), (int64_t)0);
+                        int64_t w1 = std::min(w0 + 1, in_w - 1);
+                        double dw = src_w - w0;
+                        if (dw < 0) dw = 0;
+
+                        scalar_t v00 = src[o * in_h * in_w + h0 * in_w + w0];
+                        scalar_t v01 = src[o * in_h * in_w + h0 * in_w + w1];
+                        scalar_t v10 = src[o * in_h * in_w + h1 * in_w + w0];
+                        scalar_t v11 = src[o * in_h * in_w + h1 * in_w + w1];
+
+                        dst[o * out_h * out_w + oh * out_w + ow] = static_cast<scalar_t>(
+                            (1.0 - dh) * (1.0 - dw) * v00 +
+                            (1.0 - dh) * dw * v01 +
+                            dh * (1.0 - dw) * v10 +
+                            dh * dw * v11
+                        );
+                    }
+                }
+            }
+        });
+    } else {
+        PT_CHECK_MSG(false, "interpolate: unsupported mode. Use 'nearest' or 'bilinear'");
+    }
+
+    return result;
 }
 
 } // namespace functional
