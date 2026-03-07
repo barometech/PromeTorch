@@ -4,6 +4,32 @@
 
 ---
 
+## 2026-03-07: Unary ops non-contiguous fix — LSTM WORKS!
+
+**Root cause**: `DEFINE_UNARY_OP` (sigmoid, tanh, exp, etc.) в MathOps.h использовал `data_ptr()[i]` последовательный доступ без учёта strides. Когда LSTM делит gates через `narrow_autograd(gates, 1, offset, H)`, результат — view с strides `[4*H, 1]` вместо contiguous `[H, 1]`. Sequential access `in[0], in[1], ...` читает данные из ЧУЖИХ gates для batch > 0.
+
+**Fixes**:
+- `DEFINE_UNARY_OP`: добавлен `.contiguous()` на входе
+- `DEFINE_UNARY_OP_INPLACE`: fallback через out-of-place + copy_ для non-contiguous
+- Scalar `add/mul/pow`: добавлен `.contiguous()` на входе
+- `zero_()`: stride-aware path вместо memset для non-contiguous
+- `fill_()`: stride-aware path для non-contiguous
+- Восстановлены все 10 моделей в train_10_models.cpp
+
+**Результаты**: LSTM 50% → 98.44%, все 10 моделей match PyTorch baseline.
+
+| Model | PyTorch | PromeTorch | Status |
+|-------|---------|-----------|--------|
+| 4: MNIST (SGD) | 92.54% | 92.69% | MATCH |
+| 5: Deep MNIST (Adam) | 97.46% | 97.03% | MATCH |
+| 6: Dropout MNIST | 97.03% | 97.00% | MATCH |
+| 7: RNN Sine | 1.1e-5 | 1.7e-5 | OK |
+| 8: LSTM | 98.4% | 98.44% | MATCH |
+| 9: GRU | 92.2% | 95.31% | MATCH |
+| 10: Wide MNIST | 97.59% | 97.65% | MATCH |
+
+---
+
 ## 2026-01-20: Старт проекта
 
 - Исследована архитектура PyTorch (c10, ATen, torch, autograd)

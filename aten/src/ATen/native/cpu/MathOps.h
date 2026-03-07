@@ -96,11 +96,12 @@ inline int64_t broadcast_index(
 
 #define DEFINE_UNARY_OP(name, op) \
 inline Tensor name(const Tensor& self) { \
-    Tensor result = empty_like(self); \
-    PT_DISPATCH_FLOATING_TYPES(self.dtype(), #name, [&] { \
-        const scalar_t* in = self.data_ptr<scalar_t>(); \
+    Tensor input = self.is_contiguous() ? self : self.contiguous(); \
+    Tensor result = empty_like(input); \
+    PT_DISPATCH_FLOATING_TYPES(input.dtype(), #name, [&] { \
+        const scalar_t* in = input.data_ptr<scalar_t>(); \
         scalar_t* out = result.mutable_data_ptr<scalar_t>(); \
-        int64_t n = self.numel(); \
+        int64_t n = input.numel(); \
         _Pragma("omp parallel for if(n > 10000)") \
         for (int64_t i = 0; i < n; ++i) { \
             out[i] = op; \
@@ -111,6 +112,11 @@ inline Tensor name(const Tensor& self) { \
 
 #define DEFINE_UNARY_OP_INPLACE(name, op) \
 inline Tensor& name##_(Tensor& self) { \
+    if (!self.is_contiguous()) { \
+        Tensor tmp = name(self); \
+        self.copy_(tmp); \
+        return self; \
+    } \
     PT_DISPATCH_FLOATING_TYPES(self.dtype(), #name "_", [&] { \
         scalar_t* data = self.mutable_data_ptr<scalar_t>(); \
         int64_t n = self.numel(); \
@@ -162,17 +168,55 @@ DEFINE_UNARY_OP_INPLACE(round, std::round(data[i]))
 
 // Zero and fill
 inline Tensor& zero_(Tensor& self) {
-    std::memset(self.data_ptr(), 0, self.nbytes());
+    if (self.is_contiguous()) {
+        std::memset(self.data_ptr(), 0, self.nbytes());
+    } else {
+        PT_DISPATCH_ALL_TYPES(self.dtype(), "zero_", [&] {
+            scalar_t* base = self.mutable_data_ptr<scalar_t>();
+            int64_t n = self.numel();
+            int64_t ndim = self.dim();
+            auto sz = self.sizes();
+            auto st = self.strides();
+            for (int64_t flat = 0; flat < n; ++flat) {
+                int64_t offset = 0;
+                int64_t rem = flat;
+                for (int64_t d = ndim - 1; d >= 0; --d) {
+                    int64_t idx = rem % sz[d];
+                    rem /= sz[d];
+                    offset += idx * st[d];
+                }
+                base[offset] = 0;
+            }
+        });
+    }
     return self;
 }
 
 inline Tensor& fill_(Tensor& self, Scalar value) {
     PT_DISPATCH_ALL_TYPES(self.dtype(), "fill_", [&] {
         scalar_t val = value.to<scalar_t>();
-        scalar_t* data = self.mutable_data_ptr<scalar_t>();
-        int64_t numel = self.numel();
-        for (int64_t i = 0; i < numel; ++i) {
-            data[i] = val;
+        if (self.is_contiguous()) {
+            scalar_t* data = self.mutable_data_ptr<scalar_t>();
+            int64_t numel = self.numel();
+            for (int64_t i = 0; i < numel; ++i) {
+                data[i] = val;
+            }
+        } else {
+            scalar_t* base = self.mutable_data_ptr<scalar_t>();
+            int64_t n = self.numel();
+            int64_t ndim = self.dim();
+            auto sz = self.sizes();
+            auto st = self.strides();
+            for (int64_t flat = 0; flat < n; ++flat) {
+                int64_t offset = 0;
+                int64_t rem = flat;
+                for (int64_t d = ndim - 1; d >= 0; --d) {
+                    int64_t idx = rem % sz[d];
+                    rem /= sz[d];
+                    offset += idx * st[d];
+                }
+                base[offset] = val;
+            }
         }
     });
     return self;
@@ -293,14 +337,15 @@ inline Tensor div(const Tensor& self, const Tensor& other) {
 
 // Tensor + Scalar
 inline Tensor add(const Tensor& self, Scalar other, Scalar alpha = 1) {
-    Tensor result = empty_like(self);
+    Tensor input = self.is_contiguous() ? self : self.contiguous();
+    Tensor result = empty_like(input);
     double val = other.toDouble() * alpha.toDouble();
 
-    PT_DISPATCH_ALL_TYPES(self.dtype(), "add_scalar", [&] {
-        const scalar_t* in = self.data_ptr<scalar_t>();
+    PT_DISPATCH_ALL_TYPES(input.dtype(), "add_scalar", [&] {
+        const scalar_t* in = input.data_ptr<scalar_t>();
         scalar_t* out = result.mutable_data_ptr<scalar_t>();
         scalar_t scalar_val = static_cast<scalar_t>(val);
-        int64_t n = self.numel();
+        int64_t n = input.numel();
 
         for (int64_t i = 0; i < n; ++i) {
             out[i] = in[i] + scalar_val;
@@ -315,13 +360,14 @@ inline Tensor sub(const Tensor& self, Scalar other, Scalar alpha = 1) {
 }
 
 inline Tensor mul(const Tensor& self, Scalar other) {
-    Tensor result = empty_like(self);
+    Tensor input = self.is_contiguous() ? self : self.contiguous();
+    Tensor result = empty_like(input);
 
-    PT_DISPATCH_ALL_TYPES(self.dtype(), "mul_scalar", [&] {
-        const scalar_t* in = self.data_ptr<scalar_t>();
+    PT_DISPATCH_ALL_TYPES(input.dtype(), "mul_scalar", [&] {
+        const scalar_t* in = input.data_ptr<scalar_t>();
         scalar_t* out = result.mutable_data_ptr<scalar_t>();
         scalar_t scalar_val = other.to<scalar_t>();
-        int64_t n = self.numel();
+        int64_t n = input.numel();
 
         for (int64_t i = 0; i < n; ++i) {
             out[i] = in[i] * scalar_val;
@@ -336,13 +382,14 @@ inline Tensor div(const Tensor& self, Scalar other) {
 }
 
 inline Tensor pow(const Tensor& self, Scalar exponent) {
-    Tensor result = empty_like(self);
+    Tensor input = self.is_contiguous() ? self : self.contiguous();
+    Tensor result = empty_like(input);
 
-    PT_DISPATCH_FLOATING_TYPES(self.dtype(), "pow", [&] {
-        const scalar_t* in = self.data_ptr<scalar_t>();
+    PT_DISPATCH_FLOATING_TYPES(input.dtype(), "pow", [&] {
+        const scalar_t* in = input.data_ptr<scalar_t>();
         scalar_t* out = result.mutable_data_ptr<scalar_t>();
         double exp_val = exponent.toDouble();
-        int64_t n = self.numel();
+        int64_t n = input.numel();
 
         for (int64_t i = 0; i < n; ++i) {
             out[i] = static_cast<scalar_t>(std::pow(static_cast<double>(in[i]), exp_val));

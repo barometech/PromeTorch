@@ -15,7 +15,7 @@
 
 ## Статус проекта
 
-**Все 14 фаз ЗАВЕРШЕНЫ.** ~37,000 строк C++/CUDA, 92 файла.
+**14 основных фаз + 7 критических фич ЗАВЕРШЕНЫ.** ~40,000+ строк C++/CUDA, 97+ файлов.
 
 | Фаза | Компонент | Статус |
 |------|-----------|--------|
@@ -34,15 +34,21 @@
 | 13 | Mixed Precision AMP (GradScaler, Autocast) | DONE |
 | 14 | FlashAttention (O(N) memory, causal masking) | DONE |
 
-### Активная проблема: MNIST accuracy ~15% вместо ~49%
+### Критические фичи (2026-03-07)
 
-- Backward формулы проверены — все правильные
-- Single step test PASS, multi-batch training FAIL
-- **Подозрение:** как backward подключается к forward (`mm_autograd`, `t_autograd` в `autograd.h`) или graph cleanup между батчами
-- Подробности: `JOURNAL.md` секция "2026-01-25: MNIST Training Investigation"
+| Фича | Файл(ы) | Статус |
+|------|---------|--------|
+| Custom Autograd Functions | `torch/autograd/function.h` | DONE |
+| Hooks System | `torch/nn/module.h` | DONE |
+| Serialization (save/load) | `torch/serialization.h` | DONE |
+| Advanced Indexing | `IndexOps.h`, `IndexBackward.h` | DONE |
+| Gradient Checkpointing | `torch/utils/checkpoint.h` | DONE |
+| RNN/LSTM/GRU | `torch/nn/modules/rnn.h` | DONE |
+| Channels-last Memory Format | `TensorImpl.h`, `Tensor.h`, `ShapeOps.h` | DONE |
 
-### AdamKiller оптимизатор
-- `torch/optim/adamkiller.h` — добавлен, но не отлажен из-за проблемы с autograd
+### Все 10 моделей — РЕШЕНО (2026-03-07)
+- MNIST 97.65%, LSTM 98.44%, GRU 95.3% — все match PyTorch baseline
+- Root causes: mm() non-contiguous, copy_() strided, unary ops (sigmoid/tanh) non-contiguous
 
 ---
 
@@ -98,10 +104,13 @@ aten/src/ATen/
   cudnn/                      # CuDNNConvolution, Pooling, BatchNorm, Activation
 torch/
   csrc/autograd/              # edge, node, engine, autograd_meta, backward functions
-  nn/modules/                 # linear, activation, conv, pooling, normalization, loss, transformer, pir
+  autograd/                   # function.h (custom autograd functions)
+  nn/modules/                 # linear, activation, conv, pooling, normalization, loss, transformer, pir, rnn
   optim/                      # sgd, adam, rmsprop, adamkiller, lr_scheduler
   data/                       # dataset, sampler, dataloader
   amp/                        # grad_scaler, autocast
+  utils/                      # checkpoint.h (gradient checkpointing)
+  serialization.h             # save/load tensors and state_dicts
 python/                       # pybind11 bindings, promethorch package
 examples/
   mnist/train_mnist_mlp.cpp   # MNIST MLP training

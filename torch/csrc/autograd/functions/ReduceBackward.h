@@ -25,7 +25,13 @@ struct SumBackward : public Node {
         if (!grad.defined()) return {Tensor()};
 
         // Expand scalar gradient to input shape
-        return {at::full(input_sizes_, grad.item())};
+        Tensor result = at::full(input_sizes_, grad.item());
+#ifdef PT_USE_CUDA
+        if (grad.is_cuda()) {
+            result = at::to_cuda(result);
+        }
+#endif
+        return {result};
     }
 
     std::string name() const override { return "SumBackward"; }
@@ -81,7 +87,13 @@ struct MeanBackward : public Node {
 
         // Gradient is 1/numel at each position
         double scale = 1.0 / static_cast<double>(numel_);
-        return {at::full(input_sizes_, Scalar(grad.item().toDouble() * scale))};
+        Tensor result = at::full(input_sizes_, Scalar(grad.item().toDouble() * scale));
+#ifdef PT_USE_CUDA
+        if (grad.is_cuda()) {
+            result = at::to_cuda(result);
+        }
+#endif
+        return {result};
     }
 
     std::string name() const override { return "MeanBackward"; }

@@ -478,5 +478,192 @@ inline Tensor scatter(const Tensor& self, int64_t dim, const Tensor& index, cons
     return result;
 }
 
+// ============================================================================
+// Scatter Add - Scatter values with addition (needed for index backward)
+// ============================================================================
+
+inline Tensor& scatter_add_(Tensor& self, int64_t dim, const Tensor& index, const Tensor& src) {
+    int64_t ndim = self.dim();
+    if (dim < 0) dim += ndim;
+    PT_CHECK(dim >= 0 && dim < ndim);
+    PT_CHECK_MSG(index.dtype() == c10::ScalarType::Long,
+        "scatter_add_: index must be LongTensor");
+
+    const int64_t* idx_data = index.data_ptr<int64_t>();
+
+    PT_DISPATCH_ALL_TYPES(self.dtype(), "scatter_add_", [&] {
+        scalar_t* dst = self.mutable_data_ptr<scalar_t>();
+        const scalar_t* src_data = src.data_ptr<scalar_t>();
+
+        int64_t n = index.numel();
+
+        for (int64_t i = 0; i < n; ++i) {
+            int64_t remaining = i;
+            std::vector<int64_t> idx_coords(ndim);
+
+            for (int64_t d = ndim - 1; d >= 0; --d) {
+                idx_coords[d] = remaining % index.size(d);
+                remaining /= index.size(d);
+            }
+
+            int64_t scatter_idx = idx_data[i];
+            PT_CHECK_MSG(scatter_idx >= 0 && scatter_idx < self.size(dim),
+                "scatter_add_: index out of bounds");
+
+            int64_t dst_idx = 0;
+            for (int64_t d = 0; d < ndim; ++d) {
+                int64_t coord = (d == dim) ? scatter_idx : idx_coords[d];
+                dst_idx += coord * self.stride(d);
+            }
+
+            dst[dst_idx] += src_data[i];
+        }
+    });
+
+    return self;
+}
+
+// ============================================================================
+// Index with Tensor (fancy indexing) — self[LongTensor] along dim 0
+// ============================================================================
+
+inline Tensor index_with_tensor(const Tensor& self, int64_t dim, const Tensor& index) {
+    int64_t ndim = self.dim();
+    if (dim < 0) dim += ndim;
+    PT_CHECK(dim >= 0 && dim < ndim);
+    PT_CHECK_MSG(index.dtype() == c10::ScalarType::Long,
+        "index_with_tensor: index must be LongTensor");
+
+    // index can be any shape — output replaces dim with index.sizes()
+    auto idx_sizes = index.sizes().vec();
+    int64_t idx_numel = index.numel();
+    const int64_t* idx_data = index.data_ptr<int64_t>();
+
+    // Build result shape: self.sizes[:dim] + index.sizes + self.sizes[dim+1:]
+    std::vector<int64_t> result_sizes;
+    for (int64_t d = 0; d < dim; ++d) result_sizes.push_back(self.size(d));
+    for (auto s : idx_sizes) result_sizes.push_back(s);
+    for (int64_t d = dim + 1; d < ndim; ++d) result_sizes.push_back(self.size(d));
+
+    Tensor result = empty(result_sizes, TensorOptions().dtype(self.dtype()).device(self.device()));
+
+    // Inner size = product of dims after dim
+    int64_t inner_size = 1;
+    for (int64_t d = dim + 1; d < ndim; ++d) inner_size *= self.size(d);
+
+    // Outer size = product of dims before dim
+    int64_t outer_size = 1;
+    for (int64_t d = 0; d < dim; ++d) outer_size *= self.size(d);
+
+    PT_DISPATCH_ALL_TYPES(self.dtype(), "index_with_tensor", [&] {
+        Tensor self_c = self.contiguous();
+        const scalar_t* src = self_c.data_ptr<scalar_t>();
+        scalar_t* dst = result.mutable_data_ptr<scalar_t>();
+
+        int64_t src_dim_size = self.size(dim);
+        int64_t src_dim_stride = inner_size; // contiguous stride along dim
+
+        for (int64_t outer = 0; outer < outer_size; ++outer) {
+            for (int64_t ii = 0; ii < idx_numel; ++ii) {
+                int64_t src_idx = idx_data[ii];
+                if (src_idx < 0) src_idx += src_dim_size;
+                PT_CHECK_MSG(src_idx >= 0 && src_idx < src_dim_size,
+                    "index_with_tensor: index out of bounds");
+
+                const scalar_t* src_slice = src + outer * src_dim_size * inner_size + src_idx * inner_size;
+                scalar_t* dst_slice = dst + outer * idx_numel * inner_size + ii * inner_size;
+
+                std::memcpy(dst_slice, src_slice, inner_size * sizeof(scalar_t));
+            }
+        }
+    });
+
+    return result;
+}
+
+// ============================================================================
+// Index Put — self[LongTensor] = values along dim 0
+// ============================================================================
+
+inline Tensor& index_put_(Tensor& self, int64_t dim, const Tensor& index, const Tensor& values) {
+    int64_t ndim = self.dim();
+    if (dim < 0) dim += ndim;
+    PT_CHECK(dim >= 0 && dim < ndim);
+    PT_CHECK_MSG(index.dtype() == c10::ScalarType::Long,
+        "index_put_: index must be LongTensor");
+
+    int64_t idx_numel = index.numel();
+    const int64_t* idx_data = index.data_ptr<int64_t>();
+
+    int64_t inner_size = 1;
+    for (int64_t d = dim + 1; d < ndim; ++d) inner_size *= self.size(d);
+
+    int64_t outer_size = 1;
+    for (int64_t d = 0; d < dim; ++d) outer_size *= self.size(d);
+
+    PT_DISPATCH_ALL_TYPES(self.dtype(), "index_put_", [&] {
+        scalar_t* dst = self.mutable_data_ptr<scalar_t>();
+        Tensor vals_c = values.contiguous();
+        const scalar_t* src = vals_c.data_ptr<scalar_t>();
+
+        int64_t src_dim_size = self.size(dim);
+
+        for (int64_t outer = 0; outer < outer_size; ++outer) {
+            for (int64_t ii = 0; ii < idx_numel; ++ii) {
+                int64_t dst_idx = idx_data[ii];
+                if (dst_idx < 0) dst_idx += src_dim_size;
+                PT_CHECK_MSG(dst_idx >= 0 && dst_idx < src_dim_size,
+                    "index_put_: index out of bounds");
+
+                scalar_t* dst_slice = dst + outer * src_dim_size * inner_size + dst_idx * inner_size;
+                const scalar_t* src_slice = src + outer * idx_numel * inner_size + ii * inner_size;
+
+                std::memcpy(dst_slice, src_slice, inner_size * sizeof(scalar_t));
+            }
+        }
+    });
+
+    return self;
+}
+
+// ============================================================================
+// Boolean Index — self[BoolTensor] -> 1D result
+// ============================================================================
+
+inline Tensor boolean_index(const Tensor& self, const Tensor& mask) {
+    PT_CHECK_MSG(mask.dtype() == c10::ScalarType::Bool,
+        "boolean_index: mask must be BoolTensor");
+    // Flatten self and mask if needed, then masked_select
+    return masked_select(self.contiguous(), mask.contiguous());
+}
+
+// ============================================================================
+// Boolean Index Put — self[BoolTensor] = values
+// ============================================================================
+
+inline Tensor& boolean_index_put_(Tensor& self, const Tensor& mask, const Tensor& values) {
+    PT_CHECK_MSG(mask.dtype() == c10::ScalarType::Bool,
+        "boolean_index_put_: mask must be BoolTensor");
+    PT_CHECK_MSG(self.sizes() == mask.sizes(),
+        "boolean_index_put_: mask and tensor must have same shape");
+
+    const bool* mask_data = mask.data_ptr<bool>();
+
+    PT_DISPATCH_ALL_TYPES(self.dtype(), "boolean_index_put_", [&] {
+        scalar_t* dst = self.mutable_data_ptr<scalar_t>();
+        const scalar_t* src = values.data_ptr<scalar_t>();
+        int64_t n = self.numel();
+        int64_t src_idx = 0;
+
+        for (int64_t i = 0; i < n; ++i) {
+            if (mask_data[i]) {
+                dst[i] = src[src_idx++];
+            }
+        }
+    });
+
+    return self;
+}
+
 } // namespace native
 } // namespace at

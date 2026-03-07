@@ -9,6 +9,8 @@
 #include <functional>
 #include <sstream>
 #include <iomanip>
+#include <atomic>
+#include <map>
 
 namespace torch {
 namespace nn {
@@ -18,6 +20,20 @@ using at::Tensor;
 // Forward declarations
 class Module;
 using ModulePtr = std::shared_ptr<Module>;
+
+// ============================================================================
+// Hook Types
+// ============================================================================
+
+using ForwardPreHook = std::function<void(Module&, const Tensor&)>;
+using ForwardHook = std::function<void(Module&, const Tensor&, const Tensor&)>;
+using ForwardHookWithReturn = std::function<Tensor(Module&, const Tensor&, const Tensor&)>;
+
+// Handle for removing hooks
+struct HookHandle {
+    int64_t id;
+    explicit HookHandle(int64_t id_) : id(id_) {}
+};
 
 // ============================================================================
 // Module - Base Class for All Neural Network Modules
@@ -64,9 +80,26 @@ public:
         throw std::runtime_error("forward(vector) not implemented for " + name_);
     }
 
-    // Operator() calls forward
+    // Operator() calls forward with hooks
     Tensor operator()(const Tensor& input) {
-        return forward(input);
+        // Pre-hooks
+        for (auto& [id, hook] : forward_pre_hooks_) {
+            hook(*this, input);
+        }
+        // Forward
+        Tensor output = forward(input);
+        // Post-hooks
+        for (auto& [id, hook] : forward_hooks_) {
+            hook(*this, input, output);
+        }
+        // Post-hooks with return (can modify output)
+        for (auto& [id, hook] : forward_hooks_with_return_) {
+            Tensor new_output = hook(*this, input, output);
+            if (new_output.defined()) {
+                output = new_output;
+            }
+        }
+        return output;
     }
 
     Tensor operator()(const Tensor& input1, const Tensor& input2) {
@@ -486,6 +519,34 @@ public:
     void set_name(const std::string& name) { name_ = name; }
 
     // ========================================================================
+    // Hooks
+    // ========================================================================
+
+    HookHandle register_forward_pre_hook(ForwardPreHook hook) {
+        int64_t id = next_hook_id_++;
+        forward_pre_hooks_[id] = std::move(hook);
+        return HookHandle(id);
+    }
+
+    HookHandle register_forward_hook(ForwardHook hook) {
+        int64_t id = next_hook_id_++;
+        forward_hooks_[id] = std::move(hook);
+        return HookHandle(id);
+    }
+
+    HookHandle register_forward_hook_with_return(ForwardHookWithReturn hook) {
+        int64_t id = next_hook_id_++;
+        forward_hooks_with_return_[id] = std::move(hook);
+        return HookHandle(id);
+    }
+
+    void remove_hook(const HookHandle& handle) {
+        forward_pre_hooks_.erase(handle.id);
+        forward_hooks_.erase(handle.id);
+        forward_hooks_with_return_.erase(handle.id);
+    }
+
+    // ========================================================================
     // Apply Function to All Modules
     // ========================================================================
 
@@ -516,6 +577,12 @@ protected:
     // Submodules
     std::unordered_map<std::string, ModulePtr> submodules_;
     std::vector<std::string> submodule_order_;
+
+    // Hooks
+    std::map<int64_t, ForwardPreHook> forward_pre_hooks_;
+    std::map<int64_t, ForwardHook> forward_hooks_;
+    std::map<int64_t, ForwardHookWithReturn> forward_hooks_with_return_;
+    inline static std::atomic<int64_t> next_hook_id_{0};
 };
 
 // ============================================================================
