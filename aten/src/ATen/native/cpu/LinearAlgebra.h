@@ -2,7 +2,13 @@
 
 #include "aten/src/ATen/core/Tensor.h"
 #include "aten/src/ATen/core/TensorFactory.h"
+#include "aten/src/ATen/native/cpu/ReduceOps.h"
+#include "aten/src/ATen/native/cpu/MathOps.h"
+#include "aten/src/ATen/native/cpu/ShapeOps.h"
 #include <cmath>
+#include <map>
+#include <algorithm>
+#include <numeric>
 
 namespace at {
 namespace native {
@@ -401,6 +407,725 @@ inline Tensor addmm(
     });
 
     return result;
+}
+
+// ============================================================================
+// Einstein Summation (einsum)
+// ============================================================================
+
+namespace einsum_detail {
+
+struct EinsumParsed {
+    std::vector<std::string> input_subscripts;
+    std::string output_subscript;
+    std::vector<char> all_labels;           // unique labels in order
+    std::vector<char> contraction_labels;   // labels NOT in output
+    std::vector<char> free_labels;          // labels IN output
+};
+
+inline EinsumParsed parse_einsum(const std::string& equation) {
+    EinsumParsed result;
+
+    // Split on "->"
+    size_t arrow = equation.find("->");
+    std::string lhs, rhs;
+    if (arrow != std::string::npos) {
+        lhs = equation.substr(0, arrow);
+        rhs = equation.substr(arrow + 2);
+    } else {
+        lhs = equation;
+        // Implicit output: sorted free indices
+        // (indices that appear exactly once)
+        rhs = ""; // will compute below
+    }
+
+    // Remove spaces
+    lhs.erase(std::remove(lhs.begin(), lhs.end(), ' '), lhs.end());
+    rhs.erase(std::remove(rhs.begin(), rhs.end(), ' '), rhs.end());
+
+    // Split input subscripts on ","
+    std::string current;
+    for (char c : lhs) {
+        if (c == ',') {
+            result.input_subscripts.push_back(current);
+            current.clear();
+        } else {
+            current += c;
+        }
+    }
+    result.input_subscripts.push_back(current);
+
+    // Collect all unique labels
+    std::map<char, int> label_count;
+    for (const auto& sub : result.input_subscripts) {
+        for (char c : sub) {
+            label_count[c]++;
+            if (std::find(result.all_labels.begin(), result.all_labels.end(), c) == result.all_labels.end()) {
+                result.all_labels.push_back(c);
+            }
+        }
+    }
+
+    // Compute implicit output if needed
+    if (arrow == std::string::npos) {
+        std::vector<char> sorted_labels;
+        for (char c : result.all_labels) {
+            if (label_count[c] == 1) {
+                sorted_labels.push_back(c);
+            }
+        }
+        std::sort(sorted_labels.begin(), sorted_labels.end());
+        rhs = std::string(sorted_labels.begin(), sorted_labels.end());
+    }
+
+    result.output_subscript = rhs;
+
+    // Contraction labels = all_labels - output labels
+    for (char c : result.all_labels) {
+        if (rhs.find(c) != std::string::npos) {
+            result.free_labels.push_back(c);
+        } else {
+            result.contraction_labels.push_back(c);
+        }
+    }
+
+    return result;
+}
+
+} // namespace einsum_detail
+
+inline Tensor einsum(const std::string& equation, const std::vector<Tensor>& tensors) {
+    auto parsed = einsum_detail::parse_einsum(equation);
+    PT_CHECK_MSG(parsed.input_subscripts.size() == tensors.size(),
+        "einsum: number of subscripts (", parsed.input_subscripts.size(),
+        ") does not match number of tensors (", tensors.size(), ")");
+
+    // === OPTIMIZED PATHS ===
+
+    // Two-operand operations
+    if (tensors.size() == 2) {
+        const auto& sub0 = parsed.input_subscripts[0];
+        const auto& sub1 = parsed.input_subscripts[1];
+        const auto& out = parsed.output_subscript;
+
+        // ij,jk->ik  (matrix multiply)
+        if (sub0 == "ij" && sub1 == "jk" && out == "ik") {
+            return mm(tensors[0], tensors[1]);
+        }
+        // ij,kj->ik  (mm with transpose)
+        if (sub0 == "ij" && sub1 == "kj" && out == "ik") {
+            return mm(tensors[0], t(tensors[1]));
+        }
+        // ji,jk->ik  (transpose mm)
+        if (sub0 == "ji" && sub1 == "jk" && out == "ik") {
+            return mm(t(tensors[0]), tensors[1]);
+        }
+        // bij,bjk->bik  (batched mm)
+        if (sub0 == "bij" && sub1 == "bjk" && out == "bik") {
+            return bmm(tensors[0], tensors[1]);
+        }
+        // ij,j->i  (matrix-vector)
+        if (sub0 == "ij" && sub1 == "j" && out == "i") {
+            return mv(tensors[0], tensors[1]);
+        }
+        // i,j->ij  (outer product)
+        if (sub0 == "i" && sub1 == "j" && out == "ij") {
+            return outer(tensors[0], tensors[1]);
+        }
+        // i,i->  (dot product)
+        if (sub0 == "i" && sub1 == "i" && out == "") {
+            return dot(tensors[0], tensors[1]);
+        }
+    }
+
+    // Single operand
+    if (tensors.size() == 1) {
+        const auto& sub0 = parsed.input_subscripts[0];
+        const auto& out = parsed.output_subscript;
+
+        // ij->ji  (transpose)
+        if (sub0 == "ij" && out == "ji") {
+            return t(tensors[0]);
+        }
+        // ij->j  (sum over first dim)
+        if (sub0 == "ij" && out == "j") {
+            return at::native::sum(tensors[0], 0);
+        }
+        // ij->i  (sum over second dim)
+        if (sub0 == "ij" && out == "i") {
+            return at::native::sum(tensors[0], 1);
+        }
+        // ij->  (sum all)
+        if (sub0 == "ij" && out == "") {
+            return at::native::sum(tensors[0]);
+        }
+        // ii->i  (diagonal)
+        if (sub0 == "ii" && out == "i") {
+            PT_CHECK(tensors[0].dim() == 2 && tensors[0].size(0) == tensors[0].size(1));
+            return at::native::diag(tensors[0], 0);
+        }
+        // ii->  (trace)
+        if (sub0 == "ii" && out == "") {
+            PT_CHECK(tensors[0].dim() == 2 && tensors[0].size(0) == tensors[0].size(1));
+            return at::native::sum(at::native::diag(tensors[0], 0));
+        }
+    }
+
+    // === GENERAL PATH via permute + reshape + mm ===
+    // For two operands: permute both so contraction dims are at end/beginning,
+    // reshape to 2D, mm, reshape back, permute to output order
+
+    if (tensors.size() == 2) {
+        const auto& sub0 = parsed.input_subscripts[0];
+        const auto& sub1 = parsed.input_subscripts[1];
+        const auto& out = parsed.output_subscript;
+
+        // Build dimension maps: label -> (tensor_idx, dim_idx)
+        std::map<char, int64_t> label_to_dim0, label_to_dim1;
+        std::map<char, int64_t> label_to_size;
+
+        for (size_t i = 0; i < sub0.size(); ++i) {
+            label_to_dim0[sub0[i]] = i;
+            label_to_size[sub0[i]] = tensors[0].size(i);
+        }
+        for (size_t i = 0; i < sub1.size(); ++i) {
+            label_to_dim1[sub1[i]] = i;
+            label_to_size[sub1[i]] = tensors[1].size(i);
+        }
+
+        // Classify labels
+        std::vector<char> free0_labels, free1_labels, contract_labels;
+        for (char c : sub0) {
+            if (sub1.find(c) != std::string::npos) {
+                if (std::find(contract_labels.begin(), contract_labels.end(), c) == contract_labels.end()) {
+                    if (out.find(c) == std::string::npos) {
+                        contract_labels.push_back(c);
+                    }
+                }
+            }
+        }
+        for (char c : sub0) {
+            if (std::find(contract_labels.begin(), contract_labels.end(), c) == contract_labels.end()) {
+                if (std::find(free0_labels.begin(), free0_labels.end(), c) == free0_labels.end()) {
+                    free0_labels.push_back(c);
+                }
+            }
+        }
+        for (char c : sub1) {
+            if (std::find(contract_labels.begin(), contract_labels.end(), c) == contract_labels.end()) {
+                if (std::find(free1_labels.begin(), free1_labels.end(), c) == free1_labels.end()) {
+                    free1_labels.push_back(c);
+                }
+            }
+        }
+
+        // Permute tensor0: [free0..., contract...]
+        std::vector<int64_t> perm0;
+        int64_t free0_numel = 1, contract_numel = 1;
+        for (char c : free0_labels) {
+            perm0.push_back(label_to_dim0[c]);
+            free0_numel *= label_to_size[c];
+        }
+        for (char c : contract_labels) {
+            perm0.push_back(label_to_dim0[c]);
+            contract_numel *= label_to_size[c];
+        }
+
+        // Permute tensor1: [contract..., free1...]
+        std::vector<int64_t> perm1;
+        int64_t free1_numel = 1;
+        for (char c : contract_labels) {
+            perm1.push_back(label_to_dim1[c]);
+        }
+        for (char c : free1_labels) {
+            perm1.push_back(label_to_dim1[c]);
+            free1_numel *= label_to_size[c];
+        }
+
+        Tensor t0 = permute(tensors[0], perm0).contiguous().reshape({free0_numel, contract_numel});
+        Tensor t1 = permute(tensors[1], perm1).contiguous().reshape({contract_numel, free1_numel});
+
+        Tensor mm_result = mm(t0, t1);  // [free0_numel, free1_numel]
+
+        // Build result shape from free0 + free1 labels
+        std::vector<int64_t> result_shape;
+        std::string result_labels;
+        for (char c : free0_labels) {
+            result_shape.push_back(label_to_size[c]);
+            result_labels += c;
+        }
+        for (char c : free1_labels) {
+            result_shape.push_back(label_to_size[c]);
+            result_labels += c;
+        }
+
+        Tensor result = mm_result.reshape(result_shape);
+
+        // Permute to output order if different
+        if (result_labels != out && !out.empty()) {
+            std::vector<int64_t> final_perm;
+            for (char c : out) {
+                auto pos = result_labels.find(c);
+                PT_CHECK_MSG(pos != std::string::npos, "einsum: output label '", c, "' not found");
+                final_perm.push_back(static_cast<int64_t>(pos));
+            }
+            result = permute(result, final_perm);
+        }
+
+        return result;
+    }
+
+    PT_CHECK_MSG(false, "einsum: general case with ", tensors.size(), " operands not yet supported (use 1 or 2 operands)");
+    return Tensor();
+}
+
+// ============================================================================
+// LU Decomposition with partial pivoting
+// Returns L (lower triangular, unit diagonal), U (upper triangular), P (permutation)
+// ============================================================================
+
+struct LUResult {
+    Tensor L, U, P;
+};
+
+inline LUResult lu(const Tensor& self) {
+    PT_CHECK_MSG(self.dim() == 2, "lu requires 2D tensor");
+    PT_CHECK_MSG(self.size(0) == self.size(1), "lu requires square matrix");
+
+    Tensor A = self.contiguous().clone();
+    int64_t n = A.size(0);
+
+    // Initialize permutation as identity
+    std::vector<int64_t> perm(n);
+    std::iota(perm.begin(), perm.end(), 0);
+
+    PT_DISPATCH_FLOATING_TYPES(A.dtype(), "lu", [&] {
+        scalar_t* data = A.mutable_data_ptr<scalar_t>();
+
+        for (int64_t k = 0; k < n; ++k) {
+            // Find pivot
+            int64_t max_row = k;
+            scalar_t max_val = std::abs(data[k * n + k]);
+            for (int64_t i = k + 1; i < n; ++i) {
+                scalar_t val = std::abs(data[i * n + k]);
+                if (val > max_val) {
+                    max_val = val;
+                    max_row = i;
+                }
+            }
+
+            // Swap rows
+            if (max_row != k) {
+                std::swap(perm[k], perm[max_row]);
+                for (int64_t j = 0; j < n; ++j) {
+                    std::swap(data[k * n + j], data[max_row * n + j]);
+                }
+            }
+
+            // Check for singularity
+            if (std::abs(data[k * n + k]) < 1e-12) continue;
+
+            // Eliminate below
+            for (int64_t i = k + 1; i < n; ++i) {
+                data[i * n + k] /= data[k * n + k];
+                for (int64_t j = k + 1; j < n; ++j) {
+                    data[i * n + j] -= data[i * n + k] * data[k * n + j];
+                }
+            }
+        }
+    });
+
+    // Extract L, U, P
+    Tensor L = eye(n, n, TensorOptions().dtype(self.dtype()));
+    Tensor U = zeros({n, n}, TensorOptions().dtype(self.dtype()));
+    Tensor P = zeros({n, n}, TensorOptions().dtype(self.dtype()));
+
+    PT_DISPATCH_FLOATING_TYPES(self.dtype(), "lu_extract", [&] {
+        const scalar_t* data = A.data_ptr<scalar_t>();
+        scalar_t* L_data = L.mutable_data_ptr<scalar_t>();
+        scalar_t* U_data = U.mutable_data_ptr<scalar_t>();
+        scalar_t* P_data = P.mutable_data_ptr<scalar_t>();
+
+        for (int64_t i = 0; i < n; ++i) {
+            P_data[i * n + perm[i]] = static_cast<scalar_t>(1);
+            for (int64_t j = 0; j < n; ++j) {
+                if (j < i) {
+                    L_data[i * n + j] = data[i * n + j];
+                } else {
+                    U_data[i * n + j] = data[i * n + j];
+                }
+            }
+        }
+    });
+
+    return {L, U, P};
+}
+
+// ============================================================================
+// Matrix Inverse via LU decomposition
+// A^{-1} = solve(A, I)
+// ============================================================================
+
+inline Tensor inverse(const Tensor& self) {
+    PT_CHECK_MSG(self.dim() == 2, "inverse requires 2D tensor");
+    PT_CHECK_MSG(self.size(0) == self.size(1), "inverse requires square matrix");
+
+    int64_t n = self.size(0);
+    auto [L, U, P] = lu(self);
+
+    Tensor result = zeros({n, n}, TensorOptions().dtype(self.dtype()));
+
+    PT_DISPATCH_FLOATING_TYPES(self.dtype(), "inverse", [&] {
+        const scalar_t* L_data = L.data_ptr<scalar_t>();
+        const scalar_t* U_data = U.data_ptr<scalar_t>();
+        const scalar_t* P_data = P.data_ptr<scalar_t>();
+        scalar_t* res_data = result.mutable_data_ptr<scalar_t>();
+
+        // Solve AX = I column by column
+        // PA = LU, so AX = I => LU X = P I = P
+        for (int64_t col = 0; col < n; ++col) {
+            // b = P * e_col
+            std::vector<scalar_t> b(n, 0);
+            for (int64_t i = 0; i < n; ++i) {
+                for (int64_t j = 0; j < n; ++j) {
+                    if (j == col) b[i] += P_data[i * n + j];
+                }
+            }
+
+            // Forward substitution: Ly = b
+            std::vector<scalar_t> y(n);
+            for (int64_t i = 0; i < n; ++i) {
+                scalar_t sum = b[i];
+                for (int64_t j = 0; j < i; ++j) {
+                    sum -= L_data[i * n + j] * y[j];
+                }
+                y[i] = sum; // L has unit diagonal
+            }
+
+            // Backward substitution: Ux = y
+            std::vector<scalar_t> x(n);
+            for (int64_t i = n - 1; i >= 0; --i) {
+                scalar_t sum = y[i];
+                for (int64_t j = i + 1; j < n; ++j) {
+                    sum -= U_data[i * n + j] * x[j];
+                }
+                x[i] = sum / U_data[i * n + i];
+            }
+
+            for (int64_t i = 0; i < n; ++i) {
+                res_data[i * n + col] = x[i];
+            }
+        }
+    });
+
+    return result;
+}
+
+// ============================================================================
+// Solve: solve(A, b) -> x such that Ax = b
+// ============================================================================
+
+inline Tensor solve(const Tensor& A, const Tensor& b) {
+    PT_CHECK_MSG(A.dim() == 2, "solve requires 2D matrix A");
+    PT_CHECK_MSG(A.size(0) == A.size(1), "solve requires square matrix A");
+
+    int64_t n = A.size(0);
+    bool is_vector = (b.dim() == 1);
+
+    Tensor B = is_vector ? b.unsqueeze(1) : b;
+    PT_CHECK_MSG(B.size(0) == n, "solve: dimensions mismatch");
+
+    int64_t nrhs = B.size(1);
+    auto [L, U, P] = lu(A);
+
+    Tensor result = zeros({n, nrhs}, TensorOptions().dtype(A.dtype()));
+
+    PT_DISPATCH_FLOATING_TYPES(A.dtype(), "solve", [&] {
+        const scalar_t* L_data = L.data_ptr<scalar_t>();
+        const scalar_t* U_data = U.data_ptr<scalar_t>();
+        const scalar_t* P_data = P.data_ptr<scalar_t>();
+        Tensor B_contig = B.contiguous();
+        const scalar_t* B_data = B_contig.data_ptr<scalar_t>();
+        scalar_t* res_data = result.mutable_data_ptr<scalar_t>();
+
+        for (int64_t col = 0; col < nrhs; ++col) {
+            // Pb
+            std::vector<scalar_t> pb(n, 0);
+            for (int64_t i = 0; i < n; ++i) {
+                for (int64_t j = 0; j < n; ++j) {
+                    pb[i] += P_data[i * n + j] * B_data[j * nrhs + col];
+                }
+            }
+
+            // Forward substitution: Ly = Pb
+            std::vector<scalar_t> y(n);
+            for (int64_t i = 0; i < n; ++i) {
+                scalar_t s = pb[i];
+                for (int64_t j = 0; j < i; ++j) s -= L_data[i * n + j] * y[j];
+                y[i] = s;
+            }
+
+            // Backward substitution: Ux = y
+            std::vector<scalar_t> x(n);
+            for (int64_t i = n - 1; i >= 0; --i) {
+                scalar_t s = y[i];
+                for (int64_t j = i + 1; j < n; ++j) s -= U_data[i * n + j] * x[j];
+                x[i] = s / U_data[i * n + i];
+            }
+
+            for (int64_t i = 0; i < n; ++i) {
+                res_data[i * nrhs + col] = x[i];
+            }
+        }
+    });
+
+    return is_vector ? result.squeeze(1) : result;
+}
+
+// ============================================================================
+// Determinant via LU decomposition
+// det(A) = sign(P) * prod(diag(U))
+// ============================================================================
+
+inline Tensor det(const Tensor& self) {
+    PT_CHECK_MSG(self.dim() == 2, "det requires 2D tensor");
+    PT_CHECK_MSG(self.size(0) == self.size(1), "det requires square matrix");
+
+    auto [L, U, P] = lu(self);
+    int64_t n = self.size(0);
+
+    Tensor result = zeros({}, TensorOptions().dtype(self.dtype()));
+
+    PT_DISPATCH_FLOATING_TYPES(self.dtype(), "det", [&] {
+        const scalar_t* U_data = U.data_ptr<scalar_t>();
+        const scalar_t* P_data = P.data_ptr<scalar_t>();
+
+        // Product of diagonal of U
+        scalar_t prod = 1;
+        for (int64_t i = 0; i < n; ++i) {
+            prod *= U_data[i * n + i];
+        }
+
+        // Sign of permutation: count swaps
+        // Extract permutation vector from P matrix
+        std::vector<int64_t> perm(n);
+        for (int64_t i = 0; i < n; ++i) {
+            for (int64_t j = 0; j < n; ++j) {
+                if (static_cast<double>(P_data[i * n + j]) > 0.5) {
+                    perm[i] = j;
+                    break;
+                }
+            }
+        }
+
+        // Count inversions (number of swaps)
+        int swaps = 0;
+        std::vector<bool> visited(n, false);
+        for (int64_t i = 0; i < n; ++i) {
+            if (!visited[i]) {
+                int64_t j = i;
+                int cycle_len = 0;
+                while (!visited[j]) {
+                    visited[j] = true;
+                    j = perm[j];
+                    cycle_len++;
+                }
+                swaps += cycle_len - 1;
+            }
+        }
+
+        scalar_t sign = (swaps % 2 == 0) ? 1 : -1;
+        result.mutable_data_ptr<scalar_t>()[0] = sign * prod;
+    });
+
+    return result;
+}
+
+// ============================================================================
+// Cholesky decomposition: A = L @ L^T (for symmetric positive-definite matrices)
+// ============================================================================
+
+inline Tensor cholesky(const Tensor& self, bool upper = false) {
+    PT_CHECK_MSG(self.dim() == 2, "cholesky requires 2D tensor");
+    PT_CHECK_MSG(self.size(0) == self.size(1), "cholesky requires square matrix");
+
+    int64_t n = self.size(0);
+    Tensor L = zeros({n, n}, TensorOptions().dtype(self.dtype()));
+    Tensor A = self.contiguous();
+
+    PT_DISPATCH_FLOATING_TYPES(self.dtype(), "cholesky", [&] {
+        const scalar_t* A_data = A.data_ptr<scalar_t>();
+        scalar_t* L_data = L.mutable_data_ptr<scalar_t>();
+
+        for (int64_t i = 0; i < n; ++i) {
+            for (int64_t j = 0; j <= i; ++j) {
+                scalar_t sum = 0;
+                for (int64_t k = 0; k < j; ++k) {
+                    sum += L_data[i * n + k] * L_data[j * n + k];
+                }
+
+                if (i == j) {
+                    scalar_t val = A_data[i * n + i] - sum;
+                    PT_CHECK_MSG(val > 0, "cholesky: matrix is not positive definite");
+                    L_data[i * n + j] = std::sqrt(val);
+                } else {
+                    L_data[i * n + j] = (A_data[i * n + j] - sum) / L_data[j * n + j];
+                }
+            }
+        }
+    });
+
+    return upper ? t(L) : L;
+}
+
+// ============================================================================
+// QR decomposition via Householder reflections
+// A = Q @ R
+// ============================================================================
+
+struct QRResult {
+    Tensor Q, R;
+};
+
+inline QRResult qr(const Tensor& self) {
+    PT_CHECK_MSG(self.dim() == 2, "qr requires 2D tensor");
+
+    int64_t m = self.size(0);
+    int64_t n = self.size(1);
+    int64_t k = std::min(m, n);
+
+    Tensor R = self.contiguous().clone();
+    Tensor Q = eye(m, m, TensorOptions().dtype(self.dtype()));
+
+    PT_DISPATCH_FLOATING_TYPES(self.dtype(), "qr", [&] {
+        scalar_t* R_data = R.mutable_data_ptr<scalar_t>();
+        scalar_t* Q_data = Q.mutable_data_ptr<scalar_t>();
+
+        for (int64_t j = 0; j < k; ++j) {
+            // Compute Householder vector
+            std::vector<scalar_t> v(m - j);
+            scalar_t norm = 0;
+            for (int64_t i = j; i < m; ++i) {
+                v[i - j] = R_data[i * n + j];
+                norm += v[i - j] * v[i - j];
+            }
+            norm = std::sqrt(norm);
+
+            if (norm < 1e-15) continue;
+
+            scalar_t sign = (v[0] >= 0) ? 1 : -1;
+            v[0] += sign * norm;
+
+            // Normalize v
+            scalar_t v_norm = 0;
+            for (auto& vi : v) v_norm += vi * vi;
+            if (v_norm < 1e-30) continue;
+
+            // Apply H = I - 2*v*v^T/||v||^2 to R
+            for (int64_t col = j; col < n; ++col) {
+                scalar_t dot_val = 0;
+                for (int64_t i = 0; i < static_cast<int64_t>(v.size()); ++i) {
+                    dot_val += v[i] * R_data[(j + i) * n + col];
+                }
+                scalar_t factor = 2 * dot_val / v_norm;
+                for (int64_t i = 0; i < static_cast<int64_t>(v.size()); ++i) {
+                    R_data[(j + i) * n + col] -= factor * v[i];
+                }
+            }
+
+            // Apply H to Q (Q = Q @ H)
+            for (int64_t row = 0; row < m; ++row) {
+                scalar_t dot_val = 0;
+                for (int64_t i = 0; i < static_cast<int64_t>(v.size()); ++i) {
+                    dot_val += Q_data[row * m + (j + i)] * v[i];
+                }
+                scalar_t factor = 2 * dot_val / v_norm;
+                for (int64_t i = 0; i < static_cast<int64_t>(v.size()); ++i) {
+                    Q_data[row * m + (j + i)] -= factor * v[i];
+                }
+            }
+        }
+    });
+
+    // Trim R to [m, n] (already correct shape) and Q to [m, m]
+    return {Q, R};
+}
+
+// ============================================================================
+// Trace: sum of diagonal elements
+// ============================================================================
+
+inline Tensor trace(const Tensor& self) {
+    PT_CHECK_MSG(self.dim() == 2, "trace requires 2D tensor");
+
+    int64_t n = std::min(self.size(0), self.size(1));
+    Tensor A = self.contiguous();
+    Tensor result = zeros({}, TensorOptions().dtype(self.dtype()));
+
+    PT_DISPATCH_FLOATING_TYPES(self.dtype(), "trace", [&] {
+        const scalar_t* data = A.data_ptr<scalar_t>();
+        int64_t cols = A.size(1);
+        scalar_t sum = 0;
+        for (int64_t i = 0; i < n; ++i) {
+            sum += data[i * cols + i];
+        }
+        result.mutable_data_ptr<scalar_t>()[0] = sum;
+    });
+
+    return result;
+}
+
+// ============================================================================
+// Cross product (3D vectors)
+// ============================================================================
+
+inline Tensor cross(const Tensor& self, const Tensor& other, int64_t dim = -1) {
+    PT_CHECK_MSG(self.sizes() == other.sizes(), "cross: tensors must have same shape");
+
+    if (dim < 0) dim += self.dim();
+    PT_CHECK_MSG(self.size(dim) == 3, "cross: dimension must have size 3");
+
+    Tensor a = self.contiguous();
+    Tensor b = other.contiguous();
+
+    // Use select along dim to get components
+    Tensor a0 = a.select(dim, 0);
+    Tensor a1 = a.select(dim, 1);
+    Tensor a2 = a.select(dim, 2);
+    Tensor b0 = b.select(dim, 0);
+    Tensor b1 = b.select(dim, 1);
+    Tensor b2 = b.select(dim, 2);
+
+    Tensor c0 = a1.mul(b2).sub(a2.mul(b1));
+    Tensor c1 = a2.mul(b0).sub(a0.mul(b2));
+    Tensor c2 = a0.mul(b1).sub(a1.mul(b0));
+
+    return at::native::stack({c0, c1, c2}, dim);
+}
+
+// ============================================================================
+// Matrix Norm
+// ============================================================================
+
+inline Tensor matrix_norm(const Tensor& self, double ord = 2.0) {
+    PT_CHECK_MSG(self.dim() == 2, "matrix_norm requires 2D tensor");
+
+    if (ord == 1.0) {
+        // Max absolute column sum
+        return at::native::sum(at::native::abs(self), 0).max();
+    } else if (ord == -1.0) {
+        // Min absolute column sum
+        return at::native::sum(at::native::abs(self), 0).min();
+    } else if (std::isinf(ord) && ord > 0) {
+        // Max absolute row sum
+        return at::native::sum(at::native::abs(self), 1).max();
+    } else if (std::isinf(ord) && ord < 0) {
+        // Min absolute row sum
+        return at::native::sum(at::native::abs(self), 1).min();
+    } else {
+        // Frobenius norm (default for ord=2 approximation)
+        return at::native::sqrt(at::native::sum(at::native::mul(self, self)));
+    }
 }
 
 } // namespace native

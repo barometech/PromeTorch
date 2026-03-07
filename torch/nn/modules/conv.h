@@ -573,8 +573,9 @@ public:
     }
 
     Tensor forward(const Tensor& input) override {
-        // Transposed convolution
+        // Transposed convolution (deconvolution)
         int64_t batch_size = input.size(0);
+        int64_t in_channels = input.size(1);
         int64_t in_height = input.size(2);
         int64_t in_width = input.size(3);
 
@@ -584,10 +585,66 @@ public:
         int64_t out_width = (in_width - 1) * stride_[1] - 2 * padding_[1] +
                            dilation_[1] * (kernel_size_[1] - 1) + output_padding_[1] + 1;
 
-        Tensor output = at::zeros({batch_size, out_channels_, out_height, out_width});
+        auto* weight_param = get_parameter("weight");
+        PT_CHECK_MSG(weight_param && weight_param->defined(), "ConvTranspose2d: weight not initialized");
+        Tensor weight = weight_param->data().contiguous();
 
-        // Implementation: scatter input to output positions
-        // (Simplified - full implementation would be more complex)
+        int64_t out_channels_per_group = out_channels_ / groups_;
+        int64_t in_channels_per_group = in_channels_ / groups_;
+
+        Tensor output = at::zeros({batch_size, out_channels_, out_height, out_width});
+        Tensor inp = input.contiguous();
+
+        const float* in_data = inp.data_ptr<float>();
+        const float* w_data = weight.data_ptr<float>();
+        float* out_data = output.mutable_data_ptr<float>();
+
+        int64_t kH = kernel_size_[0];
+        int64_t kW = kernel_size_[1];
+
+        for (int64_t n = 0; n < batch_size; ++n) {
+            for (int64_t g = 0; g < groups_; ++g) {
+                for (int64_t ic = 0; ic < in_channels_per_group; ++ic) {
+                    int64_t c_in = g * in_channels_per_group + ic;
+                    for (int64_t oc = 0; oc < out_channels_per_group; ++oc) {
+                        int64_t c_out = g * out_channels_per_group + oc;
+                        for (int64_t ih = 0; ih < in_height; ++ih) {
+                            for (int64_t iw = 0; iw < in_width; ++iw) {
+                                float val = in_data[((n * in_channels + c_in) * in_height + ih) * in_width + iw];
+                                for (int64_t kh = 0; kh < kH; ++kh) {
+                                    for (int64_t kw = 0; kw < kW; ++kw) {
+                                        int64_t oh = ih * stride_[0] - padding_[0] + kh * dilation_[0];
+                                        int64_t ow = iw * stride_[1] - padding_[1] + kw * dilation_[1];
+                                        if (oh >= 0 && oh < out_height && ow >= 0 && ow < out_width) {
+                                            // weight layout: [in_channels, out_channels/groups, kH, kW]
+                                            int64_t w_idx = ((c_in * out_channels_per_group + oc) * kH + kh) * kW + kw;
+                                            out_data[((n * out_channels_ + c_out) * out_height + oh) * out_width + ow] += val * w_data[w_idx];
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Add bias
+        if (has_bias_) {
+            auto* bias_param = get_parameter("bias");
+            if (bias_param && bias_param->defined()) {
+                const float* b_data = bias_param->data().data_ptr<float>();
+                for (int64_t n = 0; n < batch_size; ++n) {
+                    for (int64_t c = 0; c < out_channels_; ++c) {
+                        for (int64_t h = 0; h < out_height; ++h) {
+                            for (int64_t w = 0; w < out_width; ++w) {
+                                out_data[((n * out_channels_ + c) * out_height + h) * out_width + w] += b_data[c];
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         return output;
     }

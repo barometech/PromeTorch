@@ -363,6 +363,98 @@ inline Tensor mean_autograd(const Tensor& self, int64_t dim, bool keepdim = fals
 }
 
 // ============================================================================
+// New Operations with Autograd
+// ============================================================================
+
+inline Tensor clamp_autograd(const Tensor& self, Scalar min_val, Scalar max_val) {
+    Tensor result = self.clamp(min_val, max_val);
+    if (compute_requires_grad(self)) {
+        auto grad_fn = std::make_shared<ClampBackward>(self, min_val.toDouble(), max_val.toDouble());
+        grad_fn->add_input_metadata(self);
+        set_grad_fn(result, grad_fn);
+        result.set_requires_grad(true);
+    }
+    return result;
+}
+
+inline Tensor triu_autograd(const Tensor& self, int64_t diagonal = 0) {
+    Tensor result = at::native::triu(self, diagonal);
+    if (compute_requires_grad(self)) {
+        auto grad_fn = std::make_shared<TriuBackward>(diagonal);
+        grad_fn->add_input_metadata(self);
+        set_grad_fn(result, grad_fn);
+        result.set_requires_grad(true);
+    }
+    return result;
+}
+
+inline Tensor tril_autograd(const Tensor& self, int64_t diagonal = 0) {
+    Tensor result = at::native::tril(self, diagonal);
+    if (compute_requires_grad(self)) {
+        auto grad_fn = std::make_shared<TrilBackward>(diagonal);
+        grad_fn->add_input_metadata(self);
+        set_grad_fn(result, grad_fn);
+        result.set_requires_grad(true);
+    }
+    return result;
+}
+
+inline Tensor diag_autograd(const Tensor& self, int64_t diagonal = 0) {
+    Tensor result = at::native::diag(self, diagonal);
+    if (compute_requires_grad(self)) {
+        auto grad_fn = std::make_shared<DiagBackward>(diagonal, self.sizes(), self.dim());
+        grad_fn->add_input_metadata(self);
+        set_grad_fn(result, grad_fn);
+        result.set_requires_grad(true);
+    }
+    return result;
+}
+
+inline Tensor cumsum_autograd(const Tensor& self, int64_t dim) {
+    Tensor result = at::native::cumsum(self, dim);
+    if (compute_requires_grad(self)) {
+        auto grad_fn = std::make_shared<CumsumBackward>(dim, self.sizes());
+        grad_fn->add_input_metadata(self);
+        set_grad_fn(result, grad_fn);
+        result.set_requires_grad(true);
+    }
+    return result;
+}
+
+inline Tensor cumprod_autograd(const Tensor& self, int64_t dim) {
+    Tensor result = at::native::cumprod(self, dim);
+    if (compute_requires_grad(self)) {
+        auto grad_fn = std::make_shared<CumprodBackward>(dim, self, result);
+        grad_fn->add_input_metadata(self);
+        set_grad_fn(result, grad_fn);
+        result.set_requires_grad(true);
+    }
+    return result;
+}
+
+inline std::tuple<Tensor, Tensor> sort_autograd(const Tensor& self, int64_t dim = -1, bool descending = false) {
+    auto [values, indices] = at::native::sort(self, dim, descending);
+    if (compute_requires_grad(self)) {
+        auto grad_fn = std::make_shared<SortBackward>(indices, dim, self.sizes());
+        grad_fn->add_input_metadata(self);
+        set_grad_fn(values, grad_fn);
+        values.set_requires_grad(true);
+    }
+    return std::make_tuple(values, indices);
+}
+
+inline std::tuple<Tensor, Tensor> topk_autograd(const Tensor& self, int64_t k, int64_t dim = -1, bool largest = true, bool sorted = true) {
+    auto [values, indices] = at::native::topk(self, k, dim, largest, sorted);
+    if (compute_requires_grad(self)) {
+        auto grad_fn = std::make_shared<TopkBackward>(indices, dim, self.sizes());
+        grad_fn->add_input_metadata(self);
+        set_grad_fn(values, grad_fn);
+        values.set_requires_grad(true);
+    }
+    return std::make_tuple(values, indices);
+}
+
+// ============================================================================
 // Linear Algebra Operations with Autograd
 // ============================================================================
 
@@ -416,6 +508,29 @@ inline Tensor dot_autograd(const Tensor& self, const Tensor& other) {
     // dot: no CUDA dispatch yet, fallback to CPU
     Tensor result = at::native::dot(self, other);
     return make_result_with_grad2<DotBackward>(result, self, other, self, other);
+}
+
+inline Tensor einsum_autograd(const std::string& equation, const std::vector<Tensor>& tensors) {
+    Tensor result = at::native::einsum(equation, tensors);
+
+    bool any_requires_grad = false;
+    for (const auto& t : tensors) {
+        if (compute_requires_grad(t)) {
+            any_requires_grad = true;
+            break;
+        }
+    }
+
+    if (any_requires_grad) {
+        auto grad_fn = std::make_shared<EinsumBackward>(equation, tensors);
+        for (const auto& t : tensors) {
+            grad_fn->add_input_metadata(t);
+        }
+        set_grad_fn(result, grad_fn);
+        result.set_requires_grad(true);
+    }
+
+    return result;
 }
 
 // ============================================================================
@@ -602,6 +717,91 @@ inline void clear_gradient_graph(Tensor& grad) {
 
 // Note: clear_param_gradients moved to nn.h to avoid circular dependency
 // Use torch::nn::clear_param_gradients() instead
+
+// ============================================================================
+// Linalg Operations with Autograd
+// ============================================================================
+
+inline Tensor inverse_autograd(const Tensor& self) {
+    Tensor result = at::native::inverse(self);
+    if (compute_requires_grad(self)) {
+        auto grad_fn = std::make_shared<InverseBackward>(result);
+        grad_fn->add_input_metadata(self);
+        set_grad_fn(result, grad_fn);
+        result.set_requires_grad(true);
+    }
+    return result;
+}
+
+inline Tensor det_autograd(const Tensor& self) {
+    Tensor result = at::native::det(self);
+    if (compute_requires_grad(self)) {
+        auto grad_fn = std::make_shared<DetBackward>(self, result);
+        grad_fn->add_input_metadata(self);
+        set_grad_fn(result, grad_fn);
+        result.set_requires_grad(true);
+    }
+    return result;
+}
+
+inline Tensor cholesky_autograd(const Tensor& self, bool upper = false) {
+    Tensor result = at::native::cholesky(self, upper);
+    if (compute_requires_grad(self)) {
+        auto grad_fn = std::make_shared<CholeskyBackward>(result);
+        grad_fn->add_input_metadata(self);
+        set_grad_fn(result, grad_fn);
+        result.set_requires_grad(true);
+    }
+    return result;
+}
+
+inline Tensor trace_autograd(const Tensor& self) {
+    Tensor result = at::native::trace(self);
+    if (compute_requires_grad(self)) {
+        auto grad_fn = std::make_shared<TraceBackward>(self.size(0), self.size(1));
+        grad_fn->add_input_metadata(self);
+        set_grad_fn(result, grad_fn);
+        result.set_requires_grad(true);
+    }
+    return result;
+}
+
+// ============================================================================
+// Flip/Roll/RepeatInterleave with Autograd
+// ============================================================================
+
+inline Tensor flip_autograd(const Tensor& self, c10::IntArrayRef dims) {
+    Tensor result = at::native::flip(self, dims);
+    if (compute_requires_grad(self)) {
+        auto grad_fn = std::make_shared<FlipBackward>(dims);
+        grad_fn->add_input_metadata(self);
+        set_grad_fn(result, grad_fn);
+        result.set_requires_grad(true);
+    }
+    return result;
+}
+
+inline Tensor roll_autograd(const Tensor& self, c10::IntArrayRef shifts, c10::IntArrayRef dims) {
+    Tensor result = at::native::roll(self, shifts, dims);
+    if (compute_requires_grad(self)) {
+        auto grad_fn = std::make_shared<RollBackward>(shifts, dims);
+        grad_fn->add_input_metadata(self);
+        set_grad_fn(result, grad_fn);
+        result.set_requires_grad(true);
+    }
+    return result;
+}
+
+inline Tensor repeat_interleave_autograd(const Tensor& self, int64_t repeats, int64_t dim = 0) {
+    Tensor result = at::native::repeat_interleave(self, repeats, dim);
+    if (compute_requires_grad(self)) {
+        auto grad_fn = std::make_shared<RepeatInterleaveBackward>(repeats, dim, self.sizes());
+        grad_fn->add_input_metadata(self);
+        set_grad_fn(result, grad_fn);
+        result.set_requires_grad(true);
+    }
+    return result;
+}
 
 } // namespace autograd
 } // namespace torch

@@ -19,6 +19,7 @@
 #include "aten/src/ATen/native/cpu/LinearAlgebra.h"
 #include "aten/src/ATen/native/cpu/ShapeOps.h"
 #include "aten/src/ATen/native/cpu/IndexOps.h"
+#include "aten/src/ATen/native/cpu/FFTOps.h"
 
 namespace at {
 
@@ -283,6 +284,14 @@ inline Tensor Tensor::floor() const { return native::floor(*this); }
 inline Tensor Tensor::round() const { return native::round(*this); }
 inline Tensor Tensor::sign() const { return native::sign(*this); }
 inline Tensor Tensor::reciprocal() const { return native::reciprocal(*this); }
+inline Tensor Tensor::clamp(Scalar min_val, Scalar max_val) const { return native::clamp(*this, min_val, max_val); }
+inline Tensor Tensor::clamp(std::optional<Scalar> min, std::optional<Scalar> max) const { return native::clamp(*this, min, max); }
+inline Tensor& Tensor::clamp_(Scalar min_val, Scalar max_val) { return native::clamp_(*this, min_val, max_val); }
+inline Tensor Tensor::clamp_min(Scalar min_val) const { return native::clamp_min(*this, min_val); }
+inline Tensor Tensor::clamp_max(Scalar max_val) const { return native::clamp_max(*this, max_val); }
+inline Tensor Tensor::triu(int64_t diagonal) const { return native::triu(*this, diagonal); }
+inline Tensor Tensor::tril(int64_t diagonal) const { return native::tril(*this, diagonal); }
+inline Tensor Tensor::diag(int64_t diagonal) const { return native::diag(*this, diagonal); }
 
 // In-place unary
 inline Tensor& Tensor::neg_() { return native::neg_(*this); }
@@ -576,6 +585,11 @@ inline Tensor Tensor::std(bool unbiased) const { return native::std(*this, unbia
 inline Tensor Tensor::norm(Scalar p) const { return native::norm(*this, p); }
 inline bool Tensor::all() const { return native::all(*this); }
 inline bool Tensor::any() const { return native::any(*this); }
+inline std::tuple<Tensor, Tensor> Tensor::sort(int64_t dim, bool descending) const { return native::sort(*this, dim, descending); }
+inline Tensor Tensor::argsort(int64_t dim, bool descending) const { return native::argsort(*this, dim, descending); }
+inline std::tuple<Tensor, Tensor> Tensor::topk(int64_t k, int64_t dim, bool largest, bool sorted) const { return native::topk(*this, k, dim, largest, sorted); }
+inline Tensor Tensor::cumsum(int64_t dim) const { return native::cumsum(*this, dim); }
+inline Tensor Tensor::cumprod(int64_t dim) const { return native::cumprod(*this, dim); }
 
 // Linear algebra
 inline Tensor Tensor::matmul(const Tensor& other) const {
@@ -872,6 +886,85 @@ inline Tensor where(const Tensor& condition, const Tensor& x, const Tensor& y) {
 }
 inline Tensor nonzero(const Tensor& t) {
     return at::native::nonzero(t);
+}
+
+// Sort, argsort, topk, cumsum, cumprod
+inline std::tuple<Tensor, Tensor> sort(const Tensor& t, int64_t dim = -1, bool descending = false) {
+    return at::native::sort(t, dim, descending);
+}
+inline Tensor argsort(const Tensor& t, int64_t dim = -1, bool descending = false) {
+    return at::native::argsort(t, dim, descending);
+}
+inline std::tuple<Tensor, Tensor> topk(const Tensor& t, int64_t k, int64_t dim = -1, bool largest = true, bool sorted = true) {
+    return at::native::topk(t, k, dim, largest, sorted);
+}
+inline Tensor cumsum(const Tensor& t, int64_t dim) {
+    return at::native::cumsum(t, dim);
+}
+inline Tensor cumprod(const Tensor& t, int64_t dim) {
+    return at::native::cumprod(t, dim);
+}
+
+// Clamp, triu, tril, diag
+inline Tensor clamp(const Tensor& t, Scalar min_val, Scalar max_val) {
+    return at::native::clamp(t, min_val, max_val);
+}
+inline Tensor triu(const Tensor& t, int64_t diagonal = 0) {
+    return at::native::triu(t, diagonal);
+}
+inline Tensor tril(const Tensor& t, int64_t diagonal = 0) {
+    return at::native::tril(t, diagonal);
+}
+inline Tensor diag(const Tensor& t, int64_t diagonal = 0) {
+    return at::native::diag(t, diagonal);
+}
+
+// Einsum
+inline Tensor einsum(const std::string& equation, const std::vector<Tensor>& tensors) {
+    return at::native::einsum(equation, tensors);
+}
+
+// Linalg functions
+inline Tensor inverse(const Tensor& t) { return at::native::inverse(t); }
+inline Tensor det(const Tensor& t) { return at::native::det(t); }
+inline Tensor trace(const Tensor& t) { return at::native::trace(t); }
+inline Tensor cholesky(const Tensor& t, bool upper = false) { return at::native::cholesky(t, upper); }
+inline Tensor solve(const Tensor& A, const Tensor& b) { return at::native::solve(A, b); }
+inline Tensor cross(const Tensor& a, const Tensor& b, int64_t dim = -1) { return at::native::cross(a, b, dim); }
+inline Tensor matrix_norm(const Tensor& t, double ord = 2.0) { return at::native::matrix_norm(t, ord); }
+
+namespace linalg {
+    inline at::native::LUResult lu(const Tensor& t) { return at::native::lu(t); }
+    inline Tensor inv(const Tensor& t) { return at::native::inverse(t); }
+    inline Tensor solve(const Tensor& A, const Tensor& b) { return at::native::solve(A, b); }
+    inline Tensor det(const Tensor& t) { return at::native::det(t); }
+    inline Tensor cholesky(const Tensor& t, bool upper = false) { return at::native::cholesky(t, upper); }
+    inline at::native::QRResult qr(const Tensor& t) { return at::native::qr(t); }
+    inline Tensor matrix_norm(const Tensor& t, double ord = 2.0) { return at::native::matrix_norm(t, ord); }
+    inline Tensor cross(const Tensor& a, const Tensor& b, int64_t dim = -1) { return at::native::cross(a, b, dim); }
+}
+
+// New tensor ops
+inline Tensor flip(const Tensor& t, c10::IntArrayRef dims) { return at::native::flip(t, dims); }
+inline Tensor roll(const Tensor& t, c10::IntArrayRef shifts, c10::IntArrayRef dims) { return at::native::roll(t, shifts, dims); }
+inline std::vector<Tensor> meshgrid(const std::vector<Tensor>& tensors, const std::string& indexing = "ij") { return at::native::meshgrid(tensors, indexing); }
+inline Tensor repeat_interleave(const Tensor& t, int64_t repeats, int64_t dim = 0) { return at::native::repeat_interleave(t, repeats, dim); }
+inline std::tuple<Tensor, Tensor, Tensor> unique(const Tensor& t, bool sorted = true, bool return_inverse = false, bool return_counts = false) { return at::native::unique(t, sorted, return_inverse, return_counts); }
+inline Tensor tril_indices(int64_t row, int64_t col, int64_t offset = 0) { return at::native::tril_indices(row, col, offset); }
+inline Tensor triu_indices(int64_t row, int64_t col, int64_t offset = 0) { return at::native::triu_indices(row, col, offset); }
+
+// FFT namespace
+namespace fft {
+    inline Tensor fft(const Tensor& t, int64_t n = -1, int64_t dim = -1) { return at::native::fft(t, n, dim); }
+    inline Tensor ifft(const Tensor& t, int64_t n = -1, int64_t dim = -1) { return at::native::ifft(t, n, dim); }
+    inline Tensor rfft(const Tensor& t, int64_t n = -1, int64_t dim = -1) { return at::native::rfft(t, n, dim); }
+    inline Tensor irfft(const Tensor& t, int64_t n = -1, int64_t dim = -1) { return at::native::irfft(t, n, dim); }
+    inline Tensor fft2(const Tensor& t) { return at::native::fft2(t); }
+    inline Tensor ifft2(const Tensor& t) { return at::native::ifft2(t); }
+    inline Tensor fftfreq(int64_t n, double d = 1.0) { return at::native::fftfreq(n, d); }
+    inline Tensor rfftfreq(int64_t n, double d = 1.0) { return at::native::rfftfreq(n, d); }
+    inline Tensor fftshift(const Tensor& t, c10::IntArrayRef dims = {}) { return at::native::fftshift(t, dims); }
+    inline Tensor ifftshift(const Tensor& t, c10::IntArrayRef dims = {}) { return at::native::ifftshift(t, dims); }
 }
 
 } // namespace torch

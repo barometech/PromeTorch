@@ -68,6 +68,23 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/train_10_models.cpp")
     endif()
 endif()
 
+# Phase 2 Feature Tests
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test_phase2.cpp")
+    add_executable(test_phase2 test_phase2.cpp)
+    target_include_directories(test_phase2 PRIVATE
+        ${PROJECT_SOURCE_DIR}
+        ${PROJECT_SOURCE_DIR}/aten/src
+    )
+    target_link_libraries(test_phase2 PRIVATE c10 aten torch_autograd torch_nn torch_optim torch_data)
+    if(PT_USE_CUDA)
+        target_link_libraries(test_phase2 PRIVATE aten_cuda ${CUDA_LIBRARIES})
+        target_compile_definitions(test_phase2 PRIVATE PT_USE_CUDA)
+    endif()
+    if(MSVC)
+        target_link_options(test_phase2 PRIVATE /STACK:10485760)
+    endif()
+endif()
+
 # CUDA Debug Test
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test_cuda_debug.cpp")
     add_executable(test_cuda_debug test_cuda_debug.cpp)

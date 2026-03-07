@@ -3,6 +3,9 @@
 #include "aten/src/ATen/core/Tensor.h"
 #include "aten/src/ATen/core/TensorFactory.h"
 #include <numeric>
+#include <algorithm>
+#include <array>
+#include <string>
 
 #ifdef PT_USE_CUDA
 #include "aten/src/ATen/cuda/CUDAOps.h"
@@ -827,6 +830,423 @@ inline Tensor stack(const std::vector<Tensor>& tensors, int64_t dim = 0) {
     }
 
     return cat(unsqueezed, dim);
+}
+
+// ============================================================================
+// Flip — reverse elements along given dimensions
+// ============================================================================
+
+inline Tensor flip(const Tensor& self, c10::IntArrayRef dims) {
+    Tensor input = self.contiguous();
+    Tensor result = empty(input.sizes(), TensorOptions().dtype(input.dtype()).device(input.device()));
+
+    int64_t ndim = input.dim();
+    int64_t total = input.numel();
+    auto sizes = input.sizes();
+    auto strides = input.strides();
+
+    // Build a set of dims to flip
+    std::vector<bool> flip_dim(ndim, false);
+    for (auto d : dims) {
+        int64_t dim = d < 0 ? d + ndim : d;
+        PT_CHECK(dim >= 0 && dim < ndim);
+        flip_dim[dim] = true;
+    }
+
+    PT_DISPATCH_ALL_TYPES(input.dtype(), "flip", [&] {
+        const scalar_t* src = input.data_ptr<scalar_t>();
+        scalar_t* dst = result.mutable_data_ptr<scalar_t>();
+
+        for (int64_t i = 0; i < total; ++i) {
+            // Convert flat index to multi-dim index
+            int64_t remaining = i;
+            int64_t src_offset = 0;
+
+            for (int64_t d = ndim - 1; d >= 0; --d) {
+                int64_t idx = remaining % sizes[d];
+                remaining /= sizes[d];
+
+                if (flip_dim[d]) {
+                    src_offset += (sizes[d] - 1 - idx) * strides[d];
+                } else {
+                    src_offset += idx * strides[d];
+                }
+            }
+
+            dst[i] = src[src_offset];
+        }
+    });
+
+    return result;
+}
+
+// ============================================================================
+// Roll — cyclically shift elements along given dimensions
+// ============================================================================
+
+inline Tensor roll(const Tensor& self, c10::IntArrayRef shifts, c10::IntArrayRef dims) {
+    PT_CHECK_MSG(shifts.size() == dims.size(),
+        "roll: shifts and dims must have the same size");
+
+    Tensor result = self.contiguous().clone();
+
+    for (size_t i = 0; i < shifts.size(); ++i) {
+        int64_t shift = shifts[i];
+        int64_t dim = dims[i] < 0 ? dims[i] + result.dim() : dims[i];
+        PT_CHECK(dim >= 0 && dim < result.dim());
+
+        int64_t dim_size = result.size(dim);
+        shift = ((shift % dim_size) + dim_size) % dim_size;  // normalize
+        if (shift == 0) continue;
+
+        Tensor tmp = result.clone();
+        int64_t total = result.numel();
+        auto sizes = result.sizes();
+
+        PT_DISPATCH_ALL_TYPES(result.dtype(), "roll", [&] {
+            const scalar_t* src = tmp.data_ptr<scalar_t>();
+            scalar_t* dst = result.mutable_data_ptr<scalar_t>();
+
+            for (int64_t idx = 0; idx < total; ++idx) {
+                // Convert flat index to multi-dim coords
+                int64_t remaining = idx;
+                std::vector<int64_t> coords(result.dim());
+                for (int64_t d = result.dim() - 1; d >= 0; --d) {
+                    coords[d] = remaining % sizes[d];
+                    remaining /= sizes[d];
+                }
+
+                // Compute source coord (shift backwards)
+                int64_t src_coord = ((coords[dim] - shift) % dim_size + dim_size) % dim_size;
+                coords[dim] = src_coord;
+
+                // Convert back to flat index
+                int64_t src_idx = 0;
+                int64_t stride = 1;
+                for (int64_t d = result.dim() - 1; d >= 0; --d) {
+                    src_idx += coords[d] * stride;
+                    stride *= sizes[d];
+                }
+
+                dst[idx] = src[src_idx];
+            }
+        });
+    }
+
+    return result;
+}
+
+// ============================================================================
+// Meshgrid — create coordinate grids
+// ============================================================================
+
+inline std::vector<Tensor> meshgrid(const std::vector<Tensor>& tensors, const std::string& indexing = "ij") {
+    PT_CHECK_MSG(!tensors.empty(), "meshgrid: empty tensor list");
+    for (const auto& t : tensors) {
+        PT_CHECK_MSG(t.dim() == 1, "meshgrid: all tensors must be 1D");
+    }
+
+    size_t N = tensors.size();
+    std::vector<int64_t> shape;
+
+    if (indexing == "xy" && N >= 2) {
+        shape.push_back(tensors[1].size(0));
+        shape.push_back(tensors[0].size(0));
+        for (size_t i = 2; i < N; ++i) shape.push_back(tensors[i].size(0));
+    } else {
+        for (const auto& t : tensors) shape.push_back(t.size(0));
+    }
+
+    std::vector<Tensor> result;
+
+    for (size_t i = 0; i < N; ++i) {
+        // Determine which dimension this tensor maps to
+        size_t dim;
+        if (indexing == "xy" && N >= 2) {
+            if (i == 0) dim = 1;
+            else if (i == 1) dim = 0;
+            else dim = i;
+        } else {
+            dim = i;
+        }
+
+        // Reshape to broadcast shape
+        std::vector<int64_t> view_shape(N, 1);
+        view_shape[dim] = tensors[i].size(0);
+
+        Tensor expanded = tensors[i].reshape(view_shape).expand(shape);
+        result.push_back(expanded.contiguous());
+    }
+
+    return result;
+}
+
+// ============================================================================
+// repeat_interleave — repeat each element
+// ============================================================================
+
+inline Tensor repeat_interleave(const Tensor& self, int64_t repeats, int64_t dim = 0) {
+    if (dim < 0) dim += self.dim();
+    PT_CHECK(dim >= 0 && dim < self.dim());
+
+    int64_t dim_size = self.size(dim);
+    int64_t new_dim_size = dim_size * repeats;
+
+    std::vector<int64_t> new_shape = self.sizes().vec();
+    new_shape[dim] = new_dim_size;
+
+    Tensor input = self.contiguous();
+    Tensor result = empty(new_shape, TensorOptions().dtype(input.dtype()).device(input.device()));
+
+    int64_t total = result.numel();
+    auto sizes = result.sizes();
+    auto in_sizes = input.sizes();
+
+    PT_DISPATCH_ALL_TYPES(input.dtype(), "repeat_interleave", [&] {
+        const scalar_t* src = input.data_ptr<scalar_t>();
+        scalar_t* dst = result.mutable_data_ptr<scalar_t>();
+
+        for (int64_t idx = 0; idx < total; ++idx) {
+            // Convert flat index to multi-dim coords
+            int64_t remaining = idx;
+            std::vector<int64_t> coords(self.dim());
+            for (int64_t d = self.dim() - 1; d >= 0; --d) {
+                coords[d] = remaining % sizes[d];
+                remaining /= sizes[d];
+            }
+
+            // Map back to source: divide dim coordinate by repeats
+            coords[dim] = coords[dim] / repeats;
+
+            // Convert to source flat index
+            int64_t src_idx = 0;
+            int64_t stride = 1;
+            for (int64_t d = self.dim() - 1; d >= 0; --d) {
+                src_idx += coords[d] * stride;
+                stride *= in_sizes[d];
+            }
+
+            dst[idx] = src[src_idx];
+        }
+    });
+
+    return result;
+}
+
+// ============================================================================
+// unique — return unique elements
+// ============================================================================
+
+inline std::tuple<Tensor, Tensor, Tensor> unique(
+    const Tensor& self,
+    bool sorted = true,
+    bool return_inverse = false,
+    bool return_counts = false
+) {
+    Tensor input = self.contiguous();
+    int64_t n = input.numel();
+
+    Tensor result_unique, result_inverse, result_counts;
+
+    PT_DISPATCH_ALL_TYPES(input.dtype(), "unique", [&] {
+        const scalar_t* data = input.data_ptr<scalar_t>();
+
+        // Collect unique values
+        std::vector<scalar_t> vals(data, data + n);
+        if (sorted) std::sort(vals.begin(), vals.end());
+        vals.erase(std::unique(vals.begin(), vals.end()), vals.end());
+
+        int64_t num_unique = static_cast<int64_t>(vals.size());
+        result_unique = empty({num_unique}, TensorOptions().dtype(input.dtype()));
+        scalar_t* u_data = result_unique.mutable_data_ptr<scalar_t>();
+        for (int64_t i = 0; i < num_unique; ++i) u_data[i] = vals[i];
+
+        if (return_inverse) {
+            result_inverse = empty({n}, TensorOptions().dtype(c10::ScalarType::Long));
+            int64_t* inv = result_inverse.mutable_data_ptr<int64_t>();
+            for (int64_t i = 0; i < n; ++i) {
+                for (int64_t j = 0; j < num_unique; ++j) {
+                    if (data[i] == vals[j]) { inv[i] = j; break; }
+                }
+            }
+        }
+
+        if (return_counts) {
+            result_counts = zeros({num_unique}, TensorOptions().dtype(c10::ScalarType::Long));
+            int64_t* cnt = result_counts.mutable_data_ptr<int64_t>();
+            for (int64_t i = 0; i < n; ++i) {
+                for (int64_t j = 0; j < num_unique; ++j) {
+                    if (data[i] == vals[j]) { cnt[j]++; break; }
+                }
+            }
+        }
+    });
+
+    return {result_unique, result_inverse, result_counts};
+}
+
+// ============================================================================
+// tril_indices / triu_indices — indices of triangular parts
+// ============================================================================
+
+inline Tensor tril_indices(int64_t row, int64_t col, int64_t offset = 0) {
+    std::vector<int64_t> rows_vec, cols_vec;
+    for (int64_t i = 0; i < row; ++i) {
+        for (int64_t j = 0; j <= std::min(i + offset, col - 1); ++j) {
+            if (j >= 0) {
+                rows_vec.push_back(i);
+                cols_vec.push_back(j);
+            }
+        }
+    }
+
+    int64_t n = static_cast<int64_t>(rows_vec.size());
+    Tensor result = empty({2, n}, TensorOptions().dtype(c10::ScalarType::Long));
+    int64_t* data = result.mutable_data_ptr<int64_t>();
+    for (int64_t i = 0; i < n; ++i) {
+        data[i] = rows_vec[i];
+        data[n + i] = cols_vec[i];
+    }
+    return result;
+}
+
+inline Tensor triu_indices(int64_t row, int64_t col, int64_t offset = 0) {
+    std::vector<int64_t> rows_vec, cols_vec;
+    for (int64_t i = 0; i < row; ++i) {
+        for (int64_t j = std::max(i + offset, (int64_t)0); j < col; ++j) {
+            rows_vec.push_back(i);
+            cols_vec.push_back(j);
+        }
+    }
+
+    int64_t n = static_cast<int64_t>(rows_vec.size());
+    Tensor result = empty({2, n}, TensorOptions().dtype(c10::ScalarType::Long));
+    int64_t* data = result.mutable_data_ptr<int64_t>();
+    for (int64_t i = 0; i < n; ++i) {
+        data[i] = rows_vec[i];
+        data[n + i] = cols_vec[i];
+    }
+    return result;
+}
+
+// ============================================================================
+// Unfold (im2col) — extract sliding local blocks
+// Input: (N, C, H, W) → Output: (N, C*kH*kW, L)
+// where L = number of valid positions
+// ============================================================================
+
+inline Tensor unfold_im2col(const Tensor& input,
+                            std::array<int64_t, 2> kernel_size,
+                            std::array<int64_t, 2> dilation = {1, 1},
+                            std::array<int64_t, 2> padding = {0, 0},
+                            std::array<int64_t, 2> stride = {1, 1}) {
+    PT_CHECK_MSG(input.dim() == 4, "unfold requires 4D input (N, C, H, W)");
+
+    Tensor inp = input.contiguous();
+    int64_t N = inp.size(0);
+    int64_t C = inp.size(1);
+    int64_t H = inp.size(2);
+    int64_t W = inp.size(3);
+    int64_t kH = kernel_size[0], kW = kernel_size[1];
+    int64_t dH = dilation[0], dW = dilation[1];
+    int64_t pH = padding[0], pW = padding[1];
+    int64_t sH = stride[0], sW = stride[1];
+
+    int64_t out_H = (H + 2 * pH - dH * (kH - 1) - 1) / sH + 1;
+    int64_t out_W = (W + 2 * pW - dW * (kW - 1) - 1) / sW + 1;
+    int64_t L = out_H * out_W;
+    int64_t col_channels = C * kH * kW;
+
+    Tensor output = at::zeros({N, col_channels, L});
+
+    const float* in_data = inp.data_ptr<float>();
+    float* out_data = output.mutable_data_ptr<float>();
+
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t c = 0; c < C; ++c) {
+            for (int64_t kh = 0; kh < kH; ++kh) {
+                for (int64_t kw = 0; kw < kW; ++kw) {
+                    int64_t col_idx = (c * kH + kh) * kW + kw;
+                    for (int64_t oh = 0; oh < out_H; ++oh) {
+                        for (int64_t ow = 0; ow < out_W; ++ow) {
+                            int64_t ih = oh * sH - pH + kh * dH;
+                            int64_t iw = ow * sW - pW + kw * dW;
+                            int64_t l_idx = oh * out_W + ow;
+
+                            float val = 0.0f;
+                            if (ih >= 0 && ih < H && iw >= 0 && iw < W) {
+                                val = in_data[((n * C + c) * H + ih) * W + iw];
+                            }
+                            out_data[(n * col_channels + col_idx) * L + l_idx] = val;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return output;
+}
+
+// ============================================================================
+// Fold (col2im) — combine sliding local blocks into image
+// Input: (N, C*kH*kW, L) → Output: (N, C, H, W)
+// ============================================================================
+
+inline Tensor fold_col2im(const Tensor& input,
+                          std::array<int64_t, 2> output_size,
+                          std::array<int64_t, 2> kernel_size,
+                          std::array<int64_t, 2> dilation = {1, 1},
+                          std::array<int64_t, 2> padding = {0, 0},
+                          std::array<int64_t, 2> stride = {1, 1}) {
+    PT_CHECK_MSG(input.dim() == 3, "fold requires 3D input (N, C*kH*kW, L)");
+
+    Tensor inp = input.contiguous();
+    int64_t N = inp.size(0);
+    int64_t col_channels = inp.size(1);
+    int64_t L = inp.size(2);
+
+    int64_t oH = output_size[0], oW = output_size[1];
+    int64_t kH = kernel_size[0], kW = kernel_size[1];
+    int64_t dH = dilation[0], dW = dilation[1];
+    int64_t pH = padding[0], pW = padding[1];
+    int64_t sH = stride[0], sW = stride[1];
+
+    int64_t C = col_channels / (kH * kW);
+    PT_CHECK_MSG(C * kH * kW == col_channels, "fold: col_channels must be divisible by kH*kW");
+
+    int64_t out_H_calc = (oH + 2 * pH - dH * (kH - 1) - 1) / sH + 1;
+    int64_t out_W_calc = (oW + 2 * pW - dW * (kW - 1) - 1) / sW + 1;
+    PT_CHECK_MSG(out_H_calc * out_W_calc == L, "fold: L doesn't match output_size");
+
+    Tensor output = at::zeros({N, C, oH, oW});
+
+    const float* in_data = inp.data_ptr<float>();
+    float* out_data = output.mutable_data_ptr<float>();
+
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t c = 0; c < C; ++c) {
+            for (int64_t kh = 0; kh < kH; ++kh) {
+                for (int64_t kw = 0; kw < kW; ++kw) {
+                    int64_t col_idx = (c * kH + kh) * kW + kw;
+                    for (int64_t oh = 0; oh < out_H_calc; ++oh) {
+                        for (int64_t ow = 0; ow < out_W_calc; ++ow) {
+                            int64_t ih = oh * sH - pH + kh * dH;
+                            int64_t iw = ow * sW - pW + kw * dW;
+                            int64_t l_idx = oh * out_W_calc + ow;
+
+                            if (ih >= 0 && ih < oH && iw >= 0 && iw < oW) {
+                                out_data[((n * C + c) * oH + ih) * oW + iw] +=
+                                    in_data[(n * col_channels + col_idx) * L + l_idx];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return output;
 }
 
 } // namespace native

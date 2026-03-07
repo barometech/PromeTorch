@@ -480,5 +480,84 @@ struct DetachBackward : public Node {
     std::string name() const override { return "DetachBackward"; }
 };
 
+// ============================================================================
+// Flip Backward — flip is self-adjoint
+// ============================================================================
+
+struct FlipBackward : public Node {
+    std::vector<int64_t> dims_;
+
+    explicit FlipBackward(c10::IntArrayRef dims) : dims_(dims.vec()) {}
+
+    variable_list apply(variable_list&& grads) override {
+        auto& grad = grads[0];
+        if (!grad.defined()) return {Tensor()};
+        return {at::native::flip(grad, dims_)};
+    }
+
+    std::string name() const override { return "FlipBackward"; }
+};
+
+// ============================================================================
+// Roll Backward — roll with negated shifts
+// ============================================================================
+
+struct RollBackward : public Node {
+    std::vector<int64_t> shifts_;
+    std::vector<int64_t> dims_;
+
+    RollBackward(c10::IntArrayRef shifts, c10::IntArrayRef dims)
+        : shifts_(shifts.vec()), dims_(dims.vec()) {}
+
+    variable_list apply(variable_list&& grads) override {
+        auto& grad = grads[0];
+        if (!grad.defined()) return {Tensor()};
+
+        std::vector<int64_t> neg_shifts;
+        for (auto s : shifts_) neg_shifts.push_back(-s);
+        return {at::native::roll(grad, neg_shifts, dims_)};
+    }
+
+    std::string name() const override { return "RollBackward"; }
+};
+
+// ============================================================================
+// RepeatInterleave Backward — sum over repeated elements
+// ============================================================================
+
+struct RepeatInterleaveBackward : public Node {
+    int64_t repeats_;
+    int64_t dim_;
+    std::vector<int64_t> input_sizes_;
+
+    RepeatInterleaveBackward(int64_t repeats, int64_t dim, c10::IntArrayRef input_sizes)
+        : repeats_(repeats), dim_(dim), input_sizes_(input_sizes.vec()) {}
+
+    variable_list apply(variable_list&& grads) override {
+        auto& grad = grads[0];
+        if (!grad.defined()) return {Tensor()};
+
+        // Reshape to isolate repeated elements, then sum
+        auto sizes = grad.sizes().vec();
+        int64_t orig_size = sizes[dim_] / repeats_;
+
+        std::vector<int64_t> new_shape;
+        for (int64_t d = 0; d < static_cast<int64_t>(sizes.size()); ++d) {
+            if (d == dim_) {
+                new_shape.push_back(orig_size);
+                new_shape.push_back(repeats_);
+            } else {
+                new_shape.push_back(sizes[d]);
+            }
+        }
+
+        Tensor reshaped = grad.reshape(new_shape);
+        Tensor result = reshaped.sum(dim_ + 1);
+        return {result};
+    }
+
+    std::string name() const override { return "RepeatInterleaveBackward"; }
+};
+
 } // namespace autograd
 } // namespace torch
