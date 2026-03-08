@@ -352,9 +352,121 @@ ATEN_CUDA_API void launch_concat(
 }
 
 // ============================================================================
-// Embedding Scale Kernel (element-wise multiply by scalar)
-// Already exists as mul_scalar, but this confirms it's available
+// KV Cache Write Kernel
 // ============================================================================
+// Copy new_rows of [cols] into dst_cache starting at offset_row.
+// dst_cache layout: [max_seq, cols], write at [offset_row..offset_row+num_new_rows-1, :]
+
+__global__ void kv_cache_write_kernel(
+    const float* __restrict__ src,
+    float* __restrict__ dst,
+    int64_t num_new_rows, int64_t cols, int64_t offset_row)
+{
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total = num_new_rows * cols;
+    if (idx >= total) return;
+    dst[(offset_row * cols) + idx] = src[idx];
+}
+
+ATEN_CUDA_API void launch_kv_cache_write(
+    const float* src, float* dst_cache,
+    int64_t num_new_rows, int64_t cols, int64_t offset_row,
+    cudaStream_t stream)
+{
+    int64_t total = num_new_rows * cols;
+    int block_size = 256;
+    int num_blocks = (int)((total + block_size - 1) / block_size);
+    if (num_blocks > 65535) num_blocks = 65535;
+    kv_cache_write_kernel<<<num_blocks, block_size, 0, stream>>>(
+        src, dst_cache, num_new_rows, cols, offset_row);
+}
+
+// ============================================================================
+// Fused SiLU-Mul Kernel
+// ============================================================================
+// out[i] = silu(gate[i]) * up[i] = (gate[i] / (1 + exp(-gate[i]))) * up[i]
+// Replaces 2 kernel launches (silu + mul) + intermediate tensor
+
+__global__ void silu_mul_kernel(
+    const float* __restrict__ gate,
+    const float* __restrict__ up,
+    float* __restrict__ output,
+    int64_t n)
+{
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    float g = gate[idx];
+    output[idx] = (g / (1.0f + expf(-g))) * up[idx];
+}
+
+ATEN_CUDA_API void launch_silu_mul(
+    const float* gate, const float* up, float* output,
+    int64_t n, cudaStream_t stream)
+{
+    int block_size = 256;
+    int num_blocks = (int)((n + block_size - 1) / block_size);
+    if (num_blocks > 65535) num_blocks = 65535;
+    silu_mul_kernel<<<num_blocks, block_size, 0, stream>>>(gate, up, output, n);
+}
+
+// ============================================================================
+// Inference GEMV Kernel (for decode: [1,K] @ [K,N] → [1,N])
+// ============================================================================
+// W is row-major [K, N]. Each thread computes one output y[n].
+// Adjacent threads have adjacent n values → coalesced W reads.
+// W[k*N + n] with adjacent n = adjacent memory addresses.
+//
+// For large K: load x into shared memory for reuse across threads.
+
+__global__ void inference_gemv_kernel(
+    const float* __restrict__ x,   // [K]
+    const float* __restrict__ W,   // [K, N] row-major
+    float* __restrict__ y,         // [N]
+    int K, int N)
+{
+    int n = blockIdx.x * blockDim.x + threadIdx.x;
+
+    // Load x into shared memory — ALL threads must participate before __syncthreads
+    extern __shared__ float x_shared[];
+    int tid = threadIdx.x;
+    int block_size = blockDim.x;
+    for (int k = tid; k < K; k += block_size) {
+        x_shared[k] = x[k];
+    }
+    __syncthreads();
+
+    // Now safe to exit for out-of-bounds threads
+    if (n >= N) return;
+
+    float sum = 0.0f;
+
+    // Process 4 elements at a time
+    int K4 = (K / 4) * 4;
+    for (int k = 0; k < K4; k += 4) {
+        float x0 = x_shared[k], x1 = x_shared[k+1], x2 = x_shared[k+2], x3 = x_shared[k+3];
+        sum += x0 * W[(k  ) * N + n]
+             + x1 * W[(k+1) * N + n]
+             + x2 * W[(k+2) * N + n]
+             + x3 * W[(k+3) * N + n];
+    }
+    for (int k = K4; k < K; ++k) {
+        sum += x_shared[k] * W[k * N + n];
+    }
+
+    y[n] = sum;
+}
+
+ATEN_CUDA_API void launch_inference_gemv(
+    const float* x, const float* W, float* y,
+    int K, int N, cudaStream_t stream)
+{
+    // Each thread computes one output element
+    // 256 threads per block, ceil(N/256) blocks
+    int block_size = 256;
+    int grid_size = (N + block_size - 1) / block_size;
+    int shared_mem = K * sizeof(float);  // x vector in shared memory (max ~39 KB for K=9728)
+    inference_gemv_kernel<<<grid_size, block_size, shared_mem, stream>>>(x, W, y, K, N);
+}
 
 } // namespace cuda
 } // namespace at

@@ -4,6 +4,7 @@
 #include "torch/io/gguf_dequant.h"
 #include "torch/io/ollama.h"
 #include "torch/io/tokenizer.h"
+#include "torch/io/inference_profiler.h"
 #include "aten/src/ATen/ATen.h"
 #ifdef PT_USE_CUDA
 #include "aten/src/ATen/cuda/CUDADispatch.h"
@@ -20,6 +21,10 @@
 #include <algorithm>
 #include <numeric>
 #include <iomanip>
+
+#ifdef __AVX2__
+#include <immintrin.h>
+#endif
 
 namespace torch {
 namespace io {
@@ -114,6 +119,31 @@ struct TransformerConfig {
 // Transformer Layer Weights
 // ============================================================================
 
+// ============================================================================
+// Quantized Weight — raw quant blocks stored on GPU/CPU
+// Supports Q4_K (144B/256vals) and Q6_K (210B/256vals)
+// ============================================================================
+
+struct QuantizedWeight {
+    void* gpu_data = nullptr;     // raw quant blocks on GPU
+    void* cpu_data = nullptr;     // raw quant blocks on CPU (heap allocated)
+    int64_t rows = 0;             // N (out_features) — original [N, K] layout
+    int64_t cols = 0;             // K (in_features)
+    int64_t row_stride_bytes = 0; // bytes per row
+    int64_t total_bytes = 0;
+    uint32_t quant_type = 0;      // gguf::GGML_TYPE_Q4_K or Q6_K
+    bool valid = false;
+
+    bool is_q4k() const { return quant_type == 12; }  // GGML_TYPE_Q4_K
+    bool is_q6k() const { return quant_type == 14; }  // GGML_TYPE_Q6_K
+    bool is_q5k() const { return quant_type == 13; }  // GGML_TYPE_Q5_K
+
+    void free_gpu() {
+        gpu_data = nullptr;
+        valid = false;
+    }
+};
+
 struct TransformerLayer {
     // Attention
     Tensor attn_norm;    // [hidden]
@@ -140,21 +170,124 @@ struct TransformerLayer {
     Tensor attn_q_bias;
     Tensor attn_k_bias;
     Tensor attn_v_bias;
+
+    // Quantized weights (GPU, Q4_K_M) — used for decode GEMV
+    QuantizedWeight q_attn_q, q_attn_k, q_attn_v, q_attn_output;
+    QuantizedWeight q_ffn_gate, q_ffn_up, q_ffn_down;
 };
 
 // ============================================================================
-// KV Cache for inference
+// KV Cache for inference — Pre-allocated for zero-allocation decode
 // ============================================================================
 
 struct KVCache {
-    std::vector<Tensor> key_cache;   // per layer: [seq_so_far, num_kv_heads, head_dim]
-    std::vector<Tensor> value_cache; // per layer: [seq_so_far, num_kv_heads, head_dim]
+    std::vector<Tensor> key_cache;   // per layer: [max_seq, kv_dim] pre-allocated
+    std::vector<Tensor> value_cache; // per layer: [max_seq, kv_dim] pre-allocated
     int64_t seq_len = 0;
+    int64_t max_seq = 0;
+    bool allocated = false;
 
     void reset() {
-        key_cache.clear();
-        value_cache.clear();
         seq_len = 0;
+        // Don't deallocate — reuse buffers
+    }
+
+    void allocate(int64_t num_layers, int64_t max_seq_len, int64_t kv_dim, bool use_cuda) {
+        max_seq = max_seq_len;
+        key_cache.resize(num_layers);
+        value_cache.resize(num_layers);
+        for (int64_t i = 0; i < num_layers; ++i) {
+#ifdef PT_USE_CUDA
+            if (use_cuda) {
+                key_cache[i] = at::empty_cuda({max_seq, kv_dim});
+                value_cache[i] = at::empty_cuda({max_seq, kv_dim});
+            } else
+#endif
+            {
+                key_cache[i] = at::empty({max_seq, kv_dim});
+                value_cache[i] = at::empty({max_seq, kv_dim});
+            }
+        }
+        allocated = true;
+        seq_len = 0;
+    }
+
+    // Append new K/V rows at current seq_len offset (no reallocation!)
+    void append(int64_t layer_idx, const Tensor& new_k, const Tensor& new_v, bool use_cuda) {
+        int64_t num_new = new_k.size(0);
+        int64_t kv_dim = new_k.size(1);
+        (void)kv_dim;
+#ifdef PT_USE_CUDA
+        if (use_cuda) {
+            at::cuda::launch_kv_cache_write(
+                new_k.data_ptr<float>(), key_cache[layer_idx].mutable_data_ptr<float>(),
+                num_new, new_k.size(1), seq_len, nullptr);
+            at::cuda::launch_kv_cache_write(
+                new_v.data_ptr<float>(), value_cache[layer_idx].mutable_data_ptr<float>(),
+                num_new, new_v.size(1), seq_len, nullptr);
+            return;
+        }
+#endif
+        // CPU fallback: memcpy
+        int64_t cols = new_k.size(1);
+        std::memcpy(key_cache[layer_idx].mutable_data_ptr<float>() + seq_len * cols,
+                     new_k.data_ptr<float>(), num_new * cols * sizeof(float));
+        std::memcpy(value_cache[layer_idx].mutable_data_ptr<float>() + seq_len * cols,
+                     new_v.data_ptr<float>(), num_new * cols * sizeof(float));
+    }
+
+    // Get view of K cache [0..seq_len+new_rows-1, kv_dim] — just adjust size interpretation
+    // Since we pre-allocated, we return the full buffer and pass total_seq to kernels
+};
+
+// ============================================================================
+// Scratch Pool — Pre-allocated GPU buffers for zero-allocation decode
+// ============================================================================
+
+struct InferenceScratchPool {
+    Tensor buf_x[2];       // [1, H] — double-buffered hidden state
+    Tensor buf_normed;     // [1, H]
+    Tensor buf_q;          // [1, q_dim]
+    Tensor buf_k;          // [1, kv_dim]
+    Tensor buf_v;          // [1, kv_dim]
+    Tensor buf_attn;       // [1, q_dim] — attention output
+    Tensor buf_attn_proj;  // [1, H]
+    Tensor buf_h;          // [1, H] — residual intermediate
+    Tensor buf_gate;       // [1, intermediate]
+    Tensor buf_up;         // [1, intermediate]
+    Tensor buf_silu;       // [1, intermediate]
+    Tensor buf_down;       // [1, H]
+    Tensor buf_logits;     // [1, vocab_size]
+    bool allocated = false;
+
+    void allocate(const TransformerConfig& config) {
+#ifdef PT_USE_CUDA
+        int64_t H = config.hidden_size;
+        int64_t q_dim = config.num_heads * config.head_dim;
+        int64_t kv_dim = config.num_kv_heads * config.head_dim;
+        int64_t inter = config.intermediate_size;
+        int64_t V = config.vocab_size;
+
+        buf_x[0] = at::empty_cuda({1, H});
+        buf_x[1] = at::empty_cuda({1, H});
+        buf_normed = at::empty_cuda({1, H});
+        buf_q = at::empty_cuda({1, q_dim});
+        buf_k = at::empty_cuda({1, kv_dim});
+        buf_v = at::empty_cuda({1, kv_dim});
+        buf_attn = at::empty_cuda({1, q_dim});
+        buf_attn_proj = at::empty_cuda({1, H});
+        buf_h = at::empty_cuda({1, H});
+        buf_gate = at::empty_cuda({1, inter});
+        buf_up = at::empty_cuda({1, inter});
+        buf_silu = at::empty_cuda({1, inter});
+        buf_down = at::empty_cuda({1, H});
+        buf_logits = at::empty_cuda({1, V});
+        allocated = true;
+
+        size_t total_bytes = (6*H + 2*q_dim + 2*kv_dim + 3*inter + V) * sizeof(float);
+        std::cout << "[Scratch] Allocated decode buffers: "
+                  << (total_bytes / 1024) << " KB" << std::endl;
+#endif
     }
 };
 
@@ -178,6 +311,18 @@ public:
 
     // Device
     bool use_cuda_ = false;
+    bool use_quant_gemv_ = false;  // Q4_K_M decode acceleration
+    bool output_weight_needs_float32_ = false;  // true if output.weight has no Q4_K_M
+
+    // GGUF file path (for reloading raw quant data)
+    std::string gguf_file_path_;
+    QuantizedWeight q_output_weight;  // quantized output projection
+
+    // Profiler (enabled with --profile flag)
+    InferenceProfiler profiler;
+
+    // Scratch pool for zero-allocation decode
+    InferenceScratchPool scratch_;
 
     // Helper: move tensor to CPU
     Tensor to_cpu_tensor(const Tensor& t) const {
@@ -198,62 +343,51 @@ public:
     }
 
     // ========================================================================
-    // Move all weights to CUDA
-    // Pre-transposes 2D weights for faster mm (no runtime transpose needed)
+    // Move weights to CUDA (quant-only mode)
+    // Only moves small tensors (norms, biases). Large weight matrices stay
+    // as Q4_K_M on GPU — no float32 duplication. Saves ~14 GB VRAM.
     // ========================================================================
 
     void to_cuda() {
 #ifdef PT_USE_CUDA
         auto t_start = std::chrono::high_resolution_clock::now();
-        std::cout << "[Model] Moving weights to CUDA..." << std::endl;
+        std::cout << "[Model] Moving weights to CUDA (quant-only mode)..." << std::endl;
 
         auto move = [](Tensor& t) {
             if (t.defined() && t.is_cpu()) {
                 t = at::to_cuda(t);
             }
         };
-        // Pre-transpose and move 2D weights (for mm without runtime transpose)
-        auto move_t = [](Tensor& t) {
-            if (t.defined() && t.dim() == 2 && t.is_cpu()) {
-                // Transpose: [out, in] → [in, out] and make contiguous
-                Tensor tr = t.t().contiguous();
-                t = at::to_cuda(tr);
-            } else if (t.defined() && t.is_cpu()) {
-                t = at::to_cuda(t);
-            }
-        };
 
         // Keep token_embedding on CPU — embedding lookup is CPU-based
-        // (copying vocab*hidden from GPU→CPU every token would be worse)
 
-        // Output weight: create transposed copy on GPU
-        // Must handle tied embeddings (output_weight == token_embedding)
-        {
-            Tensor out_cpu = output_weight.is_cpu() ? output_weight : to_cpu_tensor(output_weight);
-            Tensor out_tr = out_cpu.t().contiguous();
-            output_weight = at::to_cuda(out_tr);
-        }
+        // Output weight: only move if no Q4_K_M version available (e.g. tied embeddings)
+        // Will be loaded as Q4_K_M later if possible; otherwise needs float32
+        // Note: we defer this — load_quantized_to_cuda() handles Q4_K_M.
+        // If output.weight has Q4_K_M, we skip float32. Otherwise, move it.
+        output_weight_needs_float32_ = true;  // assume yes, corrected after quant load
+
+        // Output norm — small 1D tensor, always move
         move(output_norm);
 
         for (auto& layer : layers) {
+            // 1D norms — always move (tiny: hidden_size floats each)
             move(layer.attn_norm);
-            move_t(layer.attn_q);
-            move_t(layer.attn_k);
-            move_t(layer.attn_v);
-            move_t(layer.attn_output);
             move(layer.ffn_norm);
-            move_t(layer.ffn_gate);
-            move_t(layer.ffn_up);
-            move_t(layer.ffn_down);
-
-            // 1D weights/biases
             move(layer.attn_q_norm);
             move(layer.attn_k_norm);
             move(layer.post_attention_norm);
             move(layer.post_ffw_norm);
+
+            // 1D biases — always move
             move(layer.attn_q_bias);
             move(layer.attn_k_bias);
             move(layer.attn_v_bias);
+
+            // SKIP large 2D weight matrices — they stay on CPU for now
+            // load_quantized_to_cuda() will either:
+            //   - load Q4_K_M and free float32 (saves 14 GB VRAM)
+            //   - or move float32 to GPU as fallback (non-Q4_K_M weights)
         }
 
         use_cuda_ = true;
@@ -275,10 +409,205 @@ public:
     }
 
     // ========================================================================
+    // Load raw Q4_K_M weights to GPU for quantized GEMV inference
+    // Call AFTER to_cuda(). Re-reads GGUF file to get raw quant blocks.
+    // ========================================================================
+
+    void load_quantized_to_cuda() {
+#ifdef PT_USE_CUDA
+        if (gguf_file_path_.empty()) {
+            std::cerr << "[Quant] No GGUF file path stored — skipping quantized loading" << std::endl;
+            return;
+        }
+
+        auto t_start = std::chrono::high_resolution_clock::now();
+        std::cout << "[Quant] Loading quantized weights to GPU..." << std::endl;
+
+        gguf::GGUFReader reader;
+        reader.open(gguf_file_path_);
+
+        auto upload_quant = [&](const std::string& name, QuantizedWeight& qw) {
+            if (!reader.has_tensor(name)) return;
+            const auto& info = reader.get_tensor_info(name);
+            // Accept Q4_K, Q5_K, Q6_K
+            uint32_t type = info.type;
+            int64_t block_bytes = 0;
+            if (type == gguf::GGML_TYPE_Q4_K) block_bytes = 144;
+            else if (type == gguf::GGML_TYPE_Q6_K) block_bytes = 210;
+            else if (type == gguf::GGML_TYPE_Q5_K) block_bytes = 176;
+            else return;  // F16/F32/other → handled via float32 fallback
+
+            auto raw = reader.load_raw_tensor(name);
+            auto shape = raw.shape;
+            qw.rows = shape[0];
+            qw.cols = shape[1];
+            qw.row_stride_bytes = (qw.cols / 256) * block_bytes;
+            qw.total_bytes = static_cast<int64_t>(raw.data.size());
+            qw.quant_type = type;
+
+            cudaMalloc(&qw.gpu_data, qw.total_bytes);
+            cudaMemcpy(qw.gpu_data, raw.data.data(), qw.total_bytes, cudaMemcpyHostToDevice);
+            qw.valid = true;
+        };
+
+        // Helper: move float32 to GPU with pre-transpose (for weights without Q4_K_M)
+        auto move_t_gpu = [](Tensor& t) {
+            if (t.defined() && t.dim() == 2 && t.is_cpu()) {
+                Tensor tr = t.t().contiguous();
+                t = at::to_cuda(tr);
+            } else if (t.defined() && t.is_cpu()) {
+                t = at::to_cuda(t);
+            }
+        };
+
+        // Helper: if Q4_K_M loaded → free float32; else → move float32 to GPU
+        auto finalize_weight = [&](QuantizedWeight& qw, Tensor& float_w) {
+            if (qw.valid) {
+                float_w = Tensor();  // free float32 — Q4_K_M is used
+            } else if (float_w.defined()) {
+                move_t_gpu(float_w);  // fallback: move float32 to GPU
+            }
+        };
+
+        // Load per-layer weights + finalize
+        int64_t freed_count = 0, gpu_count = 0;
+        for (int64_t i = 0; i < config.num_layers; ++i) {
+            std::string prefix = "blk." + std::to_string(i) + ".";
+            auto& layer = layers[i];
+
+            upload_quant(prefix + "attn_q.weight", layer.q_attn_q);
+            upload_quant(prefix + "attn_k.weight", layer.q_attn_k);
+            upload_quant(prefix + "attn_v.weight", layer.q_attn_v);
+            upload_quant(prefix + "attn_output.weight", layer.q_attn_output);
+            upload_quant(prefix + "ffn_gate.weight", layer.q_ffn_gate);
+            upload_quant(prefix + "ffn_up.weight", layer.q_ffn_up);
+            upload_quant(prefix + "ffn_down.weight", layer.q_ffn_down);
+
+            // For each weight: Q4_K_M → free float32, else → move float32 to GPU
+            finalize_weight(layer.q_attn_q, layer.attn_q);
+            finalize_weight(layer.q_attn_k, layer.attn_k);
+            finalize_weight(layer.q_attn_v, layer.attn_v);
+            finalize_weight(layer.q_attn_output, layer.attn_output);
+            finalize_weight(layer.q_ffn_gate, layer.ffn_gate);
+            finalize_weight(layer.q_ffn_up, layer.ffn_up);
+            finalize_weight(layer.q_ffn_down, layer.ffn_down);
+
+            // Count for logging
+            auto count = [&](const QuantizedWeight& qw) {
+                if (qw.valid) freed_count++; else gpu_count++;
+            };
+            count(layer.q_attn_q); count(layer.q_attn_k); count(layer.q_attn_v);
+            count(layer.q_attn_output);
+            count(layer.q_ffn_gate); count(layer.q_ffn_up); count(layer.q_ffn_down);
+        }
+
+        // Output projection
+        if (reader.has_tensor("output.weight")) {
+            upload_quant("output.weight", q_output_weight);
+        }
+
+        use_quant_gemv_ = true;
+
+        // Handle output_weight
+        if (q_output_weight.valid) {
+            output_weight_needs_float32_ = false;
+            output_weight = Tensor();
+            freed_count++;
+        } else if (output_weight_needs_float32_ && output_weight.defined()) {
+            Tensor out_cpu = output_weight.is_cpu() ? output_weight : to_cpu_tensor(output_weight);
+            Tensor out_tr = out_cpu.t().contiguous();
+            output_weight = at::to_cuda(out_tr);
+            gpu_count++;
+        }
+
+        std::cout << "[Quant] " << freed_count << " weights → quantized (float32 freed), "
+                  << gpu_count << " weights → float32 on GPU (fallback)" << std::endl;
+
+        auto t_end = std::chrono::high_resolution_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
+        std::cout << "[Quant] Loaded in " << (ms / 1000.0) << " seconds" << std::endl;
+
+        // Report VRAM usage
+        size_t vram_free = 0, vram_total = 0;
+        cudaMemGetInfo(&vram_free, &vram_total);
+        double used_gb = (vram_total - vram_free) / (1024.0 * 1024.0 * 1024.0);
+        double total_gb = vram_total / (1024.0 * 1024.0 * 1024.0);
+        std::cout << "[Quant] VRAM: " << std::fixed << std::setprecision(1)
+                  << used_gb << " / " << total_gb << " GB" << std::endl;
+#else
+        std::cerr << "[Quant] CUDA not available" << std::endl;
+#endif
+    }
+
+    // ========================================================================
+    // Load raw Q4_K_M weights to CPU for fused dequant-GEMV
+    // Avoids reading 14 GB of float32 — reads 2.6 GB of Q4_K_M instead (7x less bandwidth)
+    // ========================================================================
+
+    void load_quantized_to_cpu() {
+        if (gguf_file_path_.empty()) {
+            std::cerr << "[Quant] No GGUF file path stored — skipping" << std::endl;
+            return;
+        }
+
+        auto t_start = std::chrono::high_resolution_clock::now();
+        std::cout << "[Quant] Loading quantized weights to CPU..." << std::endl;
+
+        gguf::GGUFReader reader;
+        reader.open(gguf_file_path_);
+
+        auto upload_quant_cpu = [&](const std::string& name, QuantizedWeight& qw) {
+            if (!reader.has_tensor(name)) return;
+            const auto& info = reader.get_tensor_info(name);
+            uint32_t type = info.type;
+            int64_t block_bytes = 0;
+            if (type == gguf::GGML_TYPE_Q4_K) block_bytes = 144;
+            else if (type == gguf::GGML_TYPE_Q6_K) block_bytes = 210;
+            else if (type == gguf::GGML_TYPE_Q5_K) block_bytes = 176;
+            else return;
+
+            auto raw = reader.load_raw_tensor(name);
+            auto shape = raw.shape;
+            qw.rows = shape[0];
+            qw.cols = shape[1];
+            qw.row_stride_bytes = (qw.cols / 256) * block_bytes;
+            qw.total_bytes = static_cast<int64_t>(raw.data.size());
+            qw.quant_type = type;
+
+            qw.cpu_data = std::malloc(qw.total_bytes);
+            std::memcpy(qw.cpu_data, raw.data.data(), qw.total_bytes);
+            qw.valid = true;
+        };
+
+        for (int64_t i = 0; i < config.num_layers; ++i) {
+            std::string prefix = "blk." + std::to_string(i) + ".";
+            auto& layer = layers[i];
+            upload_quant_cpu(prefix + "attn_q.weight", layer.q_attn_q);
+            upload_quant_cpu(prefix + "attn_k.weight", layer.q_attn_k);
+            upload_quant_cpu(prefix + "attn_v.weight", layer.q_attn_v);
+            upload_quant_cpu(prefix + "attn_output.weight", layer.q_attn_output);
+            upload_quant_cpu(prefix + "ffn_gate.weight", layer.q_ffn_gate);
+            upload_quant_cpu(prefix + "ffn_up.weight", layer.q_ffn_up);
+            upload_quant_cpu(prefix + "ffn_down.weight", layer.q_ffn_down);
+        }
+
+        if (reader.has_tensor("output.weight")) {
+            upload_quant_cpu("output.weight", q_output_weight);
+        }
+
+        use_quant_gemv_ = true;
+
+        auto t_end = std::chrono::high_resolution_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
+        std::cout << "[Quant] CPU Q4_K_M loaded in " << (ms / 1000.0) << " seconds" << std::endl;
+    }
+
+    // ========================================================================
     // Load from GGUF file path
     // ========================================================================
 
     void load(const std::string& gguf_path) {
+        gguf_file_path_ = gguf_path;  // Save for later quantized loading
         auto t_start = std::chrono::high_resolution_clock::now();
 
         gguf::GGUFReader reader;
@@ -299,8 +628,11 @@ public:
 
         config.print();
 
-        // Load all weights
+        // Load all weights (dequantized to float32)
         load_weights(reader);
+
+        // Also load raw Q4_K_M for CPU dequant-GEMV (7x less bandwidth per token)
+        load_quantized_to_cpu();
 
         auto t_end = std::chrono::high_resolution_clock::now();
         double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
@@ -327,9 +659,9 @@ public:
         int64_t H = config.hidden_size;
 
         // 1. Token embedding lookup
+        PROF_BEGIN(profiler, "embedding");
         Tensor x = embedding_lookup(tokens);  // [seq_len, hidden]
-
-
+        PROF_END(profiler, "embedding");
 
         // Scale embeddings (Gemma)
         if (config.scale_embeddings) {
@@ -358,16 +690,15 @@ public:
         }
 
         // 3. Final RMS norm
+        PROF_BEGIN(profiler, "final_norm");
         x = rms_norm(x, output_norm, config.rms_norm_eps);
+        PROF_END(profiler, "final_norm");
 
         // 4. Output projection → logits
-        // For single-token generation, only compute logits for last position
         Tensor x_last = x;
-        if (use_cache && seq_len > 1) {
-            // During prefill, we only need last position logits for generation
-            // But we compute all for correctness (KV cache needs all positions processed)
-        }
-        Tensor logits = matmul(x_last, output_weight, true);
+        PROF_BEGIN(profiler, "output_proj");
+        Tensor logits = matmul_q(x_last, output_weight, q_output_weight, true);
+        PROF_END(profiler, "output_proj");
 
         if (use_cache) {
             kv_cache.seq_len += seq_len;
@@ -376,6 +707,244 @@ public:
         return logits;
     }
 
+    // ========================================================================
+    // Zero-allocation decode forward (single token, CUDA only)
+    // Uses pre-allocated scratch buffers — no cudaMalloc during decode.
+    // ========================================================================
+
+#ifdef PT_USE_CUDA
+    Tensor forward_decode(int64_t token_id) {
+        if (!scratch_.allocated) {
+            scratch_.allocate(config);
+        }
+
+        auto& sp = scratch_;
+        int64_t H = config.hidden_size;
+        int64_t q_dim = config.num_heads * config.head_dim;
+        int64_t kv_dim = config.num_kv_heads * config.head_dim;
+        int64_t n_heads = config.num_heads;
+        int64_t n_kv_heads = config.num_kv_heads;
+        int64_t head_dim = config.head_dim;
+        int64_t inter = config.intermediate_size;
+        int64_t past_len = kv_cache.seq_len;
+        float eps = config.rms_norm_eps;
+        bool add_one = config.gemma_norm_add_one;
+
+        // 1. Embedding: CPU lookup → H2D into buf_x[0]
+        PROF_BEGIN(profiler, "embedding");
+        const float* emb_table = token_embedding.data_ptr<float>();
+        cudaMemcpy(sp.buf_x[0].mutable_data_ptr<float>(),
+                   emb_table + token_id * H, H * sizeof(float), cudaMemcpyHostToDevice);
+        PROF_END(profiler, "embedding");
+
+        // Scale embeddings (Gemma)
+        if (config.scale_embeddings) {
+            float scale = std::sqrt(static_cast<float>(H));
+            at::cuda::launch_mul_scalar(sp.buf_x[0].data_ptr<float>(), scale,
+                                         sp.buf_x[0].mutable_data_ptr<float>(), H, nullptr);
+        }
+
+        int cur = 0; // which buf_x holds current hidden state
+
+        // 2. Transformer layers — all operations use scratch buffers
+        for (int64_t i = 0; i < config.num_layers; ++i) {
+            auto& layer = layers[i];
+            float* x_ptr = sp.buf_x[cur].mutable_data_ptr<float>();
+
+            // -- Attention pre-norm: x → buf_normed --
+            PROF_BEGIN(profiler, "attn_norm");
+            at::cuda::launch_rms_norm(
+                x_ptr, layer.attn_norm.data_ptr<float>(),
+                sp.buf_normed.mutable_data_ptr<float>(),
+                1, static_cast<int>(H), eps, add_one, nullptr);
+            PROF_END(profiler, "attn_norm");
+
+            const float* normed_ptr = sp.buf_normed.data_ptr<float>();
+
+            // -- Q/K/V projections: buf_normed → buf_q, buf_k, buf_v --
+            PROF_BEGIN(profiler, "qkv_proj");
+            gemv_scratch(layer.q_attn_q, layer.attn_q, normed_ptr,
+                        sp.buf_q.mutable_data_ptr<float>(), q_dim);
+            gemv_scratch(layer.q_attn_k, layer.attn_k, normed_ptr,
+                        sp.buf_k.mutable_data_ptr<float>(), kv_dim);
+            gemv_scratch(layer.q_attn_v, layer.attn_v, normed_ptr,
+                        sp.buf_v.mutable_data_ptr<float>(), kv_dim);
+            PROF_END(profiler, "qkv_proj");
+
+            // -- Biases (Qwen3 has Q/K/V biases) --
+            if (layer.attn_q_bias.defined()) {
+                at::cuda::launch_add(
+                    sp.buf_q.data_ptr<float>(), layer.attn_q_bias.data_ptr<float>(),
+                    sp.buf_q.mutable_data_ptr<float>(), q_dim, nullptr);
+                at::cuda::launch_add(
+                    sp.buf_k.data_ptr<float>(), layer.attn_k_bias.data_ptr<float>(),
+                    sp.buf_k.mutable_data_ptr<float>(), kv_dim, nullptr);
+                at::cuda::launch_add(
+                    sp.buf_v.data_ptr<float>(), layer.attn_v_bias.data_ptr<float>(),
+                    sp.buf_v.mutable_data_ptr<float>(), kv_dim, nullptr);
+            }
+
+            // -- QK-norm (in-place) --
+            if (layer.attn_q_norm.defined()) {
+                PROF_BEGIN(profiler, "qk_norm");
+                at::cuda::launch_per_head_rms_norm(
+                    sp.buf_q.mutable_data_ptr<float>(), layer.attn_q_norm.data_ptr<float>(),
+                    1, static_cast<int>(n_heads), static_cast<int>(head_dim),
+                    eps, add_one, nullptr);
+                at::cuda::launch_per_head_rms_norm(
+                    sp.buf_k.mutable_data_ptr<float>(), layer.attn_k_norm.data_ptr<float>(),
+                    1, static_cast<int>(n_kv_heads), static_cast<int>(head_dim),
+                    eps, add_one, nullptr);
+                PROF_END(profiler, "qk_norm");
+            }
+
+            // -- RoPE (in-place) --
+            PROF_BEGIN(profiler, "rope");
+            at::cuda::launch_rope(sp.buf_q.mutable_data_ptr<float>(),
+                1, static_cast<int>(n_heads), static_cast<int>(head_dim),
+                static_cast<int>(past_len), config.rope_freq_base, nullptr);
+            at::cuda::launch_rope(sp.buf_k.mutable_data_ptr<float>(),
+                1, static_cast<int>(n_kv_heads), static_cast<int>(head_dim),
+                static_cast<int>(past_len), config.rope_freq_base, nullptr);
+            PROF_END(profiler, "rope");
+
+            // -- KV cache append --
+            PROF_BEGIN(profiler, "kv_cache");
+            at::cuda::launch_kv_cache_write(
+                sp.buf_k.data_ptr<float>(), kv_cache.key_cache[i].mutable_data_ptr<float>(),
+                1, kv_dim, past_len, nullptr);
+            at::cuda::launch_kv_cache_write(
+                sp.buf_v.data_ptr<float>(), kv_cache.value_cache[i].mutable_data_ptr<float>(),
+                1, kv_dim, past_len, nullptr);
+            PROF_END(profiler, "kv_cache");
+
+            int64_t total_seq = past_len + 1;
+            float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+
+            // -- Attention: buf_q × K_cache × V_cache → buf_attn --
+            PROF_BEGIN(profiler, "attention");
+            at::cuda::launch_causal_attention(
+                sp.buf_q.data_ptr<float>(),
+                kv_cache.key_cache[i].data_ptr<float>(),
+                kv_cache.value_cache[i].data_ptr<float>(),
+                sp.buf_attn.mutable_data_ptr<float>(),
+                1, static_cast<int>(total_seq),
+                static_cast<int>(n_heads), static_cast<int>(n_kv_heads),
+                static_cast<int>(head_dim),
+                static_cast<int>(past_len), scale, nullptr);
+            PROF_END(profiler, "attention");
+
+            // -- Output projection: buf_attn → buf_attn_proj --
+            PROF_BEGIN(profiler, "attn_output_proj");
+            gemv_scratch(layer.q_attn_output, layer.attn_output,
+                        sp.buf_attn.data_ptr<float>(),
+                        sp.buf_attn_proj.mutable_data_ptr<float>(), H);
+            PROF_END(profiler, "attn_output_proj");
+
+            // -- Post-attention norm (Gemma3) --
+            if (layer.post_attention_norm.defined()) {
+                at::cuda::launch_rms_norm(
+                    sp.buf_attn_proj.data_ptr<float>(),
+                    layer.post_attention_norm.data_ptr<float>(),
+                    sp.buf_attn_proj.mutable_data_ptr<float>(),
+                    1, static_cast<int>(H), eps, add_one, nullptr);
+            }
+
+            // -- Residual: x + attn_proj → buf_h --
+            PROF_BEGIN(profiler, "residual_add");
+            at::cuda::launch_add(x_ptr, sp.buf_attn_proj.data_ptr<float>(),
+                                  sp.buf_h.mutable_data_ptr<float>(), H, nullptr);
+            PROF_END(profiler, "residual_add");
+
+            // -- FFN pre-norm: buf_h → buf_normed --
+            PROF_BEGIN(profiler, "ffn_norm");
+            at::cuda::launch_rms_norm(
+                sp.buf_h.data_ptr<float>(), layer.ffn_norm.data_ptr<float>(),
+                sp.buf_normed.mutable_data_ptr<float>(),
+                1, static_cast<int>(H), eps, add_one, nullptr);
+            PROF_END(profiler, "ffn_norm");
+
+            normed_ptr = sp.buf_normed.data_ptr<float>();
+
+            // -- Gate/Up projections: buf_normed → buf_gate, buf_up --
+            PROF_BEGIN(profiler, "ffn_gate_up");
+            gemv_scratch(layer.q_ffn_gate, layer.ffn_gate, normed_ptr,
+                        sp.buf_gate.mutable_data_ptr<float>(), inter);
+            gemv_scratch(layer.q_ffn_up, layer.ffn_up, normed_ptr,
+                        sp.buf_up.mutable_data_ptr<float>(), inter);
+            PROF_END(profiler, "ffn_gate_up");
+
+            // -- SiLU-Mul: silu(gate) * up → buf_silu --
+            PROF_BEGIN(profiler, "silu_mul");
+            at::cuda::launch_silu_mul(
+                sp.buf_gate.data_ptr<float>(), sp.buf_up.data_ptr<float>(),
+                sp.buf_silu.mutable_data_ptr<float>(), inter, nullptr);
+            PROF_END(profiler, "silu_mul");
+
+            // -- Down projection: buf_silu → buf_down --
+            PROF_BEGIN(profiler, "ffn_down");
+            gemv_scratch(layer.q_ffn_down, layer.ffn_down,
+                        sp.buf_silu.data_ptr<float>(),
+                        sp.buf_down.mutable_data_ptr<float>(), H);
+            PROF_END(profiler, "ffn_down");
+
+            // -- Post-FFN norm (Gemma3) --
+            if (layer.post_ffw_norm.defined()) {
+                at::cuda::launch_rms_norm(
+                    sp.buf_down.data_ptr<float>(),
+                    layer.post_ffw_norm.data_ptr<float>(),
+                    sp.buf_down.mutable_data_ptr<float>(),
+                    1, static_cast<int>(H), eps, add_one, nullptr);
+            }
+
+            // -- Residual: buf_h + buf_down → buf_x[next] --
+            int next = 1 - cur;
+            PROF_BEGIN(profiler, "residual_add");
+            at::cuda::launch_add(sp.buf_h.data_ptr<float>(), sp.buf_down.data_ptr<float>(),
+                                  sp.buf_x[next].mutable_data_ptr<float>(), H, nullptr);
+            PROF_END(profiler, "residual_add");
+            cur = next;
+        }
+
+        // 3. Final RMS norm: buf_x[cur] → buf_normed
+        PROF_BEGIN(profiler, "final_norm");
+        at::cuda::launch_rms_norm(
+            sp.buf_x[cur].data_ptr<float>(), output_norm.data_ptr<float>(),
+            sp.buf_normed.mutable_data_ptr<float>(),
+            1, static_cast<int>(H), eps, add_one, nullptr);
+        PROF_END(profiler, "final_norm");
+
+        // 4. Output projection: buf_normed → buf_logits
+        PROF_BEGIN(profiler, "output_proj");
+        gemv_scratch(q_output_weight, output_weight,
+                    sp.buf_normed.data_ptr<float>(),
+                    sp.buf_logits.mutable_data_ptr<float>(), config.vocab_size);
+        PROF_END(profiler, "output_proj");
+
+        kv_cache.seq_len += 1;
+        return sp.buf_logits;
+    }
+
+    // GEMV helper for scratch pool: dispatch quant or float32 GEMV to output ptr
+    void gemv_scratch(const QuantizedWeight& qw, const Tensor& float_w,
+                      const float* x, float* y, int64_t N) {
+        if (use_quant_gemv_ && qw.valid && qw.gpu_data) {
+            int K = static_cast<int>(qw.cols);
+            int Nr = static_cast<int>(qw.rows);
+            if (qw.is_q4k()) {
+                at::cuda::launch_q4km_gemv(qw.gpu_data, x, y, K, Nr, qw.row_stride_bytes, nullptr);
+            } else if (qw.is_q6k()) {
+                at::cuda::launch_q6k_gemv(qw.gpu_data, x, y, K, Nr, qw.row_stride_bytes, nullptr);
+            } else if (qw.is_q5k()) {
+                at::cuda::launch_q5k_gemv(qw.gpu_data, x, y, K, Nr, qw.row_stride_bytes, nullptr);
+            }
+        } else if (float_w.defined()) {
+            int K = static_cast<int>(float_w.size(0));
+            int Ni = static_cast<int>(float_w.size(1));
+            at::cuda::launch_inference_gemv(x, float_w.data_ptr<float>(), y, K, Ni, nullptr);
+        }
+    }
+#endif
 
 
     // ========================================================================
@@ -384,8 +953,8 @@ public:
 
     std::string apply_chat_template(const std::string& prompt) const {
         if (config.architecture == "qwen3") {
-            // Qwen3 chat format
-            return "<|im_start|>user\n" + prompt + "<|im_end|>\n<|im_start|>assistant\n";
+            // Qwen3 chat format with /no_think system message to disable thinking
+            return "<|im_start|>system\n/no_think<|im_end|>\n<|im_start|>user\n" + prompt + "<|im_end|>\n<|im_start|>assistant\n";
         } else if (config.architecture == "gemma3" || config.architecture == "gemma2") {
             // Gemma chat format
             return "<start_of_turn>user\n" + prompt + "<end_of_turn>\n<start_of_turn>model\n";
@@ -412,10 +981,14 @@ public:
     std::string generate(const std::string& prompt, int max_tokens = 128,
                          float temperature = 0.7f, int top_k = 40, float top_p = 0.9f,
                          float repetition_penalty = 1.05f) {
-        // Reset KV cache
+        // Reset KV cache — allocate pre-sized buffers if not yet done
         kv_cache.reset();
-        kv_cache.key_cache.resize(config.num_layers);
-        kv_cache.value_cache.resize(config.num_layers);
+        int64_t kv_dim = config.num_kv_heads * config.head_dim;
+        int64_t max_total_seq = static_cast<int64_t>(max_tokens) + 2048; // prompt + generation
+        if (max_total_seq > config.context_length) max_total_seq = config.context_length;
+        if (!kv_cache.allocated || kv_cache.max_seq < max_total_seq) {
+            kv_cache.allocate(config.num_layers, max_total_seq, kv_dim, use_cuda_);
+        }
 
         // Encode prompt
         auto input_tokens = tokenizer.encode(prompt, true);
@@ -429,26 +1002,53 @@ public:
         std::vector<int32_t> generated;
         auto t_start = std::chrono::high_resolution_clock::now();
 
-        for (int step = 0; step < max_tokens; ++step) {
-            // Sample next token from last position logits
-            int64_t last_pos = logits.size(0) - 1;
-            Tensor last_logits = get_row(logits, last_pos);  // [vocab_size]
+        // Pre-check: can we use GPU-only greedy path? (no D2H transfer)
+        bool gpu_greedy = use_cuda_ && (temperature < 1e-6f) && (repetition_penalty <= 1.0f);
 
-            // Apply repetition penalty
-            if (repetition_penalty > 1.0f && !generated.empty()) {
-                float* logit_data = last_logits.mutable_data_ptr<float>();
-                for (int32_t prev_token : generated) {
-                    if (prev_token >= 0 && prev_token < static_cast<int32_t>(tokenizer.vocab.size())) {
-                        if (logit_data[prev_token] > 0) {
-                            logit_data[prev_token] /= repetition_penalty;
-                        } else {
-                            logit_data[prev_token] *= repetition_penalty;
+        // Pre-allocate GPU argmax buffer (reused every token, 8 bytes)
+#ifdef PT_USE_CUDA
+        int64_t* d_argmax_idx = nullptr;
+        if (gpu_greedy) {
+            cudaMalloc(&d_argmax_idx, sizeof(int64_t));
+        }
+#endif
+
+        for (int step = 0; step < max_tokens; ++step) {
+            int32_t next_token;
+
+#ifdef PT_USE_CUDA
+            if (gpu_greedy && logits.is_cuda()) {
+                PROF_BEGIN(profiler, "argmax");
+                int64_t last_pos = logits.size(0) - 1;
+                int64_t V = logits.size(1);
+                const float* logit_row = logits.data_ptr<float>() + last_pos * V;
+                at::cuda::launch_argmax(logit_row, d_argmax_idx, V, nullptr);
+                int64_t h_idx = 0;
+                cudaMemcpy(&h_idx, d_argmax_idx, sizeof(int64_t), cudaMemcpyDeviceToHost);
+                next_token = static_cast<int32_t>(h_idx);
+                PROF_END(profiler, "argmax");
+            } else
+#endif
+            {
+                // CPU path: transfer last row, apply penalties, sample
+                int64_t last_pos = logits.size(0) - 1;
+                Tensor last_logits = get_row(logits, last_pos);
+
+                if (repetition_penalty > 1.0f && !generated.empty()) {
+                    float* logit_data = last_logits.mutable_data_ptr<float>();
+                    for (int32_t prev_token : generated) {
+                        if (prev_token >= 0 && prev_token < static_cast<int32_t>(tokenizer.vocab.size())) {
+                            if (logit_data[prev_token] > 0) {
+                                logit_data[prev_token] /= repetition_penalty;
+                            } else {
+                                logit_data[prev_token] *= repetition_penalty;
+                            }
                         }
                     }
                 }
-            }
 
-            int32_t next_token = sample_token(last_logits, temperature, top_k, top_p);
+                next_token = sample_token(last_logits, temperature, top_k, top_p);
+            }
 
             if (next_token == tokenizer.eos_id) {
                 break;
@@ -466,9 +1066,30 @@ public:
             std::cout << token_str << std::flush;
 
             // Forward with single token (using KV cache)
-            std::vector<int64_t> next_input = {static_cast<int64_t>(next_token)};
-            logits = forward(next_input, true);
+#ifdef PT_USE_CUDA
+            if (use_cuda_) {
+                logits = forward_decode(static_cast<int64_t>(next_token));
+            } else
+#endif
+            {
+                std::vector<int64_t> next_input = {static_cast<int64_t>(next_token)};
+                logits = forward(next_input, true);
+            }
+
+            // Profiler: count token and sample VRAM periodically
+            if (profiler.enabled()) {
+                profiler.count_tokens(1);
+                if (step % 16 == 0) profiler.sample_vram();
+            }
         }
+
+        // Free GPU argmax buffer
+#ifdef PT_USE_CUDA
+        if (d_argmax_idx) {
+            cudaFree(d_argmax_idx);
+            d_argmax_idx = nullptr;
+        }
+#endif
 
         auto t_end = std::chrono::high_resolution_clock::now();
         double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
@@ -476,6 +1097,12 @@ public:
 
         std::cout << "\n\n[Generate] " << generated.size() << " tokens in "
                   << (ms / 1000.0) << "s (" << tokens_per_sec << " tok/s)" << std::endl;
+
+        // Print profiler report if enabled
+        if (profiler.enabled()) {
+            profiler.print_report(std::cout);
+            profiler.print_vram_timeline(std::cout);
+        }
 
         std::string result = tokenizer.decode(generated, true);
 
@@ -487,8 +1114,9 @@ public:
             if (e != std::string::npos) {
                 result.erase(s, e + 8 - s);
             } else {
-                // No closing tag — just remove the <think> tag itself
-                result.erase(s, 7);
+                // No closing tag — remove everything from <think> to end
+                result.erase(s);
+                break;
             }
         }
         // Also remove standalone </think>
@@ -707,12 +1335,197 @@ private:
     // Matrix multiplication: A @ B or A @ B^T
     // ========================================================================
 
+    // Quantized matmul: uses Q4_K/Q6_K/Q5_K GEMV kernels
+    // qw: quantized weight in original [N, K] layout
+    // Falls back to float32 matmul if quant not available
+    Tensor matmul_q(const Tensor& a, const Tensor& b,
+                    const QuantizedWeight& qw, bool transpose_b = false) {
+#ifdef PT_USE_CUDA
+        if (use_cuda_ && use_quant_gemv_ && qw.valid && qw.gpu_data) {
+            int64_t M = a.size(0);
+            int K = static_cast<int>(qw.cols);
+            int N = static_cast<int>(qw.rows);
+
+            // Select launch function based on quant type
+            auto launch_gemv = [&](const float* x_ptr, float* y_ptr) {
+                if (qw.is_q4k()) {
+                    at::cuda::launch_q4km_gemv(qw.gpu_data, x_ptr, y_ptr,
+                        K, N, qw.row_stride_bytes, nullptr);
+                } else if (qw.is_q6k()) {
+                    at::cuda::launch_q6k_gemv(qw.gpu_data, x_ptr, y_ptr,
+                        K, N, qw.row_stride_bytes, nullptr);
+                } else if (qw.is_q5k()) {
+                    at::cuda::launch_q5k_gemv(qw.gpu_data, x_ptr, y_ptr,
+                        K, N, qw.row_stride_bytes, nullptr);
+                }
+            };
+
+            if (M == 1) {
+                auto output = at::empty_cuda({1, N}, a.dtype(), a.device().index());
+                launch_gemv(a.data_ptr<float>(), output.mutable_data_ptr<float>());
+                return output;
+            } else {
+                // Prefill (M>1): batch GEMV — one per input row
+                auto output = at::empty_cuda({M, N}, a.dtype(), a.device().index());
+                const float* a_ptr = a.data_ptr<float>();
+                float* out_ptr = output.mutable_data_ptr<float>();
+                for (int64_t m = 0; m < M; ++m) {
+                    launch_gemv(a_ptr + m * K, out_ptr + m * N);
+                }
+                return output;
+            }
+        }
+#endif
+        // CPU Q4_K_M dequant-GEMV
+        if (!use_cuda_ && use_quant_gemv_ && qw.valid && qw.cpu_data && a.size(0) == 1) {
+            return cpu_q4km_gemv(a, qw);
+        }
+        return matmul(a, b, transpose_b);
+    }
+
+    // ========================================================================
+    // CPU Q4_K_M fused dequant-GEMV
+    // For each output row: read Q4_K_M blocks, dequant in-register, dot with input
+    // Q4_K_M block = 144 bytes = 256 values: d(fp16) + dmin(fp16) + scales[12] + qs[128]
+    // ========================================================================
+
+    Tensor cpu_q4km_gemv(const Tensor& x, const QuantizedWeight& qw) {
+        int64_t K = qw.cols;
+        int64_t N = qw.rows;
+        int64_t blocks_per_row = K / 256;  // QK_K = 256
+
+        Tensor output = at::zeros({1, N});
+        const float* x_data = x.data_ptr<float>();
+        float* y_data = output.mutable_data_ptr<float>();
+        const uint8_t* raw = static_cast<const uint8_t*>(qw.cpu_data);
+
+        for (int64_t n = 0; n < N; ++n) {
+            const uint8_t* row_data = raw + n * qw.row_stride_bytes;
+
+#ifdef __AVX2__
+            // Accumulate entire row in vector registers — single horizontal sum at end
+            __m256 acc = _mm256_setzero_ps();
+            __m256i mask_lo = _mm256_set1_epi32(0xF);
+
+            for (int64_t bi = 0; bi < blocks_per_row; ++bi) {
+                const uint8_t* block = row_data + bi * 144;
+                int64_t base_k = bi * 256;
+
+                uint16_t d_bits, dmin_bits;
+                std::memcpy(&d_bits, block, 2);
+                std::memcpy(&dmin_bits, block + 2, 2);
+                const float d = gguf::fp16_to_fp32(d_bits);
+                const float dmin = gguf::fp16_to_fp32(dmin_bits);
+                const uint8_t* scales = block + 4;
+                const uint8_t* qs = block + 16;
+
+                int is = 0;
+                for (int j = 0; j < 256; j += 64) {
+                    uint8_t sc, m_val;
+                    gguf::get_scale_min_k4(is, scales, &sc, &m_val);
+                    float d1 = d * sc;
+                    float m1 = dmin * m_val;
+                    gguf::get_scale_min_k4(is + 1, scales, &sc, &m_val);
+                    float d2 = d * sc;
+                    float m2 = dmin * m_val;
+
+                    // Compute: sum_x += (d1 * q_lo - m1) * x  and  (d2 * q_hi - m2) * x
+                    // Rewrite: d1 * sum(q_lo * x) - m1 * sum(x)  + d2 * sum(q_hi * x) - m2 * sum(x_hi)
+                    // This avoids per-element dequant: just accumulate q*x and x separately
+
+                    __m256 sum_qx_lo = _mm256_setzero_ps();
+                    __m256 sum_x_lo = _mm256_setzero_ps();
+                    __m256 sum_qx_hi = _mm256_setzero_ps();
+                    __m256 sum_x_hi = _mm256_setzero_ps();
+
+                    for (int l = 0; l < 32; l += 8) {
+                        // Load 8 quant bytes, extract low/high nibbles as int32
+                        // Use scalar extract since we need nibble separation
+                        __m256i qi = _mm256_set_epi32(
+                            qs[l+7], qs[l+6], qs[l+5], qs[l+4],
+                            qs[l+3], qs[l+2], qs[l+1], qs[l+0]);
+                        __m256i q_lo_i = _mm256_and_si256(qi, mask_lo);
+                        __m256i q_hi_i = _mm256_srli_epi32(qi, 4);
+
+                        __m256 q_lo_f = _mm256_cvtepi32_ps(q_lo_i);
+                        __m256 q_hi_f = _mm256_cvtepi32_ps(q_hi_i);
+
+                        __m256 vx_lo = _mm256_loadu_ps(x_data + base_k + j + l);
+                        __m256 vx_hi = _mm256_loadu_ps(x_data + base_k + j + 32 + l);
+
+                        sum_qx_lo = _mm256_fmadd_ps(q_lo_f, vx_lo, sum_qx_lo);
+                        sum_x_lo = _mm256_add_ps(sum_x_lo, vx_lo);
+                        sum_qx_hi = _mm256_fmadd_ps(q_hi_f, vx_hi, sum_qx_hi);
+                        sum_x_hi = _mm256_add_ps(sum_x_hi, vx_hi);
+                    }
+                    // acc += d1 * sum(q_lo * x) - m1 * sum(x_lo) + d2 * sum(q_hi * x) - m2 * sum(x_hi)
+                    acc = _mm256_fmadd_ps(_mm256_set1_ps(d1), sum_qx_lo, acc);
+                    acc = _mm256_fnmadd_ps(_mm256_set1_ps(m1), sum_x_lo, acc);
+                    acc = _mm256_fmadd_ps(_mm256_set1_ps(d2), sum_qx_hi, acc);
+                    acc = _mm256_fnmadd_ps(_mm256_set1_ps(m2), sum_x_hi, acc);
+
+                    qs += 32;
+                    is += 2;
+                }
+            }
+            // Single horizontal sum at the end
+            __m128 hi128 = _mm256_extractf128_ps(acc, 1);
+            __m128 lo128 = _mm256_castps256_ps128(acc);
+            __m128 sum4 = _mm_add_ps(lo128, hi128);
+            sum4 = _mm_hadd_ps(sum4, sum4);
+            sum4 = _mm_hadd_ps(sum4, sum4);
+            y_data[n] = _mm_cvtss_f32(sum4);
+#else
+            float dot = 0.0f;
+            for (int64_t bi = 0; bi < blocks_per_row; ++bi) {
+                const uint8_t* block = row_data + bi * 144;
+                int64_t base_k = bi * 256;
+                uint16_t d_bits, dmin_bits;
+                std::memcpy(&d_bits, block, 2);
+                std::memcpy(&dmin_bits, block + 2, 2);
+                const float d = gguf::fp16_to_fp32(d_bits);
+                const float dmin = gguf::fp16_to_fp32(dmin_bits);
+                const uint8_t* scales = block + 4;
+                const uint8_t* qs = block + 16;
+                int is = 0;
+                for (int j = 0; j < 256; j += 64) {
+                    uint8_t sc, m_val;
+                    gguf::get_scale_min_k4(is, scales, &sc, &m_val);
+                    float d1 = d * sc;
+                    float m1 = dmin * m_val;
+                    gguf::get_scale_min_k4(is + 1, scales, &sc, &m_val);
+                    float d2 = d * sc;
+                    float m2 = dmin * m_val;
+                    for (int l = 0; l < 32; ++l) {
+                        dot += (d1 * (qs[l] & 0xF) - m1) * x_data[base_k + j + l];
+                        dot += (d2 * (qs[l] >> 4) - m2) * x_data[base_k + j + 32 + l];
+                    }
+                    qs += 32;
+                    is += 2;
+                }
+            }
+            y_data[n] = dot;
+#endif
+        }
+        return output;
+    }
+
     Tensor matmul(const Tensor& a, const Tensor& b, bool transpose_b = false) {
 #ifdef PT_USE_CUDA
         if (use_cuda_) {
             // On GPU, weights are pre-transposed during to_cuda().
             // So when transpose_b=true, B is already [K, N] (not [N, K]).
-            // Just do A @ B directly.
+            // For decode (M=1): use dedicated GEMV kernel (much faster than GEMM)
+            if (a.size(0) == 1) {
+                int K = a.size(1);
+                int N = b.size(1);
+                auto output = at::empty_cuda({1, N}, a.dtype(), a.device().index());
+                at::cuda::launch_inference_gemv(
+                    a.data_ptr<float>(), b.data_ptr<float>(),
+                    output.mutable_data_ptr<float>(), K, N, nullptr);
+                return output;
+            }
+            // Prefill: use tiled GEMM
             return at::cuda_ops::mm(a, b);
         }
 #endif
@@ -735,30 +1548,51 @@ private:
         const float* b_data = b.data_ptr<float>();
         float* c_data = result.mutable_data_ptr<float>();
 
-        // Basic GEMM with tiling for cache efficiency
-        constexpr int64_t TILE = 32;
-
         if (transpose_b) {
-            // C[m,n] = sum_k A[m,k] * B[n,k]
+            // C[m,n] = sum_k A[m,k] * B[n,k]  (B is [N, K])
+#ifdef __AVX2__
+            if (M == 1) {
+                // AVX2 GEMV: one dot product per output element
+                const float* x = a_data;
+                for (int64_t n = 0; n < N; ++n) {
+                    const float* w = b_data + n * K;
+                    __m256 acc0 = _mm256_setzero_ps();
+                    __m256 acc1 = _mm256_setzero_ps();
+                    int64_t k = 0;
+                    for (; k + 15 < K; k += 16) {
+                        acc0 = _mm256_fmadd_ps(_mm256_loadu_ps(x + k),     _mm256_loadu_ps(w + k),     acc0);
+                        acc1 = _mm256_fmadd_ps(_mm256_loadu_ps(x + k + 8), _mm256_loadu_ps(w + k + 8), acc1);
+                    }
+                    acc0 = _mm256_add_ps(acc0, acc1);
+                    for (; k + 7 < K; k += 8) {
+                        acc0 = _mm256_fmadd_ps(_mm256_loadu_ps(x + k), _mm256_loadu_ps(w + k), acc0);
+                    }
+                    // Horizontal sum
+                    __m128 hi = _mm256_extractf128_ps(acc0, 1);
+                    __m128 lo = _mm256_castps256_ps128(acc0);
+                    __m128 sum4 = _mm_add_ps(lo, hi);
+                    sum4 = _mm_hadd_ps(sum4, sum4);
+                    sum4 = _mm_hadd_ps(sum4, sum4);
+                    float sum = _mm_cvtss_f32(sum4);
+                    for (; k < K; ++k) sum += x[k] * w[k];
+                    c_data[n] = sum;
+                }
+                return result;
+            }
+#endif
             #pragma omp parallel for schedule(dynamic) if(M > 4)
             for (int64_t m = 0; m < M; ++m) {
-                for (int64_t n_tile = 0; n_tile < N; n_tile += TILE) {
-                    int64_t n_end = (std::min)(n_tile + TILE, N);
-                    for (int64_t n = n_tile; n < n_end; ++n) {
-                        float sum = 0.0f;
-                        const float* a_row = a_data + m * K;
-                        const float* b_row = b_data + n * K;
-                        int64_t k = 0;
-                        // Unrolled accumulation
-                        for (; k + 3 < K; k += 4) {
-                            sum += a_row[k] * b_row[k] + a_row[k+1] * b_row[k+1]
-                                 + a_row[k+2] * b_row[k+2] + a_row[k+3] * b_row[k+3];
-                        }
-                        for (; k < K; ++k) {
-                            sum += a_row[k] * b_row[k];
-                        }
-                        c_data[m * N + n] = sum;
+                for (int64_t n = 0; n < N; ++n) {
+                    float sum = 0.0f;
+                    const float* a_row = a_data + m * K;
+                    const float* b_row = b_data + n * K;
+                    int64_t k = 0;
+                    for (; k + 3 < K; k += 4) {
+                        sum += a_row[k] * b_row[k] + a_row[k+1] * b_row[k+1]
+                             + a_row[k+2] * b_row[k+2] + a_row[k+3] * b_row[k+3];
                     }
+                    for (; k < K; ++k) sum += a_row[k] * b_row[k];
+                    c_data[m * N + n] = sum;
                 }
             }
         } else {
@@ -785,8 +1619,12 @@ private:
                               int64_t past_len, bool use_cache) {
         auto& layer = layers[layer_idx];
 
-        // 1. Attention pre-norm → Self-attention
+        // 1. Attention pre-norm
+        PROF_BEGIN(profiler, "attn_norm");
         Tensor normed = rms_norm(x, layer.attn_norm, config.rms_norm_eps);
+        PROF_END(profiler, "attn_norm");
+
+        // Self-attention
         Tensor attn_out = self_attention(normed, layer, layer_idx, past_len, use_cache);
 
         // 2. Post-attention norm (Gemma3)
@@ -795,10 +1633,16 @@ private:
         }
 
         // 3. Residual
+        PROF_BEGIN(profiler, "residual_add");
         Tensor h = add_tensors(x, attn_out);
+        PROF_END(profiler, "residual_add");
 
-        // 4. FFN pre-norm → SwiGLU FFN
+        // 4. FFN pre-norm
+        PROF_BEGIN(profiler, "ffn_norm");
         Tensor normed2 = rms_norm(h, layer.ffn_norm, config.rms_norm_eps);
+        PROF_END(profiler, "ffn_norm");
+
+        // SwiGLU FFN
         Tensor ffn_out = swiglu_ffn(normed2, layer);
 
         // 5. Post-FFN norm (Gemma3)
@@ -807,7 +1651,10 @@ private:
         }
 
         // 6. Residual
-        return add_tensors(h, ffn_out);
+        PROF_BEGIN(profiler, "residual_add");
+        Tensor result = add_tensors(h, ffn_out);
+        PROF_END(profiler, "residual_add");
+        return result;
     }
 
     // ========================================================================
@@ -823,10 +1670,12 @@ private:
         int64_t q_dim = n_heads * head_dim;
         int64_t kv_dim = n_kv_heads * head_dim;
 
-        // Q, K, V projections: x @ W^T (GPU GEMM when CUDA)
-        Tensor q = matmul(x, layer.attn_q, true);   // [seq, q_dim]
-        Tensor k = matmul(x, layer.attn_k, true);   // [seq, kv_dim]
-        Tensor v = matmul(x, layer.attn_v, true);   // [seq, kv_dim]
+        // Q, K, V projections
+        PROF_BEGIN(profiler, "qkv_proj");
+        Tensor q = matmul_q(x, layer.attn_q, layer.q_attn_q, true);   // [seq, q_dim]
+        Tensor k = matmul_q(x, layer.attn_k, layer.q_attn_k, true);   // [seq, kv_dim]
+        Tensor v = matmul_q(x, layer.attn_v, layer.q_attn_v, true);   // [seq, kv_dim]
+        PROF_END(profiler, "qkv_proj");
 
         // Add biases if present
         if (layer.attn_q_bias.defined()) {
@@ -835,32 +1684,35 @@ private:
             v = add_tensors(v, layer.attn_v_bias);
         }
 
-        // QK-norm (operates on current device — GPU or CPU)
+        // QK-norm
         if (layer.attn_q_norm.defined()) {
+            PROF_BEGIN(profiler, "qk_norm");
             apply_qk_norm_inplace(q, layer.attn_q_norm, n_heads, head_dim);
             apply_qk_norm_inplace(k, layer.attn_k_norm, n_kv_heads, head_dim);
+            PROF_END(profiler, "qk_norm");
         }
 
-        // RoPE (operates on current device — GPU or CPU)
+        // RoPE
+        PROF_BEGIN(profiler, "rope");
         apply_rope_inplace(q, n_heads, head_dim, past_len);
         apply_rope_inplace(k, n_kv_heads, head_dim, past_len);
+        PROF_END(profiler, "rope");
 
-        // KV cache (on same device as K,V)
+        // KV cache
         if (use_cache) {
-            if (kv_cache.key_cache[layer_idx].defined()) {
-                k = concat_tensors(kv_cache.key_cache[layer_idx], k);
-                v = concat_tensors(kv_cache.value_cache[layer_idx], v);
-            }
-            kv_cache.key_cache[layer_idx] = k;
-            kv_cache.value_cache[layer_idx] = v;
+            PROF_BEGIN(profiler, "kv_cache");
+            kv_cache.append(layer_idx, k, v, use_cuda_);
+            k = kv_cache.key_cache[layer_idx];
+            v = kv_cache.value_cache[layer_idx];
+            PROF_END(profiler, "kv_cache");
         }
 
-        int64_t total_seq = k.size(0);
+        int64_t total_seq = use_cache ? (kv_cache.seq_len + seq_len) : k.size(0);
         float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
 
 #ifdef PT_USE_CUDA
         if (use_cuda_ && q.is_cuda()) {
-            // Full GPU attention using CUDA kernel
+            PROF_BEGIN(profiler, "attention");
             auto output = at::empty_cuda({seq_len, q_dim}, q.dtype(), q.device().index());
             at::cuda::launch_causal_attention(
                 q.data_ptr<float>(), k.data_ptr<float>(), v.data_ptr<float>(),
@@ -869,8 +1721,12 @@ private:
                 static_cast<int>(n_heads), static_cast<int>(n_kv_heads),
                 static_cast<int>(head_dim),
                 static_cast<int>(past_len), scale, nullptr);
+            PROF_END(profiler, "attention");
             // Output projection
-            return matmul(output, layer.attn_output, true);
+            PROF_BEGIN(profiler, "attn_output_proj");
+            Tensor attn_result = matmul_q(output, layer.attn_output, layer.q_attn_output, true);
+            PROF_END(profiler, "attn_output_proj");
+            return attn_result;
         }
 #endif
         // CPU fallback
@@ -963,29 +1819,70 @@ private:
     // ========================================================================
 
     Tensor swiglu_ffn(const Tensor& x, const TransformerLayer& layer) {
-        // gate = x @ gate_weight^T  [seq, intermediate]
-        Tensor gate = matmul(x, layer.ffn_gate, true);
-        // up = x @ up_weight^T  [seq, intermediate]
-        Tensor up = matmul(x, layer.ffn_up, true);
+        // gate + up projections
+        PROF_BEGIN(profiler, "ffn_gate_up");
+        Tensor gate = matmul_q(x, layer.ffn_gate, layer.q_ffn_gate, true);
+        Tensor up = matmul_q(x, layer.ffn_up, layer.q_ffn_up, true);
+        PROF_END(profiler, "ffn_gate_up");
 
-        // SiLU(gate) * up
+        // Fused SiLU(gate) * up
 #ifdef PT_USE_CUDA
         if (use_cuda_ && gate.is_cuda()) {
-            Tensor activated = at::cuda_ops::silu(gate);
-            Tensor hidden = at::cuda_ops::mul(activated, up);
-            return matmul(hidden, layer.ffn_down, true);
+            PROF_BEGIN(profiler, "silu_mul");
+            auto hidden = at::empty_cuda(gate.sizes().vec(), gate.dtype(), gate.device().index());
+            at::cuda::launch_silu_mul(gate.data_ptr<float>(), up.data_ptr<float>(),
+                                       hidden.mutable_data_ptr<float>(), gate.numel(), nullptr);
+            PROF_END(profiler, "silu_mul");
+            PROF_BEGIN(profiler, "ffn_down");
+            Tensor result = matmul_q(hidden, layer.ffn_down, layer.q_ffn_down, true);
+            PROF_END(profiler, "ffn_down");
+            return result;
         }
 #endif
         {
             int64_t n = gate.numel();
             float* gate_data = gate.mutable_data_ptr<float>();
             const float* up_data = up.data_ptr<float>();
+#ifdef __AVX2__
+            // AVX2 fused SiLU-Mul: silu(g) * u = g * sigmoid(g) * u
+            // Fast exp approximation via polynomial (good enough for inference)
+            int64_t i = 0;
+            __m256 one = _mm256_set1_ps(1.0f);
+            __m256 neg_one = _mm256_set1_ps(-1.0f);
+            for (; i + 7 < n; i += 8) {
+                __m256 g = _mm256_loadu_ps(gate_data + i);
+                __m256 u = _mm256_loadu_ps(up_data + i);
+                // sigmoid(g) = 1/(1+exp(-g))
+                // Use fast approximation: exp(-x) ≈ via Schraudolph/clamp
+                __m256 neg_g = _mm256_mul_ps(g, neg_one);
+                // Clamp to [-88, 88] to avoid overflow
+                neg_g = _mm256_max_ps(neg_g, _mm256_set1_ps(-88.0f));
+                neg_g = _mm256_min_ps(neg_g, _mm256_set1_ps(88.0f));
+                // exp via Cephes-style polynomial (4th order, ~1e-4 accuracy)
+                // exp(x) ≈ (1 + x/256)^256 ≈ use integer trick
+                // Simpler: use scalar fallback for exp
+                float tmp[8];
+                _mm256_storeu_ps(tmp, neg_g);
+                __m256 exp_neg_g = _mm256_set_ps(
+                    std::exp(tmp[7]), std::exp(tmp[6]), std::exp(tmp[5]), std::exp(tmp[4]),
+                    std::exp(tmp[3]), std::exp(tmp[2]), std::exp(tmp[1]), std::exp(tmp[0]));
+                __m256 sigmoid = _mm256_div_ps(one, _mm256_add_ps(one, exp_neg_g));
+                __m256 silu = _mm256_mul_ps(g, sigmoid);
+                __m256 result = _mm256_mul_ps(silu, u);
+                _mm256_storeu_ps(gate_data + i, result);
+            }
+            for (; i < n; ++i) {
+                float g = gate_data[i];
+                gate_data[i] = (g / (1.0f + std::exp(-g))) * up_data[i];
+            }
+#else
             for (int64_t i = 0; i < n; ++i) {
                 float g = gate_data[i];
                 float silu = g / (1.0f + std::exp(-g));
                 gate_data[i] = silu * up_data[i];
             }
-            return matmul(gate, layer.ffn_down, true);
+#endif
+            return matmul_q(gate, layer.ffn_down, layer.q_ffn_down, true);
         }
     }
 

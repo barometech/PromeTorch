@@ -465,7 +465,8 @@ inline Tensor mm(const Tensor& a, const Tensor& b) {
         a_contig.data_ptr<float>(), b_contig.data_ptr<float>(), output.mutable_data_ptr<float>(),
         M, N, K, 1.0f, 0.0f, false, false, nullptr
     );
-    c10::cuda::cuda_synchronize();
+    // No sync needed: all ops on default stream, CUDA guarantees ordered execution.
+    // Sync happens implicitly in to_cpu() when results are needed on host.
     return output;
 }
 
