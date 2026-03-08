@@ -37,19 +37,46 @@
 - CUDA: matmul (GEMM), SiLU, element-wise ops на GPU; pre-transpose 2D weights при to_cuda()
 - Top-k/top-p sampling, greedy decoding, temperature
 
-### Результаты
-| Модель | Device | tok/s | Текст |
-|--------|--------|-------|-------|
-| qwen3:4b | CPU | ~0.6 | "in a small village, there was a girl named Lila..." |
-| qwen3:4b | CUDA | **10.15** | То же, 17x speedup |
-| gemma3:4b | CPU | ~0.5 | "2+2=4", story completions |
+### Полностью GPU инференс (CUDA kernels)
+- `CUDAInference.cu`: собственные CUDA kernels — RMSNorm, per-head QK-norm, RoPE, causal GQA attention, concat
+- Убраны все `cuda_synchronize()` (sync только при CPU←GPU transfer для sampling)
+- Chat template: `<|im_start|>user\n...<|im_end|>\n<|im_start|>assistant\n`
+- Special token encoding (tokenizer находит `<|im_start|>` и кодирует как один ID)
+- GPT-2 decode: Ċ→\n, ĉ→\t
+- `<think>...</think>` stripping (qwen3 thinking mode)
+- Stop tokens: `<|im_end|>`, `<end_of_turn>`, `<|eot_id|>`, `</s>`
+- Repetition penalty (1.05) для предотвращения зацикливания
+
+### Результаты vs Ollama baseline
+
+| Модель | Device | VRAM | tok/s | Ollama tok/s | Правильность |
+|--------|--------|------|-------|-------------|--------------|
+| qwen3:4b | CPU | 0 | ~0.6 | N/A | OK |
+| qwen3:4b | **CUDA** | **16.9 GB** | **11.7** | ~40 | **Matches Ollama** |
+| gemma3:4b | CUDA | ~20 GB | **12.2** | ~35 | OK |
+
+**Промпт/ответ сравнение с Ollama (greedy, qwen3:4b):**
+| Промпт | Ollama | PromeTorch | Match |
+|--------|--------|------------|-------|
+| "What is 2+2?" | "2 + 2 equals 4." | "The result of 2 + 2 is 4." | YES |
+| "Capital of France?" | "The capital of France is Paris." | "The capital of France is Paris." | EXACT |
+| "Hello! What is your name?" | "I'm Qwen" | "My name is Qwen. I'm a large language model developed by Alibaba" | YES |
+
+**Ключевые ограничения vs Ollama:**
+- **Скорость 3.4x медленнее**: мы float32 naive kernels, Ollama — int4 оптимизированные (llama.cpp)
+- **VRAM 5.6x больше**: dequant Q4_K_M → float32 (2.6 GB → 14+ GB)
+- **Загрузка 90 сек**: transpose + memcpy vs Ollama 2 сек (mmap + keep quant)
+- **Длинные тексты**: деградация после ~80 токенов (нужен frequency penalty, min_p)
+- **Крупные модели**: deepseek-r1:8b нужно ~30 GB float32, llama3.3:70b не влезет
 
 ### Исправленные баги
 - Q6_K scale index bug: `is = n/16` → `is = n/16 + l/16`
 - Tokenizer: Qwen reports "gpt2" model_type, не SentencePiece → GPT-2 pre-tokenization
-- GPT-2 spaces: Ġ (U+0120) → space conversion in decode
+- GPT-2 spaces: Ġ (U+0120) → space, Ċ (U+010A) → \n
 - Gemma norm +1: GGUF converter already bakes in +1, double-application caused value explosion
-- CUDA QK-norm: `apply_qk_norm_inplace` двигал тензор на GPU, а `apply_rope_inplace` потом писал в него как CPU → crash
+- CUDA QK-norm: device mismatch crash (moved to GPU, then RoPE wrote as CPU)
+- Tied embeddings: output_weight == token_embedding → separate transposed copy on GPU
+- `<think>` stripping: don't erase all text when `</think>` missing
 
 ---
 
