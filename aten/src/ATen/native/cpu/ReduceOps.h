@@ -5,6 +5,8 @@
 #include <cmath>
 #include <limits>
 #include <tuple>
+#include <algorithm>
+#include <numeric>
 
 namespace at {
 namespace native {
@@ -548,6 +550,211 @@ inline bool any(const Tensor& self) {
         for (int64_t i = 0; i < n && !result; ++i) {
             if (data[i] != static_cast<scalar_t>(0)) {
                 result = true;
+            }
+        }
+    });
+
+    return result;
+}
+
+// ============================================================================
+// Sort, Argsort, Topk, Cumsum, Cumprod
+// ============================================================================
+
+// Sort along dimension
+inline std::tuple<Tensor, Tensor> sort(const Tensor& self, int64_t dim = -1, bool descending = false) {
+    int64_t ndim = self.dim();
+    if (dim < 0) dim += ndim;
+    PT_CHECK(dim >= 0 && dim < ndim);
+
+    Tensor input = self.is_contiguous() ? self : self.contiguous();
+    Tensor values = input.clone();
+    Tensor indices = empty(self.sizes(), TensorOptions().dtype(c10::ScalarType::Long).device(self.device()));
+
+    PT_DISPATCH_ALL_TYPES(self.dtype(), "sort", [&] {
+        scalar_t* vals = values.mutable_data_ptr<scalar_t>();
+        int64_t* idx = indices.mutable_data_ptr<int64_t>();
+
+        int64_t outer_size = 1;
+        for (int64_t i = 0; i < dim; ++i) outer_size *= self.size(i);
+        int64_t sort_size = self.size(dim);
+        int64_t inner_size = 1;
+        for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= self.size(i);
+
+        // Temp buffer for sorting
+        std::vector<int64_t> perm(sort_size);
+
+        for (int64_t outer = 0; outer < outer_size; ++outer) {
+            for (int64_t inner = 0; inner < inner_size; ++inner) {
+                // Initialize permutation
+                std::iota(perm.begin(), perm.end(), 0);
+
+                // Sort permutation by values
+                int64_t base = outer * sort_size * inner_size + inner;
+                if (descending) {
+                    std::sort(perm.begin(), perm.end(), [&](int64_t a, int64_t b) {
+                        return vals[base + a * inner_size] > vals[base + b * inner_size];
+                    });
+                } else {
+                    std::sort(perm.begin(), perm.end(), [&](int64_t a, int64_t b) {
+                        return vals[base + a * inner_size] < vals[base + b * inner_size];
+                    });
+                }
+
+                // Apply permutation - need temp copy of slice
+                std::vector<scalar_t> tmp(sort_size);
+                for (int64_t r = 0; r < sort_size; ++r) {
+                    tmp[r] = vals[base + r * inner_size];
+                }
+                for (int64_t r = 0; r < sort_size; ++r) {
+                    vals[base + r * inner_size] = tmp[perm[r]];
+                    idx[base + r * inner_size] = perm[r];
+                }
+            }
+        }
+    });
+
+    return std::make_tuple(values, indices);
+}
+
+// Argsort
+inline Tensor argsort(const Tensor& self, int64_t dim = -1, bool descending = false) {
+    auto [values, indices] = sort(self, dim, descending);
+    return indices;
+}
+
+// Topk
+inline std::tuple<Tensor, Tensor> topk(const Tensor& self, int64_t k, int64_t dim = -1,
+                                         bool largest = true, bool sorted = true) {
+    int64_t ndim = self.dim();
+    if (dim < 0) dim += ndim;
+    PT_CHECK(dim >= 0 && dim < ndim);
+    PT_CHECK(k >= 0 && k <= self.size(dim));
+
+    // Result shape: same as input but dim has size k
+    std::vector<int64_t> result_shape(self.sizes().vec());
+    result_shape[dim] = k;
+
+    Tensor values = empty(result_shape, TensorOptions().dtype(self.dtype()).device(self.device()));
+    Tensor indices = empty(result_shape, TensorOptions().dtype(c10::ScalarType::Long).device(self.device()));
+
+    Tensor input = self.is_contiguous() ? self : self.contiguous();
+
+    PT_DISPATCH_ALL_TYPES(self.dtype(), "topk", [&] {
+        const scalar_t* in = input.data_ptr<scalar_t>();
+        scalar_t* out_vals = values.mutable_data_ptr<scalar_t>();
+        int64_t* out_idx = indices.mutable_data_ptr<int64_t>();
+
+        int64_t outer_size = 1;
+        for (int64_t i = 0; i < dim; ++i) outer_size *= self.size(i);
+        int64_t dim_size = self.size(dim);
+        int64_t inner_size = 1;
+        for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= self.size(i);
+
+        std::vector<int64_t> perm(dim_size);
+
+        for (int64_t outer = 0; outer < outer_size; ++outer) {
+            for (int64_t inner = 0; inner < inner_size; ++inner) {
+                std::iota(perm.begin(), perm.end(), 0);
+                int64_t in_base = outer * dim_size * inner_size + inner;
+
+                if (largest) {
+                    std::partial_sort(perm.begin(), perm.begin() + k, perm.end(),
+                        [&](int64_t a, int64_t b) {
+                            return in[in_base + a * inner_size] > in[in_base + b * inner_size];
+                        });
+                } else {
+                    std::partial_sort(perm.begin(), perm.begin() + k, perm.end(),
+                        [&](int64_t a, int64_t b) {
+                            return in[in_base + a * inner_size] < in[in_base + b * inner_size];
+                        });
+                }
+
+                if (sorted && largest) {
+                    std::sort(perm.begin(), perm.begin() + k,
+                        [&](int64_t a, int64_t b) {
+                            return in[in_base + a * inner_size] > in[in_base + b * inner_size];
+                        });
+                } else if (sorted && !largest) {
+                    std::sort(perm.begin(), perm.begin() + k,
+                        [&](int64_t a, int64_t b) {
+                            return in[in_base + a * inner_size] < in[in_base + b * inner_size];
+                        });
+                }
+
+                int64_t out_base = outer * k * inner_size + inner;
+                for (int64_t r = 0; r < k; ++r) {
+                    out_vals[out_base + r * inner_size] = in[in_base + perm[r] * inner_size];
+                    out_idx[out_base + r * inner_size] = perm[r];
+                }
+            }
+        }
+    });
+
+    return std::make_tuple(values, indices);
+}
+
+// Cumulative sum along dimension
+inline Tensor cumsum(const Tensor& self, int64_t dim) {
+    int64_t ndim = self.dim();
+    if (dim < 0) dim += ndim;
+    PT_CHECK(dim >= 0 && dim < ndim);
+
+    Tensor input = self.is_contiguous() ? self : self.contiguous();
+    Tensor result = empty_like(input);
+
+    PT_DISPATCH_ALL_TYPES(self.dtype(), "cumsum", [&] {
+        const scalar_t* in = input.data_ptr<scalar_t>();
+        scalar_t* out = result.mutable_data_ptr<scalar_t>();
+
+        int64_t outer_size = 1;
+        for (int64_t i = 0; i < dim; ++i) outer_size *= self.size(i);
+        int64_t dim_size = self.size(dim);
+        int64_t inner_size = 1;
+        for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= self.size(i);
+
+        for (int64_t outer = 0; outer < outer_size; ++outer) {
+            for (int64_t inner = 0; inner < inner_size; ++inner) {
+                scalar_t running = 0;
+                for (int64_t r = 0; r < dim_size; ++r) {
+                    int64_t idx = (outer * dim_size + r) * inner_size + inner;
+                    running += in[idx];
+                    out[idx] = running;
+                }
+            }
+        }
+    });
+
+    return result;
+}
+
+// Cumulative product along dimension
+inline Tensor cumprod(const Tensor& self, int64_t dim) {
+    int64_t ndim = self.dim();
+    if (dim < 0) dim += ndim;
+    PT_CHECK(dim >= 0 && dim < ndim);
+
+    Tensor input = self.is_contiguous() ? self : self.contiguous();
+    Tensor result = empty_like(input);
+
+    PT_DISPATCH_ALL_TYPES(self.dtype(), "cumprod", [&] {
+        const scalar_t* in = input.data_ptr<scalar_t>();
+        scalar_t* out = result.mutable_data_ptr<scalar_t>();
+
+        int64_t outer_size = 1;
+        for (int64_t i = 0; i < dim; ++i) outer_size *= self.size(i);
+        int64_t dim_size = self.size(dim);
+        int64_t inner_size = 1;
+        for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= self.size(i);
+
+        for (int64_t outer = 0; outer < outer_size; ++outer) {
+            for (int64_t inner = 0; inner < inner_size; ++inner) {
+                scalar_t running = 1;
+                for (int64_t r = 0; r < dim_size; ++r) {
+                    int64_t idx = (outer * dim_size + r) * inner_size + inner;
+                    running *= in[idx];
+                    out[idx] = running;
+                }
             }
         }
     });

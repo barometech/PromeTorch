@@ -569,6 +569,7 @@ add_subdirectory(examples/mnist)
 add_subdirectory(examples/rnn)
 add_subdirectory(examples/transformer)
 add_subdirectory(examples/vit)
+add_subdirectory(examples/gguf)
 
 # ============================================================================
 # Installation

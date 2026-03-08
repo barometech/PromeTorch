@@ -331,5 +331,73 @@ private:
     int64_t in_features_;
 };
 
+// ============================================================================
+// Flatten - Flattens a contiguous range of dims
+// ============================================================================
+// Input: (N, *dims) -> Output: (N, prod(dims[start_dim:end_dim+1]))
+
+class Flatten : public Module {
+public:
+    Flatten(int64_t start_dim = 1, int64_t end_dim = -1)
+        : Module("Flatten"), start_dim_(start_dim), end_dim_(end_dim) {}
+
+    Tensor forward(const Tensor& input) override {
+        return input.flatten(start_dim_, end_dim_);
+    }
+
+    std::string extra_repr() const override {
+        std::ostringstream ss;
+        ss << "start_dim=" << start_dim_ << ", end_dim=" << end_dim_;
+        return ss.str();
+    }
+
+private:
+    int64_t start_dim_;
+    int64_t end_dim_;
+};
+
+// ============================================================================
+// Unflatten - Unflattens a dim into multiple dims
+// ============================================================================
+
+class Unflatten : public Module {
+public:
+    Unflatten(int64_t dim, std::vector<int64_t> unflattened_size)
+        : Module("Unflatten"), dim_(dim), unflattened_size_(std::move(unflattened_size)) {}
+
+    Tensor forward(const Tensor& input) override {
+        int64_t actual_dim = dim_ < 0 ? dim_ + input.dim() : dim_;
+
+        // Build new shape: dims before | unflattened | dims after
+        std::vector<int64_t> new_shape;
+        for (int64_t i = 0; i < actual_dim; ++i) {
+            new_shape.push_back(input.size(i));
+        }
+        for (auto s : unflattened_size_) {
+            new_shape.push_back(s);
+        }
+        for (int64_t i = actual_dim + 1; i < input.dim(); ++i) {
+            new_shape.push_back(input.size(i));
+        }
+
+        return input.reshape(new_shape);
+    }
+
+    std::string extra_repr() const override {
+        std::ostringstream ss;
+        ss << "dim=" << dim_ << ", unflattened_size=(";
+        for (size_t i = 0; i < unflattened_size_.size(); ++i) {
+            if (i > 0) ss << ", ";
+            ss << unflattened_size_[i];
+        }
+        ss << ")";
+        return ss.str();
+    }
+
+private:
+    int64_t dim_;
+    std::vector<int64_t> unflattened_size_;
+};
+
 } // namespace nn
 } // namespace torch

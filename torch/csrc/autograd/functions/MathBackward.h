@@ -1386,5 +1386,85 @@ struct EmbeddingBackward : public Node {
     std::string name() const override { return "EmbeddingBackward"; }
 };
 
+// ============================================================================
+// Clamp Backward: grad * (min <= self <= max) — zero grad where clamped
+// ============================================================================
+struct ClampBackward : public Node {
+    Tensor self_;
+    double min_val_, max_val_;
+
+    ClampBackward(const Tensor& self, double min_val, double max_val)
+        : self_(self), min_val_(min_val), max_val_(max_val) {}
+
+    void release_saved_tensors() override { self_ = Tensor(); }
+
+    variable_list apply(variable_list&& grads) override {
+        auto& grad = grads[0];
+        if (!grad.defined()) return {Tensor()};
+        // Gradient passes through where input was NOT clamped
+        Tensor mask = self_.ge(Scalar(min_val_)).mul(self_.le(Scalar(max_val_)));
+        // mask is Bool tensor — need to convert to float
+        Tensor mask_float = mask.to(self_.dtype());
+        auto result = grad.mul(mask_float);
+        self_ = Tensor();
+        return {result};
+    }
+    std::string name() const override { return "ClampBackward"; }
+};
+
+// ============================================================================
+// Triu Backward: triu(grad)
+// ============================================================================
+struct TriuBackward : public Node {
+    int64_t diagonal_;
+
+    explicit TriuBackward(int64_t diagonal) : diagonal_(diagonal) {}
+
+    variable_list apply(variable_list&& grads) override {
+        auto& grad = grads[0];
+        if (!grad.defined()) return {Tensor()};
+        return {at::native::triu(grad, diagonal_)};
+    }
+    std::string name() const override { return "TriuBackward"; }
+};
+
+// ============================================================================
+// Tril Backward: tril(grad)
+// ============================================================================
+struct TrilBackward : public Node {
+    int64_t diagonal_;
+
+    explicit TrilBackward(int64_t diagonal) : diagonal_(diagonal) {}
+
+    variable_list apply(variable_list&& grads) override {
+        auto& grad = grads[0];
+        if (!grad.defined()) return {Tensor()};
+        return {at::native::tril(grad, diagonal_)};
+    }
+    std::string name() const override { return "TrilBackward"; }
+};
+
+// ============================================================================
+// Diag Backward
+// ============================================================================
+struct DiagBackward : public Node {
+    int64_t diagonal_;
+    std::vector<int64_t> input_sizes_;
+    int64_t input_dim_;
+
+    DiagBackward(int64_t diagonal, c10::IntArrayRef input_sizes, int64_t input_dim)
+        : diagonal_(diagonal), input_sizes_(input_sizes.vec()), input_dim_(input_dim) {}
+
+    variable_list apply(variable_list&& grads) override {
+        auto& grad = grads[0];
+        if (!grad.defined()) return {Tensor()};
+        // If input was 2D, backward is diag() (1D -> 2D would give wrong shape)
+        // If input was 1D, backward is diag() of grad
+        // diag is its own adjoint: diag(diag(x)) extracts and embeds
+        return {at::native::diag(grad, diagonal_)};
+    }
+    std::string name() const override { return "DiagBackward"; }
+};
+
 } // namespace autograd
 } // namespace torch

@@ -5,6 +5,8 @@
 #include "c10/core/ScalarType.h"
 #include <cmath>
 #include <algorithm>
+#include <optional>
+#include <limits>
 
 // OpenMP conditional support
 #ifdef _OPENMP
@@ -220,6 +222,160 @@ inline Tensor& fill_(Tensor& self, Scalar value) {
         }
     });
     return self;
+}
+
+// ============================================================================
+// Clamp Operations
+// ============================================================================
+
+// clamp(self, min_val, max_val) — element-wise clamp
+inline Tensor clamp(const Tensor& self, Scalar min_val, Scalar max_val) {
+    Tensor input = self.is_contiguous() ? self : self.contiguous();
+    Tensor result = empty_like(input);
+    PT_DISPATCH_ALL_TYPES(input.dtype(), "clamp", [&] {
+        const scalar_t* in = input.data_ptr<scalar_t>();
+        scalar_t* out = result.mutable_data_ptr<scalar_t>();
+        scalar_t lo = min_val.to<scalar_t>();
+        scalar_t hi = max_val.to<scalar_t>();
+        int64_t n = input.numel();
+        for (int64_t i = 0; i < n; ++i) {
+            out[i] = std::min(std::max(in[i], lo), hi);
+        }
+    });
+    return result;
+}
+
+// clamp with optional min/max
+inline Tensor clamp(const Tensor& self, std::optional<Scalar> min_opt, std::optional<Scalar> max_opt) {
+    Tensor input = self.is_contiguous() ? self : self.contiguous();
+    Tensor result = empty_like(input);
+    PT_DISPATCH_ALL_TYPES(input.dtype(), "clamp_opt", [&] {
+        const scalar_t* in = input.data_ptr<scalar_t>();
+        scalar_t* out = result.mutable_data_ptr<scalar_t>();
+        int64_t n = input.numel();
+        bool has_min = min_opt.has_value();
+        bool has_max = max_opt.has_value();
+        scalar_t lo = has_min ? min_opt->to<scalar_t>() : std::numeric_limits<scalar_t>::lowest();
+        scalar_t hi = has_max ? max_opt->to<scalar_t>() : std::numeric_limits<scalar_t>::max();
+        for (int64_t i = 0; i < n; ++i) {
+            out[i] = std::min(std::max(in[i], lo), hi);
+        }
+    });
+    return result;
+}
+
+// In-place clamp
+inline Tensor& clamp_(Tensor& self, Scalar min_val, Scalar max_val) {
+    if (!self.is_contiguous()) {
+        Tensor tmp = clamp(self, min_val, max_val);
+        self.copy_(tmp);
+        return self;
+    }
+    PT_DISPATCH_ALL_TYPES(self.dtype(), "clamp_", [&] {
+        scalar_t* data = self.mutable_data_ptr<scalar_t>();
+        scalar_t lo = min_val.to<scalar_t>();
+        scalar_t hi = max_val.to<scalar_t>();
+        int64_t n = self.numel();
+        for (int64_t i = 0; i < n; ++i) {
+            data[i] = std::min(std::max(data[i], lo), hi);
+        }
+    });
+    return self;
+}
+
+inline Tensor clamp_min(const Tensor& self, Scalar min_val) {
+    return clamp(self, min_val, Scalar(std::numeric_limits<double>::max()));
+}
+
+inline Tensor clamp_max(const Tensor& self, Scalar max_val) {
+    return clamp(self, Scalar(std::numeric_limits<double>::lowest()), max_val);
+}
+
+// ============================================================================
+// Matrix Triangle and Diagonal Operations
+// ============================================================================
+
+// Upper triangular
+inline Tensor triu(const Tensor& self, int64_t diagonal = 0) {
+    PT_CHECK(self.dim() == 2);
+    Tensor input = self.is_contiguous() ? self : self.contiguous();
+    Tensor result = zeros_like(input);
+    int64_t rows = input.size(0);
+    int64_t cols = input.size(1);
+    PT_DISPATCH_ALL_TYPES(input.dtype(), "triu", [&] {
+        const scalar_t* in = input.data_ptr<scalar_t>();
+        scalar_t* out = result.mutable_data_ptr<scalar_t>();
+        for (int64_t i = 0; i < rows; ++i) {
+            for (int64_t j = std::max((int64_t)0, i + diagonal); j < cols; ++j) {
+                out[i * cols + j] = in[i * cols + j];
+            }
+        }
+    });
+    return result;
+}
+
+// Lower triangular
+inline Tensor tril(const Tensor& self, int64_t diagonal = 0) {
+    PT_CHECK(self.dim() == 2);
+    Tensor input = self.is_contiguous() ? self : self.contiguous();
+    Tensor result = zeros_like(input);
+    int64_t rows = input.size(0);
+    int64_t cols = input.size(1);
+    PT_DISPATCH_ALL_TYPES(input.dtype(), "tril", [&] {
+        const scalar_t* in = input.data_ptr<scalar_t>();
+        scalar_t* out = result.mutable_data_ptr<scalar_t>();
+        for (int64_t i = 0; i < rows; ++i) {
+            for (int64_t j = 0; j <= std::min(i + diagonal, cols - 1); ++j) {
+                if (j >= 0) out[i * cols + j] = in[i * cols + j];
+            }
+        }
+    });
+    return result;
+}
+
+// Diagonal extraction (2D->1D) or diagonal matrix creation (1D->2D)
+inline Tensor diag(const Tensor& self, int64_t diagonal = 0) {
+    if (self.dim() == 1) {
+        // Create 2D diagonal matrix from 1D
+        int64_t n = self.size(0) + std::abs(diagonal);
+        Tensor result = zeros({n, n}, TensorOptions().dtype(self.dtype()).device(self.device()));
+        Tensor input = self.is_contiguous() ? self : self.contiguous();
+        PT_DISPATCH_ALL_TYPES(self.dtype(), "diag_1d", [&] {
+            const scalar_t* in = input.data_ptr<scalar_t>();
+            scalar_t* out = result.mutable_data_ptr<scalar_t>();
+            for (int64_t i = 0; i < self.size(0); ++i) {
+                int64_t r = (diagonal >= 0) ? i : i - diagonal;
+                int64_t c = (diagonal >= 0) ? i + diagonal : i;
+                out[r * n + c] = in[i];
+            }
+        });
+        return result;
+    } else if (self.dim() == 2) {
+        // Extract diagonal from 2D
+        int64_t rows = self.size(0);
+        int64_t cols = self.size(1);
+        int64_t diag_size;
+        if (diagonal >= 0) {
+            diag_size = std::min(rows, cols - diagonal);
+        } else {
+            diag_size = std::min(rows + diagonal, cols);
+        }
+        if (diag_size <= 0) return zeros({0}, TensorOptions().dtype(self.dtype()).device(self.device()));
+        Tensor input = self.is_contiguous() ? self : self.contiguous();
+        Tensor result = empty({diag_size}, TensorOptions().dtype(self.dtype()).device(self.device()));
+        PT_DISPATCH_ALL_TYPES(self.dtype(), "diag_2d", [&] {
+            const scalar_t* in = input.data_ptr<scalar_t>();
+            scalar_t* out = result.mutable_data_ptr<scalar_t>();
+            for (int64_t i = 0; i < diag_size; ++i) {
+                int64_t r = (diagonal >= 0) ? i : i - diagonal;
+                int64_t c = (diagonal >= 0) ? i + diagonal : i;
+                out[i] = in[r * cols + c];
+            }
+        });
+        return result;
+    }
+    PT_CHECK_MSG(false, "diag: expected 1D or 2D tensor");
+    return Tensor();
 }
 
 // ============================================================================

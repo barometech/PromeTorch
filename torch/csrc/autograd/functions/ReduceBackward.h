@@ -465,5 +465,253 @@ struct NormBackward : public Node {
     std::string name() const override { return "NormBackward"; }
 };
 
+// ============================================================================
+// Cumsum Backward: reverse cumsum
+// backward of cumsum(x, dim) = flip(cumsum(flip(grad, dim), dim), dim)
+// ============================================================================
+struct CumsumBackward : public Node {
+    int64_t dim_;
+    std::vector<int64_t> input_sizes_;
+
+    CumsumBackward(int64_t dim, c10::IntArrayRef input_sizes)
+        : dim_(dim), input_sizes_(input_sizes.vec()) {}
+
+    variable_list apply(variable_list&& grads) override {
+        auto& grad = grads[0];
+        if (!grad.defined()) return {Tensor()};
+        // Reverse cumsum: for each position i, sum of grad[i..end]
+        // = cumsum of reversed grad, then reverse back
+        // Implement directly without flip (flip not yet available)
+        Tensor input_grad = at::empty(input_sizes_, at::TensorOptions().dtype(grad.dtype()).device(grad.device()));
+        Tensor g = grad.contiguous();
+
+        PT_DISPATCH_FLOATING_TYPES(grad.dtype(), "cumsum_backward", [&] {
+            const scalar_t* g_data = g.data_ptr<scalar_t>();
+            scalar_t* out = input_grad.mutable_data_ptr<scalar_t>();
+
+            int64_t ndim = grad.dim();
+            int64_t actual_dim = dim_ < 0 ? dim_ + ndim : dim_;
+
+            int64_t outer_size = 1;
+            for (int64_t i = 0; i < actual_dim; ++i) outer_size *= grad.size(i);
+            int64_t dim_size = grad.size(actual_dim);
+            int64_t inner_size = 1;
+            for (int64_t i = actual_dim + 1; i < ndim; ++i) inner_size *= grad.size(i);
+
+            for (int64_t outer = 0; outer < outer_size; ++outer) {
+                for (int64_t inner = 0; inner < inner_size; ++inner) {
+                    // Reverse cumulative sum
+                    scalar_t running = 0;
+                    for (int64_t r = dim_size - 1; r >= 0; --r) {
+                        int64_t idx = (outer * dim_size + r) * inner_size + inner;
+                        running += g_data[idx];
+                        out[idx] = running;
+                    }
+                }
+            }
+        });
+
+        return {input_grad};
+    }
+    std::string name() const override { return "CumsumBackward"; }
+};
+
+// ============================================================================
+// Cumprod Backward
+// d/dx[cumprod(x, dim)] involves cumprod(x) and cumsum of ratios
+// ============================================================================
+struct CumprodBackward : public Node {
+    int64_t dim_;
+    Tensor self_;     // saved input
+    Tensor result_;   // saved cumprod output
+
+    CumprodBackward(int64_t dim, const Tensor& self, const Tensor& result)
+        : dim_(dim), self_(self), result_(result) {}
+
+    void release_saved_tensors() override {
+        self_ = Tensor();
+        result_ = Tensor();
+    }
+
+    variable_list apply(variable_list&& grads) override {
+        auto& grad = grads[0];
+        if (!grad.defined()) {
+            self_ = Tensor();
+            result_ = Tensor();
+            return {Tensor()};
+        }
+
+        // cumprod backward:
+        // grad_input[i] = sum_{j>=i} grad_output[j] * cumprod_output[j] / input[i]
+        // = (1/input[i]) * reverse_cumsum(grad * cumprod_output)[i]
+        // But need to handle zeros carefully. For simplicity:
+        // grad_input = reverse_cumsum(grad * result) / self
+        // where division by zero gives 0
+
+        Tensor grad_times_output = grad.mul(result_);
+
+        // Reverse cumsum
+        Tensor rev_cumsum = at::empty_like(grad_times_output);
+        Tensor gto = grad_times_output.contiguous();
+
+        PT_DISPATCH_FLOATING_TYPES(grad.dtype(), "cumprod_backward", [&] {
+            const scalar_t* g_data = gto.data_ptr<scalar_t>();
+            scalar_t* out = rev_cumsum.mutable_data_ptr<scalar_t>();
+
+            int64_t ndim = grad.dim();
+            int64_t actual_dim = dim_ < 0 ? dim_ + ndim : dim_;
+
+            int64_t outer_size = 1;
+            for (int64_t i = 0; i < actual_dim; ++i) outer_size *= grad.size(i);
+            int64_t dim_size = grad.size(actual_dim);
+            int64_t inner_size = 1;
+            for (int64_t i = actual_dim + 1; i < ndim; ++i) inner_size *= grad.size(i);
+
+            for (int64_t outer = 0; outer < outer_size; ++outer) {
+                for (int64_t inner = 0; inner < inner_size; ++inner) {
+                    scalar_t running = 0;
+                    for (int64_t r = dim_size - 1; r >= 0; --r) {
+                        int64_t idx = (outer * dim_size + r) * inner_size + inner;
+                        running += g_data[idx];
+                        out[idx] = running;
+                    }
+                }
+            }
+        });
+
+        // Divide by self (with safe division for zeros)
+        Tensor self_safe = self_.clone();
+        PT_DISPATCH_FLOATING_TYPES(self_safe.dtype(), "cumprod_bwd_safe", [&] {
+            scalar_t* data = self_safe.mutable_data_ptr<scalar_t>();
+            int64_t n = self_safe.numel();
+            for (int64_t i = 0; i < n; ++i) {
+                if (data[i] == 0) data[i] = 1;  // Avoid division by zero
+            }
+        });
+
+        Tensor result = rev_cumsum.div(self_safe);
+        self_ = Tensor();
+        result_ = Tensor();
+        return {result};
+    }
+    std::string name() const override { return "CumprodBackward"; }
+};
+
+// ============================================================================
+// Sort Backward: scatter gradient back using indices
+// ============================================================================
+struct SortBackward : public Node {
+    Tensor indices_;
+    int64_t dim_;
+    std::vector<int64_t> input_sizes_;
+
+    SortBackward(const Tensor& indices, int64_t dim, c10::IntArrayRef input_sizes)
+        : indices_(indices), dim_(dim), input_sizes_(input_sizes.vec()) {}
+
+    void release_saved_tensors() override { indices_ = Tensor(); }
+
+    variable_list apply(variable_list&& grads) override {
+        auto& grad = grads[0];
+        if (!grad.defined()) {
+            indices_ = Tensor();
+            return {Tensor()};
+        }
+
+        // Scatter gradient back to original positions
+        int64_t ndim = grad.dim();
+        int64_t actual_dim = dim_ < 0 ? dim_ + ndim : dim_;
+
+        Tensor result = at::zeros(input_sizes_, at::TensorOptions().dtype(grad.dtype()).device(grad.device()));
+        Tensor g = grad.contiguous();
+        Tensor idx = indices_.contiguous();
+
+        PT_DISPATCH_FLOATING_TYPES(grad.dtype(), "sort_backward", [&] {
+            const scalar_t* g_data = g.data_ptr<scalar_t>();
+            const int64_t* idx_data = idx.data_ptr<int64_t>();
+            scalar_t* out = result.mutable_data_ptr<scalar_t>();
+
+            int64_t outer_size = 1;
+            for (int64_t i = 0; i < actual_dim; ++i) outer_size *= grad.size(i);
+            int64_t dim_size = grad.size(actual_dim);
+            int64_t inner_size = 1;
+            for (int64_t i = actual_dim + 1; i < ndim; ++i) inner_size *= grad.size(i);
+            int64_t orig_dim_size = input_sizes_[actual_dim];
+
+            for (int64_t outer = 0; outer < outer_size; ++outer) {
+                for (int64_t inner = 0; inner < inner_size; ++inner) {
+                    for (int64_t r = 0; r < dim_size; ++r) {
+                        int64_t grad_idx = (outer * dim_size + r) * inner_size + inner;
+                        int64_t orig_pos = idx_data[grad_idx];
+                        int64_t out_idx = (outer * orig_dim_size + orig_pos) * inner_size + inner;
+                        out[out_idx] += g_data[grad_idx];
+                    }
+                }
+            }
+        });
+
+        indices_ = Tensor();
+        return {result};
+    }
+    std::string name() const override { return "SortBackward"; }
+};
+
+// ============================================================================
+// Topk Backward: scatter gradient back using indices
+// ============================================================================
+struct TopkBackward : public Node {
+    Tensor indices_;
+    int64_t dim_;
+    std::vector<int64_t> input_sizes_;
+
+    TopkBackward(const Tensor& indices, int64_t dim, c10::IntArrayRef input_sizes)
+        : indices_(indices), dim_(dim), input_sizes_(input_sizes.vec()) {}
+
+    void release_saved_tensors() override { indices_ = Tensor(); }
+
+    variable_list apply(variable_list&& grads) override {
+        auto& grad = grads[0];
+        if (!grad.defined()) {
+            indices_ = Tensor();
+            return {Tensor()};
+        }
+
+        // Same as sort backward: scatter gradient back
+        int64_t ndim = grad.dim();
+        int64_t actual_dim = dim_ < 0 ? dim_ + ndim : dim_;
+
+        Tensor result = at::zeros(input_sizes_, at::TensorOptions().dtype(grad.dtype()).device(grad.device()));
+        Tensor g = grad.contiguous();
+        Tensor idx = indices_.contiguous();
+
+        PT_DISPATCH_FLOATING_TYPES(grad.dtype(), "topk_backward", [&] {
+            const scalar_t* g_data = g.data_ptr<scalar_t>();
+            const int64_t* idx_data = idx.data_ptr<int64_t>();
+            scalar_t* out = result.mutable_data_ptr<scalar_t>();
+
+            int64_t outer_size = 1;
+            for (int64_t i = 0; i < actual_dim; ++i) outer_size *= grad.size(i);
+            int64_t k = grad.size(actual_dim);
+            int64_t inner_size = 1;
+            for (int64_t i = actual_dim + 1; i < ndim; ++i) inner_size *= grad.size(i);
+            int64_t orig_dim_size = input_sizes_[actual_dim];
+
+            for (int64_t outer = 0; outer < outer_size; ++outer) {
+                for (int64_t inner = 0; inner < inner_size; ++inner) {
+                    for (int64_t r = 0; r < k; ++r) {
+                        int64_t grad_idx = (outer * k + r) * inner_size + inner;
+                        int64_t orig_pos = idx_data[grad_idx];
+                        int64_t out_idx = (outer * orig_dim_size + orig_pos) * inner_size + inner;
+                        out[out_idx] += g_data[grad_idx];
+                    }
+                }
+            }
+        });
+
+        indices_ = Tensor();
+        return {result};
+    }
+    std::string name() const override { return "TopkBackward"; }
+};
+
 } // namespace autograd
 } // namespace torch
