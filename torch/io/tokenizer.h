@@ -97,10 +97,27 @@ public:
             merge_rank_[merges[i].first + " " + merges[i].second] = static_cast<int32_t>(i);
         }
 
+        // Collect special tokens (tokens with <|...|> or <...> patterns)
+        for (size_t i = 0; i < vocab.size(); ++i) {
+            const auto& tok = vocab[i];
+            if (tok.size() >= 3 && tok[0] == '<' && tok.back() == '>') {
+                // Check it's not a byte token like <0xFF>
+                if (tok.size() > 4 || tok[1] != '0') {
+                    special_tokens_.push_back({tok, static_cast<int32_t>(i)});
+                }
+            }
+        }
+        // Sort by length descending so longer tokens match first
+        std::sort(special_tokens_.begin(), special_tokens_.end(),
+                  [](const auto& a, const auto& b) {
+                      return a.first.size() > b.first.size();
+                  });
+
         std::cout << "[Tokenizer] Loaded: model=" << model_type
                   << ", vocab=" << vocab.size()
                   << ", merges=" << merges.size()
-                  << ", bos=" << bos_id << ", eos=" << eos_id << std::endl;
+                  << ", bos=" << bos_id << ", eos=" << eos_id
+                  << ", special=" << special_tokens_.size() << std::endl;
     }
 
     // ========================================================================
@@ -116,12 +133,22 @@ public:
 
         if (text.empty()) return tokens;
 
-        if (!merges.empty()) {
-            // BPE encoding
-            encode_bpe(text, tokens);
-        } else {
-            // Greedy longest-match encoding using scores
-            encode_greedy(text, tokens);
+        // Split text by special tokens first, then BPE-encode non-special parts
+        std::vector<std::pair<std::string, int32_t>> segments;  // text,-1 or "",token_id
+        split_special_tokens(text, segments);
+
+        for (const auto& seg : segments) {
+            if (seg.second >= 0) {
+                // Special token — add directly
+                tokens.push_back(seg.second);
+            } else if (!seg.first.empty()) {
+                // Regular text — BPE encode
+                if (!merges.empty()) {
+                    encode_bpe(seg.first, tokens);
+                } else {
+                    encode_greedy(seg.first, tokens);
+                }
+            }
         }
 
         return tokens;
@@ -160,6 +187,46 @@ public:
 
 private:
     std::unordered_map<std::string, int32_t> merge_rank_;
+    std::vector<std::pair<std::string, int32_t>> special_tokens_;  // sorted by length desc
+
+    // Split text into alternating segments: regular text (id=-1) and special tokens (id>=0)
+    void split_special_tokens(const std::string& text,
+                              std::vector<std::pair<std::string, int32_t>>& segments) const {
+        if (special_tokens_.empty()) {
+            segments.push_back({text, -1});
+            return;
+        }
+
+        size_t pos = 0;
+        while (pos < text.size()) {
+            // Try to match a special token at current position
+            bool found = false;
+            for (const auto& st : special_tokens_) {
+                const auto& tok_str = st.first;
+                if (pos + tok_str.size() <= text.size() &&
+                    text.compare(pos, tok_str.size(), tok_str) == 0) {
+                    // Found special token
+                    segments.push_back({"", st.second});
+                    pos += tok_str.size();
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                // Find next special token or end of string
+                size_t next_special = text.size();
+                for (const auto& st : special_tokens_) {
+                    size_t p = text.find(st.first, pos);
+                    if (p != std::string::npos && p < next_special) {
+                        next_special = p;
+                    }
+                }
+                // Add regular text segment
+                segments.push_back({text.substr(pos, next_special - pos), -1});
+                pos = next_special;
+            }
+        }
+    }
 
     // ========================================================================
     // BPE encoding with merges
@@ -405,6 +472,22 @@ private:
         pos = 0;
         while ((pos = result.find(gpt2_space, pos)) != std::string::npos) {
             result.replace(pos, gpt2_space.size(), " ");
+            pos += 1;
+        }
+
+        // GPT-2: Ċ (U+010A, UTF-8: 0xC4 0x8A) → newline
+        const std::string gpt2_newline = "\xc4\x8a";
+        pos = 0;
+        while ((pos = result.find(gpt2_newline, pos)) != std::string::npos) {
+            result.replace(pos, gpt2_newline.size(), "\n");
+            pos += 1;
+        }
+
+        // GPT-2: ĉ (U+0109, UTF-8: 0xC4 0x89) → tab
+        const std::string gpt2_tab = "\xc4\x89";
+        pos = 0;
+        while ((pos = result.find(gpt2_tab, pos)) != std::string::npos) {
+            result.replace(pos, gpt2_tab.size(), "\t");
             pos += 1;
         }
 

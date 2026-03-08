@@ -370,7 +370,33 @@ public:
 
 
     // ========================================================================
-    // Generate text
+    // Chat template formatting
+    // ========================================================================
+
+    std::string apply_chat_template(const std::string& prompt) const {
+        if (config.architecture == "qwen3") {
+            // Qwen3 chat format
+            return "<|im_start|>user\n" + prompt + "<|im_end|>\n<|im_start|>assistant\n";
+        } else if (config.architecture == "gemma3" || config.architecture == "gemma2") {
+            // Gemma chat format
+            return "<start_of_turn>user\n" + prompt + "<end_of_turn>\n<start_of_turn>model\n";
+        } else if (config.architecture == "llama") {
+            // Llama 3 chat format
+            return "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n"
+                   + prompt + "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n";
+        }
+        // Default: raw prompt
+        return prompt;
+    }
+
+    // Generate with chat template applied
+    std::string chat(const std::string& prompt, int max_tokens = 128,
+                     float temperature = 0.7f, int top_k = 40, float top_p = 0.9f) {
+        return generate(apply_chat_template(prompt), max_tokens, temperature, top_k, top_p);
+    }
+
+    // ========================================================================
+    // Generate text (raw prompt, no template)
     // ========================================================================
 
     std::string generate(const std::string& prompt, int max_tokens = 128,
@@ -403,6 +429,11 @@ public:
                 break;
             }
 
+            // Check for model-specific stop tokens
+            if (is_stop_token(next_token)) {
+                break;
+            }
+
             generated.push_back(next_token);
 
             // Print token as it's generated
@@ -421,10 +452,52 @@ public:
         std::cout << "\n\n[Generate] " << generated.size() << " tokens in "
                   << (ms / 1000.0) << "s (" << tokens_per_sec << " tok/s)" << std::endl;
 
-        return tokenizer.decode(generated, true);
+        std::string result = tokenizer.decode(generated, true);
+
+        // Strip thinking blocks: <think>...</think>
+        for (;;) {
+            size_t s = result.find("<think>");
+            if (s == std::string::npos) break;
+            size_t e = result.find("</think>", s);
+            if (e != std::string::npos) {
+                result.erase(s, e + 8 - s);
+            } else {
+                // No closing tag — just remove the <think> tag itself
+                result.erase(s, 7);
+            }
+        }
+        // Also remove standalone </think>
+        for (;;) {
+            size_t s = result.find("</think>");
+            if (s == std::string::npos) break;
+            result.erase(s, 8);
+        }
+
+        // Trim leading whitespace
+        size_t first_non_ws = result.find_first_not_of(" \n\r\t");
+        if (first_non_ws != std::string::npos && first_non_ws > 0) {
+            result = result.substr(first_non_ws);
+        } else if (first_non_ws == std::string::npos) {
+            result.clear();
+        }
+
+        return result;
     }
 
 private:
+    // Check if token is a stop/EOS token for the model
+    bool is_stop_token(int32_t token_id) const {
+        if (token_id < 0 || token_id >= static_cast<int32_t>(tokenizer.vocab.size())) return false;
+        const auto& tok = tokenizer.vocab[token_id];
+        // Common stop tokens across architectures
+        if (tok == "<|im_end|>" || tok == "<|endoftext|>" ||
+            tok == "<end_of_turn>" || tok == "<|eot_id|>" ||
+            tok == "</s>" || tok == "<|end|>") {
+            return true;
+        }
+        return false;
+    }
+
     // ========================================================================
     // Load weights from GGUF reader
     // ========================================================================
@@ -534,74 +607,75 @@ private:
     // RMS Normalization
     // ========================================================================
 
-    // RMS Normalization (CPU implementation, copies to/from GPU as needed)
     Tensor rms_norm(const Tensor& x, const Tensor& weight, float eps) {
-        // Copy to CPU if on GPU
-        Tensor x_cpu = x.is_cpu() ? x : to_cpu_tensor(x);
-        Tensor w_cpu = weight.is_cpu() ? weight : to_cpu_tensor(weight);
-
-        int64_t outer = x_cpu.size(0);
-        int64_t hidden = x_cpu.size(-1);
-
-        Tensor output = at::empty(x_cpu.sizes().vec());
-        const float* x_data = x_cpu.data_ptr<float>();
-        const float* w_data = w_cpu.data_ptr<float>();
+#ifdef PT_USE_CUDA
+        if (use_cuda_ && x.is_cuda()) {
+            int64_t rows = x.size(0);
+            int64_t hidden = x.size(-1);
+            auto output = at::empty_cuda(x.sizes().vec(), x.dtype(), x.device().index());
+            at::cuda::launch_rms_norm(
+                x.data_ptr<float>(), weight.data_ptr<float>(),
+                output.mutable_data_ptr<float>(),
+                static_cast<int>(rows), static_cast<int>(hidden),
+                eps, config.gemma_norm_add_one, nullptr);
+            return output;
+        }
+#endif
+        // CPU fallback
+        int64_t outer = x.size(0);
+        int64_t hidden = x.size(-1);
+        Tensor output = at::empty(x.sizes().vec());
+        const float* x_data = x.data_ptr<float>();
+        const float* w_data = weight.data_ptr<float>();
         float* out_data = output.mutable_data_ptr<float>();
         bool add_one = config.gemma_norm_add_one;
 
         for (int64_t s = 0; s < outer; ++s) {
             const float* row = x_data + s * hidden;
             float* out_row = out_data + s * hidden;
-
             float sum_sq = 0.0f;
-            for (int64_t j = 0; j < hidden; ++j) {
-                sum_sq += row[j] * row[j];
-            }
+            for (int64_t j = 0; j < hidden; ++j) sum_sq += row[j] * row[j];
             float rms = 1.0f / std::sqrt(sum_sq / hidden + eps);
-
             for (int64_t j = 0; j < hidden; ++j) {
                 float w = add_one ? (1.0f + w_data[j]) : w_data[j];
                 out_row[j] = row[j] * rms * w;
             }
         }
-
-        // Copy back to GPU if needed
-        if (use_cuda_) return to_cuda_tensor(output);
         return output;
     }
 
-    // Per-head RMS norm for QK-norm (Gemma3)
-    // x: [seq, n_heads * head_dim], weight: [head_dim]
-    // Always operates on CPU, returns CPU tensor.
-    // Caller manages GPU transfers.
+    // Per-head RMS norm for QK-norm (in-place on current device)
     void apply_qk_norm_inplace(Tensor& x, const Tensor& weight,
                                 int64_t n_heads, int64_t head_dim) {
-        Tensor x_cpu = x.is_cpu() ? x : to_cpu_tensor(x);
-        Tensor w_cpu = weight.is_cpu() ? weight : to_cpu_tensor(weight);
-
-        int64_t seq_len = x_cpu.size(0);
-        float* data = x_cpu.mutable_data_ptr<float>();
-        const float* w_data = w_cpu.data_ptr<float>();
+#ifdef PT_USE_CUDA
+        if (use_cuda_ && x.is_cuda()) {
+            int64_t seq_len = x.size(0);
+            at::cuda::launch_per_head_rms_norm(
+                x.mutable_data_ptr<float>(), weight.data_ptr<float>(),
+                static_cast<int>(seq_len), static_cast<int>(n_heads),
+                static_cast<int>(head_dim),
+                config.rms_norm_eps, config.gemma_norm_add_one, nullptr);
+            return;
+        }
+#endif
+        // CPU fallback
+        int64_t seq_len = x.size(0);
+        float* data = x.mutable_data_ptr<float>();
+        const float* w_data = weight.data_ptr<float>();
         float eps = config.rms_norm_eps;
         bool add_one = config.gemma_norm_add_one;
-
         for (int64_t s = 0; s < seq_len; ++s) {
             for (int64_t h = 0; h < n_heads; ++h) {
                 float* head = data + s * (n_heads * head_dim) + h * head_dim;
-
                 float sum_sq = 0.0f;
-                for (int64_t d = 0; d < head_dim; ++d) {
-                    sum_sq += head[d] * head[d];
-                }
+                for (int64_t d = 0; d < head_dim; ++d) sum_sq += head[d] * head[d];
                 float rms = 1.0f / std::sqrt(sum_sq / head_dim + eps);
-
                 for (int64_t d = 0; d < head_dim; ++d) {
                     float w = add_one ? (1.0f + w_data[d]) : w_data[d];
                     head[d] = head[d] * rms * w;
                 }
             }
         }
-        x = x_cpu;  // Always return CPU — caller handles GPU transfer
     }
 
     // ========================================================================
@@ -724,7 +798,7 @@ private:
         int64_t q_dim = n_heads * head_dim;
         int64_t kv_dim = n_kv_heads * head_dim;
 
-        // Q, K, V projections: x @ W^T
+        // Q, K, V projections: x @ W^T (GPU GEMM when CUDA)
         Tensor q = matmul(x, layer.attn_q, true);   // [seq, q_dim]
         Tensor k = matmul(x, layer.attn_k, true);   // [seq, kv_dim]
         Tensor v = matmul(x, layer.attn_v, true);   // [seq, kv_dim]
@@ -736,97 +810,87 @@ private:
             v = add_tensors(v, layer.attn_v_bias);
         }
 
-        // QK-norm, RoPE, attention scoring done on CPU
-        // Copy Q,K,V to CPU for these operations
-        Tensor q_cpu = q.is_cpu() ? q : to_cpu_tensor(q);
-        Tensor k_cpu = k.is_cpu() ? k : to_cpu_tensor(k);
-        Tensor v_cpu = v.is_cpu() ? v : to_cpu_tensor(v);
-
-        // QK-norm (Gemma3): per-head RMS normalization on Q and K
+        // QK-norm (operates on current device — GPU or CPU)
         if (layer.attn_q_norm.defined()) {
-            apply_qk_norm_inplace(q_cpu, layer.attn_q_norm, n_heads, head_dim);
-            apply_qk_norm_inplace(k_cpu, layer.attn_k_norm, n_kv_heads, head_dim);
+            apply_qk_norm_inplace(q, layer.attn_q_norm, n_heads, head_dim);
+            apply_qk_norm_inplace(k, layer.attn_k_norm, n_kv_heads, head_dim);
         }
 
-        // Apply RoPE to Q and K
-        apply_rope_inplace(q_cpu, n_heads, head_dim, past_len);
-        apply_rope_inplace(k_cpu, n_kv_heads, head_dim, past_len);
+        // RoPE (operates on current device — GPU or CPU)
+        apply_rope_inplace(q, n_heads, head_dim, past_len);
+        apply_rope_inplace(k, n_kv_heads, head_dim, past_len);
 
-        // KV cache (kept on CPU for now)
+        // KV cache (on same device as K,V)
         if (use_cache) {
             if (kv_cache.key_cache[layer_idx].defined()) {
-                k_cpu = concat_tensors(kv_cache.key_cache[layer_idx], k_cpu);
-                v_cpu = concat_tensors(kv_cache.value_cache[layer_idx], v_cpu);
+                k = concat_tensors(kv_cache.key_cache[layer_idx], k);
+                v = concat_tensors(kv_cache.value_cache[layer_idx], v);
             }
-            kv_cache.key_cache[layer_idx] = k_cpu;
-            kv_cache.value_cache[layer_idx] = v_cpu;
+            kv_cache.key_cache[layer_idx] = k;
+            kv_cache.value_cache[layer_idx] = v;
         }
 
-        int64_t total_seq = k_cpu.size(0);
-        int64_t heads_per_group = n_heads / n_kv_heads;
+        int64_t total_seq = k.size(0);
         float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
 
-        // Attention scoring on CPU
+#ifdef PT_USE_CUDA
+        if (use_cuda_ && q.is_cuda()) {
+            // Full GPU attention using CUDA kernel
+            auto output = at::empty_cuda({seq_len, q_dim}, q.dtype(), q.device().index());
+            at::cuda::launch_causal_attention(
+                q.data_ptr<float>(), k.data_ptr<float>(), v.data_ptr<float>(),
+                output.mutable_data_ptr<float>(),
+                static_cast<int>(seq_len), static_cast<int>(total_seq),
+                static_cast<int>(n_heads), static_cast<int>(n_kv_heads),
+                static_cast<int>(head_dim),
+                static_cast<int>(past_len), scale, nullptr);
+            // Output projection
+            return matmul(output, layer.attn_output, true);
+        }
+#endif
+        // CPU fallback
+        int64_t heads_per_group = n_heads / n_kv_heads;
         Tensor output = at::empty({seq_len, q_dim});
         float* out_data = output.mutable_data_ptr<float>();
-        const float* q_data = q_cpu.data_ptr<float>();
-        const float* k_data = k_cpu.data_ptr<float>();
-        const float* v_data = v_cpu.data_ptr<float>();
+        const float* q_data = q.data_ptr<float>();
+        const float* k_data = k.data_ptr<float>();
+        const float* v_data = v.data_ptr<float>();
 
         #pragma omp parallel for if(n_heads > 2)
         for (int64_t h = 0; h < n_heads; ++h) {
             int64_t kv_h = h / heads_per_group;
-
             std::vector<float> scores(total_seq);
-            std::vector<float> attn_weights(total_seq);
 
             for (int64_t s = 0; s < seq_len; ++s) {
                 const float* q_head = q_data + s * q_dim + h * head_dim;
-
                 for (int64_t t = 0; t < total_seq; ++t) {
                     const float* k_head = k_data + t * kv_dim + kv_h * head_dim;
                     float dot = 0.0f;
-                    for (int64_t d = 0; d < head_dim; ++d) {
-                        dot += q_head[d] * k_head[d];
-                    }
+                    for (int64_t d = 0; d < head_dim; ++d) dot += q_head[d] * k_head[d];
                     scores[t] = dot * scale;
                 }
-
                 int64_t max_pos = past_len + s;
-                for (int64_t t = max_pos + 1; t < total_seq; ++t) {
-                    scores[t] = -1e9f;
-                }
+                for (int64_t t = max_pos + 1; t < total_seq; ++t) scores[t] = -1e9f;
 
-                float max_score = *std::max_element(scores.begin(),
-                    scores.begin() + total_seq);
+                float max_score = *std::max_element(scores.begin(), scores.begin() + total_seq);
                 float sum_exp = 0.0f;
                 for (int64_t t = 0; t < total_seq; ++t) {
-                    attn_weights[t] = std::exp(scores[t] - max_score);
-                    sum_exp += attn_weights[t];
+                    scores[t] = std::exp(scores[t] - max_score);
+                    sum_exp += scores[t];
                 }
                 float inv_sum = 1.0f / (sum_exp + 1e-10f);
-                for (int64_t t = 0; t < total_seq; ++t) {
-                    attn_weights[t] *= inv_sum;
-                }
+                for (int64_t t = 0; t < total_seq; ++t) scores[t] *= inv_sum;
 
                 float* out_head = out_data + s * q_dim + h * head_dim;
                 std::fill(out_head, out_head + head_dim, 0.0f);
                 for (int64_t t = 0; t < total_seq; ++t) {
                     const float* v_head = v_data + t * kv_dim + kv_h * head_dim;
-                    float w = attn_weights[t];
-                    for (int64_t d = 0; d < head_dim; ++d) {
-                        out_head[d] += w * v_head[d];
-                    }
+                    float w = scores[t];
+                    for (int64_t d = 0; d < head_dim; ++d) out_head[d] += w * v_head[d];
                 }
             }
         }
-
-        // Move attention output to GPU for output projection
-        if (use_cuda_) output = to_cuda_tensor(output);
-
-        // Output projection: [seq, q_dim] @ [hidden, q_dim]^T → [seq, hidden]
-        Tensor result = matmul(output, layer.attn_output, true);
-        return result;
+        return matmul(output, layer.attn_output, true);
     }
 
     // ========================================================================
@@ -835,24 +899,31 @@ private:
 
     void apply_rope_inplace(Tensor& x, int64_t n_heads, int64_t head_dim,
                             int64_t position_offset) {
+#ifdef PT_USE_CUDA
+        if (use_cuda_ && x.is_cuda()) {
+            int64_t seq_len = x.size(0);
+            at::cuda::launch_rope(
+                x.mutable_data_ptr<float>(),
+                static_cast<int>(seq_len), static_cast<int>(n_heads),
+                static_cast<int>(head_dim),
+                static_cast<int>(position_offset), config.rope_freq_base, nullptr);
+            return;
+        }
+#endif
         int64_t seq_len = x.size(0);
         float* data = x.mutable_data_ptr<float>();
         float freq_base = config.rope_freq_base;
-
         for (int64_t s = 0; s < seq_len; ++s) {
             int64_t pos = position_offset + s;
             for (int64_t h = 0; h < n_heads; ++h) {
                 float* head_data = data + s * (n_heads * head_dim) + h * head_dim;
-
                 for (int64_t d = 0; d < head_dim / 2; ++d) {
                     float freq = 1.0f / std::pow(freq_base, 2.0f * d / head_dim);
                     float theta = pos * freq;
                     float cos_theta = std::cos(theta);
                     float sin_theta = std::sin(theta);
-
                     float x0 = head_data[2 * d];
                     float x1 = head_data[2 * d + 1];
-
                     head_data[2 * d]     = x0 * cos_theta - x1 * sin_theta;
                     head_data[2 * d + 1] = x0 * sin_theta + x1 * cos_theta;
                 }
@@ -934,7 +1005,16 @@ private:
     }
 
     Tensor concat_tensors(const Tensor& a, const Tensor& b) {
-        // Concatenate along dim 0: [M1, K] + [M2, K] → [M1+M2, K]
+#ifdef PT_USE_CUDA
+        if (use_cuda_ && a.is_cuda()) {
+            int64_t M1 = a.size(0), M2 = b.size(0), K = a.size(1);
+            auto result = at::empty_cuda({M1 + M2, K}, a.dtype(), a.device().index());
+            at::cuda::launch_concat(
+                a.data_ptr<float>(), b.data_ptr<float>(),
+                result.mutable_data_ptr<float>(), M1, M2, K, nullptr);
+            return result;
+        }
+#endif
         int64_t M1 = a.size(0), M2 = b.size(0), K = a.size(1);
         Tensor result = at::empty({M1 + M2, K});
         float* out = result.mutable_data_ptr<float>();

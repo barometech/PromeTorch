@@ -31,6 +31,8 @@ void print_usage(const char* argv0) {
     std::cout << "  --device cuda    Run on GPU (CUDA)" << std::endl;
     std::cout << "  --cuda           Same as --device cuda" << std::endl;
     std::cout << "  --greedy         Greedy decoding (temp=0)" << std::endl;
+    std::cout << "  --chat           Apply chat template (recommended for questions)" << std::endl;
+    std::cout << "  --raw            No chat template (default, good for completions)" << std::endl;
 }
 
 int main(int argc, char* argv[]) {
@@ -44,6 +46,7 @@ int main(int argc, char* argv[]) {
     bool info_only = false;
     bool tensors_only = false;
     bool use_cuda = false;
+    bool use_chat = false;
     int max_tokens = 128;
     float temperature = 0.7f;
     int top_k = 40;
@@ -63,6 +66,10 @@ int main(int argc, char* argv[]) {
             use_cuda = true;
         } else if (arg == "--greedy") {
             temperature = 0.0f;
+        } else if (arg == "--chat") {
+            use_chat = true;
+        } else if (arg == "--raw") {
+            use_chat = false;
         } else if (arg == "--max-tokens" && i + 1 < argc) {
             max_tokens = std::atoi(argv[++i]);
         } else if (arg == "--temp" && i + 1 < argc) {
@@ -130,6 +137,7 @@ int main(int argc, char* argv[]) {
         std::cout << "Top-k: " << top_k << std::endl;
         std::cout << "Top-p: " << top_p << std::endl;
         std::cout << "Device: " << (use_cuda ? "CUDA" : "CPU") << std::endl;
+        std::cout << "Mode: " << (use_chat ? "Chat" : "Completion") << std::endl;
         std::cout << "============================================" << std::endl;
 
         // Load model
@@ -150,7 +158,12 @@ int main(int argc, char* argv[]) {
 
         // Generate
         std::cout << "\n--- Generation ---" << std::endl;
-        std::string response = model.generate(prompt, max_tokens, temperature, top_k, top_p);
+        std::string response;
+        if (use_chat) {
+            response = model.chat(prompt, max_tokens, temperature, top_k, top_p);
+        } else {
+            response = model.generate(prompt, max_tokens, temperature, top_k, top_p);
+        }
 
         std::cout << "\n--- Full Response ---" << std::endl;
         std::cout << response << std::endl;
