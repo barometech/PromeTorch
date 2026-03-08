@@ -39,6 +39,7 @@
 #include "torch/data/dataset.h"
 #include "torch/data/sampler.h"
 #include "torch/data/dataloader.h"
+#include "torch/data/transforms.h"
 
 namespace torch {
 namespace data {

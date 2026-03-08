@@ -5,6 +5,8 @@
 #include <iostream>
 #include <initializer_list>
 #include <functional>
+#include <optional>
+#include <tuple>
 #include "c10/core/TensorImpl.h"
 #include "c10/core/ScalarType.h"
 #include "c10/core/Device.h"
@@ -364,6 +366,14 @@ public:
     Tensor round() const;
     Tensor sign() const;
     Tensor reciprocal() const;
+    Tensor clamp(Scalar min_val, Scalar max_val) const;
+    Tensor clamp(std::optional<Scalar> min, std::optional<Scalar> max) const;
+    Tensor& clamp_(Scalar min_val, Scalar max_val);
+    Tensor clamp_min(Scalar min_val) const;
+    Tensor clamp_max(Scalar max_val) const;
+    Tensor triu(int64_t diagonal = 0) const;
+    Tensor tril(int64_t diagonal = 0) const;
+    Tensor diag(int64_t diagonal = 0) const;
 
     // In-place versions
     Tensor& neg_();
@@ -479,6 +489,12 @@ public:
 
     bool any() const;
     Tensor any(int64_t dim, bool keepdim = false) const;
+
+    std::tuple<Tensor, Tensor> sort(int64_t dim = -1, bool descending = false) const;
+    Tensor argsort(int64_t dim = -1, bool descending = false) const;
+    std::tuple<Tensor, Tensor> topk(int64_t k, int64_t dim = -1, bool largest = true, bool sorted = true) const;
+    Tensor cumsum(int64_t dim) const;
+    Tensor cumprod(int64_t dim) const;
 
     // ========================================================================
     // Linear algebra operations
