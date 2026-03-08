@@ -328,6 +328,37 @@ inline void launch_bmm(
 }
 
 // ============================================================================
+// Inference Kernels (LLM: RMSNorm, RoPE, Causal Attention)
+// ============================================================================
+
+ATEN_CUDA_API void launch_rms_norm(
+    const float* input, const float* weight, float* output,
+    int rows, int hidden, float eps, bool add_one,
+    cudaStream_t stream = nullptr);
+
+ATEN_CUDA_API void launch_per_head_rms_norm(
+    float* data, const float* weight,
+    int rows, int n_heads, int head_dim, float eps, bool add_one,
+    cudaStream_t stream = nullptr);
+
+ATEN_CUDA_API void launch_rope(
+    float* data, int seq_len, int n_heads, int head_dim,
+    int position_offset, float freq_base,
+    cudaStream_t stream = nullptr);
+
+ATEN_CUDA_API void launch_causal_attention(
+    const float* Q, const float* K, const float* V, float* output,
+    int seq_len, int total_seq,
+    int n_heads, int n_kv_heads, int head_dim,
+    int past_len, float scale,
+    cudaStream_t stream = nullptr);
+
+ATEN_CUDA_API void launch_concat(
+    const float* a, const float* b, float* output,
+    int64_t a_rows, int64_t b_rows, int64_t cols,
+    cudaStream_t stream = nullptr);
+
+// ============================================================================
 // PIR Operations (Parallel Scan for Recurrent Networks)
 // ============================================================================
 
