@@ -47,27 +47,51 @@
 - Stop tokens: `<|im_end|>`, `<end_of_turn>`, `<|eot_id|>`, `</s>`
 - Repetition penalty (1.05) для предотвращения зацикливания
 
-### Результаты vs Ollama baseline
+### Оптимизация скорости: 16 → 49.9 tok/s (3.1× speedup)
 
-| Модель | Device | VRAM | tok/s | Ollama tok/s | Правильность |
-|--------|--------|------|-------|-------------|--------------|
-| qwen3:4b | CPU | 0 | ~0.6 | N/A | OK |
-| qwen3:4b | **CUDA** | **16.9 GB** | **11.7** | ~40 | **Matches Ollama** |
-| gemma3:4b | CUDA | ~20 GB | **12.2** | ~35 | OK |
+**Фазы оптимизации:**
+1. **Profiler** (`torch/io/inference_profiler.h`) — CUDA event-based timing, per-operation breakdown
+2. **Vectorized GEMV** — float4 loads, 128 threads/block → 16 → 25.4 tok/s (+59%)
+3. **Coalesced float32 GEMV** — row-major access → 25.4 → 34.4 tok/s (+35%)
+4. **Warp-cooperative quant GEMV** — полная перезапись CUDAQuantGemv.cu:
+   - Каждый warp = 1 output row, 32 lanes читают consecutive qs bytes
+   - x vector в shared memory, uint32_t packed load, float4 loads из smem
+   - Warp shuffle reduction (без shared memory для reduce)
+   - 34.4 → 49.9 tok/s (+45%)
+5. **Scratch Pool** — pre-allocated decode buffers, zero alloc hot path (no speed gain — caching allocator уже быстрый)
+6. **Shared memory fix** — cudaFuncSetAttribute для K > 12288 (68 KB smem для ffn_down в 14B+ моделях)
+7. **Think tag fix** — strip everything from `<think>` to end when no `</think>`
+8. **/no_think** — system message для Qwen3 чтобы отключить thinking mode
 
-**Промпт/ответ сравнение с Ollama (greedy, qwen3:4b):**
-| Промпт | Ollama | PromeTorch | Match |
-|--------|--------|------------|-------|
-| "What is 2+2?" | "2 + 2 equals 4." | "The result of 2 + 2 is 4." | YES |
-| "Capital of France?" | "The capital of France is Paris." | "The capital of France is Paris." | EXACT |
-| "Hello! What is your name?" | "I'm Qwen" | "My name is Qwen. I'm a large language model developed by Alibaba" | YES |
+### Результаты vs Ollama baseline (A100 40GB)
+
+| Модель | VRAM | PromeTorch tok/s | Ollama tok/s | Ratio | Корректность |
+|--------|------|-----------------|-------------|-------|-------------|
+| qwen3:4b | 4.9 GB | **49.9** | 164.6 | 30% | ✅ "The result of 2 + 2 is 4." |
+| gemma3:4b | ~3 GB | **52.9** | 147.5 | 36% | ✅ Correct "4" |
+| deepseek-r1:8b | 5.9 GB | **30.5** | 129.6 | 24% | ✅ Correct answers |
+| qwen3:14b | 9.6 GB | **18.4** | 84.4 | 22% | ✅ Works (after smem fix) |
+| qwen3:30b | - | ❌ MoE | 115.4 | - | MoE не поддерж. |
+| gemma3:27b | 9.6 GB | ❌ crash | 48.9 | - | tied weights bug |
+| llama3.3:70b | - | ❌ too large | - | - | 40.5 GB > VRAM |
+
+**Предыдущий baseline 40 tok/s был неверен.** Реальный Ollama: 84-165 tok/s. Мы на 22-36%.
+
+### Что делать дальше
+- **gemma3:27b**: исправить undefined tensor при tied embeddings
+- **MoE**: поддержка qwen3moe (expert routing, shared expert)
+- **Скорость**: мы на 22-36% от Ollama. Потенциальные улучшения:
+  - Fused Residual+RMSNorm kernel (-2 launches/layer)
+  - GPU Embedding Lookup (убрать CPU→GPU transfer)
+  - Fused QK-norm+RoPE
+  - FP16 compute (half precision GEMV)
+  - Flash Decoding (batched attention)
 
 **Ключевые ограничения vs Ollama:**
-- **Скорость 3.4x медленнее**: мы float32 naive kernels, Ollama — int4 оптимизированные (llama.cpp)
-- **VRAM 5.6x больше**: dequant Q4_K_M → float32 (2.6 GB → 14+ GB)
-- **Загрузка 90 сек**: transpose + memcpy vs Ollama 2 сек (mmap + keep quant)
-- **Длинные тексты**: деградация после ~80 токенов (нужен frequency penalty, min_p)
-- **Крупные модели**: deepseek-r1:8b нужно ~30 GB float32, llama3.3:70b не влезет
+- **Скорость 3-4x медленнее**: наши kernels чисто float32, Ollama — half precision + flash decoding
+- **VRAM эффективный**: quant-only mode (4.9 GB для 4B), сравнимо с Ollama
+- **Загрузка медленная**: 20-40 сек vs Ollama 2 сек (mmap)
+- **Длинные тексты**: деградация после ~80 токенов с greedy decoding
 
 ### Исправленные баги
 - Q6_K scale index bug: `is = n/16` → `is = n/16 + l/16`

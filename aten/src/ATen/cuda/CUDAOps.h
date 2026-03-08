@@ -358,6 +358,41 @@ ATEN_CUDA_API void launch_concat(
     int64_t a_rows, int64_t b_rows, int64_t cols,
     cudaStream_t stream = nullptr);
 
+// Write new KV rows into pre-allocated cache at offset position
+ATEN_CUDA_API void launch_kv_cache_write(
+    const float* src, float* dst_cache,
+    int64_t num_new_rows, int64_t cols, int64_t offset_row,
+    cudaStream_t stream = nullptr);
+
+// Fused SiLU(gate) * up: out[i] = silu(gate[i]) * up[i]
+ATEN_CUDA_API void launch_silu_mul(
+    const float* gate, const float* up, float* output,
+    int64_t n, cudaStream_t stream = nullptr);
+
+// Inference GEMV: y[n] = sum_k x[k] * W[k * N + n], for [1,K] @ [K,N] = [1,N]
+// W is row-major [K, N] (pre-transposed weights)
+ATEN_CUDA_API void launch_inference_gemv(
+    const float* x, const float* W, float* y,
+    int K, int N, cudaStream_t stream = nullptr);
+
+// Fused Q4_K_M dequant-GEMV: y[n] = sum_k dequant(W_q4km[n,k]) * x[k]
+ATEN_CUDA_API void launch_q4km_gemv(
+    const void* weights, const float* x, float* y,
+    int K, int N, int64_t row_stride_bytes,
+    cudaStream_t stream = nullptr);
+
+// Fused Q6_K dequant-GEMV: y[n] = sum_k dequant(W_q6k[n,k]) * x[k]
+ATEN_CUDA_API void launch_q6k_gemv(
+    const void* weights, const float* x, float* y,
+    int K, int N, int64_t row_stride_bytes,
+    cudaStream_t stream = nullptr);
+
+// Fused Q5_K dequant-GEMV: y[n] = sum_k dequant(W_q5k[n,k]) * x[k]
+ATEN_CUDA_API void launch_q5k_gemv(
+    const void* weights, const float* x, float* y,
+    int K, int N, int64_t row_stride_bytes,
+    cudaStream_t stream = nullptr);
+
 // ============================================================================
 // PIR Operations (Parallel Scan for Recurrent Networks)
 // ============================================================================

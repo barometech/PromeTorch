@@ -263,6 +263,39 @@ public:
     }
 
     // ========================================================================
+    // Load raw tensor bytes (no dequantization) for GPU quantized inference
+    // Returns raw quantized bytes + quant type + shape
+    // ========================================================================
+
+    struct RawTensorData {
+        std::vector<uint8_t> data;
+        GGMLType type;
+        std::vector<int64_t> shape;  // PyTorch convention [rows, cols]
+        int64_t n_elements;
+    };
+
+    RawTensorData load_raw_tensor(const std::string& name) const {
+        const auto& info = get_tensor_info(name);
+        int64_t raw_bytes = info.data_bytes();
+
+        std::ifstream f(file_path, std::ios::binary);
+        if (!f) throw std::runtime_error("GGUF: Cannot reopen file: " + file_path);
+
+        uint64_t abs_offset = data_offset + info.offset;
+        f.seekg(static_cast<std::streamoff>(abs_offset));
+
+        RawTensorData result;
+        result.data.resize(raw_bytes);
+        f.read(reinterpret_cast<char*>(result.data.data()), raw_bytes);
+        if (!f) throw std::runtime_error("GGUF: Read failed for raw tensor: " + info.name);
+
+        result.type = info.type;
+        result.shape = info.shape();
+        result.n_elements = info.n_elements();
+        return result;
+    }
+
+    // ========================================================================
     // Load all tensors (with progress)
     // ========================================================================
 

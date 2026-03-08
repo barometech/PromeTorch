@@ -33,6 +33,7 @@ void print_usage(const char* argv0) {
     std::cout << "  --greedy         Greedy decoding (temp=0)" << std::endl;
     std::cout << "  --chat           Apply chat template (recommended for questions)" << std::endl;
     std::cout << "  --raw            No chat template (default, good for completions)" << std::endl;
+    std::cout << "  --profile        Enable GPU profiling (timing breakdown)" << std::endl;
 }
 
 int main(int argc, char* argv[]) {
@@ -47,6 +48,7 @@ int main(int argc, char* argv[]) {
     bool tensors_only = false;
     bool use_cuda = false;
     bool use_chat = false;
+    bool use_profile = false;
     int max_tokens = 128;
     float temperature = 0.7f;
     int top_k = 40;
@@ -70,6 +72,8 @@ int main(int argc, char* argv[]) {
             use_chat = true;
         } else if (arg == "--raw") {
             use_chat = false;
+        } else if (arg == "--profile") {
+            use_profile = true;
         } else if (arg == "--max-tokens" && i + 1 < argc) {
             max_tokens = std::atoi(argv[++i]);
         } else if (arg == "--temp" && i + 1 < argc) {
@@ -154,6 +158,14 @@ int main(int argc, char* argv[]) {
         // Move to CUDA if requested
         if (use_cuda) {
             model.to_cuda();
+            // Load quantized weights for fast decode GEMV
+            model.load_quantized_to_cuda();
+        }
+
+        // Enable profiling if requested
+        if (use_profile) {
+            model.profiler.enable();
+            std::cout << "[Profile] GPU profiling enabled" << std::endl;
         }
 
         // Generate
