@@ -4,6 +4,55 @@
 
 ---
 
+## 2026-03-08: GGUF Inference — загрузка моделей Ollama + генерация текста (CPU & CUDA)
+
+**~3000 строк нового кода, 6 новых файлов, qwen3:4b и gemma3:4b работают.**
+
+### GGUF Reader (`torch/io/gguf_loader.h`)
+- Полный парсинг формата GGUF v3 (magic, header, metadata KV pairs, tensor info)
+- Поддержка всех типов метаданных: string, int, float, bool, array
+- Автоматическое выравнивание данных (32-byte alignment)
+- `reader.load_tensor(name)` — чтение + dequantization → float32
+
+### Dequantization (`torch/io/gguf_dequant.h`)
+- Q4_K_M: 256 values per 144-byte block, 6-bit packed scales + 4-bit weights
+- Q6_K: 256 values per 210-byte block, ql[128] + qh[64] + scales[16] + d(fp16)
+- Q8_0, Q5_K, F16, F32
+- Исправлен баг Q6_K: scale index `n/16` → `n/16 + l/16` (без этого веса были мусором)
+
+### Tokenizer (`torch/io/tokenizer.h`)
+- SentencePiece BPE (Llama, Gemma): ▁ (U+2581) word separator
+- GPT-2 BPE (Qwen): Ġ (U+0120) space encoding, word-level pre-tokenization
+- Byte fallback (<0xNN>), encode/decode
+
+### Ollama Resolver (`torch/io/ollama.h`)
+- Автоматический поиск моделей: `~/.ollama/models/manifests/` → digest → blob path
+- Поддержка Windows и Linux путей
+
+### Transformer Inference (`torch/io/gguf_model.h`)
+- Полный transformer: RMSNorm, RoPE, GQA attention, SwiGLU FFN, KV cache
+- Поддержка архитектур: qwen3, gemma3, llama (через GGUF metadata)
+- Gemma-specific: embedding scaling (sqrt(H)), QK-norm, post-attention/post-FFN norms
+- Gemma RMSNorm: GGUF converter bakes in +1 (layernorm1p) → НЕ добавлять +1 повторно
+- CUDA: matmul (GEMM), SiLU, element-wise ops на GPU; pre-transpose 2D weights при to_cuda()
+- Top-k/top-p sampling, greedy decoding, temperature
+
+### Результаты
+| Модель | Device | tok/s | Текст |
+|--------|--------|-------|-------|
+| qwen3:4b | CPU | ~0.6 | "in a small village, there was a girl named Lila..." |
+| qwen3:4b | CUDA | **10.15** | То же, 17x speedup |
+| gemma3:4b | CPU | ~0.5 | "2+2=4", story completions |
+
+### Исправленные баги
+- Q6_K scale index bug: `is = n/16` → `is = n/16 + l/16`
+- Tokenizer: Qwen reports "gpt2" model_type, не SentencePiece → GPT-2 pre-tokenization
+- GPT-2 spaces: Ġ (U+0120) → space conversion in decode
+- Gemma norm +1: GGUF converter already bakes in +1, double-application caused value explosion
+- CUDA QK-norm: `apply_qk_norm_inplace` двигал тензор на GPU, а `apply_rope_inplace` потом писал в него как CPU → crash
+
+---
+
 ## 2026-03-08: Phase 2 — linalg, FFT, tensor ops, ConvTranspose2d, INT8 quantization
 
 **~3700 строк нового кода, 16 файлов, 39/39 тестов пройдены.**
