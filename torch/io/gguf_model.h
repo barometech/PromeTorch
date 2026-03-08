@@ -19,6 +19,7 @@
 #include <random>
 #include <algorithm>
 #include <numeric>
+#include <iomanip>
 
 namespace torch {
 namespace io {
@@ -260,6 +261,14 @@ public:
         auto t_end = std::chrono::high_resolution_clock::now();
         double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
         std::cout << "[Model] Moved to CUDA in " << (ms / 1000.0) << " seconds" << std::endl;
+
+        // Report VRAM usage
+        size_t vram_free = 0, vram_total = 0;
+        cudaMemGetInfo(&vram_free, &vram_total);
+        double used_gb = (vram_total - vram_free) / (1024.0 * 1024.0 * 1024.0);
+        double total_gb = vram_total / (1024.0 * 1024.0 * 1024.0);
+        std::cout << "[Model] VRAM: " << std::fixed << std::setprecision(1)
+                  << used_gb << " / " << total_gb << " GB" << std::endl;
 #else
         std::cerr << "[Model] CUDA not available (compiled without PT_USE_CUDA)" << std::endl;
 #endif
@@ -391,8 +400,9 @@ public:
 
     // Generate with chat template applied
     std::string chat(const std::string& prompt, int max_tokens = 128,
-                     float temperature = 0.7f, int top_k = 40, float top_p = 0.9f) {
-        return generate(apply_chat_template(prompt), max_tokens, temperature, top_k, top_p);
+                     float temperature = 0.7f, int top_k = 40, float top_p = 0.9f,
+                     float repetition_penalty = 1.05f) {
+        return generate(apply_chat_template(prompt), max_tokens, temperature, top_k, top_p, repetition_penalty);
     }
 
     // ========================================================================
@@ -400,7 +410,8 @@ public:
     // ========================================================================
 
     std::string generate(const std::string& prompt, int max_tokens = 128,
-                         float temperature = 0.7f, int top_k = 40, float top_p = 0.9f) {
+                         float temperature = 0.7f, int top_k = 40, float top_p = 0.9f,
+                         float repetition_penalty = 1.05f) {
         // Reset KV cache
         kv_cache.reset();
         kv_cache.key_cache.resize(config.num_layers);
@@ -422,6 +433,20 @@ public:
             // Sample next token from last position logits
             int64_t last_pos = logits.size(0) - 1;
             Tensor last_logits = get_row(logits, last_pos);  // [vocab_size]
+
+            // Apply repetition penalty
+            if (repetition_penalty > 1.0f && !generated.empty()) {
+                float* logit_data = last_logits.mutable_data_ptr<float>();
+                for (int32_t prev_token : generated) {
+                    if (prev_token >= 0 && prev_token < static_cast<int32_t>(tokenizer.vocab.size())) {
+                        if (logit_data[prev_token] > 0) {
+                            logit_data[prev_token] /= repetition_penalty;
+                        } else {
+                            logit_data[prev_token] *= repetition_penalty;
+                        }
+                    }
+                }
+            }
 
             int32_t next_token = sample_token(last_logits, temperature, top_k, top_p);
 
