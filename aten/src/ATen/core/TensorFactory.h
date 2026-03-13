@@ -552,6 +552,87 @@ inline void manual_seed(uint64_t seed) {
     Generator::getDefault().manual_seed(seed);
 }
 
+// ============================================================================
+// Multinomial — sample from probability distribution
+// ============================================================================
+
+inline Tensor multinomial(const Tensor& probs, int64_t num_samples, bool replacement = false) {
+    PT_CHECK_MSG(probs.dim() == 1 || probs.dim() == 2,
+        "multinomial: probs must be 1D or 2D");
+
+    bool is_batched = (probs.dim() == 2);
+    int64_t batch = is_batched ? probs.size(0) : 1;
+    int64_t n_categories = is_batched ? probs.size(1) : probs.size(0);
+
+    PT_CHECK_MSG(replacement || num_samples <= n_categories,
+        "multinomial: cannot sample more than categories without replacement");
+
+    std::vector<int64_t> out_shape;
+    if (is_batched) {
+        out_shape = {batch, num_samples};
+    } else {
+        out_shape = {num_samples};
+    }
+
+    Tensor result = empty(out_shape, TensorOptions().dtype(c10::ScalarType::Long));
+    Tensor p = probs.contiguous();
+
+    PT_DISPATCH_FLOATING_TYPES(probs.dtype(), "multinomial", [&] {
+        const scalar_t* p_data = p.data_ptr<scalar_t>();
+        int64_t* out_data = result.mutable_data_ptr<int64_t>();
+        auto& gen = Generator::getDefault();
+
+        for (int64_t b = 0; b < batch; ++b) {
+            const scalar_t* row = p_data + b * n_categories;
+
+            // Build CDF
+            std::vector<double> cdf(n_categories);
+            cdf[0] = static_cast<double>(row[0]);
+            for (int64_t j = 1; j < n_categories; ++j) {
+                cdf[j] = cdf[j - 1] + static_cast<double>(row[j]);
+            }
+            // Normalize
+            double total = cdf[n_categories - 1];
+            if (total > 0) {
+                for (auto& c : cdf) c /= total;
+            }
+
+            std::vector<bool> used(n_categories, false);
+
+            for (int64_t s = 0; s < num_samples; ++s) {
+                double u = gen.uniform();
+
+                // Binary search in CDF
+                int64_t lo = 0, hi = n_categories;
+                while (lo < hi) {
+                    int64_t mid = lo + (hi - lo) / 2;
+                    double cdf_val = cdf[mid];
+                    // For no-replacement, skip used entries
+                    if (!replacement && used[mid]) {
+                        lo = mid + 1;
+                        continue;
+                    }
+                    if (cdf_val < u) lo = mid + 1;
+                    else hi = mid;
+                }
+
+                if (!replacement) {
+                    // Simple approach: sample with replacement then reject
+                    int64_t idx = lo < n_categories ? lo : n_categories - 1;
+                    while (used[idx] && idx < n_categories - 1) idx++;
+                    while (used[idx] && idx > 0) idx--;
+                    used[idx] = true;
+                    out_data[b * num_samples + s] = idx;
+                } else {
+                    out_data[b * num_samples + s] = lo < n_categories ? lo : n_categories - 1;
+                }
+            }
+        }
+    });
+
+    return result;
+}
+
 } // namespace at
 
 // ============================================================================
@@ -580,5 +661,6 @@ namespace torch {
     using at::tensor;
     using at::scalar_tensor;
     using at::manual_seed;
+    using at::multinomial;
     using at::Generator;
 }

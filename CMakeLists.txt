@@ -505,6 +505,84 @@ if(PT_BUILD_TESTS)
     )
 
     gtest_discover_tests(pir_tests)
+
+    # Comprehensive All-Ops Test
+    add_executable(all_ops_tests
+        test/cpp/test_all_ops.cpp
+    )
+
+    target_link_libraries(all_ops_tests
+        PRIVATE
+        aten
+        GTest::gtest
+        GTest::gtest_main
+    )
+
+    gtest_discover_tests(all_ops_tests)
+
+    # Comprehensive Autograd Test
+    add_executable(autograd_full_tests
+        test/cpp/test_autograd_full.cpp
+    )
+
+    target_link_libraries(autograd_full_tests
+        PRIVATE
+        torch_autograd
+        GTest::gtest
+        GTest::gtest_main
+    )
+
+    gtest_discover_tests(autograd_full_tests)
+
+    # NN Modules Test
+    add_executable(nn_modules_tests
+        test/cpp/test_nn_modules.cpp
+    )
+
+    target_link_libraries(nn_modules_tests
+        PRIVATE
+        torch_nn
+        GTest::gtest
+        GTest::gtest_main
+    )
+
+    if(PT_USE_OPENMP AND OpenMP_CXX_FOUND)
+        target_link_libraries(nn_modules_tests PRIVATE OpenMP::OpenMP_CXX)
+    endif()
+
+    gtest_discover_tests(nn_modules_tests)
+
+    # NN Functional Test
+    add_executable(nn_functional_tests
+        test/cpp/test_nn_functional_full.cpp
+    )
+
+    target_link_libraries(nn_functional_tests
+        PRIVATE
+        torch_nn
+        GTest::gtest
+        GTest::gtest_main
+    )
+
+    if(PT_USE_OPENMP AND OpenMP_CXX_FOUND)
+        target_link_libraries(nn_functional_tests PRIVATE OpenMP::OpenMP_CXX)
+    endif()
+
+    gtest_discover_tests(nn_functional_tests)
+
+    # Edge Cases Test
+    add_executable(edge_case_tests
+        test/cpp/test_edge_cases.cpp
+    )
+
+    target_link_libraries(edge_case_tests
+        PRIVATE
+        aten
+        GTest::gtest
+        GTest::gtest_main
+    )
+
+    gtest_discover_tests(edge_case_tests)
 endif()
 
 # ============================================================================

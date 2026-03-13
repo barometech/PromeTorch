@@ -665,5 +665,119 @@ inline Tensor& boolean_index_put_(Tensor& self, const Tensor& mask, const Tensor
     return self;
 }
 
+// ============================================================================
+// Scatter Reduce — scatter with reduction (sum, mean, amax, amin, prod)
+// ============================================================================
+
+inline Tensor& scatter_reduce_(Tensor& self, int64_t dim, const Tensor& index,
+                                const Tensor& src, const std::string& reduce) {
+    int64_t ndim = self.dim();
+    if (dim < 0) dim += ndim;
+    PT_CHECK(dim >= 0 && dim < ndim);
+    PT_CHECK_MSG(index.dtype() == c10::ScalarType::Long,
+        "scatter_reduce_: index must be LongTensor");
+
+    const int64_t* idx_data = index.data_ptr<int64_t>();
+
+    // For "mean" we need to track counts
+    Tensor counts;
+    if (reduce == "mean") {
+        counts = at::zeros(self.sizes(), TensorOptions().dtype(c10::ScalarType::Long));
+    }
+
+    PT_DISPATCH_ALL_TYPES(self.dtype(), "scatter_reduce_", [&] {
+        scalar_t* dst = self.mutable_data_ptr<scalar_t>();
+        const scalar_t* src_data = src.data_ptr<scalar_t>();
+        int64_t* cnt_data = (reduce == "mean") ? counts.mutable_data_ptr<int64_t>() : nullptr;
+
+        int64_t n = index.numel();
+
+        for (int64_t i = 0; i < n; ++i) {
+            int64_t remaining = i;
+            std::vector<int64_t> idx_coords(ndim);
+
+            for (int64_t d = ndim - 1; d >= 0; --d) {
+                idx_coords[d] = remaining % index.size(d);
+                remaining /= index.size(d);
+            }
+
+            int64_t scatter_idx = idx_data[i];
+            PT_CHECK_MSG(scatter_idx >= 0 && scatter_idx < self.size(dim),
+                "scatter_reduce_: index out of bounds");
+
+            int64_t dst_idx = 0;
+            for (int64_t d = 0; d < ndim; ++d) {
+                int64_t coord = (d == dim) ? scatter_idx : idx_coords[d];
+                dst_idx += coord * self.stride(d);
+            }
+
+            scalar_t val = src_data[i];
+
+            if (reduce == "sum" || reduce == "add") {
+                dst[dst_idx] += val;
+            } else if (reduce == "prod") {
+                dst[dst_idx] *= val;
+            } else if (reduce == "amax") {
+                dst[dst_idx] = std::max(dst[dst_idx], val);
+            } else if (reduce == "amin") {
+                dst[dst_idx] = std::min(dst[dst_idx], val);
+            } else if (reduce == "mean") {
+                dst[dst_idx] += val;
+                cnt_data[dst_idx] += 1;
+            }
+        }
+
+        // For mean, divide by counts
+        if (reduce == "mean") {
+            int64_t total = self.numel();
+            for (int64_t j = 0; j < total; ++j) {
+                if (cnt_data[j] > 0) {
+                    dst[j] /= static_cast<scalar_t>(cnt_data[j]);
+                }
+            }
+        }
+    });
+
+    return self;
+}
+
+// ============================================================================
+// Search Sorted — binary search on sorted sequence
+// ============================================================================
+
+inline Tensor searchsorted(const Tensor& sorted_sequence, const Tensor& values, bool right = false) {
+    PT_CHECK_MSG(sorted_sequence.dim() == 1, "searchsorted: sorted_sequence must be 1D");
+
+    Tensor result = at::empty(values.sizes(), TensorOptions().dtype(c10::ScalarType::Long));
+
+    Tensor seq = sorted_sequence.contiguous();
+    Tensor vals = values.contiguous();
+
+    PT_DISPATCH_FLOATING_TYPES(sorted_sequence.dtype(), "searchsorted", [&] {
+        const scalar_t* seq_data = seq.data_ptr<scalar_t>();
+        const scalar_t* val_data = vals.data_ptr<scalar_t>();
+        int64_t* out_data = result.mutable_data_ptr<int64_t>();
+        int64_t seq_len = sorted_sequence.size(0);
+        int64_t n = values.numel();
+
+        for (int64_t i = 0; i < n; ++i) {
+            scalar_t v = val_data[i];
+            int64_t lo = 0, hi = seq_len;
+
+            while (lo < hi) {
+                int64_t mid = lo + (hi - lo) / 2;
+                if (right ? (seq_data[mid] <= v) : (seq_data[mid] < v)) {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
+                }
+            }
+            out_data[i] = lo;
+        }
+    });
+
+    return result;
+}
+
 } // namespace native
 } // namespace at

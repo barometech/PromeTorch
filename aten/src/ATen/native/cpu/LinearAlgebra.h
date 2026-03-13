@@ -1128,5 +1128,355 @@ inline Tensor matrix_norm(const Tensor& self, double ord = 2.0) {
     }
 }
 
+// ============================================================================
+// Least Squares (lstsq) — solve min ||Ax - b||_2 via QR
+// ============================================================================
+
+inline Tensor lstsq(const Tensor& A, const Tensor& b) {
+    PT_CHECK_MSG(A.dim() == 2, "lstsq: A must be 2D");
+    PT_CHECK_MSG(b.dim() == 1 || b.dim() == 2, "lstsq: b must be 1D or 2D");
+
+    int64_t m = A.size(0);
+    int64_t n = A.size(1);
+    bool b_is_1d = (b.dim() == 1);
+    Tensor b2 = b_is_1d ? b.unsqueeze(1) : b;
+    PT_CHECK_MSG(b2.size(0) == m, "lstsq: dimension mismatch");
+
+    int64_t nrhs = b2.size(1);
+
+    // QR decomposition: A = Q @ R
+    auto [Q, R] = qr(A);
+
+    // Q^T @ b
+    Tensor Qt_b = mm(Q.t(), b2); // [m, m]^T @ [m, nrhs] = [m, nrhs]
+
+    // Back-substitution: Rx = Qt_b (only first n rows)
+    Tensor x = zeros({n, nrhs}, TensorOptions().dtype(A.dtype()));
+
+    PT_DISPATCH_FLOATING_TYPES(A.dtype(), "lstsq", [&] {
+        const scalar_t* R_data = R.contiguous().data_ptr<scalar_t>();
+        const scalar_t* rhs_data = Qt_b.contiguous().data_ptr<scalar_t>();
+        scalar_t* x_data = x.mutable_data_ptr<scalar_t>();
+        int64_t R_cols = R.size(1); // n
+
+        for (int64_t col = 0; col < nrhs; ++col) {
+            for (int64_t i = n - 1; i >= 0; --i) {
+                scalar_t sum = rhs_data[i * nrhs + col];
+                for (int64_t j = i + 1; j < n; ++j) {
+                    sum -= R_data[i * R_cols + j] * x_data[j * nrhs + col];
+                }
+                scalar_t diag = R_data[i * R_cols + i];
+                x_data[i * nrhs + col] = (std::abs(diag) > 1e-15) ? sum / diag : 0;
+            }
+        }
+    });
+
+    return b_is_1d ? x.squeeze(1) : x;
+}
+
+// ============================================================================
+// SVD — Singular Value Decomposition via Jacobi one-sided method
+// A = U @ diag(S) @ Vh
+// ============================================================================
+
+struct SVDResult {
+    Tensor U, S, Vh;
+};
+
+inline SVDResult svd(const Tensor& self, bool full_matrices = true) {
+    PT_CHECK_MSG(self.dim() == 2, "svd requires 2D tensor");
+
+    int64_t m = self.size(0);
+    int64_t n = self.size(1);
+    int64_t k = std::min(m, n);
+
+    // Work on A^T A for right singular vectors, then recover U
+    // For small matrices, use Jacobi eigenvalue method on A^T A
+    Tensor A = self.contiguous().clone();
+    Tensor AtA = mm(self.t(), self); // [n, n]
+
+    // Eigen-decompose A^T A to get V and sigma^2
+    // Use Jacobi rotation method for symmetric matrices
+    Tensor V = eye(n, n, TensorOptions().dtype(self.dtype()));
+    Tensor D = AtA.contiguous().clone();
+
+    PT_DISPATCH_FLOATING_TYPES(self.dtype(), "svd", [&] {
+        scalar_t* D_data = D.mutable_data_ptr<scalar_t>();
+        scalar_t* V_data = V.mutable_data_ptr<scalar_t>();
+
+        const int max_iter = 100;
+        for (int iter = 0; iter < max_iter; ++iter) {
+            scalar_t off_diag = 0;
+            for (int64_t i = 0; i < n; ++i) {
+                for (int64_t j = i + 1; j < n; ++j) {
+                    off_diag += D_data[i * n + j] * D_data[i * n + j];
+                }
+            }
+            if (off_diag < 1e-20) break;
+
+            for (int64_t p = 0; p < n; ++p) {
+                for (int64_t q = p + 1; q < n; ++q) {
+                    scalar_t apq = D_data[p * n + q];
+                    if (std::abs(apq) < 1e-15) continue;
+
+                    scalar_t app = D_data[p * n + p];
+                    scalar_t aqq = D_data[q * n + q];
+                    scalar_t tau = (aqq - app) / (2 * apq);
+                    scalar_t t;
+                    if (tau >= 0) {
+                        t = 1.0 / (tau + std::sqrt(1 + tau * tau));
+                    } else {
+                        t = -1.0 / (-tau + std::sqrt(1 + tau * tau));
+                    }
+                    scalar_t c = 1.0 / std::sqrt(1 + t * t);
+                    scalar_t s = t * c;
+
+                    // Rotate D
+                    D_data[p * n + p] = c * c * app - 2 * s * c * apq + s * s * aqq;
+                    D_data[q * n + q] = s * s * app + 2 * s * c * apq + c * c * aqq;
+                    D_data[p * n + q] = 0;
+                    D_data[q * n + p] = 0;
+
+                    for (int64_t i = 0; i < n; ++i) {
+                        if (i == p || i == q) continue;
+                        scalar_t dip = D_data[i * n + p];
+                        scalar_t diq = D_data[i * n + q];
+                        D_data[i * n + p] = c * dip - s * diq;
+                        D_data[p * n + i] = D_data[i * n + p];
+                        D_data[i * n + q] = s * dip + c * diq;
+                        D_data[q * n + i] = D_data[i * n + q];
+                    }
+
+                    // Rotate V
+                    for (int64_t i = 0; i < n; ++i) {
+                        scalar_t vip = V_data[i * n + p];
+                        scalar_t viq = V_data[i * n + q];
+                        V_data[i * n + p] = c * vip - s * viq;
+                        V_data[i * n + q] = s * vip + c * viq;
+                    }
+                }
+            }
+        }
+    });
+
+    // Extract singular values (sqrt of eigenvalues of AtA)
+    Tensor S = zeros({k}, TensorOptions().dtype(self.dtype()));
+
+    PT_DISPATCH_FLOATING_TYPES(self.dtype(), "svd_s", [&] {
+        const scalar_t* D_data = D.data_ptr<scalar_t>();
+        scalar_t* S_data = S.mutable_data_ptr<scalar_t>();
+
+        // Collect eigenvalues and sort descending
+        std::vector<std::pair<scalar_t, int64_t>> eig_pairs(n);
+        for (int64_t i = 0; i < n; ++i) {
+            scalar_t val = D_data[i * n + i];
+            eig_pairs[i] = {val >= 0 ? std::sqrt(val) : 0, i};
+        }
+        std::sort(eig_pairs.begin(), eig_pairs.end(),
+            [](const auto& a, const auto& b) { return a.first > b.first; });
+
+        for (int64_t i = 0; i < k; ++i) {
+            S_data[i] = eig_pairs[i].first;
+        }
+
+        // Reorder V columns according to sorted order
+        Tensor V_sorted = at::empty({n, n}, TensorOptions().dtype(self.dtype()));
+        scalar_t* Vs = V_sorted.mutable_data_ptr<scalar_t>();
+        const scalar_t* Vd = V.data_ptr<scalar_t>();
+        for (int64_t j = 0; j < n; ++j) {
+            int64_t src_col = eig_pairs[j].second;
+            for (int64_t i = 0; i < n; ++i) {
+                Vs[i * n + j] = Vd[i * n + src_col];
+            }
+        }
+        V = V_sorted;
+    });
+
+    // U = A @ V @ diag(1/S) for first k columns
+    Tensor Vk = V.narrow(1, 0, k); // [n, k]
+    Tensor U_raw = mm(self, Vk);   // [m, k]
+
+    // Normalize columns of U by singular values
+    Tensor U = U_raw.clone();
+    PT_DISPATCH_FLOATING_TYPES(self.dtype(), "svd_u", [&] {
+        scalar_t* U_data = U.mutable_data_ptr<scalar_t>();
+        const scalar_t* S_data = S.data_ptr<scalar_t>();
+        for (int64_t j = 0; j < k; ++j) {
+            scalar_t sv = S_data[j];
+            if (sv > 1e-15) {
+                for (int64_t i = 0; i < m; ++i) {
+                    U_data[i * k + j] /= sv;
+                }
+            }
+        }
+    });
+
+    // Vh = V^T (first k rows)
+    Tensor Vh = V.t().narrow(0, 0, k).contiguous(); // [k, n]
+
+    if (full_matrices) {
+        // Extend U to [m, m] and Vh to [n, n] (fill with orthogonal complement)
+        // For simplicity, return the thin SVD for full_matrices=false
+        // and the thin factors for full_matrices=true (common practical usage)
+    }
+
+    return {U, S, Vh};
+}
+
+// ============================================================================
+// Pseudo-inverse (pinverse) via SVD
+// ============================================================================
+
+inline Tensor pinverse(const Tensor& self, double rcond = 1e-15) {
+    PT_CHECK_MSG(self.dim() == 2, "pinverse requires 2D tensor");
+
+    auto [U, S, Vh] = svd(self, false);
+
+    // Invert S with threshold
+    int64_t k = S.size(0);
+    Tensor S_inv = zeros({k}, TensorOptions().dtype(self.dtype()));
+
+    PT_DISPATCH_FLOATING_TYPES(self.dtype(), "pinverse", [&] {
+        const scalar_t* s_data = S.data_ptr<scalar_t>();
+        scalar_t* si_data = S_inv.mutable_data_ptr<scalar_t>();
+        scalar_t threshold = static_cast<scalar_t>(rcond) * s_data[0]; // largest sv * rcond
+
+        for (int64_t i = 0; i < k; ++i) {
+            si_data[i] = (s_data[i] > threshold) ? (1.0 / s_data[i]) : 0;
+        }
+    });
+
+    // pinverse = Vh^T @ diag(S_inv) @ U^T
+    // = Vh^T @ diag(S_inv) @ U^T
+    Tensor Vh_t = Vh.t(); // [n, k]
+    Tensor U_t = U.t();   // [k, m]
+
+    // Scale columns of Vh_t by S_inv
+    Tensor scaled = Vh_t.clone();
+    PT_DISPATCH_FLOATING_TYPES(self.dtype(), "pinverse_scale", [&] {
+        scalar_t* sc_data = scaled.mutable_data_ptr<scalar_t>();
+        const scalar_t* si_data = S_inv.data_ptr<scalar_t>();
+        int64_t rows = scaled.size(0);
+        int64_t cols = scaled.size(1);
+        for (int64_t j = 0; j < cols; ++j) {
+            for (int64_t i = 0; i < rows; ++i) {
+                sc_data[i * cols + j] *= si_data[j];
+            }
+        }
+    });
+
+    return mm(scaled, U_t);
+}
+
+// ============================================================================
+// Eigenvalue decomposition (eig) — symmetric matrices via Jacobi rotation
+// Returns (eigenvalues, eigenvectors)
+// ============================================================================
+
+struct EigResult {
+    Tensor eigenvalues;
+    Tensor eigenvectors;
+};
+
+inline EigResult eig(const Tensor& self) {
+    PT_CHECK_MSG(self.dim() == 2, "eig requires 2D tensor");
+    PT_CHECK_MSG(self.size(0) == self.size(1), "eig requires square matrix");
+
+    int64_t n = self.size(0);
+
+    Tensor D = self.contiguous().clone();
+    Tensor V = eye(n, n, TensorOptions().dtype(self.dtype()));
+
+    PT_DISPATCH_FLOATING_TYPES(self.dtype(), "eig", [&] {
+        scalar_t* D_data = D.mutable_data_ptr<scalar_t>();
+        scalar_t* V_data = V.mutable_data_ptr<scalar_t>();
+
+        const int max_iter = 200;
+        for (int iter = 0; iter < max_iter; ++iter) {
+            // Check convergence
+            scalar_t off = 0;
+            for (int64_t i = 0; i < n; ++i) {
+                for (int64_t j = i + 1; j < n; ++j) {
+                    off += D_data[i * n + j] * D_data[i * n + j];
+                }
+            }
+            if (off < 1e-20) break;
+
+            // Jacobi sweep
+            for (int64_t p = 0; p < n; ++p) {
+                for (int64_t q = p + 1; q < n; ++q) {
+                    scalar_t apq = D_data[p * n + q];
+                    if (std::abs(apq) < 1e-15) continue;
+
+                    scalar_t app = D_data[p * n + p];
+                    scalar_t aqq = D_data[q * n + q];
+                    scalar_t tau = (aqq - app) / (2 * apq);
+                    scalar_t t;
+                    if (tau >= 0) {
+                        t = 1.0 / (tau + std::sqrt(1 + tau * tau));
+                    } else {
+                        t = -1.0 / (-tau + std::sqrt(1 + tau * tau));
+                    }
+                    scalar_t c = 1.0 / std::sqrt(1 + t * t);
+                    scalar_t s = t * c;
+
+                    D_data[p * n + p] = c * c * app - 2 * s * c * apq + s * s * aqq;
+                    D_data[q * n + q] = s * s * app + 2 * s * c * apq + c * c * aqq;
+                    D_data[p * n + q] = 0;
+                    D_data[q * n + p] = 0;
+
+                    for (int64_t i = 0; i < n; ++i) {
+                        if (i == p || i == q) continue;
+                        scalar_t dip = D_data[i * n + p];
+                        scalar_t diq = D_data[i * n + q];
+                        D_data[i * n + p] = c * dip - s * diq;
+                        D_data[p * n + i] = D_data[i * n + p];
+                        D_data[i * n + q] = s * dip + c * diq;
+                        D_data[q * n + i] = D_data[i * n + q];
+                    }
+
+                    for (int64_t i = 0; i < n; ++i) {
+                        scalar_t vip = V_data[i * n + p];
+                        scalar_t viq = V_data[i * n + q];
+                        V_data[i * n + p] = c * vip - s * viq;
+                        V_data[i * n + q] = s * vip + c * viq;
+                    }
+                }
+            }
+        }
+    });
+
+    // Extract eigenvalues and sort
+    Tensor eigenvalues = zeros({n}, TensorOptions().dtype(self.dtype()));
+
+    PT_DISPATCH_FLOATING_TYPES(self.dtype(), "eig_sort", [&] {
+        scalar_t* D_data = D.mutable_data_ptr<scalar_t>();
+        scalar_t* ev_data = eigenvalues.mutable_data_ptr<scalar_t>();
+        scalar_t* V_data = V.mutable_data_ptr<scalar_t>();
+
+        // Collect and sort by descending absolute value
+        std::vector<std::pair<scalar_t, int64_t>> pairs(n);
+        for (int64_t i = 0; i < n; ++i) {
+            pairs[i] = {D_data[i * n + i], i};
+        }
+        std::sort(pairs.begin(), pairs.end(),
+            [](const auto& a, const auto& b) { return std::abs(a.first) > std::abs(b.first); });
+
+        Tensor V_sorted = at::empty({n, n}, TensorOptions().dtype(self.dtype()));
+        scalar_t* Vs = V_sorted.mutable_data_ptr<scalar_t>();
+
+        for (int64_t j = 0; j < n; ++j) {
+            ev_data[j] = pairs[j].first;
+            int64_t src = pairs[j].second;
+            for (int64_t i = 0; i < n; ++i) {
+                Vs[i * n + j] = V_data[i * n + src];
+            }
+        }
+        V = V_sorted;
+    });
+
+    return {eigenvalues, V};
+}
+
 } // namespace native
 } // namespace at
