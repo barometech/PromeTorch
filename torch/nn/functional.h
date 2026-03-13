@@ -1280,6 +1280,179 @@ inline Tensor interpolate(const Tensor& input,
     return result;
 }
 
+// ============================================================================
+// Normalize — L_p normalization along a dimension
+// ============================================================================
+
+inline Tensor normalize(const Tensor& input, double p = 2.0, int64_t dim = 1, double eps = 1e-12) {
+    Tensor norm_val = input.norm(at::Scalar(p), dim, /*keepdim=*/true);
+    // Clamp to avoid division by zero
+    Tensor denom = at::native::clamp_min(norm_val, at::Scalar(eps));
+    return input / denom;
+}
+
+// ============================================================================
+// Cosine Similarity — pairwise cosine similarity along a dimension
+// ============================================================================
+
+inline Tensor cosine_similarity(const Tensor& x1, const Tensor& x2, int64_t dim = 1, double eps = 1e-8) {
+    Tensor dot = (x1 * x2).sum(dim);
+    Tensor norm1 = x1.norm(at::Scalar(2.0), dim);
+    Tensor norm2 = x2.norm(at::Scalar(2.0), dim);
+    Tensor denom = at::native::clamp_min(norm1 * norm2, at::Scalar(eps));
+    return dot / denom;
+}
+
+// ============================================================================
+// Pairwise Distance — Euclidean (or Lp) distance between pairs
+// ============================================================================
+
+inline Tensor pairwise_distance(const Tensor& x1, const Tensor& x2, double p = 2.0, double eps = 1e-6, bool keepdim = false) {
+    Tensor diff = x1 - x2;
+    return diff.norm(at::Scalar(p), /*dim=*/1, keepdim);
+}
+
+// ============================================================================
+// Grid Sample — bilinear sampling from a grid of coordinates
+// ============================================================================
+
+inline Tensor grid_sample(const Tensor& input, const Tensor& grid,
+                          const std::string& mode = "bilinear",
+                          const std::string& padding_mode = "zeros",
+                          bool align_corners = false) {
+    PT_CHECK_MSG(input.dim() == 4, "grid_sample: input must be 4D (N,C,H,W)");
+    PT_CHECK_MSG(grid.dim() == 4, "grid_sample: grid must be 4D (N,H_out,W_out,2)");
+    PT_CHECK_MSG(grid.size(3) == 2, "grid_sample: last dim of grid must be 2");
+    PT_CHECK_MSG(input.size(0) == grid.size(0), "grid_sample: batch size must match");
+
+    int64_t N = input.size(0);
+    int64_t C = input.size(1);
+    int64_t in_H = input.size(2);
+    int64_t in_W = input.size(3);
+    int64_t out_H = grid.size(1);
+    int64_t out_W = grid.size(2);
+
+    Tensor output = at::zeros({N, C, out_H, out_W}, at::TensorOptions().dtype(input.dtype()));
+
+    Tensor inp = input.contiguous();
+    Tensor grd = grid.contiguous();
+
+    PT_DISPATCH_FLOATING_TYPES(input.dtype(), "grid_sample", [&] {
+        const scalar_t* in_data = inp.data_ptr<scalar_t>();
+        const scalar_t* g_data = grd.data_ptr<scalar_t>();
+        scalar_t* out_data = output.mutable_data_ptr<scalar_t>();
+
+        for (int64_t n = 0; n < N; ++n) {
+            for (int64_t oh = 0; oh < out_H; ++oh) {
+                for (int64_t ow = 0; ow < out_W; ++ow) {
+                    // Grid values in [-1, 1]
+                    scalar_t gx = g_data[n * out_H * out_W * 2 + oh * out_W * 2 + ow * 2 + 0];
+                    scalar_t gy = g_data[n * out_H * out_W * 2 + oh * out_W * 2 + ow * 2 + 1];
+
+                    // Convert to pixel coordinates
+                    scalar_t ix, iy;
+                    if (align_corners) {
+                        ix = (gx + 1) * (in_W - 1) / 2;
+                        iy = (gy + 1) * (in_H - 1) / 2;
+                    } else {
+                        ix = ((gx + 1) * in_W - 1) / 2;
+                        iy = ((gy + 1) * in_H - 1) / 2;
+                    }
+
+                    if (mode == "bilinear") {
+                        int64_t ix0 = static_cast<int64_t>(std::floor(ix));
+                        int64_t iy0 = static_cast<int64_t>(std::floor(iy));
+                        int64_t ix1 = ix0 + 1;
+                        int64_t iy1 = iy0 + 1;
+
+                        scalar_t dx = ix - ix0;
+                        scalar_t dy = iy - iy0;
+
+                        auto get_val = [&](int64_t c, int64_t h, int64_t w) -> scalar_t {
+                            if (padding_mode == "zeros") {
+                                if (h < 0 || h >= in_H || w < 0 || w >= in_W) return 0;
+                            } else if (padding_mode == "border") {
+                                h = std::max(int64_t(0), std::min(h, in_H - 1));
+                                w = std::max(int64_t(0), std::min(w, in_W - 1));
+                            }
+                            return in_data[n * C * in_H * in_W + c * in_H * in_W + h * in_W + w];
+                        };
+
+                        for (int64_t c = 0; c < C; ++c) {
+                            scalar_t val = (1 - dy) * (1 - dx) * get_val(c, iy0, ix0) +
+                                           (1 - dy) * dx       * get_val(c, iy0, ix1) +
+                                           dy       * (1 - dx) * get_val(c, iy1, ix0) +
+                                           dy       * dx       * get_val(c, iy1, ix1);
+                            out_data[n * C * out_H * out_W + c * out_H * out_W + oh * out_W + ow] = val;
+                        }
+                    } else { // nearest
+                        int64_t nix = static_cast<int64_t>(std::round(ix));
+                        int64_t niy = static_cast<int64_t>(std::round(iy));
+                        for (int64_t c = 0; c < C; ++c) {
+                            scalar_t val = 0;
+                            if (niy >= 0 && niy < in_H && nix >= 0 && nix < in_W) {
+                                val = in_data[n * C * in_H * in_W + c * in_H * in_W + niy * in_W + nix];
+                            }
+                            out_data[n * C * out_H * out_W + c * out_H * out_W + oh * out_W + ow] = val;
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    return output;
+}
+
+// ============================================================================
+// Affine Grid — generate sampling grid from affine transformation matrix
+// ============================================================================
+
+inline Tensor affine_grid(const Tensor& theta, const std::vector<int64_t>& size, bool align_corners = false) {
+    PT_CHECK_MSG(theta.dim() == 3 && theta.size(1) == 2 && theta.size(2) == 3,
+        "affine_grid: theta must be Nx2x3");
+    PT_CHECK_MSG(size.size() == 4, "affine_grid: size must be (N,C,H,W)");
+
+    int64_t N = size[0];
+    int64_t H = size[2];
+    int64_t W = size[3];
+
+    PT_CHECK_MSG(theta.size(0) == N, "affine_grid: theta batch must match size[0]");
+
+    // Create base grid with normalized coordinates [-1, 1]
+    Tensor grid = at::empty({N, H, W, 2}, at::TensorOptions().dtype(theta.dtype()));
+    Tensor th = theta.contiguous();
+
+    PT_DISPATCH_FLOATING_TYPES(theta.dtype(), "affine_grid", [&] {
+        const scalar_t* t_data = th.data_ptr<scalar_t>();
+        scalar_t* g_data = grid.mutable_data_ptr<scalar_t>();
+
+        for (int64_t n = 0; n < N; ++n) {
+            const scalar_t* t = t_data + n * 6; // 2x3 matrix
+            for (int64_t h = 0; h < H; ++h) {
+                for (int64_t w = 0; w < W; ++w) {
+                    scalar_t y, x;
+                    if (align_corners) {
+                        y = (H > 1) ? (2.0 * h / (H - 1) - 1.0) : 0;
+                        x = (W > 1) ? (2.0 * w / (W - 1) - 1.0) : 0;
+                    } else {
+                        y = (2.0 * (h + 0.5) / H - 1.0);
+                        x = (2.0 * (w + 0.5) / W - 1.0);
+                    }
+                    // [x', y'] = theta @ [x, y, 1]^T
+                    scalar_t gx = t[0] * x + t[1] * y + t[2];
+                    scalar_t gy = t[3] * x + t[4] * y + t[5];
+                    int64_t idx = n * H * W * 2 + h * W * 2 + w * 2;
+                    g_data[idx + 0] = gx;
+                    g_data[idx + 1] = gy;
+                }
+            }
+        }
+    });
+
+    return grid;
+}
+
 } // namespace functional
 
 // Namespace alias for convenience

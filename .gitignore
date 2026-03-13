@@ -29,6 +29,7 @@ cmake_output.txt
 # Data files (large)
 data/mnist/
 *.ubyte
+*.ptor
 
 # Temp
 .claude/
@@ -41,21 +42,25 @@ data/mnist/
 *.png
 output.txt
 
-# Test directories
-test/
+# Unused directories
 PIR/
 tools/
 
 # Temporary build/debug logs (root directory)
 *.txt
 !CLAUDE.md
-!RESUME.md
 !BUILD_GUIDE.md
 !TECHNICAL_SPECIFICATION.md
-!CUDA_CRASH_INVESTIGATION.md
+!JOURNAL.md
+!AVOIDRECURSION.md
 
-# Temporary test files
-test_*.cpp
+# Root debug/test scripts (not part of framework)
+check_tokenizer.py
+compare_*.py
+debug_*.py
+exact_grad_compare.py
+verify_dequant*.py
+test_*.py
 pytorch_*.py
 benchmark_*.py
 fix_*.py

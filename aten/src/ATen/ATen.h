@@ -933,6 +933,19 @@ inline Tensor solve(const Tensor& A, const Tensor& b) { return at::native::solve
 inline Tensor cross(const Tensor& a, const Tensor& b, int64_t dim = -1) { return at::native::cross(a, b, dim); }
 inline Tensor matrix_norm(const Tensor& t, double ord = 2.0) { return at::native::matrix_norm(t, ord); }
 
+inline Tensor lstsq(const Tensor& A, const Tensor& b) { return at::native::lstsq(A, b); }
+inline at::native::SVDResult svd(const Tensor& t, bool full = true) { return at::native::svd(t, full); }
+inline Tensor pinverse(const Tensor& t, double rcond = 1e-15) { return at::native::pinverse(t, rcond); }
+inline at::native::EigResult eig(const Tensor& t) { return at::native::eig(t); }
+
+// Index ops
+inline Tensor& scatter_reduce_(Tensor& self, int64_t dim, const Tensor& index, const Tensor& src, const std::string& reduce) {
+    return at::native::scatter_reduce_(self, dim, index, src, reduce);
+}
+inline Tensor searchsorted(const Tensor& sorted, const Tensor& values, bool right = false) {
+    return at::native::searchsorted(sorted, values, right);
+}
+
 namespace linalg {
     inline at::native::LUResult lu(const Tensor& t) { return at::native::lu(t); }
     inline Tensor inv(const Tensor& t) { return at::native::inverse(t); }
@@ -940,6 +953,10 @@ namespace linalg {
     inline Tensor det(const Tensor& t) { return at::native::det(t); }
     inline Tensor cholesky(const Tensor& t, bool upper = false) { return at::native::cholesky(t, upper); }
     inline at::native::QRResult qr(const Tensor& t) { return at::native::qr(t); }
+    inline at::native::SVDResult svd(const Tensor& t, bool full = true) { return at::native::svd(t, full); }
+    inline at::native::EigResult eig(const Tensor& t) { return at::native::eig(t); }
+    inline Tensor lstsq(const Tensor& A, const Tensor& b) { return at::native::lstsq(A, b); }
+    inline Tensor pinverse(const Tensor& t, double rcond = 1e-15) { return at::native::pinverse(t, rcond); }
     inline Tensor matrix_norm(const Tensor& t, double ord = 2.0) { return at::native::matrix_norm(t, ord); }
     inline Tensor cross(const Tensor& a, const Tensor& b, int64_t dim = -1) { return at::native::cross(a, b, dim); }
 }
