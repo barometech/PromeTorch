@@ -276,6 +276,207 @@ inline Tensor relu_autograd(const Tensor& self) {
     return make_result_with_grad<ReluBackward>(result, self, self);
 }
 
+inline Tensor tan_autograd(const Tensor& self) {
+    Tensor result = self.tan();
+    return make_result_with_grad<TanBackward>(result, self, result);
+}
+
+inline Tensor rsqrt_autograd(const Tensor& self) {
+    Tensor result = self.rsqrt();  // Has CUDA dispatch
+    return make_result_with_grad<RsqrtBackward>(result, self, result);
+}
+
+inline Tensor square_autograd(const Tensor& self) {
+    Tensor result = self.square();  // Has CUDA dispatch
+    return make_result_with_grad<SquareBackward>(result, self, self);
+}
+
+inline Tensor reciprocal_autograd(const Tensor& self) {
+    Tensor result = self.reciprocal();
+    return make_result_with_grad<ReciprocalBackward>(result, self, result);
+}
+
+inline Tensor log2_autograd(const Tensor& self) {
+    Tensor result = self.log2();
+    return make_result_with_grad<Log2Backward>(result, self, self);
+}
+
+inline Tensor log10_autograd(const Tensor& self) {
+    Tensor result = self.log10();
+    return make_result_with_grad<Log10Backward>(result, self, self);
+}
+
+// ============================================================================
+// Activation Operations with Autograd
+// ============================================================================
+
+inline Tensor leaky_relu_autograd(const Tensor& self, double negative_slope = 0.01) {
+    // Forward: compute leaky_relu
+    Tensor result;
+#ifdef PT_USE_CUDA
+    if (self.is_cuda()) {
+        result = at::cuda_ops::leaky_relu(self, static_cast<float>(negative_slope));
+    } else
+#endif
+    {
+        Tensor self_contig = self.is_contiguous() ? self : self.contiguous();
+        result = at::empty(self_contig.sizes(), self_contig.dtype());
+        const float* in_data = self_contig.data_ptr<float>();
+        float* out_data = result.mutable_data_ptr<float>();
+        float slope = static_cast<float>(negative_slope);
+        for (int64_t i = 0; i < self_contig.numel(); ++i) {
+            out_data[i] = in_data[i] > 0.0f ? in_data[i] : in_data[i] * slope;
+        }
+    }
+
+    if (compute_requires_grad(self)) {
+        auto grad_fn = std::make_shared<LeakyReluBackward>(self, negative_slope);
+        grad_fn->add_input_metadata(self);
+        set_grad_fn(result, grad_fn);
+        result.set_requires_grad(true);
+    }
+    return result;
+}
+
+inline Tensor elu_autograd(const Tensor& self, double alpha = 1.0) {
+    // Forward: compute ELU
+    Tensor self_contig = self.is_contiguous() ? self : self.contiguous();
+    Tensor result = at::empty(self_contig.sizes(), self_contig.dtype());
+    const float* in_data = self_contig.data_ptr<float>();
+    float* out_data = result.mutable_data_ptr<float>();
+    float a = static_cast<float>(alpha);
+
+    for (int64_t i = 0; i < self_contig.numel(); ++i) {
+        out_data[i] = in_data[i] > 0.0f ? in_data[i] : a * (std::exp(in_data[i]) - 1.0f);
+    }
+
+    if (compute_requires_grad(self)) {
+        auto grad_fn = std::make_shared<ELUBackward>(self, alpha);
+        grad_fn->add_input_metadata(self);
+        set_grad_fn(result, grad_fn);
+        result.set_requires_grad(true);
+    }
+    return result;
+}
+
+inline Tensor selu_autograd(const Tensor& self) {
+    // Forward: compute SELU
+    constexpr float alpha = 1.6732632423543772848170429916717f;
+    constexpr float scale = 1.0507009873554804934193349852946f;
+
+    Tensor self_contig = self.is_contiguous() ? self : self.contiguous();
+    Tensor result = at::empty(self_contig.sizes(), self_contig.dtype());
+    const float* in_data = self_contig.data_ptr<float>();
+    float* out_data = result.mutable_data_ptr<float>();
+
+    for (int64_t i = 0; i < self_contig.numel(); ++i) {
+        if (in_data[i] > 0.0f) {
+            out_data[i] = scale * in_data[i];
+        } else {
+            out_data[i] = scale * alpha * (std::exp(in_data[i]) - 1.0f);
+        }
+    }
+
+    if (compute_requires_grad(self)) {
+        auto grad_fn = std::make_shared<SELUBackward>(self);
+        grad_fn->add_input_metadata(self);
+        set_grad_fn(result, grad_fn);
+        result.set_requires_grad(true);
+    }
+    return result;
+}
+
+inline Tensor mish_autograd(const Tensor& self) {
+    // Forward: compute Mish = x * tanh(softplus(x))
+    Tensor self_contig = self.is_contiguous() ? self : self.contiguous();
+    Tensor result = at::empty(self_contig.sizes(), self_contig.dtype());
+    const float* in_data = self_contig.data_ptr<float>();
+    float* out_data = result.mutable_data_ptr<float>();
+
+    for (int64_t i = 0; i < self_contig.numel(); ++i) {
+        float x = in_data[i];
+        float sp = std::log(1.0f + std::exp(x));  // softplus
+        out_data[i] = x * std::tanh(sp);
+    }
+
+    if (compute_requires_grad(self)) {
+        auto grad_fn = std::make_shared<MishBackward>(self);
+        grad_fn->add_input_metadata(self);
+        set_grad_fn(result, grad_fn);
+        result.set_requires_grad(true);
+    }
+    return result;
+}
+
+inline Tensor hardtanh_autograd(const Tensor& self, double min_val = -1.0, double max_val = 1.0) {
+    // Forward: hardtanh = clamp(x, min_val, max_val)
+    Tensor result = self.clamp(Scalar(min_val), Scalar(max_val));
+
+    if (compute_requires_grad(self)) {
+        auto grad_fn = std::make_shared<HardtanhBackward>(self, min_val, max_val);
+        grad_fn->add_input_metadata(self);
+        set_grad_fn(result, grad_fn);
+        result.set_requires_grad(true);
+    }
+    return result;
+}
+
+inline Tensor hardsigmoid_autograd(const Tensor& self) {
+    // Forward: hardsigmoid(x) = 0 if x <= -3, 1 if x >= 3, x/6 + 0.5 otherwise
+    Tensor self_contig = self.is_contiguous() ? self : self.contiguous();
+    Tensor result = at::empty(self_contig.sizes(), self_contig.dtype());
+    const float* in_data = self_contig.data_ptr<float>();
+    float* out_data = result.mutable_data_ptr<float>();
+
+    for (int64_t i = 0; i < self_contig.numel(); ++i) {
+        float x = in_data[i];
+        if (x <= -3.0f) {
+            out_data[i] = 0.0f;
+        } else if (x >= 3.0f) {
+            out_data[i] = 1.0f;
+        } else {
+            out_data[i] = x / 6.0f + 0.5f;
+        }
+    }
+
+    if (compute_requires_grad(self)) {
+        auto grad_fn = std::make_shared<HardsigmoidBackward>(self);
+        grad_fn->add_input_metadata(self);
+        set_grad_fn(result, grad_fn);
+        result.set_requires_grad(true);
+    }
+    return result;
+}
+
+inline Tensor hardswish_autograd(const Tensor& self) {
+    // Forward: hardswish(x) = x * hardsigmoid(x)
+    Tensor self_contig = self.is_contiguous() ? self : self.contiguous();
+    Tensor result = at::empty(self_contig.sizes(), self_contig.dtype());
+    const float* in_data = self_contig.data_ptr<float>();
+    float* out_data = result.mutable_data_ptr<float>();
+
+    for (int64_t i = 0; i < self_contig.numel(); ++i) {
+        float x = in_data[i];
+        float hs;
+        if (x <= -3.0f) {
+            hs = 0.0f;
+        } else if (x >= 3.0f) {
+            hs = 1.0f;
+        } else {
+            hs = x / 6.0f + 0.5f;
+        }
+        out_data[i] = x * hs;
+    }
+
+    if (compute_requires_grad(self)) {
+        auto grad_fn = std::make_shared<HardswishBackward>(self);
+        grad_fn->add_input_metadata(self);
+        set_grad_fn(result, grad_fn);
+        result.set_requires_grad(true);
+    }
+    return result;
+}
+
 // ============================================================================
 // Binary Operations with Autograd
 // ============================================================================
@@ -638,7 +839,8 @@ inline Tensor boolean_index_autograd(const Tensor& self, const Tensor& mask) {
 // Tensor.backward() implementation
 // ============================================================================
 
-inline void tensor_backward(const Tensor& self, const Tensor& gradient = Tensor()) {
+inline void tensor_backward(const Tensor& self, const Tensor& gradient = Tensor(),
+                             bool retain_graph = false, bool create_graph = false) {
     Tensor grad = gradient;
     if (!grad.defined()) {
         // Default gradient is ones for scalar, error for non-scalar
@@ -651,7 +853,7 @@ inline void tensor_backward(const Tensor& self, const Tensor& gradient = Tensor(
         }
     }
 
-    backward({self}, {grad});
+    backward({self}, {grad}, retain_graph, create_graph);
 }
 
 // ============================================================================

@@ -570,6 +570,66 @@ inline Tensor norm(const Tensor& self, Scalar p, int64_t dim, bool keepdim = fal
     return result;
 }
 
+// Var along dimension
+inline Tensor var(const Tensor& self, int64_t dim, bool unbiased = true, bool keepdim = false) {
+    // Compute mean along dim, then (x-mean)^2 sum / (N-1 or N)
+    Tensor m = mean(self, dim, /*keepdim=*/true);
+    // Expand mean to match self shape for broadcasting
+    Tensor centered = sub(self, m);  // broadcasting handles it if keepdim=true on mean
+    Tensor sq = mul(centered, centered);
+    Tensor s = sum(sq, dim, keepdim);
+    int64_t actual_dim = dim < 0 ? dim + self.dim() : dim;
+    double divisor = unbiased ? (double)(self.size(actual_dim) - 1) : (double)self.size(actual_dim);
+    if (divisor <= 0) divisor = 1.0;
+    // Divide by divisor
+    Tensor result = zeros(s.sizes(), TensorOptions().dtype(s.dtype()).device(s.device()));
+    PT_DISPATCH_FLOATING_TYPES(s.dtype(), "var_dim_div", [&] {
+        const scalar_t* src = s.data_ptr<scalar_t>();
+        scalar_t* dst = result.mutable_data_ptr<scalar_t>();
+        for (int64_t i = 0; i < s.numel(); ++i) {
+            dst[i] = src[i] / static_cast<scalar_t>(divisor);
+        }
+    });
+    return result;
+}
+
+// Std along dimension
+inline Tensor std(const Tensor& self, int64_t dim, bool unbiased = true, bool keepdim = false) {
+    return sqrt(var(self, dim, unbiased, keepdim));
+}
+
+// Product along dimension
+inline Tensor prod(const Tensor& self, int64_t dim, bool keepdim = false) {
+    int64_t ndim = self.dim();
+    if (dim < 0) dim += ndim;
+    std::vector<int64_t> out_shape;
+    for (int64_t i = 0; i < ndim; ++i) {
+        if (i == dim) { if (keepdim) out_shape.push_back(1); }
+        else out_shape.push_back(self.size(i));
+    }
+    if (out_shape.empty()) out_shape.push_back(1);
+    Tensor cont = self.contiguous();
+    Tensor result = ones(out_shape, TensorOptions().dtype(self.dtype()).device(self.device()));
+    PT_DISPATCH_FLOATING_TYPES(self.dtype(), "prod_dim", [&] {
+        const scalar_t* data = cont.data_ptr<scalar_t>();
+        scalar_t* out = result.mutable_data_ptr<scalar_t>();
+        int64_t dim_size = cont.size(dim);
+        int64_t outer = 1, inner = 1;
+        for (int64_t i = 0; i < dim; ++i) outer *= cont.size(i);
+        for (int64_t i = dim + 1; i < ndim; ++i) inner *= cont.size(i);
+        for (int64_t o = 0; o < outer; ++o) {
+            for (int64_t in = 0; in < inner; ++in) {
+                scalar_t acc = 1;
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    acc *= data[(o * dim_size + d) * inner + in];
+                }
+                out[o * inner + in] = acc;
+            }
+        }
+    });
+    return result;
+}
+
 // All (logical AND)
 inline bool all(const Tensor& self) {
     bool result = true;
