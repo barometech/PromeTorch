@@ -369,53 +369,54 @@ TEST(Comparison, Eq) {
     auto a = tensor({1.0f, 2.0f, 3.0f});
     auto b = tensor({1.0f, 5.0f, 3.0f});
     auto r = a.eq(b);
-    EXPECT_EQ(r.data_ptr<float>()[0], 1.0f);
-    EXPECT_EQ(r.data_ptr<float>()[1], 0.0f);
-    EXPECT_EQ(r.data_ptr<float>()[2], 1.0f);
+    EXPECT_EQ(r.dtype(), c10::ScalarType::Bool);
+    EXPECT_TRUE(r.data_ptr<bool>()[0]);
+    EXPECT_FALSE(r.data_ptr<bool>()[1]);
+    EXPECT_TRUE(r.data_ptr<bool>()[2]);
 }
 
 TEST(Comparison, Ne) {
     auto a = tensor({1.0f, 2.0f, 3.0f});
     auto b = tensor({1.0f, 5.0f, 3.0f});
     auto r = a.ne(b);
-    EXPECT_EQ(r.data_ptr<float>()[0], 0.0f);
-    EXPECT_EQ(r.data_ptr<float>()[1], 1.0f);
-    EXPECT_EQ(r.data_ptr<float>()[2], 0.0f);
+    EXPECT_FALSE(r.data_ptr<bool>()[0]);
+    EXPECT_TRUE(r.data_ptr<bool>()[1]);
+    EXPECT_FALSE(r.data_ptr<bool>()[2]);
 }
 
 TEST(Comparison, Lt) {
     auto a = tensor({1.0f, 5.0f, 3.0f});
     auto b = tensor({2.0f, 3.0f, 3.0f});
     auto r = a.lt(b);
-    EXPECT_EQ(r.data_ptr<float>()[0], 1.0f);
-    EXPECT_EQ(r.data_ptr<float>()[1], 0.0f);
-    EXPECT_EQ(r.data_ptr<float>()[2], 0.0f);
+    EXPECT_TRUE(r.data_ptr<bool>()[0]);
+    EXPECT_FALSE(r.data_ptr<bool>()[1]);
+    EXPECT_FALSE(r.data_ptr<bool>()[2]);
 }
 
 TEST(Comparison, Le) {
     auto a = tensor({1.0f, 5.0f, 3.0f});
     auto b = tensor({2.0f, 3.0f, 3.0f});
     auto r = a.le(b);
-    EXPECT_EQ(r.data_ptr<float>()[0], 1.0f);
-    EXPECT_EQ(r.data_ptr<float>()[1], 0.0f);
-    EXPECT_EQ(r.data_ptr<float>()[2], 1.0f);
+    EXPECT_TRUE(r.data_ptr<bool>()[0]);
+    EXPECT_FALSE(r.data_ptr<bool>()[1]);
+    EXPECT_TRUE(r.data_ptr<bool>()[2]);
 }
 
 TEST(Comparison, Gt) {
     auto a = tensor({1.0f, 5.0f, 3.0f});
     auto b = tensor({2.0f, 3.0f, 3.0f});
     auto r = a.gt(b);
-    EXPECT_EQ(r.data_ptr<float>()[0], 0.0f);
-    EXPECT_EQ(r.data_ptr<float>()[1], 1.0f);
-    EXPECT_EQ(r.data_ptr<float>()[2], 0.0f);
+    EXPECT_FALSE(r.data_ptr<bool>()[0]);
+    EXPECT_TRUE(r.data_ptr<bool>()[1]);
+    EXPECT_FALSE(r.data_ptr<bool>()[2]);
 }
 
 TEST(Comparison, GeWithScalar) {
     auto a = tensor({1.0f, 2.0f, 3.0f});
     auto r = a.ge(Scalar(2.0));
-    EXPECT_EQ(r.data_ptr<float>()[0], 0.0f);
-    EXPECT_EQ(r.data_ptr<float>()[1], 1.0f);
-    EXPECT_EQ(r.data_ptr<float>()[2], 1.0f);
+    EXPECT_FALSE(r.data_ptr<bool>()[0]);
+    EXPECT_TRUE(r.data_ptr<bool>()[1]);
+    EXPECT_TRUE(r.data_ptr<bool>()[2]);
 }
 
 // =============================================================================
@@ -1251,12 +1252,12 @@ TEST(TypeDevice, ComparisonOperators) {
     auto le = (a <= b);
     auto gt = (a > b);
     auto ge = (a >= b);
-    EXPECT_EQ(eq.data_ptr<float>()[1], 1.0f);
-    EXPECT_EQ(ne.data_ptr<float>()[0], 1.0f);
-    EXPECT_EQ(lt.data_ptr<float>()[0], 1.0f);
-    EXPECT_EQ(le.data_ptr<float>()[1], 1.0f);
-    EXPECT_EQ(gt.data_ptr<float>()[2], 1.0f);
-    EXPECT_EQ(ge.data_ptr<float>()[1], 1.0f);
+    EXPECT_TRUE(eq.data_ptr<bool>()[1]);   // 2==2
+    EXPECT_TRUE(ne.data_ptr<bool>()[0]);   // 1!=2
+    EXPECT_TRUE(lt.data_ptr<bool>()[0]);   // 1<2
+    EXPECT_TRUE(le.data_ptr<bool>()[1]);   // 2<=2
+    EXPECT_TRUE(gt.data_ptr<bool>()[2]);   // 3>1
+    EXPECT_TRUE(ge.data_ptr<bool>()[1]);   // 2>=2
 }
 
 TEST(TypeDevice, ScalarTensorArith) {

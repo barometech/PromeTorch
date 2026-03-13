@@ -583,6 +583,7 @@ inline Tensor Tensor::argmin(int64_t dim, bool keepdim) const { return native::a
 inline Tensor Tensor::var(bool unbiased) const { return native::var(*this, unbiased); }
 inline Tensor Tensor::std(bool unbiased) const { return native::std(*this, unbiased); }
 inline Tensor Tensor::norm(Scalar p) const { return native::norm(*this, p); }
+inline Tensor Tensor::norm(Scalar p, int64_t dim, bool keepdim) const { return native::norm(*this, p, dim, keepdim); }
 inline bool Tensor::all() const { return native::all(*this); }
 inline bool Tensor::any() const { return native::any(*this); }
 inline std::tuple<Tensor, Tensor> Tensor::sort(int64_t dim, bool descending) const { return native::sort(*this, dim, descending); }

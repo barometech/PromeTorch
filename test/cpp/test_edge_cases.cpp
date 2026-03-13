@@ -228,11 +228,13 @@ TEST(EdgeCases, RepeatCopies) {
 
 TEST(EdgeCases, SliceWithStep) {
     Tensor t = at::arange(Scalar(0), Scalar(10), Scalar(1)); // {0,1,...,9}
-    Tensor s = t.slice(0, 0, 10, 2); // {0, 2, 4, 6, 8}
+    Tensor s = t.slice(0, 0, 10, 2); // {0, 2, 4, 6, 8} — non-contiguous view!
     EXPECT_EQ(s.numel(), 5);
-    EXPECT_NEAR(s.data_ptr<float>()[0], 0.0f, 1e-5);
-    EXPECT_NEAR(s.data_ptr<float>()[1], 2.0f, 1e-5);
-    EXPECT_NEAR(s.data_ptr<float>()[4], 8.0f, 1e-5);
+    EXPECT_EQ(s.stride(0), 2); // step=2 means stride=2
+    Tensor sc = s.contiguous(); // make contiguous to read sequentially
+    EXPECT_NEAR(sc.data_ptr<float>()[0], 0.0f, 1e-5);
+    EXPECT_NEAR(sc.data_ptr<float>()[1], 2.0f, 1e-5);
+    EXPECT_NEAR(sc.data_ptr<float>()[4], 8.0f, 1e-5);
 }
 
 // ============================================================================
