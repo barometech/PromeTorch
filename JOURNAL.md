@@ -4,6 +4,48 @@
 
 ---
 
+## 2026-03-13: Закрытие гэпов + тест-сьюит + GitHub подготовка
+
+### Новые операции (12 штук)
+- `F::normalize`, `cosine_similarity`, `pairwise_distance` — тривиальные через существующие norm/sum
+- `grid_sample` (bilinear/nearest, zeros/border padding, align_corners) + `affine_grid`
+- `scatter_reduce_` — расширение scatter_add_ на режимы mean/amax/amin/prod
+- `searchsorted` — бинарный поиск на отсортированной последовательности
+- `multinomial` — семплирование из распределения (с/без замены, через CDF + binary search)
+- `lstsq` — метод наименьших квадратов через QR (back-substitution)
+- `svd` — Jacobi one-sided SVD через eigendecomposition A^TA
+- `pinverse` — псевдо-обратная через SVD
+- `eig` — eigenvalue decomposition симметричных матриц через Jacobi rotation
+
+### Аудит: что УЖЕ было реализовано (а считалось гэпом)
+where, meshgrid, unique, masked_fill, pad (constant/reflect/replicate), interpolate (nearest/bilinear), one_hot, unfold/fold, einsum, FFT (fft/ifft/rfft/fft2)
+
+### Тест-сьюит (~300+ тестов, 4472 строки, gtest)
+| Файл | Тестов | Покрытие |
+|------|--------|----------|
+| test_all_ops.cpp | 147 | Все тензорные операции: math, reduce, shape, index, linalg, factory |
+| test_autograd_full.cpp | 65 | Gradient check: аналитический + numerical для всех дифференцируемых ops |
+| test_nn_modules.cpp | 45 | Все 57+ NN модулей: activations, linear, conv, pool, norm, loss, RNN, containers |
+| test_nn_functional_full.cpp | 35 | Все F:: функции: activations, softmax, loss, pad, interpolate, normalize |
+| test_edge_cases.cpp | 30 | Скаляры, non-contiguous, broadcasting, dtype promotion, channels-last |
+
+### Чистка репо
+- Удалены из git: 17 Python debug-скриптов, 6 .bat build-скриптов, дубликат train_10_models.cpp, CUDA_CRASH_INVESTIGATION.md, RESUME.md
+- test/cpp/ теперь трекается (было в .gitignore)
+- Добавлены README.md (features, build, examples, benchmarks) + MIT LICENSE
+- .gitignore обновлён: исключения для JOURNAL.md, AVOIDRECURSION.md
+
+### Что НЕ реализовано (future work)
+Distributed (DDP/NCCL), JIT/TorchScript, ONNX export, sparse tensors, complex dtype — каждый из этих пунктов требует недели-месяцы работы.
+
+### Текущее состояние репо
+- 178 → ~180 tracked файлов
+- ~45,000 строк C++/CUDA
+- 16 test files, 300+ gtest тестов
+- README.md, LICENSE (MIT)
+
+---
+
 ## 2026-03-08: GGUF Inference — загрузка моделей Ollama + генерация текста (CPU & CUDA)
 
 **~3000 строк нового кода, 6 новых файлов, qwen3:4b и gemma3:4b работают.**
