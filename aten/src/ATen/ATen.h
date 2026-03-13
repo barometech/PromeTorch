@@ -243,7 +243,12 @@ inline Tensor Tensor::rsqrt() const {
 #endif
     return native::rsqrt(*this);
 }
-inline Tensor Tensor::square() const { return native::square(*this); }
+inline Tensor Tensor::square() const {
+#ifdef PT_USE_CUDA
+    if (is_cuda()) { return cuda_ops::square(*this); }
+#endif
+    return native::square(*this);
+}
 inline Tensor Tensor::exp() const {
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::exp(*this); }
@@ -256,11 +261,36 @@ inline Tensor Tensor::log() const {
 #endif
     return native::log(*this);
 }
-inline Tensor Tensor::log2() const { return native::log2(*this); }
-inline Tensor Tensor::log10() const { return native::log10(*this); }
-inline Tensor Tensor::sin() const { return native::sin(*this); }
-inline Tensor Tensor::cos() const { return native::cos(*this); }
-inline Tensor Tensor::tan() const { return native::tan(*this); }
+inline Tensor Tensor::log2() const {
+#ifdef PT_USE_CUDA
+    if (is_cuda()) { return cuda_ops::log2(*this); }
+#endif
+    return native::log2(*this);
+}
+inline Tensor Tensor::log10() const {
+#ifdef PT_USE_CUDA
+    if (is_cuda()) { return cuda_ops::log10(*this); }
+#endif
+    return native::log10(*this);
+}
+inline Tensor Tensor::sin() const {
+#ifdef PT_USE_CUDA
+    if (is_cuda()) { return cuda_ops::sin(*this); }
+#endif
+    return native::sin(*this);
+}
+inline Tensor Tensor::cos() const {
+#ifdef PT_USE_CUDA
+    if (is_cuda()) { return cuda_ops::cos(*this); }
+#endif
+    return native::cos(*this);
+}
+inline Tensor Tensor::tan() const {
+#ifdef PT_USE_CUDA
+    if (is_cuda()) { return cuda_ops::tan(*this); }
+#endif
+    return native::tan(*this);
+}
 inline Tensor Tensor::tanh() const {
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::tanh(*this); }
@@ -279,12 +309,42 @@ inline Tensor Tensor::relu() const {
 #endif
     return native::relu(*this);
 }
-inline Tensor Tensor::ceil() const { return native::ceil(*this); }
-inline Tensor Tensor::floor() const { return native::floor(*this); }
-inline Tensor Tensor::round() const { return native::round(*this); }
-inline Tensor Tensor::sign() const { return native::sign(*this); }
-inline Tensor Tensor::reciprocal() const { return native::reciprocal(*this); }
-inline Tensor Tensor::clamp(Scalar min_val, Scalar max_val) const { return native::clamp(*this, min_val, max_val); }
+inline Tensor Tensor::ceil() const {
+#ifdef PT_USE_CUDA
+    if (is_cuda()) { return cuda_ops::ceil(*this); }
+#endif
+    return native::ceil(*this);
+}
+inline Tensor Tensor::floor() const {
+#ifdef PT_USE_CUDA
+    if (is_cuda()) { return cuda_ops::floor(*this); }
+#endif
+    return native::floor(*this);
+}
+inline Tensor Tensor::round() const {
+#ifdef PT_USE_CUDA
+    if (is_cuda()) { return cuda_ops::round(*this); }
+#endif
+    return native::round(*this);
+}
+inline Tensor Tensor::sign() const {
+#ifdef PT_USE_CUDA
+    if (is_cuda()) { return cuda_ops::sign(*this); }
+#endif
+    return native::sign(*this);
+}
+inline Tensor Tensor::reciprocal() const {
+#ifdef PT_USE_CUDA
+    if (is_cuda()) { return cuda_ops::reciprocal(*this); }
+#endif
+    return native::reciprocal(*this);
+}
+inline Tensor Tensor::clamp(Scalar min_val, Scalar max_val) const {
+#ifdef PT_USE_CUDA
+    if (is_cuda()) { return cuda_ops::clamp(*this, min_val.to<float>(), max_val.to<float>()); }
+#endif
+    return native::clamp(*this, min_val, max_val);
+}
 inline Tensor Tensor::clamp(std::optional<Scalar> min, std::optional<Scalar> max) const { return native::clamp(*this, min, max); }
 inline Tensor& Tensor::clamp_(Scalar min_val, Scalar max_val) { return native::clamp_(*this, min_val, max_val); }
 inline Tensor Tensor::clamp_min(Scalar min_val) const { return native::clamp_min(*this, min_val); }
@@ -365,10 +425,22 @@ inline Tensor Tensor::div(const Tensor& other) const {
     return native::div(*this, other);
 }
 inline Tensor Tensor::pow(const Tensor& exponent) const {
+#ifdef PT_USE_CUDA
+    if (is_cuda()) { return cuda_ops::pow(*this, exponent); }
+#endif
     return native::pow(*this, exponent);
 }
 inline Tensor Tensor::pow(Scalar exponent) const {
+#ifdef PT_USE_CUDA
+    if (is_cuda()) { return cuda_ops::pow_scalar(*this, exponent.to<float>()); }
+#endif
     return native::pow(*this, exponent);
+}
+inline Tensor Tensor::fmod(const Tensor& other) const {
+    return native::fmod(*this, other);
+}
+inline Tensor Tensor::remainder(const Tensor& other) const {
+    return native::remainder(*this, other);
 }
 
 inline Tensor Tensor::add(Scalar other, Scalar alpha) const {
@@ -490,41 +562,128 @@ inline Tensor& Tensor::div_(Scalar other) {
 
 // Fused operations
 inline Tensor Tensor::addcmul(const Tensor& tensor1, const Tensor& tensor2, Scalar value) const {
+#ifdef PT_USE_CUDA
+    if (is_cuda()) { return cuda_ops::addcmul(*this, tensor1, tensor2, value.to<float>()); }
+#endif
     return native::addcmul(*this, tensor1, tensor2, value);
 }
 inline Tensor& Tensor::addcmul_(const Tensor& tensor1, const Tensor& tensor2, Scalar value) {
+#ifdef PT_USE_CUDA
+    if (is_cuda()) {
+        Tensor result = cuda_ops::addcmul(*this, tensor1, tensor2, value.to<float>());
+        cuda_ops::copy_(*this, result);
+        return *this;
+    }
+#endif
     return native::addcmul_(*this, tensor1, tensor2, value);
 }
 inline Tensor Tensor::addcdiv(const Tensor& tensor1, const Tensor& tensor2, Scalar value) const {
+#ifdef PT_USE_CUDA
+    if (is_cuda()) { return cuda_ops::addcdiv(*this, tensor1, tensor2, value.to<float>()); }
+#endif
     return native::addcdiv(*this, tensor1, tensor2, value);
 }
 inline Tensor& Tensor::addcdiv_(const Tensor& tensor1, const Tensor& tensor2, Scalar value) {
+#ifdef PT_USE_CUDA
+    if (is_cuda()) {
+        Tensor result = cuda_ops::addcdiv(*this, tensor1, tensor2, value.to<float>());
+        cuda_ops::copy_(*this, result);
+        return *this;
+    }
+#endif
     return native::addcdiv_(*this, tensor1, tensor2, value);
 }
 
 // Element-wise maximum/minimum (free functions for optimizers)
 inline Tensor maximum(const Tensor& a, const Tensor& b) {
+#ifdef PT_USE_CUDA
+    if (a.is_cuda()) { return cuda_ops::maximum(a, b); }
+#endif
     return native::maximum(a, b);
 }
 
 inline Tensor minimum(const Tensor& a, const Tensor& b) {
+#ifdef PT_USE_CUDA
+    if (a.is_cuda()) { return cuda_ops::minimum(a, b); }
+#endif
     return native::minimum(a, b);
 }
 
-// Comparison operations
-inline Tensor Tensor::eq(const Tensor& other) const { return native::eq(*this, other); }
-inline Tensor Tensor::ne(const Tensor& other) const { return native::ne(*this, other); }
-inline Tensor Tensor::lt(const Tensor& other) const { return native::lt(*this, other); }
-inline Tensor Tensor::le(const Tensor& other) const { return native::le(*this, other); }
-inline Tensor Tensor::gt(const Tensor& other) const { return native::gt(*this, other); }
-inline Tensor Tensor::ge(const Tensor& other) const { return native::ge(*this, other); }
+// Comparison operations (tensor vs tensor)
+inline Tensor Tensor::eq(const Tensor& other) const {
+#ifdef PT_USE_CUDA
+    if (is_cuda()) { return cuda_ops::eq(*this, other); }
+#endif
+    return native::eq(*this, other);
+}
+inline Tensor Tensor::ne(const Tensor& other) const {
+#ifdef PT_USE_CUDA
+    if (is_cuda()) { return cuda_ops::ne(*this, other); }
+#endif
+    return native::ne(*this, other);
+}
+inline Tensor Tensor::lt(const Tensor& other) const {
+#ifdef PT_USE_CUDA
+    if (is_cuda()) { return cuda_ops::lt(*this, other); }
+#endif
+    return native::lt(*this, other);
+}
+inline Tensor Tensor::le(const Tensor& other) const {
+#ifdef PT_USE_CUDA
+    if (is_cuda()) { return cuda_ops::le(*this, other); }
+#endif
+    return native::le(*this, other);
+}
+inline Tensor Tensor::gt(const Tensor& other) const {
+#ifdef PT_USE_CUDA
+    if (is_cuda()) { return cuda_ops::gt(*this, other); }
+#endif
+    return native::gt(*this, other);
+}
+inline Tensor Tensor::ge(const Tensor& other) const {
+#ifdef PT_USE_CUDA
+    if (is_cuda()) { return cuda_ops::ge(*this, other); }
+#endif
+    return native::ge(*this, other);
+}
 
-inline Tensor Tensor::eq(Scalar other) const { return native::eq(*this, other); }
-inline Tensor Tensor::ne(Scalar other) const { return native::ne(*this, other); }
-inline Tensor Tensor::lt(Scalar other) const { return native::lt(*this, other); }
-inline Tensor Tensor::le(Scalar other) const { return native::le(*this, other); }
-inline Tensor Tensor::gt(Scalar other) const { return native::gt(*this, other); }
-inline Tensor Tensor::ge(Scalar other) const { return native::ge(*this, other); }
+// Comparison operations (tensor vs scalar)
+inline Tensor Tensor::eq(Scalar other) const {
+#ifdef PT_USE_CUDA
+    if (is_cuda()) { return cuda_ops::eq_scalar(*this, other.to<float>()); }
+#endif
+    return native::eq(*this, other);
+}
+inline Tensor Tensor::ne(Scalar other) const {
+#ifdef PT_USE_CUDA
+    if (is_cuda()) { return cuda_ops::ne_scalar(*this, other.to<float>()); }
+#endif
+    return native::ne(*this, other);
+}
+inline Tensor Tensor::lt(Scalar other) const {
+#ifdef PT_USE_CUDA
+    if (is_cuda()) { return cuda_ops::lt_scalar(*this, other.to<float>()); }
+#endif
+    return native::lt(*this, other);
+}
+inline Tensor Tensor::le(Scalar other) const {
+#ifdef PT_USE_CUDA
+    if (is_cuda()) { return cuda_ops::le_scalar(*this, other.to<float>()); }
+#endif
+    return native::le(*this, other);
+}
+inline Tensor Tensor::gt(Scalar other) const {
+#ifdef PT_USE_CUDA
+    if (is_cuda()) { return cuda_ops::gt_scalar(*this, other.to<float>()); }
+#endif
+    return native::gt(*this, other);
+}
+inline Tensor Tensor::ge(Scalar other) const {
+#ifdef PT_USE_CUDA
+    if (is_cuda()) { return cuda_ops::ge_scalar(*this, other.to<float>()); }
+#endif
+    return native::ge(*this, other);
+}
 
 // Reduction operations
 inline Tensor Tensor::sum() const {
@@ -558,6 +717,7 @@ inline Tensor Tensor::mean(int64_t dim, bool keepdim) const {
     return native::mean(*this, dim, keepdim);
 }
 inline Tensor Tensor::prod() const { return native::prod(*this); }
+inline Tensor Tensor::prod(int64_t dim, bool keepdim) const { return native::prod(*this, dim, keepdim); }
 inline Tensor Tensor::max() const {
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::max(*this); }
@@ -576,12 +736,24 @@ inline Tensor Tensor::min() const {
 inline std::tuple<Tensor, Tensor> Tensor::min(int64_t dim, bool keepdim) const {
     return native::min(*this, dim, keepdim);
 }
-inline Tensor Tensor::argmax() const { return native::argmax(*this); }
+inline Tensor Tensor::argmax() const {
+#ifdef PT_USE_CUDA
+    if (is_cuda()) { return cuda_ops::argmax(*this); }
+#endif
+    return native::argmax(*this);
+}
 inline Tensor Tensor::argmax(int64_t dim, bool keepdim) const { return native::argmax(*this, dim, keepdim); }
-inline Tensor Tensor::argmin() const { return native::argmin(*this); }
+inline Tensor Tensor::argmin() const {
+#ifdef PT_USE_CUDA
+    if (is_cuda()) { return cuda_ops::argmin(*this); }
+#endif
+    return native::argmin(*this);
+}
 inline Tensor Tensor::argmin(int64_t dim, bool keepdim) const { return native::argmin(*this, dim, keepdim); }
 inline Tensor Tensor::var(bool unbiased) const { return native::var(*this, unbiased); }
+inline Tensor Tensor::var(int64_t dim, bool unbiased, bool keepdim) const { return native::var(*this, dim, unbiased, keepdim); }
 inline Tensor Tensor::std(bool unbiased) const { return native::std(*this, unbiased); }
+inline Tensor Tensor::std(int64_t dim, bool unbiased, bool keepdim) const { return native::std(*this, dim, unbiased, keepdim); }
 inline Tensor Tensor::norm(Scalar p) const { return native::norm(*this, p); }
 inline Tensor Tensor::norm(Scalar p, int64_t dim, bool keepdim) const { return native::norm(*this, p, dim, keepdim); }
 inline bool Tensor::all() const { return native::all(*this); }
@@ -594,6 +766,13 @@ inline Tensor Tensor::cumprod(int64_t dim) const { return native::cumprod(*this,
 
 // Linear algebra
 inline Tensor Tensor::matmul(const Tensor& other) const {
+#ifdef PT_USE_CUDA
+    if (is_cuda()) {
+        if (dim() == 2 && other.dim() == 2) return mm(other);
+        if (dim() == 2 && other.dim() == 1) return mv(other);
+        if (dim() >= 3 && other.dim() >= 3) return bmm(other);
+    }
+#endif
     return native::matmul(*this, other);
 }
 inline Tensor Tensor::mm(const Tensor& other) const {
@@ -608,13 +787,40 @@ inline Tensor Tensor::mm(const Tensor& other) const {
     return native::mm(*this, other);
 }
 inline Tensor Tensor::mv(const Tensor& vec) const {
+#ifdef PT_USE_CUDA
+    if (is_cuda()) {
+        Tensor self_c = is_contiguous() ? *this : contiguous();
+        Tensor vec_c = vec.is_contiguous() ? vec : vec.contiguous();
+        return cuda_ops::mv(self_c, vec_c);
+    }
+#endif
     return native::mv(*this, vec);
 }
 inline Tensor Tensor::bmm(const Tensor& other) const {
+#ifdef PT_USE_CUDA
+    if (is_cuda()) {
+        Tensor self_c = is_contiguous() ? *this : contiguous();
+        Tensor other_c = other.is_contiguous() ? other : other.contiguous();
+        return cuda_ops::bmm(self_c, other_c);
+    }
+#endif
     return native::bmm(*this, other);
 }
 inline Tensor Tensor::dot(const Tensor& other) const {
+#ifdef PT_USE_CUDA
+    if (is_cuda()) {
+        Tensor self_c = is_contiguous() ? *this : contiguous();
+        Tensor other_c = other.is_contiguous() ? other : other.contiguous();
+        return cuda_ops::dot(self_c, other_c);
+    }
+#endif
     return native::dot(*this, other);
+}
+inline Tensor Tensor::outer(const Tensor& other) const {
+    return native::outer(*this, other);
+}
+inline Tensor Tensor::addmm(const Tensor& mat1, const Tensor& mat2, Scalar beta, Scalar alpha) const {
+    return native::addmm(*this, mat1, mat2, beta, alpha);
 }
 
 // Type conversion

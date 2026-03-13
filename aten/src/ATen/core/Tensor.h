@@ -505,6 +505,8 @@ public:
     Tensor mv(const Tensor& vec) const;
     Tensor bmm(const Tensor& other) const;
     Tensor dot(const Tensor& other) const;
+    Tensor outer(const Tensor& other) const;
+    Tensor addmm(const Tensor& mat1, const Tensor& mat2, Scalar beta = 1, Scalar alpha = 1) const;
 
     // ========================================================================
     // Type conversion

@@ -478,6 +478,20 @@ if(PT_BUILD_TESTS)
 
     gtest_discover_tests(optim_tests)
 
+    # Comprehensive Optimizer Tests (all 9 optimizers)
+    add_executable(optimizer_tests
+        test/cpp/test_optimizers.cpp
+    )
+
+    target_link_libraries(optimizer_tests
+        PRIVATE
+        torch_optim
+        GTest::gtest
+        GTest::gtest_main
+    )
+
+    gtest_discover_tests(optimizer_tests)
+
     # Data Loading Test executable
     add_executable(data_tests
         test/cpp/test_data.cpp

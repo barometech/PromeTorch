@@ -341,6 +341,376 @@ struct ReciprocalBackward : public Node {
 };
 
 // ============================================================================
+// Activation Function Backward Classes
+// ============================================================================
+
+// LeakyReLU: d/dx[leaky_relu(x)] = x > 0 ? 1 : negative_slope
+struct LeakyReluBackward : public Node {
+    Tensor self_;
+    double negative_slope_;
+
+    LeakyReluBackward(const Tensor& self, double negative_slope)
+        : self_(self), negative_slope_(negative_slope) {}
+
+    void release_saved_tensors() override { self_ = Tensor(); }
+
+    variable_list apply(variable_list&& grads) override {
+        auto& grad = grads[0];
+        if (!grad.defined()) return {Tensor()};
+
+        bool is_cuda = false;
+#ifdef PT_USE_CUDA
+        is_cuda = self_.is_cuda();
+#endif
+
+        Tensor self_cpu = self_;
+        Tensor grad_cpu = grad;
+#ifdef PT_USE_CUDA
+        if (is_cuda) {
+            self_cpu = at::to_cpu(self_);
+            grad_cpu = at::to_cpu(grad);
+        }
+#endif
+
+        Tensor result = at::empty(grad_cpu.sizes(), grad_cpu.dtype());
+        const float* self_data = self_cpu.data_ptr<float>();
+        const float* grad_data = grad_cpu.data_ptr<float>();
+        float* result_data = result.mutable_data_ptr<float>();
+        float slope = static_cast<float>(negative_slope_);
+
+        for (int64_t i = 0; i < result.numel(); ++i) {
+            result_data[i] = grad_data[i] * (self_data[i] > 0.0f ? 1.0f : slope);
+        }
+
+#ifdef PT_USE_CUDA
+        if (is_cuda) {
+            result = at::to_cuda(result);
+        }
+#endif
+
+        self_ = Tensor();
+        return {result};
+    }
+    std::string name() const override { return "LeakyReluBackward"; }
+};
+
+// ELU: d/dx[elu(x)] = x > 0 ? 1 : alpha * exp(x)
+struct ELUBackward : public Node {
+    Tensor self_;
+    double alpha_;
+
+    ELUBackward(const Tensor& self, double alpha)
+        : self_(self), alpha_(alpha) {}
+
+    void release_saved_tensors() override { self_ = Tensor(); }
+
+    variable_list apply(variable_list&& grads) override {
+        auto& grad = grads[0];
+        if (!grad.defined()) return {Tensor()};
+
+        bool is_cuda = false;
+#ifdef PT_USE_CUDA
+        is_cuda = self_.is_cuda();
+#endif
+
+        Tensor self_cpu = self_;
+        Tensor grad_cpu = grad;
+#ifdef PT_USE_CUDA
+        if (is_cuda) {
+            self_cpu = at::to_cpu(self_);
+            grad_cpu = at::to_cpu(grad);
+        }
+#endif
+
+        Tensor result = at::empty(grad_cpu.sizes(), grad_cpu.dtype());
+        const float* self_data = self_cpu.data_ptr<float>();
+        const float* grad_data = grad_cpu.data_ptr<float>();
+        float* result_data = result.mutable_data_ptr<float>();
+        float a = static_cast<float>(alpha_);
+
+        for (int64_t i = 0; i < result.numel(); ++i) {
+            if (self_data[i] > 0.0f) {
+                result_data[i] = grad_data[i];
+            } else {
+                result_data[i] = grad_data[i] * a * std::exp(self_data[i]);
+            }
+        }
+
+#ifdef PT_USE_CUDA
+        if (is_cuda) {
+            result = at::to_cuda(result);
+        }
+#endif
+
+        self_ = Tensor();
+        return {result};
+    }
+    std::string name() const override { return "ELUBackward"; }
+};
+
+// SELU: d/dx[selu(x)] = scale * (x > 0 ? 1 : alpha * exp(x))
+struct SELUBackward : public Node {
+    Tensor self_;
+    static constexpr float SELU_ALPHA = 1.6732632423543772848170429916717f;
+    static constexpr float SELU_SCALE = 1.0507009873554804934193349852946f;
+
+    explicit SELUBackward(const Tensor& self) : self_(self) {}
+
+    void release_saved_tensors() override { self_ = Tensor(); }
+
+    variable_list apply(variable_list&& grads) override {
+        auto& grad = grads[0];
+        if (!grad.defined()) return {Tensor()};
+
+        bool is_cuda = false;
+#ifdef PT_USE_CUDA
+        is_cuda = self_.is_cuda();
+#endif
+
+        Tensor self_cpu = self_;
+        Tensor grad_cpu = grad;
+#ifdef PT_USE_CUDA
+        if (is_cuda) {
+            self_cpu = at::to_cpu(self_);
+            grad_cpu = at::to_cpu(grad);
+        }
+#endif
+
+        Tensor result = at::empty(grad_cpu.sizes(), grad_cpu.dtype());
+        const float* self_data = self_cpu.data_ptr<float>();
+        const float* grad_data = grad_cpu.data_ptr<float>();
+        float* result_data = result.mutable_data_ptr<float>();
+
+        for (int64_t i = 0; i < result.numel(); ++i) {
+            if (self_data[i] > 0.0f) {
+                result_data[i] = grad_data[i] * SELU_SCALE;
+            } else {
+                result_data[i] = grad_data[i] * SELU_SCALE * SELU_ALPHA * std::exp(self_data[i]);
+            }
+        }
+
+#ifdef PT_USE_CUDA
+        if (is_cuda) {
+            result = at::to_cuda(result);
+        }
+#endif
+
+        self_ = Tensor();
+        return {result};
+    }
+    std::string name() const override { return "SELUBackward"; }
+};
+
+// Mish: d/dx[mish(x)] = tanh(softplus(x)) + x * sigmoid(x) * (1 - tanh^2(softplus(x)))
+// where softplus(x) = ln(1 + exp(x))
+struct MishBackward : public Node {
+    Tensor self_;
+
+    explicit MishBackward(const Tensor& self) : self_(self) {}
+
+    void release_saved_tensors() override { self_ = Tensor(); }
+
+    variable_list apply(variable_list&& grads) override {
+        auto& grad = grads[0];
+        if (!grad.defined()) return {Tensor()};
+
+        bool is_cuda = false;
+#ifdef PT_USE_CUDA
+        is_cuda = self_.is_cuda();
+#endif
+
+        Tensor self_cpu = self_;
+        Tensor grad_cpu = grad;
+#ifdef PT_USE_CUDA
+        if (is_cuda) {
+            self_cpu = at::to_cpu(self_);
+            grad_cpu = at::to_cpu(grad);
+        }
+#endif
+
+        Tensor result = at::empty(grad_cpu.sizes(), grad_cpu.dtype());
+        const float* self_data = self_cpu.data_ptr<float>();
+        const float* grad_data = grad_cpu.data_ptr<float>();
+        float* result_data = result.mutable_data_ptr<float>();
+
+        for (int64_t i = 0; i < result.numel(); ++i) {
+            float x = self_data[i];
+            float sp = std::log(1.0f + std::exp(x));  // softplus(x)
+            float tanh_sp = std::tanh(sp);
+            float sig = 1.0f / (1.0f + std::exp(-x));  // sigmoid(x)
+            // d/dx = tanh(sp) + x * sig * (1 - tanh^2(sp))
+            float dmish = tanh_sp + x * sig * (1.0f - tanh_sp * tanh_sp);
+            result_data[i] = grad_data[i] * dmish;
+        }
+
+#ifdef PT_USE_CUDA
+        if (is_cuda) {
+            result = at::to_cuda(result);
+        }
+#endif
+
+        self_ = Tensor();
+        return {result};
+    }
+    std::string name() const override { return "MishBackward"; }
+};
+
+// Hardtanh: d/dx[hardtanh(x)] = (min_val < x < max_val) ? 1 : 0
+struct HardtanhBackward : public Node {
+    Tensor self_;
+    double min_val_;
+    double max_val_;
+
+    HardtanhBackward(const Tensor& self, double min_val, double max_val)
+        : self_(self), min_val_(min_val), max_val_(max_val) {}
+
+    void release_saved_tensors() override { self_ = Tensor(); }
+
+    variable_list apply(variable_list&& grads) override {
+        auto& grad = grads[0];
+        if (!grad.defined()) return {Tensor()};
+
+        bool is_cuda = false;
+#ifdef PT_USE_CUDA
+        is_cuda = self_.is_cuda();
+#endif
+
+        Tensor self_cpu = self_;
+        Tensor grad_cpu = grad;
+#ifdef PT_USE_CUDA
+        if (is_cuda) {
+            self_cpu = at::to_cpu(self_);
+            grad_cpu = at::to_cpu(grad);
+        }
+#endif
+
+        Tensor result = at::empty(grad_cpu.sizes(), grad_cpu.dtype());
+        const float* self_data = self_cpu.data_ptr<float>();
+        const float* grad_data = grad_cpu.data_ptr<float>();
+        float* result_data = result.mutable_data_ptr<float>();
+        float min_v = static_cast<float>(min_val_);
+        float max_v = static_cast<float>(max_val_);
+
+        for (int64_t i = 0; i < result.numel(); ++i) {
+            result_data[i] = (self_data[i] > min_v && self_data[i] < max_v)
+                ? grad_data[i] : 0.0f;
+        }
+
+#ifdef PT_USE_CUDA
+        if (is_cuda) {
+            result = at::to_cuda(result);
+        }
+#endif
+
+        self_ = Tensor();
+        return {result};
+    }
+    std::string name() const override { return "HardtanhBackward"; }
+};
+
+// Hardsigmoid: d/dx[hardsigmoid(x)] = (-3 < x < 3) ? 1/6 : 0
+struct HardsigmoidBackward : public Node {
+    Tensor self_;
+
+    explicit HardsigmoidBackward(const Tensor& self) : self_(self) {}
+
+    void release_saved_tensors() override { self_ = Tensor(); }
+
+    variable_list apply(variable_list&& grads) override {
+        auto& grad = grads[0];
+        if (!grad.defined()) return {Tensor()};
+
+        bool is_cuda = false;
+#ifdef PT_USE_CUDA
+        is_cuda = self_.is_cuda();
+#endif
+
+        Tensor self_cpu = self_;
+        Tensor grad_cpu = grad;
+#ifdef PT_USE_CUDA
+        if (is_cuda) {
+            self_cpu = at::to_cpu(self_);
+            grad_cpu = at::to_cpu(grad);
+        }
+#endif
+
+        Tensor result = at::empty(grad_cpu.sizes(), grad_cpu.dtype());
+        const float* self_data = self_cpu.data_ptr<float>();
+        const float* grad_data = grad_cpu.data_ptr<float>();
+        float* result_data = result.mutable_data_ptr<float>();
+
+        for (int64_t i = 0; i < result.numel(); ++i) {
+            float x = self_data[i];
+            result_data[i] = (x > -3.0f && x < 3.0f) ? grad_data[i] / 6.0f : 0.0f;
+        }
+
+#ifdef PT_USE_CUDA
+        if (is_cuda) {
+            result = at::to_cuda(result);
+        }
+#endif
+
+        self_ = Tensor();
+        return {result};
+    }
+    std::string name() const override { return "HardsigmoidBackward"; }
+};
+
+// Hardswish: d/dx[hardswish(x)] = 0 if x <= -3, 1 if x >= 3, (2x+3)/6 otherwise
+struct HardswishBackward : public Node {
+    Tensor self_;
+
+    explicit HardswishBackward(const Tensor& self) : self_(self) {}
+
+    void release_saved_tensors() override { self_ = Tensor(); }
+
+    variable_list apply(variable_list&& grads) override {
+        auto& grad = grads[0];
+        if (!grad.defined()) return {Tensor()};
+
+        bool is_cuda = false;
+#ifdef PT_USE_CUDA
+        is_cuda = self_.is_cuda();
+#endif
+
+        Tensor self_cpu = self_;
+        Tensor grad_cpu = grad;
+#ifdef PT_USE_CUDA
+        if (is_cuda) {
+            self_cpu = at::to_cpu(self_);
+            grad_cpu = at::to_cpu(grad);
+        }
+#endif
+
+        Tensor result = at::empty(grad_cpu.sizes(), grad_cpu.dtype());
+        const float* self_data = self_cpu.data_ptr<float>();
+        const float* grad_data = grad_cpu.data_ptr<float>();
+        float* result_data = result.mutable_data_ptr<float>();
+
+        for (int64_t i = 0; i < result.numel(); ++i) {
+            float x = self_data[i];
+            if (x <= -3.0f) {
+                result_data[i] = 0.0f;
+            } else if (x >= 3.0f) {
+                result_data[i] = grad_data[i];
+            } else {
+                result_data[i] = grad_data[i] * (2.0f * x + 3.0f) / 6.0f;
+            }
+        }
+
+#ifdef PT_USE_CUDA
+        if (is_cuda) {
+            result = at::to_cuda(result);
+        }
+#endif
+
+        self_ = Tensor();
+        return {result};
+    }
+    std::string name() const override { return "HardswishBackward"; }
+};
+
+// ============================================================================
 // Binary Operation Backward Functions
 // ============================================================================
 

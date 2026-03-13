@@ -45,6 +45,16 @@ ATEN_CUDA_API void launch_leaky_relu(const float* input, float* output, float al
 ATEN_CUDA_API void launch_silu(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
 ATEN_CUDA_API void launch_gelu(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
 
+// Additional unary operations
+ATEN_CUDA_API void launch_log2(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_log10(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_tan(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_ceil(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_floor(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_round(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_sign(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_reciprocal(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
+
 // ============================================================================
 // Element-wise Binary Operations
 // ============================================================================
@@ -72,10 +82,31 @@ ATEN_CUDA_API void launch_fill(float* data, float value, int64_t n, cudaStream_t
 ATEN_CUDA_API void launch_copy(const float* src, float* dst, int64_t n, cudaStream_t stream = nullptr);
 
 // ============================================================================
-// Comparison Operations
+// Comparison Operations (float-returning: 0.0f or 1.0f)
 // ============================================================================
 
-// Note: These output bool arrays (stored as uint8_t on GPU)
+// Tensor vs tensor comparisons
+ATEN_CUDA_API void launch_eq(const float* a, const float* b, float* out, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_ne(const float* a, const float* b, float* out, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_lt(const float* a, const float* b, float* out, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_le(const float* a, const float* b, float* out, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_gt(const float* a, const float* b, float* out, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_ge(const float* a, const float* b, float* out, int64_t n, cudaStream_t stream = nullptr);
+
+// Scalar comparisons
+ATEN_CUDA_API void launch_eq_scalar(const float* a, float val, float* out, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_ne_scalar(const float* a, float val, float* out, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_lt_scalar(const float* a, float val, float* out, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_le_scalar(const float* a, float val, float* out, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_gt_scalar(const float* a, float val, float* out, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_ge_scalar(const float* a, float val, float* out, int64_t n, cudaStream_t stream = nullptr);
+
+// ============================================================================
+// Fused Operations
+// ============================================================================
+
+ATEN_CUDA_API void launch_addcmul(const float* self, const float* t1, const float* t2, float value, float* out, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_addcdiv(const float* self, const float* t1, const float* t2, float value, float* out, int64_t n, cudaStream_t stream = nullptr);
 
 // ============================================================================
 // Conditional Operations

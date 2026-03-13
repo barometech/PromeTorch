@@ -827,5 +827,39 @@ DEFINE_COMPARISON_OP(ge, >=)
 
 #undef DEFINE_COMPARISON_OP
 
+// ============================================================================
+// Modular Arithmetic Operations
+// ============================================================================
+
+inline Tensor fmod(const Tensor& self, const Tensor& other) {
+    Tensor a = self.contiguous();
+    Tensor b = other.contiguous();
+    Tensor result = empty(a.sizes(), TensorOptions().dtype(a.dtype()).device(a.device()));
+    PT_DISPATCH_FLOATING_TYPES(a.dtype(), "fmod", [&] {
+        const scalar_t* ap = a.data_ptr<scalar_t>();
+        const scalar_t* bp = b.data_ptr<scalar_t>();
+        scalar_t* rp = result.mutable_data_ptr<scalar_t>();
+        for (int64_t i = 0; i < a.numel(); ++i) {
+            rp[i] = std::fmod(ap[i], bp[i]);
+        }
+    });
+    return result;
+}
+
+inline Tensor remainder(const Tensor& self, const Tensor& other) {
+    Tensor a = self.contiguous();
+    Tensor b = other.contiguous();
+    Tensor result = empty(a.sizes(), TensorOptions().dtype(a.dtype()).device(a.device()));
+    PT_DISPATCH_FLOATING_TYPES(a.dtype(), "remainder", [&] {
+        const scalar_t* ap = a.data_ptr<scalar_t>();
+        const scalar_t* bp = b.data_ptr<scalar_t>();
+        scalar_t* rp = result.mutable_data_ptr<scalar_t>();
+        for (int64_t i = 0; i < a.numel(); ++i) {
+            rp[i] = ap[i] - std::floor(ap[i] / bp[i]) * bp[i];
+        }
+    });
+    return result;
+}
+
 } // namespace native
 } // namespace at

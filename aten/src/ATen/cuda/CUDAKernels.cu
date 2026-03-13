@@ -158,6 +158,58 @@ __global__ void gelu_kernel(const T* input, T* output, int64_t n) {
 }
 
 // ============================================================================
+// Additional Unary Kernels
+// ============================================================================
+
+template<typename T>
+__global__ void log2_kernel(const T* input, T* output, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) { output[idx] = log2f(input[idx]); }
+}
+
+template<typename T>
+__global__ void log10_kernel(const T* input, T* output, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) { output[idx] = log10f(input[idx]); }
+}
+
+template<typename T>
+__global__ void tan_kernel(const T* input, T* output, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) { output[idx] = tanf(input[idx]); }
+}
+
+template<typename T>
+__global__ void ceil_kernel(const T* input, T* output, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) { output[idx] = ceilf(input[idx]); }
+}
+
+template<typename T>
+__global__ void floor_kernel(const T* input, T* output, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) { output[idx] = floorf(input[idx]); }
+}
+
+template<typename T>
+__global__ void round_kernel(const T* input, T* output, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) { output[idx] = roundf(input[idx]); }
+}
+
+template<typename T>
+__global__ void sign_kernel(const T* input, T* output, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) { output[idx] = (input[idx] > T(0)) - (input[idx] < T(0)); }
+}
+
+template<typename T>
+__global__ void reciprocal_kernel(const T* input, T* output, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) { output[idx] = T(1) / input[idx]; }
+}
+
+// ============================================================================
 // Element-wise Binary Kernels
 // ============================================================================
 
@@ -319,6 +371,87 @@ __global__ void ge_kernel(const T* a, const T* b, bool* out, int64_t n) {
     if (idx < n) {
         out[idx] = a[idx] >= b[idx];
     }
+}
+
+// ============================================================================
+// Float-returning Comparison Kernels (for CUDA dispatch)
+// ============================================================================
+
+__global__ void eq_float_kernel(const float* a, const float* b, float* out, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) { out[idx] = (a[idx] == b[idx]) ? 1.0f : 0.0f; }
+}
+
+__global__ void ne_float_kernel(const float* a, const float* b, float* out, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) { out[idx] = (a[idx] != b[idx]) ? 1.0f : 0.0f; }
+}
+
+__global__ void lt_float_kernel(const float* a, const float* b, float* out, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) { out[idx] = (a[idx] < b[idx]) ? 1.0f : 0.0f; }
+}
+
+__global__ void le_float_kernel(const float* a, const float* b, float* out, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) { out[idx] = (a[idx] <= b[idx]) ? 1.0f : 0.0f; }
+}
+
+__global__ void gt_float_kernel(const float* a, const float* b, float* out, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) { out[idx] = (a[idx] > b[idx]) ? 1.0f : 0.0f; }
+}
+
+__global__ void ge_float_kernel(const float* a, const float* b, float* out, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) { out[idx] = (a[idx] >= b[idx]) ? 1.0f : 0.0f; }
+}
+
+// Scalar comparison kernels
+__global__ void eq_scalar_kernel(const float* a, float val, float* out, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) { out[idx] = (a[idx] == val) ? 1.0f : 0.0f; }
+}
+
+__global__ void ne_scalar_kernel(const float* a, float val, float* out, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) { out[idx] = (a[idx] != val) ? 1.0f : 0.0f; }
+}
+
+__global__ void lt_scalar_kernel(const float* a, float val, float* out, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) { out[idx] = (a[idx] < val) ? 1.0f : 0.0f; }
+}
+
+__global__ void le_scalar_kernel(const float* a, float val, float* out, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) { out[idx] = (a[idx] <= val) ? 1.0f : 0.0f; }
+}
+
+__global__ void gt_scalar_kernel(const float* a, float val, float* out, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) { out[idx] = (a[idx] > val) ? 1.0f : 0.0f; }
+}
+
+__global__ void ge_scalar_kernel(const float* a, float val, float* out, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) { out[idx] = (a[idx] >= val) ? 1.0f : 0.0f; }
+}
+
+// ============================================================================
+// Fused Operations Kernels
+// ============================================================================
+
+// addcmul: out = self + value * t1 * t2
+__global__ void addcmul_kernel(const float* self, const float* t1, const float* t2, float value, float* out, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) { out[idx] = self[idx] + value * t1[idx] * t2[idx]; }
+}
+
+// addcdiv: out = self + value * t1 / t2
+__global__ void addcdiv_kernel(const float* self, const float* t1, const float* t2, float value, float* out, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) { out[idx] = self[idx] + value * t1[idx] / t2[idx]; }
 }
 
 // ============================================================================
@@ -511,6 +644,120 @@ void launch_silu(const float* input, float* output, int64_t n, cudaStream_t stre
 void launch_gelu(const float* input, float* output, int64_t n, cudaStream_t stream) {
     int blocks = get_num_blocks(n);
     gelu_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(input, output, n);
+}
+
+// Additional unary operations
+void launch_log2(const float* input, float* output, int64_t n, cudaStream_t stream) {
+    int blocks = get_num_blocks(n);
+    log2_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(input, output, n);
+}
+
+void launch_log10(const float* input, float* output, int64_t n, cudaStream_t stream) {
+    int blocks = get_num_blocks(n);
+    log10_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(input, output, n);
+}
+
+void launch_tan(const float* input, float* output, int64_t n, cudaStream_t stream) {
+    int blocks = get_num_blocks(n);
+    tan_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(input, output, n);
+}
+
+void launch_ceil(const float* input, float* output, int64_t n, cudaStream_t stream) {
+    int blocks = get_num_blocks(n);
+    ceil_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(input, output, n);
+}
+
+void launch_floor(const float* input, float* output, int64_t n, cudaStream_t stream) {
+    int blocks = get_num_blocks(n);
+    floor_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(input, output, n);
+}
+
+void launch_round(const float* input, float* output, int64_t n, cudaStream_t stream) {
+    int blocks = get_num_blocks(n);
+    round_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(input, output, n);
+}
+
+void launch_sign(const float* input, float* output, int64_t n, cudaStream_t stream) {
+    int blocks = get_num_blocks(n);
+    sign_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(input, output, n);
+}
+
+void launch_reciprocal(const float* input, float* output, int64_t n, cudaStream_t stream) {
+    int blocks = get_num_blocks(n);
+    reciprocal_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(input, output, n);
+}
+
+// Float-returning comparison operations (tensor vs tensor)
+void launch_eq(const float* a, const float* b, float* out, int64_t n, cudaStream_t stream) {
+    int blocks = get_num_blocks(n);
+    eq_float_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(a, b, out, n);
+}
+
+void launch_ne(const float* a, const float* b, float* out, int64_t n, cudaStream_t stream) {
+    int blocks = get_num_blocks(n);
+    ne_float_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(a, b, out, n);
+}
+
+void launch_lt(const float* a, const float* b, float* out, int64_t n, cudaStream_t stream) {
+    int blocks = get_num_blocks(n);
+    lt_float_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(a, b, out, n);
+}
+
+void launch_le(const float* a, const float* b, float* out, int64_t n, cudaStream_t stream) {
+    int blocks = get_num_blocks(n);
+    le_float_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(a, b, out, n);
+}
+
+void launch_gt(const float* a, const float* b, float* out, int64_t n, cudaStream_t stream) {
+    int blocks = get_num_blocks(n);
+    gt_float_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(a, b, out, n);
+}
+
+void launch_ge(const float* a, const float* b, float* out, int64_t n, cudaStream_t stream) {
+    int blocks = get_num_blocks(n);
+    ge_float_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(a, b, out, n);
+}
+
+// Scalar comparison operations
+void launch_eq_scalar(const float* a, float val, float* out, int64_t n, cudaStream_t stream) {
+    int blocks = get_num_blocks(n);
+    eq_scalar_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(a, val, out, n);
+}
+
+void launch_ne_scalar(const float* a, float val, float* out, int64_t n, cudaStream_t stream) {
+    int blocks = get_num_blocks(n);
+    ne_scalar_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(a, val, out, n);
+}
+
+void launch_lt_scalar(const float* a, float val, float* out, int64_t n, cudaStream_t stream) {
+    int blocks = get_num_blocks(n);
+    lt_scalar_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(a, val, out, n);
+}
+
+void launch_le_scalar(const float* a, float val, float* out, int64_t n, cudaStream_t stream) {
+    int blocks = get_num_blocks(n);
+    le_scalar_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(a, val, out, n);
+}
+
+void launch_gt_scalar(const float* a, float val, float* out, int64_t n, cudaStream_t stream) {
+    int blocks = get_num_blocks(n);
+    gt_scalar_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(a, val, out, n);
+}
+
+void launch_ge_scalar(const float* a, float val, float* out, int64_t n, cudaStream_t stream) {
+    int blocks = get_num_blocks(n);
+    ge_scalar_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(a, val, out, n);
+}
+
+// Fused operations
+void launch_addcmul(const float* self, const float* t1, const float* t2, float value, float* out, int64_t n, cudaStream_t stream) {
+    int blocks = get_num_blocks(n);
+    addcmul_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(self, t1, t2, value, out, n);
+}
+
+void launch_addcdiv(const float* self, const float* t1, const float* t2, float value, float* out, int64_t n, cudaStream_t stream) {
+    int blocks = get_num_blocks(n);
+    addcdiv_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(self, t1, t2, value, out, n);
 }
 
 // Binary operations

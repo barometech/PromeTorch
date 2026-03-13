@@ -289,13 +289,15 @@ void init_tensor_bindings(py::module& m) {
         .def("dot", &at::Tensor::dot)
 
         // Autograd
-        .def("backward", [](at::Tensor& t, py::object gradient) {
+        .def("backward", [](at::Tensor& t, py::object gradient,
+                            bool retain_graph, bool create_graph) {
             if (gradient.is_none()) {
-                torch::autograd::tensor_backward(t);
+                torch::autograd::tensor_backward(t, at::Tensor(), retain_graph, create_graph);
             } else {
-                torch::autograd::tensor_backward(t, gradient.cast<at::Tensor>());
+                torch::autograd::tensor_backward(t, gradient.cast<at::Tensor>(), retain_graph, create_graph);
             }
-        }, py::arg("gradient") = py::none())
+        }, py::arg("gradient") = py::none(),
+           py::arg("retain_graph") = false, py::arg("create_graph") = false)
 
         // Type conversion
         .def("to", [](const at::Tensor& t, c10::ScalarType dtype) {

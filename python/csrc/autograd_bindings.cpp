@@ -101,12 +101,10 @@ void init_autograd_bindings(py::module& m) {
     // backward function - uses tensor_backward from autograd.h
     m.def("backward", [](const at::Tensor& tensor, py::object grad_tensor,
                          bool retain_graph, bool create_graph) {
-        (void)retain_graph;  // Not used in our simple implementation
-        (void)create_graph;
         if (grad_tensor.is_none()) {
-            torch::autograd::tensor_backward(tensor);
+            torch::autograd::tensor_backward(tensor, at::Tensor(), retain_graph, create_graph);
         } else {
-            torch::autograd::tensor_backward(tensor, grad_tensor.cast<at::Tensor>());
+            torch::autograd::tensor_backward(tensor, grad_tensor.cast<at::Tensor>(), retain_graph, create_graph);
         }
     }, py::arg("tensor"), py::arg("grad_tensor") = py::none(),
        py::arg("retain_graph") = false, py::arg("create_graph") = false);

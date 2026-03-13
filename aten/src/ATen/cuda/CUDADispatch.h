@@ -280,6 +280,63 @@ inline Tensor gelu(const Tensor& input) {
     return output;
 }
 
+// Additional unary operations
+inline Tensor log2(const Tensor& input) {
+    Tensor ic = input.is_contiguous() ? input : input.contiguous();
+    auto output = empty_cuda(ic.sizes().vec(), ic.dtype(), ic.device().index());
+    at::cuda::launch_log2(ic.data_ptr<float>(), output.mutable_data_ptr<float>(), ic.numel(), nullptr);
+    return output;
+}
+
+inline Tensor log10(const Tensor& input) {
+    Tensor ic = input.is_contiguous() ? input : input.contiguous();
+    auto output = empty_cuda(ic.sizes().vec(), ic.dtype(), ic.device().index());
+    at::cuda::launch_log10(ic.data_ptr<float>(), output.mutable_data_ptr<float>(), ic.numel(), nullptr);
+    return output;
+}
+
+inline Tensor tan(const Tensor& input) {
+    Tensor ic = input.is_contiguous() ? input : input.contiguous();
+    auto output = empty_cuda(ic.sizes().vec(), ic.dtype(), ic.device().index());
+    at::cuda::launch_tan(ic.data_ptr<float>(), output.mutable_data_ptr<float>(), ic.numel(), nullptr);
+    return output;
+}
+
+inline Tensor ceil(const Tensor& input) {
+    Tensor ic = input.is_contiguous() ? input : input.contiguous();
+    auto output = empty_cuda(ic.sizes().vec(), ic.dtype(), ic.device().index());
+    at::cuda::launch_ceil(ic.data_ptr<float>(), output.mutable_data_ptr<float>(), ic.numel(), nullptr);
+    return output;
+}
+
+inline Tensor floor(const Tensor& input) {
+    Tensor ic = input.is_contiguous() ? input : input.contiguous();
+    auto output = empty_cuda(ic.sizes().vec(), ic.dtype(), ic.device().index());
+    at::cuda::launch_floor(ic.data_ptr<float>(), output.mutable_data_ptr<float>(), ic.numel(), nullptr);
+    return output;
+}
+
+inline Tensor round(const Tensor& input) {
+    Tensor ic = input.is_contiguous() ? input : input.contiguous();
+    auto output = empty_cuda(ic.sizes().vec(), ic.dtype(), ic.device().index());
+    at::cuda::launch_round(ic.data_ptr<float>(), output.mutable_data_ptr<float>(), ic.numel(), nullptr);
+    return output;
+}
+
+inline Tensor sign(const Tensor& input) {
+    Tensor ic = input.is_contiguous() ? input : input.contiguous();
+    auto output = empty_cuda(ic.sizes().vec(), ic.dtype(), ic.device().index());
+    at::cuda::launch_sign(ic.data_ptr<float>(), output.mutable_data_ptr<float>(), ic.numel(), nullptr);
+    return output;
+}
+
+inline Tensor reciprocal(const Tensor& input) {
+    Tensor ic = input.is_contiguous() ? input : input.contiguous();
+    auto output = empty_cuda(ic.sizes().vec(), ic.dtype(), ic.device().index());
+    at::cuda::launch_reciprocal(ic.data_ptr<float>(), output.mutable_data_ptr<float>(), ic.numel(), nullptr);
+    return output;
+}
+
 // Binary operations
 // IMPORTANT: All element-wise CUDA ops read data_ptr sequentially, so inputs
 // MUST be contiguous. Non-contiguous tensors (e.g., transposed views from t())
@@ -801,6 +858,194 @@ inline Tensor nll_loss(const Tensor& log_probs, const Tensor& targets, int reduc
     return output;
 }
 
+// Unary: sin, cos, square
+inline Tensor sin(const Tensor& input) {
+    Tensor ic = input.is_contiguous() ? input : input.contiguous();
+    auto output = empty_cuda(ic.sizes().vec(), ic.dtype(), ic.device().index());
+    at::cuda::launch_sin(ic.data_ptr<float>(), output.mutable_data_ptr<float>(), ic.numel(), nullptr);
+    return output;
+}
+
+inline Tensor cos(const Tensor& input) {
+    Tensor ic = input.is_contiguous() ? input : input.contiguous();
+    auto output = empty_cuda(ic.sizes().vec(), ic.dtype(), ic.device().index());
+    at::cuda::launch_cos(ic.data_ptr<float>(), output.mutable_data_ptr<float>(), ic.numel(), nullptr);
+    return output;
+}
+
+inline Tensor square(const Tensor& input) {
+    Tensor ic = input.is_contiguous() ? input : input.contiguous();
+    auto output = empty_cuda(ic.sizes().vec(), ic.dtype(), ic.device().index());
+    at::cuda::launch_square(ic.data_ptr<float>(), output.mutable_data_ptr<float>(), ic.numel(), nullptr);
+    return output;
+}
+
+// Binary: pow, pow_scalar, maximum, minimum
+inline Tensor pow(const Tensor& a, const Tensor& b) {
+    Tensor ac = a.is_contiguous() ? a : a.contiguous();
+    Tensor bc = b.is_contiguous() ? b : b.contiguous();
+    auto output = empty_cuda(ac.sizes().vec(), ac.dtype(), ac.device().index());
+    at::cuda::launch_pow(ac.data_ptr<float>(), bc.data_ptr<float>(), output.mutable_data_ptr<float>(), ac.numel(), nullptr);
+    return output;
+}
+
+inline Tensor pow_scalar(const Tensor& a, float exp) {
+    Tensor ac = a.is_contiguous() ? a : a.contiguous();
+    auto output = empty_cuda(ac.sizes().vec(), ac.dtype(), ac.device().index());
+    at::cuda::launch_pow_scalar(ac.data_ptr<float>(), exp, output.mutable_data_ptr<float>(), ac.numel(), nullptr);
+    return output;
+}
+
+inline Tensor maximum(const Tensor& a, const Tensor& b) {
+    Tensor ac = a.is_contiguous() ? a : a.contiguous();
+    Tensor bc = b.is_contiguous() ? b : b.contiguous();
+    auto output = empty_cuda(ac.sizes().vec(), ac.dtype(), ac.device().index());
+    at::cuda::launch_maximum(ac.data_ptr<float>(), bc.data_ptr<float>(), output.mutable_data_ptr<float>(), ac.numel(), nullptr);
+    return output;
+}
+
+inline Tensor minimum(const Tensor& a, const Tensor& b) {
+    Tensor ac = a.is_contiguous() ? a : a.contiguous();
+    Tensor bc = b.is_contiguous() ? b : b.contiguous();
+    auto output = empty_cuda(ac.sizes().vec(), ac.dtype(), ac.device().index());
+    at::cuda::launch_minimum(ac.data_ptr<float>(), bc.data_ptr<float>(), output.mutable_data_ptr<float>(), ac.numel(), nullptr);
+    return output;
+}
+
+// Reduction: dot, argmax, argmin
+inline Tensor dot(const Tensor& a, const Tensor& b) {
+    Tensor ac = a.is_contiguous() ? a : a.contiguous();
+    Tensor bc = b.is_contiguous() ? b : b.contiguous();
+    auto output = empty_cuda({}, ac.dtype(), ac.device().index());
+    at::cuda::launch_dot(ac.data_ptr<float>(), bc.data_ptr<float>(), output.mutable_data_ptr<float>(), ac.numel(), nullptr);
+    return output;
+}
+
+inline Tensor argmax(const Tensor& input) {
+    Tensor ic = input.is_contiguous() ? input : input.contiguous();
+    auto output = empty_cuda({}, c10::ScalarType::Long, ic.device().index());
+    at::cuda::launch_argmax(ic.data_ptr<float>(), output.mutable_data_ptr<int64_t>(), ic.numel(), nullptr);
+    return output;
+}
+
+inline Tensor argmin(const Tensor& input) {
+    Tensor ic = input.is_contiguous() ? input : input.contiguous();
+    auto output = empty_cuda({}, c10::ScalarType::Long, ic.device().index());
+    at::cuda::launch_argmin(ic.data_ptr<float>(), output.mutable_data_ptr<int64_t>(), ic.numel(), nullptr);
+    return output;
+}
+
+// Comparison operations (tensor vs tensor, float-returning)
+inline Tensor eq(const Tensor& a, const Tensor& b) {
+    Tensor ac = a.is_contiguous() ? a : a.contiguous();
+    Tensor bc = b.is_contiguous() ? b : b.contiguous();
+    auto output = empty_cuda(ac.sizes().vec(), ac.dtype(), ac.device().index());
+    at::cuda::launch_eq(ac.data_ptr<float>(), bc.data_ptr<float>(), output.mutable_data_ptr<float>(), ac.numel(), nullptr);
+    return output;
+}
+
+inline Tensor ne(const Tensor& a, const Tensor& b) {
+    Tensor ac = a.is_contiguous() ? a : a.contiguous();
+    Tensor bc = b.is_contiguous() ? b : b.contiguous();
+    auto output = empty_cuda(ac.sizes().vec(), ac.dtype(), ac.device().index());
+    at::cuda::launch_ne(ac.data_ptr<float>(), bc.data_ptr<float>(), output.mutable_data_ptr<float>(), ac.numel(), nullptr);
+    return output;
+}
+
+inline Tensor lt(const Tensor& a, const Tensor& b) {
+    Tensor ac = a.is_contiguous() ? a : a.contiguous();
+    Tensor bc = b.is_contiguous() ? b : b.contiguous();
+    auto output = empty_cuda(ac.sizes().vec(), ac.dtype(), ac.device().index());
+    at::cuda::launch_lt(ac.data_ptr<float>(), bc.data_ptr<float>(), output.mutable_data_ptr<float>(), ac.numel(), nullptr);
+    return output;
+}
+
+inline Tensor le(const Tensor& a, const Tensor& b) {
+    Tensor ac = a.is_contiguous() ? a : a.contiguous();
+    Tensor bc = b.is_contiguous() ? b : b.contiguous();
+    auto output = empty_cuda(ac.sizes().vec(), ac.dtype(), ac.device().index());
+    at::cuda::launch_le(ac.data_ptr<float>(), bc.data_ptr<float>(), output.mutable_data_ptr<float>(), ac.numel(), nullptr);
+    return output;
+}
+
+inline Tensor gt(const Tensor& a, const Tensor& b) {
+    Tensor ac = a.is_contiguous() ? a : a.contiguous();
+    Tensor bc = b.is_contiguous() ? b : b.contiguous();
+    auto output = empty_cuda(ac.sizes().vec(), ac.dtype(), ac.device().index());
+    at::cuda::launch_gt(ac.data_ptr<float>(), bc.data_ptr<float>(), output.mutable_data_ptr<float>(), ac.numel(), nullptr);
+    return output;
+}
+
+inline Tensor ge(const Tensor& a, const Tensor& b) {
+    Tensor ac = a.is_contiguous() ? a : a.contiguous();
+    Tensor bc = b.is_contiguous() ? b : b.contiguous();
+    auto output = empty_cuda(ac.sizes().vec(), ac.dtype(), ac.device().index());
+    at::cuda::launch_ge(ac.data_ptr<float>(), bc.data_ptr<float>(), output.mutable_data_ptr<float>(), ac.numel(), nullptr);
+    return output;
+}
+
+// Scalar comparison operations
+inline Tensor eq_scalar(const Tensor& a, float val) {
+    Tensor ac = a.is_contiguous() ? a : a.contiguous();
+    auto output = empty_cuda(ac.sizes().vec(), ac.dtype(), ac.device().index());
+    at::cuda::launch_eq_scalar(ac.data_ptr<float>(), val, output.mutable_data_ptr<float>(), ac.numel(), nullptr);
+    return output;
+}
+
+inline Tensor ne_scalar(const Tensor& a, float val) {
+    Tensor ac = a.is_contiguous() ? a : a.contiguous();
+    auto output = empty_cuda(ac.sizes().vec(), ac.dtype(), ac.device().index());
+    at::cuda::launch_ne_scalar(ac.data_ptr<float>(), val, output.mutable_data_ptr<float>(), ac.numel(), nullptr);
+    return output;
+}
+
+inline Tensor lt_scalar(const Tensor& a, float val) {
+    Tensor ac = a.is_contiguous() ? a : a.contiguous();
+    auto output = empty_cuda(ac.sizes().vec(), ac.dtype(), ac.device().index());
+    at::cuda::launch_lt_scalar(ac.data_ptr<float>(), val, output.mutable_data_ptr<float>(), ac.numel(), nullptr);
+    return output;
+}
+
+inline Tensor le_scalar(const Tensor& a, float val) {
+    Tensor ac = a.is_contiguous() ? a : a.contiguous();
+    auto output = empty_cuda(ac.sizes().vec(), ac.dtype(), ac.device().index());
+    at::cuda::launch_le_scalar(ac.data_ptr<float>(), val, output.mutable_data_ptr<float>(), ac.numel(), nullptr);
+    return output;
+}
+
+inline Tensor gt_scalar(const Tensor& a, float val) {
+    Tensor ac = a.is_contiguous() ? a : a.contiguous();
+    auto output = empty_cuda(ac.sizes().vec(), ac.dtype(), ac.device().index());
+    at::cuda::launch_gt_scalar(ac.data_ptr<float>(), val, output.mutable_data_ptr<float>(), ac.numel(), nullptr);
+    return output;
+}
+
+inline Tensor ge_scalar(const Tensor& a, float val) {
+    Tensor ac = a.is_contiguous() ? a : a.contiguous();
+    auto output = empty_cuda(ac.sizes().vec(), ac.dtype(), ac.device().index());
+    at::cuda::launch_ge_scalar(ac.data_ptr<float>(), val, output.mutable_data_ptr<float>(), ac.numel(), nullptr);
+    return output;
+}
+
+// Fused operations
+inline Tensor addcmul(const Tensor& self, const Tensor& t1, const Tensor& t2, float value) {
+    Tensor sc = self.is_contiguous() ? self : self.contiguous();
+    Tensor t1c = t1.is_contiguous() ? t1 : t1.contiguous();
+    Tensor t2c = t2.is_contiguous() ? t2 : t2.contiguous();
+    auto output = empty_cuda(sc.sizes().vec(), sc.dtype(), sc.device().index());
+    at::cuda::launch_addcmul(sc.data_ptr<float>(), t1c.data_ptr<float>(), t2c.data_ptr<float>(), value, output.mutable_data_ptr<float>(), sc.numel(), nullptr);
+    return output;
+}
+
+inline Tensor addcdiv(const Tensor& self, const Tensor& t1, const Tensor& t2, float value) {
+    Tensor sc = self.is_contiguous() ? self : self.contiguous();
+    Tensor t1c = t1.is_contiguous() ? t1 : t1.contiguous();
+    Tensor t2c = t2.is_contiguous() ? t2 : t2.contiguous();
+    auto output = empty_cuda(sc.sizes().vec(), sc.dtype(), sc.device().index());
+    at::cuda::launch_addcdiv(sc.data_ptr<float>(), t1c.data_ptr<float>(), t2c.data_ptr<float>(), value, output.mutable_data_ptr<float>(), sc.numel(), nullptr);
+    return output;
+}
+
 #else
 
 // Stub implementations when CUDA is disabled
@@ -842,6 +1087,42 @@ inline Tensor leaky_relu(const Tensor&, float) { PT_CHECK_MSG(false, "CUDA not e
 inline Tensor clamp(const Tensor&, float, float) { PT_CHECK_MSG(false, "CUDA not enabled"); return Tensor(); }
 inline Tensor cross_entropy_loss(const Tensor&, const Tensor&, int = 1) { PT_CHECK_MSG(false, "CUDA not enabled"); return Tensor(); }
 inline Tensor nll_loss(const Tensor&, const Tensor&, int = 1) { PT_CHECK_MSG(false, "CUDA not enabled"); return Tensor(); }
+inline Tensor sin(const Tensor&) { PT_CHECK_MSG(false, "CUDA not enabled"); return Tensor(); }
+inline Tensor cos(const Tensor&) { PT_CHECK_MSG(false, "CUDA not enabled"); return Tensor(); }
+inline Tensor square(const Tensor&) { PT_CHECK_MSG(false, "CUDA not enabled"); return Tensor(); }
+inline Tensor pow(const Tensor&, const Tensor&) { PT_CHECK_MSG(false, "CUDA not enabled"); return Tensor(); }
+inline Tensor pow_scalar(const Tensor&, float) { PT_CHECK_MSG(false, "CUDA not enabled"); return Tensor(); }
+inline Tensor maximum(const Tensor&, const Tensor&) { PT_CHECK_MSG(false, "CUDA not enabled"); return Tensor(); }
+inline Tensor minimum(const Tensor&, const Tensor&) { PT_CHECK_MSG(false, "CUDA not enabled"); return Tensor(); }
+inline Tensor dot(const Tensor&, const Tensor&) { PT_CHECK_MSG(false, "CUDA not enabled"); return Tensor(); }
+inline Tensor argmax(const Tensor&) { PT_CHECK_MSG(false, "CUDA not enabled"); return Tensor(); }
+inline Tensor argmin(const Tensor&) { PT_CHECK_MSG(false, "CUDA not enabled"); return Tensor(); }
+// Additional unary stubs
+inline Tensor log2(const Tensor&) { PT_CHECK_MSG(false, "CUDA not enabled"); return Tensor(); }
+inline Tensor log10(const Tensor&) { PT_CHECK_MSG(false, "CUDA not enabled"); return Tensor(); }
+inline Tensor tan(const Tensor&) { PT_CHECK_MSG(false, "CUDA not enabled"); return Tensor(); }
+inline Tensor ceil(const Tensor&) { PT_CHECK_MSG(false, "CUDA not enabled"); return Tensor(); }
+inline Tensor floor(const Tensor&) { PT_CHECK_MSG(false, "CUDA not enabled"); return Tensor(); }
+inline Tensor round(const Tensor&) { PT_CHECK_MSG(false, "CUDA not enabled"); return Tensor(); }
+inline Tensor sign(const Tensor&) { PT_CHECK_MSG(false, "CUDA not enabled"); return Tensor(); }
+inline Tensor reciprocal(const Tensor&) { PT_CHECK_MSG(false, "CUDA not enabled"); return Tensor(); }
+// Comparison stubs (tensor vs tensor)
+inline Tensor eq(const Tensor&, const Tensor&) { PT_CHECK_MSG(false, "CUDA not enabled"); return Tensor(); }
+inline Tensor ne(const Tensor&, const Tensor&) { PT_CHECK_MSG(false, "CUDA not enabled"); return Tensor(); }
+inline Tensor lt(const Tensor&, const Tensor&) { PT_CHECK_MSG(false, "CUDA not enabled"); return Tensor(); }
+inline Tensor le(const Tensor&, const Tensor&) { PT_CHECK_MSG(false, "CUDA not enabled"); return Tensor(); }
+inline Tensor gt(const Tensor&, const Tensor&) { PT_CHECK_MSG(false, "CUDA not enabled"); return Tensor(); }
+inline Tensor ge(const Tensor&, const Tensor&) { PT_CHECK_MSG(false, "CUDA not enabled"); return Tensor(); }
+// Scalar comparison stubs
+inline Tensor eq_scalar(const Tensor&, float) { PT_CHECK_MSG(false, "CUDA not enabled"); return Tensor(); }
+inline Tensor ne_scalar(const Tensor&, float) { PT_CHECK_MSG(false, "CUDA not enabled"); return Tensor(); }
+inline Tensor lt_scalar(const Tensor&, float) { PT_CHECK_MSG(false, "CUDA not enabled"); return Tensor(); }
+inline Tensor le_scalar(const Tensor&, float) { PT_CHECK_MSG(false, "CUDA not enabled"); return Tensor(); }
+inline Tensor gt_scalar(const Tensor&, float) { PT_CHECK_MSG(false, "CUDA not enabled"); return Tensor(); }
+inline Tensor ge_scalar(const Tensor&, float) { PT_CHECK_MSG(false, "CUDA not enabled"); return Tensor(); }
+// Fused ops stubs
+inline Tensor addcmul(const Tensor&, const Tensor&, const Tensor&, float) { PT_CHECK_MSG(false, "CUDA not enabled"); return Tensor(); }
+inline Tensor addcdiv(const Tensor&, const Tensor&, const Tensor&, float) { PT_CHECK_MSG(false, "CUDA not enabled"); return Tensor(); }
 
 #endif
 
