@@ -581,6 +581,7 @@ inline Tensor multinomial(const Tensor& probs, int64_t num_samples, bool replace
         const scalar_t* p_data = p.data_ptr<scalar_t>();
         int64_t* out_data = result.mutable_data_ptr<int64_t>();
         auto& gen = Generator::getDefault();
+        std::uniform_real_distribution<double> udist(0.0, 1.0);
 
         for (int64_t b = 0; b < batch; ++b) {
             const scalar_t* row = p_data + b * n_categories;
@@ -600,7 +601,7 @@ inline Tensor multinomial(const Tensor& probs, int64_t num_samples, bool replace
             std::vector<bool> used(n_categories, false);
 
             for (int64_t s = 0; s < num_samples; ++s) {
-                double u = gen.uniform();
+                double u = udist(gen.engine());
 
                 // Binary search in CDF
                 int64_t lo = 0, hi = n_categories;

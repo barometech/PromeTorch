@@ -521,6 +521,55 @@ inline Tensor norm(const Tensor& self, Scalar p = 2) {
     return result;
 }
 
+// Norm along dimension
+inline Tensor norm(const Tensor& self, Scalar p, int64_t dim, bool keepdim = false) {
+    double p_val = p.toDouble();
+    int64_t ndim = self.dim();
+    if (dim < 0) dim += ndim;
+
+    // Compute output shape
+    std::vector<int64_t> out_shape;
+    for (int64_t i = 0; i < ndim; ++i) {
+        if (i == dim) {
+            if (keepdim) out_shape.push_back(1);
+        } else {
+            out_shape.push_back(self.size(i));
+        }
+    }
+    if (out_shape.empty()) out_shape.push_back(1);
+
+    Tensor cont = self.contiguous();
+    Tensor result = zeros(out_shape, TensorOptions().dtype(self.dtype()).device(self.device()));
+
+    PT_DISPATCH_FLOATING_TYPES(self.dtype(), "norm_dim", [&] {
+        const scalar_t* data = cont.data_ptr<scalar_t>();
+        scalar_t* out = result.mutable_data_ptr<scalar_t>();
+
+        int64_t dim_size = cont.size(dim);
+        int64_t outer = 1, inner = 1;
+        for (int64_t i = 0; i < dim; ++i) outer *= cont.size(i);
+        for (int64_t i = dim + 1; i < ndim; ++i) inner *= cont.size(i);
+
+        for (int64_t o = 0; o < outer; ++o) {
+            for (int64_t in = 0; in < inner; ++in) {
+                double acc = 0;
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    double val = std::abs(static_cast<double>(data[(o * dim_size + d) * inner + in]));
+                    if (p_val == 2.0) acc += val * val;
+                    else if (p_val == 1.0) acc += val;
+                    else if (std::isinf(p_val)) acc = std::max(acc, val);
+                    else acc += std::pow(val, p_val);
+                }
+                if (p_val == 2.0) acc = std::sqrt(acc);
+                else if (p_val != 1.0 && !std::isinf(p_val)) acc = std::pow(acc, 1.0 / p_val);
+                out[o * inner + in] = static_cast<scalar_t>(acc);
+            }
+        }
+    });
+
+    return result;
+}
+
 // All (logical AND)
 inline bool all(const Tensor& self) {
     bool result = true;
