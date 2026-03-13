@@ -381,6 +381,32 @@ ATEN_CUDA_API void launch_q4km_gemv(
     int K, int N, int64_t row_stride_bytes,
     cudaStream_t stream = nullptr);
 
+// Quantize float32 x vector to Q8_1 (int8) for dp4a GEMV
+// y_q8 must point to (K/32) * 36 bytes of GPU memory
+ATEN_CUDA_API void launch_quantize_q8_1(
+    const float* x, void* y_q8, int K,
+    cudaStream_t stream = nullptr);
+
+// Q4_K × Q8_1 dp4a GEMV: x pre-quantized to Q8_1, 4x faster than float GEMV
+ATEN_CUDA_API void launch_q4km_q8_gemv(
+    const void* weights, const void* x_q8, float* y,
+    int K, int N, int64_t row_stride_bytes,
+    cudaStream_t stream = nullptr);
+
+// Dequantize Q4_K_M weights to FP16 (one-time at load)
+ATEN_CUDA_API void launch_dequant_q4k_to_fp16(
+    const void* weights, void* out_fp16,
+    int K, int N, int64_t row_stride_bytes,
+    cudaStream_t stream = nullptr);
+
+// cuBLAS Hgemm GEMV: FP16 weights × FP32 vector → FP32 output
+// Requires FP16 scratch buffers for x and y conversion
+ATEN_CUDA_API void launch_cublas_hgemv(
+    const void* W_fp16, const float* x, float* y,
+    int K, int N,
+    void* x_fp16_buf, void* y_fp16_buf,
+    cudaStream_t stream = nullptr);
+
 // Fused Q6_K dequant-GEMV: y[n] = sum_k dequant(W_q6k[n,k]) * x[k]
 ATEN_CUDA_API void launch_q6k_gemv(
     const void* weights, const float* x, float* y,

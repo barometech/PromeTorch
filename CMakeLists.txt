@@ -246,6 +246,7 @@ if(PT_USE_CUDA)
     target_link_libraries(aten_cuda PUBLIC
         c10
         CUDA::cudart
+        CUDA::cublas
     )
 
     # Link cuDNN if available

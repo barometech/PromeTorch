@@ -127,6 +127,7 @@ struct TransformerConfig {
 struct QuantizedWeight {
     void* gpu_data = nullptr;     // raw quant blocks on GPU
     void* cpu_data = nullptr;     // raw quant blocks on CPU (heap allocated)
+    void* fp16_data = nullptr;    // dequantized FP16 weights on GPU [N, K]
     int64_t rows = 0;             // N (out_features) — original [N, K] layout
     int64_t cols = 0;             // K (in_features)
     int64_t row_stride_bytes = 0; // bytes per row
@@ -142,6 +143,19 @@ struct QuantizedWeight {
         gpu_data = nullptr;
         valid = false;
     }
+
+#ifdef PT_USE_CUDA
+    void dequant_to_fp16() {
+        if (!gpu_data || !valid || !is_q4k()) return;
+        int64_t fp16_bytes = rows * cols * 2;  // sizeof(half) = 2
+        cudaMalloc(&fp16_data, fp16_bytes);
+        at::cuda::launch_dequant_q4k_to_fp16(
+            gpu_data, fp16_data,
+            static_cast<int>(cols), static_cast<int>(rows),
+            row_stride_bytes, nullptr);
+        cudaDeviceSynchronize();
+    }
+#endif
 };
 
 struct TransformerLayer {
@@ -258,6 +272,9 @@ struct InferenceScratchPool {
     Tensor buf_silu;       // [1, intermediate]
     Tensor buf_down;       // [1, H]
     Tensor buf_logits;     // [1, vocab_size]
+    void* q8_buf = nullptr;     // Q8_1 quantized x for dp4a GEMV (legacy)
+    void* x_fp16_buf = nullptr; // FP16 scratch for cuBLAS GEMV input
+    void* y_fp16_buf = nullptr; // FP16 scratch for cuBLAS GEMV output
     bool allocated = false;
 
     void allocate(const TransformerConfig& config) {
@@ -282,6 +299,15 @@ struct InferenceScratchPool {
         buf_silu = at::empty_cuda({1, inter});
         buf_down = at::empty_cuda({1, H});
         buf_logits = at::empty_cuda({1, V});
+
+        // FP16 scratch buffers for cuBLAS HGEMV
+        int64_t max_K = H > inter ? H : inter;
+        if (q_dim > max_K) max_K = q_dim;
+        int64_t max_N = V > inter ? V : inter;
+        if (q_dim > max_N) max_N = q_dim;
+        cudaMalloc(&x_fp16_buf, max_K * 2);  // sizeof(half) = 2
+        cudaMalloc(&y_fp16_buf, max_N * 2);
+
         allocated = true;
 
         size_t total_bytes = (6*H + 2*q_dim + 2*kv_dim + 3*inter + V) * sizeof(float);
@@ -445,7 +471,12 @@ public:
             qw.total_bytes = static_cast<int64_t>(raw.data.size());
             qw.quant_type = type;
 
-            cudaMalloc(&qw.gpu_data, qw.total_bytes);
+            cudaError_t err = cudaMalloc(&qw.gpu_data, qw.total_bytes);
+            if (err != cudaSuccess) {
+                qw.gpu_data = nullptr;
+                qw.valid = false;
+                return;  // fallback to float32
+            }
             cudaMemcpy(qw.gpu_data, raw.data.data(), qw.total_bytes, cudaMemcpyHostToDevice);
             qw.valid = true;
         };
@@ -501,9 +532,11 @@ public:
             count(layer.q_ffn_gate); count(layer.q_ffn_up); count(layer.q_ffn_down);
         }
 
-        // Output projection
+        // Output projection — try output.weight first, then tied token_embd.weight
         if (reader.has_tensor("output.weight")) {
             upload_quant("output.weight", q_output_weight);
+        } else if (config.tie_word_embeddings && reader.has_tensor("token_embd.weight")) {
+            upload_quant("token_embd.weight", q_output_weight);
         }
 
         use_quant_gemv_ = true;
@@ -534,6 +567,9 @@ public:
         double total_gb = vram_total / (1024.0 * 1024.0 * 1024.0);
         std::cout << "[Quant] VRAM: " << std::fixed << std::setprecision(1)
                   << used_gb << " / " << total_gb << " GB" << std::endl;
+
+        // Note: cuBLAS FP16 GEMV is available but slower than custom Q4_K GEMV
+        // for M=1 (reads 3.5x more data). Keeping infrastructure for batch GEMM.
 #else
         std::cerr << "[Quant] CUDA not available" << std::endl;
 #endif
@@ -925,17 +961,17 @@ public:
         return sp.buf_logits;
     }
 
-    // GEMV helper for scratch pool: dispatch quant or float32 GEMV to output ptr
+    // GEMV helper for scratch pool: dispatch cuBLAS FP16 > quant > float32
     void gemv_scratch(const QuantizedWeight& qw, const Tensor& float_w,
                       const float* x, float* y, int64_t N) {
-        if (use_quant_gemv_ && qw.valid && qw.gpu_data) {
+        if (use_quant_gemv_ && qw.valid) {
             int K = static_cast<int>(qw.cols);
             int Nr = static_cast<int>(qw.rows);
-            if (qw.is_q4k()) {
+            if (qw.is_q4k() && qw.gpu_data) {
                 at::cuda::launch_q4km_gemv(qw.gpu_data, x, y, K, Nr, qw.row_stride_bytes, nullptr);
-            } else if (qw.is_q6k()) {
+            } else if (qw.is_q6k() && qw.gpu_data) {
                 at::cuda::launch_q6k_gemv(qw.gpu_data, x, y, K, Nr, qw.row_stride_bytes, nullptr);
-            } else if (qw.is_q5k()) {
+            } else if (qw.is_q5k() && qw.gpu_data) {
                 at::cuda::launch_q5k_gemv(qw.gpu_data, x, y, K, Nr, qw.row_stride_bytes, nullptr);
             }
         } else if (float_w.defined()) {
