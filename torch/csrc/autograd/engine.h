@@ -362,6 +362,11 @@ inline void Engine::backward(
         } else {
             // Create ones tensor on same device as output
             Tensor ones = at::ones(output.sizes());
+#ifdef PT_USE_NMCARD
+            if (output.is_nmcard()) {
+                ones = at::to_nmcard(ones);
+            }
+#endif
 #ifdef PT_USE_CUDA
             if (output.is_cuda()) {
                 ones = at::to_cuda(ones);
@@ -393,6 +398,11 @@ inline variable_list Engine::grad(
         } else {
             // Create ones tensor on same device as output
             Tensor ones = at::ones(outputs[i].sizes());
+#ifdef PT_USE_NMCARD
+            if (outputs[i].is_nmcard()) {
+                ones = at::to_nmcard(ones);
+            }
+#endif
 #ifdef PT_USE_CUDA
             if (outputs[i].is_cuda()) {
                 ones = at::to_cuda(ones);
@@ -432,6 +442,11 @@ inline void backward(
             } else {
                 // Create ones tensor on same device as output
                 Tensor ones = at::ones(tensors[i].sizes());
+#ifdef PT_USE_NMCARD
+                if (tensors[i].is_nmcard()) {
+                    ones = at::to_nmcard(ones);
+                }
+#endif
 #ifdef PT_USE_CUDA
                 if (tensors[i].is_cuda()) {
                     ones = at::to_cuda(ones);

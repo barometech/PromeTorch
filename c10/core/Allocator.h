@@ -155,55 +155,53 @@ public:
             return DataPtr(nullptr, nullptr, nullptr, kCPU);
         }
 
-        void* data = nullptr;
+        // Round up to bucket size for better cache hit rate
+        size_t alloc_size = round_to_bucket(nbytes);
 
-        #if defined(_MSC_VER)
-            // Windows aligned allocation
-            data = _aligned_malloc(nbytes, kAlignment);
-        #else
-            // POSIX aligned allocation
-            int ret = posix_memalign(&data, kAlignment, nbytes);
-            if (ret != 0) {
-                data = nullptr;
-            }
-        #endif
+        // Try cache first
+        void* data = cache_pop(alloc_size);
 
         if (data == nullptr) {
-            PT_OOM_ERROR(
-                "Failed to allocate ", nbytes, " bytes on CPU. "
-                "Out of memory?"
-            );
+            // Cache miss: real allocation
+            #if defined(_MSC_VER)
+                data = _aligned_malloc(alloc_size, kAlignment);
+            #else
+                int ret = posix_memalign(&data, kAlignment, alloc_size);
+                if (ret != 0) data = nullptr;
+            #endif
+
+            if (data == nullptr) {
+                PT_OOM_ERROR(
+                    "Failed to allocate ", nbytes, " bytes on CPU. "
+                    "Out of memory?"
+                );
+            }
         }
 
-        return DataPtr(data, nullptr, &CPUAllocator::Delete, kCPU);
+        // Store alloc_size in context for Delete to know the bucket
+        return DataPtr(data, reinterpret_cast<void*>(alloc_size),
+                       &CPUAllocator::CachedDelete, kCPU);
     }
 
     void* raw_allocate(size_t nbytes) override {
-        if (nbytes == 0) {
-            return nullptr;
-        }
+        if (nbytes == 0) return nullptr;
 
         void* data = nullptr;
-
         #if defined(_MSC_VER)
             data = _aligned_malloc(nbytes, kAlignment);
         #else
             int ret = posix_memalign(&data, kAlignment, kAlignment > nbytes ? kAlignment : nbytes);
-            if (ret != 0) {
-                data = nullptr;
-            }
+            if (ret != 0) data = nullptr;
         #endif
 
         if (data == nullptr) {
             PT_OOM_ERROR("Failed to allocate ", nbytes, " bytes on CPU");
         }
-
         return data;
     }
 
     void raw_deallocate(void* ptr) override {
         if (ptr == nullptr) return;
-
         #if defined(_MSC_VER)
             _aligned_free(ptr);
         #else
@@ -212,18 +210,116 @@ public:
     }
 
     DeleterFn raw_deleter() const override {
-        return &CPUAllocator::Delete;
+        return &CPUAllocator::CachedDelete;
+    }
+
+    // Empty the cache (e.g., to reclaim memory)
+    void empty_cache() {
+        for (int b = 0; b < kNumBuckets; ++b) {
+            for (int i = 0; i < bucket_count_[b]; ++i) {
+                if (buckets_[b][i]) {
+                    #if defined(_MSC_VER)
+                        _aligned_free(buckets_[b][i]);
+                    #else
+                        free(buckets_[b][i]);
+                    #endif
+                    buckets_[b][i] = nullptr;
+                }
+            }
+            bucket_count_[b] = 0;
+        }
     }
 
 private:
-    CPUAllocator() = default;
+    CPUAllocator() {
+        for (int b = 0; b < kNumBuckets; ++b) {
+            bucket_count_[b] = 0;
+            for (int i = 0; i < kMaxPerBucket; ++i)
+                buckets_[b][i] = nullptr;
+        }
+    }
 
-    // Alignment for SIMD operations (AVX-512 requires 64-byte alignment)
+    ~CPUAllocator() {
+        empty_cache();
+    }
+
     static constexpr size_t kAlignment = 64;
 
+    // Cache: up to kMaxPerBucket blocks per size bucket
+    // Buckets: powers of 2 from 2^10 (1KB) to 2^26 (64MB) = 17 buckets
+    static constexpr int kMinBucketLog2 = 10;   // 1 KB
+    static constexpr int kMaxBucketLog2 = 26;   // 64 MB
+    static constexpr int kNumBuckets = kMaxBucketLog2 - kMinBucketLog2 + 1; // 17
+    static constexpr int kMaxPerBucket = 16;
+    static constexpr size_t kMaxCacheableSize = (1ULL << kMaxBucketLog2); // 64 MB
+
+    void* buckets_[kNumBuckets][kMaxPerBucket];
+    int bucket_count_[kNumBuckets];
+
+    // Round up to next power of 2 (for bucket matching)
+    static size_t round_to_bucket(size_t n) {
+        if (n <= (1ULL << kMinBucketLog2)) return (1ULL << kMinBucketLog2);
+        if (n > kMaxCacheableSize) return n; // Don't bucket huge allocs
+        // Next power of 2
+        n--;
+        n |= n >> 1;  n |= n >> 2;  n |= n >> 4;
+        n |= n >> 8;  n |= n >> 16; n |= n >> 32;
+        return n + 1;
+    }
+
+    // Bucket index for a power-of-2 size
+    static int bucket_index(size_t alloc_size) {
+        if (alloc_size > kMaxCacheableSize) return -1;
+        // log2 via bit scan
+        int idx = 0;
+        size_t s = alloc_size;
+        while (s > 1) { s >>= 1; idx++; }
+        return idx - kMinBucketLog2;
+    }
+
+    // Pop a cached block of given size
+    void* cache_pop(size_t alloc_size) {
+        int idx = bucket_index(alloc_size);
+        if (idx < 0 || idx >= kNumBuckets) return nullptr;
+        if (bucket_count_[idx] > 0) {
+            bucket_count_[idx]--;
+            void* ptr = buckets_[idx][bucket_count_[idx]];
+            buckets_[idx][bucket_count_[idx]] = nullptr;
+            return ptr;
+        }
+        return nullptr;
+    }
+
+    // Push a block to cache
+    bool cache_push(void* ptr, size_t alloc_size) {
+        int idx = bucket_index(alloc_size);
+        if (idx < 0 || idx >= kNumBuckets) return false;
+        if (bucket_count_[idx] < kMaxPerBucket) {
+            buckets_[idx][bucket_count_[idx]] = ptr;
+            bucket_count_[idx]++;
+            return true;
+        }
+        return false; // Bucket full
+    }
+
+    static void CachedDelete(void* data, void* context) {
+        if (data == nullptr) return;
+        size_t alloc_size = reinterpret_cast<size_t>(context);
+        // Try to cache instead of freeing
+        if (alloc_size > 0 && CPUAllocator::get().cache_push(data, alloc_size)) {
+            return; // Cached successfully
+        }
+        // Cache full or uncacheable: actually free
+        #if defined(_MSC_VER)
+            _aligned_free(data);
+        #else
+            free(data);
+        #endif
+    }
+
+    // Legacy non-cached delete for backward compat
     static void Delete(void* data, void* /*context*/) {
         if (data == nullptr) return;
-
         #if defined(_MSC_VER)
             _aligned_free(data);
         #else

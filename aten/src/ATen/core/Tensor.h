@@ -214,6 +214,7 @@ public:
 
     bool is_cpu() const { return defined() && impl_->is_cpu(); }
     bool is_cuda() const { return defined() && impl_->is_cuda(); }
+    bool is_nmcard() const { return defined() && impl_->is_nmcard(); }
 
     // Contiguity
     bool is_contiguous() const {
