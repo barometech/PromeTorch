@@ -1,9 +1,10 @@
 // ============================================================================
-// MNIST Training on NM Card Mini (Emulator)
+// MNIST Training on NM Card Mini (Emulator or Hardware)
 // ============================================================================
 // MLP model trained on the NMCard backend. Same architecture as CPU MNIST,
-// but all tensors live on device "nmcard" and ops go through the emulator.
+// but all tensors live on device "nmcard" and ops go through emulator or hardware.
 // Usage: train_mnist_nmcard.exe --data . --epochs 3 --device nmcard
+//        train_mnist_nmcard.exe --device nmcard --hardware --dispatcher path/to/dispatcher.abs
 // ============================================================================
 
 #include "torch/nn/nn.h"
@@ -12,6 +13,7 @@
 #include "aten/src/ATen/nmcard/NMCardDispatch.h"
 #include "c10/nmcard/NMCardAllocator.h"
 #include "aten/src/ATen/nmcard/NMCardEmulator.h"
+#include "aten/src/ATen/nmcard/NMCardHardware.h"
 #include <fstream>
 #include <iostream>
 #include <vector>
@@ -147,10 +149,12 @@ private:
 int main(int argc, char* argv[]) {
     std::string data_dir = ".";
     std::string device_str = "nmcard";
+    std::string dispatcher_path = "";
     int64_t batch_size = 64;
     int64_t epochs = 3;
     float lr = 0.001f;
     bool fixed_point = false;
+    bool use_hardware = false;
 
     // Parse args
     for (int i = 1; i < argc; ++i) {
@@ -167,6 +171,10 @@ int main(int argc, char* argv[]) {
             lr = std::stof(argv[++i]);
         } else if (arg == "--fixed_point") {
             fixed_point = true;
+        } else if (arg == "--hardware") {
+            use_hardware = true;
+        } else if (arg == "--dispatcher" && i + 1 < argc) {
+            dispatcher_path = argv[++i];
         }
     }
 
@@ -179,14 +187,27 @@ int main(int argc, char* argv[]) {
         // Register NMCard allocator (both DLL-internal and local registry)
         c10::nmcard::register_nmcard_allocator();
         c10::nmcard::register_nmcard_allocator_local();
-        auto& emu = at::nmcard::NMCardEmulator::get();
-        if (fixed_point) {
-            emu.set_fixed_point(true);
-            std::cout << "Using NMCard Emulator (Q16.16 fixed-point)" << std::endl;
-        } else {
-            std::cout << "Using NMCard Emulator (float32)" << std::endl;
+
+        if (use_hardware) {
+            // Try to initialize real NM Card Mini hardware
+            auto& hw = at::nmcard::NMCardHardware::get();
+            if (hw.init(dispatcher_path)) {
+                std::cout << "Using NM Card Mini HARDWARE" << std::endl;
+            } else {
+                std::cout << "Hardware init failed, falling back to emulator" << std::endl;
+            }
         }
-        std::cout << "Virtual NMC4 cores: " << emu.num_cores() << std::endl;
+
+        if (!at::nmcard::NMCardHardware::get().is_available()) {
+            auto& emu = at::nmcard::NMCardEmulator::get();
+            if (fixed_point) {
+                emu.set_fixed_point(true);
+                std::cout << "Using NMCard Emulator (Q16.16 fixed-point)" << std::endl;
+            } else {
+                std::cout << "Using NMCard Emulator (float32)" << std::endl;
+            }
+            std::cout << "Virtual NMC4 cores: " << emu.num_cores() << std::endl;
+        }
     }
 
     // Load data
