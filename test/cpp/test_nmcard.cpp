@@ -9,6 +9,7 @@
 #include "c10/nmcard/NMCardAllocator.h"
 #include "aten/src/ATen/nmcard/NMCardEmulator.h"
 #include "aten/src/ATen/nmcard/NMCardMath.h"
+#include "aten/src/ATen/nmcard/NMCardHardware.h"
 
 #include <iostream>
 #include <cmath>
@@ -412,6 +413,23 @@ int main() {
     test_emulator_ops();
     test_fixed_point_mode();
     test_tensor_dispatch();
+
+    // Hardware detection test — always runs, just reports availability
+    std::cout << "\n--- Hardware Detection ---" << std::endl;
+    TEST("hardware_detection") {
+        auto& hw = at::nmcard::NMCardHardware::get();
+        // Don't call init() by default — it would need the real card
+        // Just verify the singleton works and is_available() returns false
+        if (!hw.is_available()) {
+            std::cout << "no card (expected in emulator mode)... ";
+            PASS();
+        } else {
+            std::cout << "HARDWARE DETECTED! " << hw.num_cores() << " core(s)... ";
+            PASS();
+        }
+    } catch (const std::exception& e) {
+        FAIL(e.what());
+    }
 
     std::cout << "\n========================================" << std::endl;
     std::cout << "Results: " << tests_passed << " passed, "

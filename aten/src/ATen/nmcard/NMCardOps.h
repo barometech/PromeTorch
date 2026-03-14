@@ -2,21 +2,27 @@
 // ============================================================================
 // NMCardOps.h - NMCard Operation Declarations
 // ============================================================================
-// Thin wrappers around NMCardEmulator methods
-// Analogous to CUDAOps.h but runs on emulator instead of GPU
+// Thin wrappers that dispatch to hardware (if available) or emulator.
+// Hardware-accelerated: matmul, rmsnorm, softmax, silu, rope,
+//                       elem_add, elem_mul, gate_mul
+// CPU fallback: abs, sqrt, exp, log, sin, cos, tanh, sigmoid, comparisons,
+//               reductions, backward ops, optimizers
 
 #include "aten/src/ATen/nmcard/NMCardEmulator.h"
+#include "aten/src/ATen/nmcard/NMCardHardware.h"
 #include <cstdint>
 
 namespace at {
 namespace nmcard_ops {
 
 using nmcard::NMCardEmulator;
+using nmcard::NMCardHardware;
 
 // ============================================================================
 // Element-wise Unary Operations
 // ============================================================================
 
+// neg, relu — emulator only (no hardware opcode)
 inline void launch_neg(const float* input, float* output, int64_t n) {
     NMCardEmulator::get().neg(input, output, n);
 }
@@ -25,10 +31,16 @@ inline void launch_relu(const float* input, float* output, int64_t n) {
     NMCardEmulator::get().relu(input, output, n);
 }
 
+// silu — hardware OP_SILU(4)
 inline void launch_silu(const float* input, float* output, int64_t n) {
-    NMCardEmulator::get().silu(input, output, n);
+    if (NMCardHardware::get().is_available()) {
+        NMCardHardware::get().silu(input, output, n);
+    } else {
+        NMCardEmulator::get().silu(input, output, n);
+    }
 }
 
+// gelu — no hardware opcode in dispatcher, emulator only
 inline void launch_gelu(const float* input, float* output, int64_t n) {
     NMCardEmulator::get().gelu(input, output, n);
 }
@@ -116,16 +128,27 @@ inline void launch_leaky_relu(const float* input, float* output, float alpha, in
 // Element-wise Binary Operations
 // ============================================================================
 
+// elem_add — hardware OP_ELEM_ADD(10)
 inline void launch_add(const float* a, const float* b, float* out, int64_t n) {
-    NMCardEmulator::get().elem_add(a, b, out, n);
+    if (NMCardHardware::get().is_available()) {
+        NMCardHardware::get().elem_add(a, b, out, n);
+    } else {
+        NMCardEmulator::get().elem_add(a, b, out, n);
+    }
 }
 
+// elem_sub — no hardware opcode (OP_ELEM_SUB=12 declared but not in dispatcher)
 inline void launch_sub(const float* a, const float* b, float* out, int64_t n) {
     NMCardEmulator::get().elem_sub(a, b, out, n);
 }
 
+// elem_mul — hardware OP_ELEM_MUL(11)
 inline void launch_mul(const float* a, const float* b, float* out, int64_t n) {
-    NMCardEmulator::get().elem_mul(a, b, out, n);
+    if (NMCardHardware::get().is_available()) {
+        NMCardHardware::get().elem_mul(a, b, out, n);
+    } else {
+        NMCardEmulator::get().elem_mul(a, b, out, n);
+    }
 }
 
 inline void launch_add_scalar(const float* a, float scalar, float* out, int64_t n) {
@@ -201,16 +224,20 @@ inline void launch_copy(const float* src, float* dst, int64_t n) {
 }
 
 // ============================================================================
-// MatMul
+// MatMul — hardware OP_MATMUL(1)
 // ============================================================================
 
 inline void launch_matmul(const float* A, const float* B, float* C,
                            int64_t M, int64_t K, int64_t N) {
-    NMCardEmulator::get().matmul(A, B, C, M, K, N);
+    if (NMCardHardware::get().is_available()) {
+        NMCardHardware::get().matmul(A, B, C, M, K, N);
+    } else {
+        NMCardEmulator::get().matmul(A, B, C, M, K, N);
+    }
 }
 
 // ============================================================================
-// Reduce Operations
+// Reduce Operations (no hardware opcodes — CPU fallback)
 // ============================================================================
 
 inline void launch_sum(const float* input, float* output, int64_t n) {
@@ -241,7 +268,7 @@ inline void launch_max(const float* input, float* output, int64_t n) {
 }
 
 // ============================================================================
-// Comparison Operations
+// Comparison Operations (no hardware opcodes — CPU fallback)
 // ============================================================================
 
 inline void launch_eq(const float* a, const float* b, float* out, int64_t n) {
@@ -278,28 +305,49 @@ inline void launch_clamp(const float* input, float* output, float min_val, float
 }
 
 // ============================================================================
-// NMCard-native Operations (use emulator directly)
+// NMCard-native Operations (hardware accelerated where opcodes exist)
 // ============================================================================
 
+// softmax — hardware OP_SOFTMAX(3)
 inline void launch_softmax(const float* input, float* output,
                             int64_t batch, int64_t dim) {
-    NMCardEmulator::get().softmax(input, output, batch, dim);
+    if (NMCardHardware::get().is_available()) {
+        NMCardHardware::get().softmax(input, output, batch, dim);
+    } else {
+        NMCardEmulator::get().softmax(input, output, batch, dim);
+    }
 }
 
+// rmsnorm — hardware OP_RMSNORM(2)
 inline void launch_rmsnorm(const float* input, float* output, const float* gamma,
                             int64_t batch, int64_t hidden) {
-    NMCardEmulator::get().rmsnorm(input, output, gamma, batch, hidden);
+    if (NMCardHardware::get().is_available()) {
+        NMCardHardware::get().rmsnorm(input, output, gamma, batch, hidden);
+    } else {
+        NMCardEmulator::get().rmsnorm(input, output, gamma, batch, hidden);
+    }
 }
 
+// rope — hardware OP_ROPE(5)
 inline void launch_rope(const float* input, float* output, const float* freqs,
                          int64_t seq_len, int64_t head_dim, int64_t pos_offset) {
-    NMCardEmulator::get().rope(input, output, freqs, seq_len, head_dim, pos_offset);
+    if (NMCardHardware::get().is_available()) {
+        NMCardHardware::get().rope(input, output, freqs, seq_len, head_dim, pos_offset);
+    } else {
+        NMCardEmulator::get().rope(input, output, freqs, seq_len, head_dim, pos_offset);
+    }
 }
 
+// gate_mul — hardware OP_GATE_MUL(13)
 inline void launch_gate_mul(const float* a, const float* b, float* out, int64_t count) {
-    NMCardEmulator::get().gate_mul(a, b, out, count);
+    if (NMCardHardware::get().is_available()) {
+        NMCardHardware::get().gate_mul(a, b, out, count);
+    } else {
+        NMCardEmulator::get().gate_mul(a, b, out, count);
+    }
 }
 
+// layernorm — no hardware opcode (OP_LAYERNORM=16 declared but not in dispatcher)
 inline void launch_layernorm(const float* input, float* output,
                               const float* gamma, const float* beta,
                               int64_t batch, int64_t hidden) {
@@ -307,7 +355,7 @@ inline void launch_layernorm(const float* input, float* output,
 }
 
 // ============================================================================
-// Training Operations
+// Training Operations (no hardware opcodes — emulator/CPU only)
 // ============================================================================
 
 inline void launch_matmul_backward(const float* A, const float* B, const float* grad_C,
