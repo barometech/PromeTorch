@@ -4,6 +4,51 @@
 
 ---
 
+## 2026-03-14: NM Card Mini — Hardware Backend (подготовка к реальному железу)
+
+### Что сделано
+Подготовлен полный путь к реальному NM Card Mini через `nm_card_load.dll`. Эмулятор остаётся дефолтом, железо — opt-in через `--hardware` флаг.
+
+### Новые файлы
+- **`NMCardHardware.h`** — DDR bump-allocator, function pointer typedefs для DLL, класс NMCardHardware (singleton)
+- **`NMCardHardware.cpp`** — загрузка DLL (LoadLibraryA/GetProcAddress), инициализация платы (GetBoardCount → GetBoardDesc → ResetBoard → LoadInitCode → GetAccess → LoadProgramFile), DDR dispatch protocol, 8 high-level операций
+
+### Архитектура
+```
+launch_matmul() → NMCardHardware::get().is_available()?
+  → YES: upload → dispatch_op(1) → wait_done → download  (реальная карта)
+  → NO:  NMCardEmulator::get().matmul()                    (эмулятор)
+```
+
+### DDR Protocol
+- CMD_BLOCK: 32 слова на ядро, opcode[0], args[1..29], STATUS[30], WATCHDOG[31]
+- Host: write args → set STATUS=0 → write opcode → poll STATUS until done
+- Data flow: float32 на хосте ↔ Q16.16 внутри карты (конверсия в dispatcher.abs)
+
+### Операции с аппаратной поддержкой
+| Op | Opcode | Аргументы |
+|----|--------|-----------|
+| matmul | 1 | M, K, N, addr_A, addr_B, addr_C |
+| rmsnorm | 2 | batch, hidden, addr_in, addr_out, addr_gamma |
+| softmax | 3 | batch, dim, addr_in, addr_out |
+| silu | 4 | count, addr_in, addr_out |
+| rope | 5 | seq_len, head_dim, pos, addr_in, addr_out, addr_freqs |
+| elem_add | 10 | count, addr_a, addr_b, addr_out |
+| elem_mul | 11 | count, addr_a, addr_b, addr_out |
+| gate_mul | 13 | count, addr_a, addr_b, addr_out |
+
+### Решённые проблемы при сборке
+1. **NMCardOp enum redefined** — enum существовал в NMCardEmulator.h, дублировался в NMCardHardware.h → убрали из Hardware, используем целочисленные константы
+2. **windows.h min/max макросы** — включение `<windows.h>` в header ломало `std::min`/`std::max` → forward-declare `HMODULE_t`, windows.h только в .cpp
+
+### Результат
+- `aten_nmcard.dll` — собирается
+- `nmcard_tests.exe` — 33/33 тестов (включая hardware_detection)
+- `train_mnist_nmcard.exe` — собирается, `--hardware --dispatcher path/to/dispatcher.abs`
+- Без карты: всё работает на эмуляторе, `init()` возвращает false
+
+---
+
 ## 2026-03-13: Полное закрытие гэпов — CUDA dispatch, autograd, оптимизаторы, тесты
 
 ### Аудит и план

@@ -278,13 +278,14 @@ if(PT_USE_CUDA)
 endif()
 
 # ============================================================================
-# NM Card Mini Backend (Emulator)
+# NM Card Mini Backend (Emulator + Hardware)
 # ============================================================================
 
 if(PT_USE_NMCARD)
     set(NMCARD_SOURCES
         c10/nmcard/NMCardAllocator.cpp
         aten/src/ATen/nmcard/NMCardEmulator.cpp
+        aten/src/ATen/nmcard/NMCardHardware.cpp
     )
 
     if(PT_BUILD_SHARED_LIBS)
