@@ -5,6 +5,7 @@
 #include "aten/src/ATen/native/cpu/ReduceOps.h"
 #include "aten/src/ATen/native/cpu/MathOps.h"
 #include "aten/src/ATen/native/cpu/ShapeOps.h"
+#include "aten/src/ATen/native/cpu/PromeBLAS.h"
 #include <cmath>
 #include <map>
 #include <algorithm>
@@ -26,27 +27,47 @@ inline Tensor mm(const Tensor& self, const Tensor& other) {
         self.size(0), "x", self.size(1), " and ",
         other.size(0), "x", other.size(1), ")");
 
-    // CRITICAL FIX: Make tensors contiguous before computation!
-    // transpose() creates a VIEW with swapped strides but doesn't rearrange data.
-    // The loop below assumes contiguous layout (stride [K,1] for A, [N,1] for B).
-    // Without this, mm(input, weight.t()) computes WRONG values!
+    int64_t M = self.size(0);
+    int64_t K = self.size(1);
+    int64_t N = other.size(1);
+
+    c10::ScalarType result_dtype = c10::promoteTypes(self.dtype(), other.dtype());
+
+    // Fast path for float32: detect transposed B to avoid .contiguous() copy
+    if (result_dtype == c10::ScalarType::Float) {
+        Tensor A = self.contiguous();
+        const float* A_data = A.data_ptr<float>();
+
+        Tensor result = at::empty({M, N}, TensorOptions().dtype(result_dtype).device(self.device()));
+        float* C = result.mutable_data_ptr<float>();
+
+        // Check if B is a simple 2D transpose: strides [1, K] instead of [N, 1]
+        // This means B is a transposed view of original [N, K] matrix
+        bool b_is_transpose = (other.stride(0) == 1 && other.stride(1) == other.size(0));
+
+        if (b_is_transpose) {
+            // B is transposed view of B_orig[N, K]. Use sgemm_nt to avoid copy.
+            const float* B_data = other.data_ptr<float>();
+            int64_t ldb = other.stride(1); // = K (leading dim of B_orig)
+            blas::sgemm_nt(M, K, N, 1.0f, A_data, K, B_data, ldb, 0.0f, C, N);
+        } else {
+            Tensor B = other.contiguous();
+            const float* B_data = B.data_ptr<float>();
+            blas::sgemm(M, K, N, 1.0f, A_data, K, B_data, N, 0.0f, C, N);
+        }
+
+        return result;
+    }
+
+    // Non-float fallback: make contiguous and use scalar loop
     Tensor A = self.contiguous();
     Tensor B = other.contiguous();
-
-    int64_t M = A.size(0);
-    int64_t K = A.size(1);
-    int64_t N = B.size(1);
-
-    c10::ScalarType result_dtype = c10::promoteTypes(A.dtype(), B.dtype());
     Tensor result = zeros({M, N}, TensorOptions().dtype(result_dtype).device(A.device()));
 
     PT_DISPATCH_FLOATING_TYPES(result_dtype, "mm", [&] {
         const scalar_t* A_data = A.data_ptr<scalar_t>();
         const scalar_t* B_data = B.data_ptr<scalar_t>();
         scalar_t* C = result.mutable_data_ptr<scalar_t>();
-
-        // Basic matrix multiplication with OpenMP parallelization
-        // For production, should use BLAS (OpenBLAS/MKL)
         for (int64_t i = 0; i < M; ++i) {
             for (int64_t j = 0; j < N; ++j) {
                 scalar_t sum = 0;
@@ -82,19 +103,23 @@ inline Tensor mv(const Tensor& self, const Tensor& vec) {
     c10::ScalarType result_dtype = c10::promoteTypes(A.dtype(), x.dtype());
     Tensor result = zeros({M}, TensorOptions().dtype(result_dtype).device(A.device()));
 
-    PT_DISPATCH_FLOATING_TYPES(result_dtype, "mv", [&] {
-        const scalar_t* A_data = A.data_ptr<scalar_t>();
-        const scalar_t* x_data = x.data_ptr<scalar_t>();
-        scalar_t* y = result.mutable_data_ptr<scalar_t>();
-
-        for (int64_t i = 0; i < M; ++i) {
-            scalar_t sum = 0;
-            for (int64_t j = 0; j < N; ++j) {
-                sum += A_data[i * N + j] * x_data[j];
+    if (result_dtype == c10::ScalarType::Float) {
+        blas::sgemv(M, N, 1.0f, A.data_ptr<float>(), N, x.data_ptr<float>(),
+                    0.0f, result.mutable_data_ptr<float>());
+    } else {
+        PT_DISPATCH_FLOATING_TYPES(result_dtype, "mv", [&] {
+            const scalar_t* A_data = A.data_ptr<scalar_t>();
+            const scalar_t* x_data = x.data_ptr<scalar_t>();
+            scalar_t* y = result.mutable_data_ptr<scalar_t>();
+            for (int64_t i = 0; i < M; ++i) {
+                scalar_t sum = 0;
+                for (int64_t j = 0; j < N; ++j) {
+                    sum += A_data[i * N + j] * x_data[j];
+                }
+                y[i] = sum;
             }
-            y[i] = sum;
-        }
-    });
+        });
+    }
 
     return result;
 }
@@ -124,27 +149,37 @@ inline Tensor bmm(const Tensor& self, const Tensor& other) {
     c10::ScalarType result_dtype = c10::promoteTypes(A.dtype(), B.dtype());
     Tensor result = zeros({batch, M, N}, TensorOptions().dtype(result_dtype).device(A.device()));
 
-    PT_DISPATCH_FLOATING_TYPES(result_dtype, "bmm", [&] {
-        const scalar_t* A_data = A.data_ptr<scalar_t>();
-        const scalar_t* B_data = B.data_ptr<scalar_t>();
-        scalar_t* C = result.mutable_data_ptr<scalar_t>();
-
+    if (result_dtype == c10::ScalarType::Float) {
+        const float* A_data = A.data_ptr<float>();
+        const float* B_data = B.data_ptr<float>();
+        float* C = result.mutable_data_ptr<float>();
         for (int64_t b = 0; b < batch; ++b) {
-            const scalar_t* A_b = A_data + b * M * K;
-            const scalar_t* B_b = B_data + b * K * N;
-            scalar_t* C_b = C + b * M * N;
-
-            for (int64_t i = 0; i < M; ++i) {
-                for (int64_t j = 0; j < N; ++j) {
-                    scalar_t sum = 0;
-                    for (int64_t k = 0; k < K; ++k) {
-                        sum += A_b[i * K + k] * B_b[k * N + j];
+            blas::sgemm(M, K, N, 1.0f,
+                        A_data + b * M * K, K,
+                        B_data + b * K * N, N,
+                        0.0f, C + b * M * N, N);
+        }
+    } else {
+        PT_DISPATCH_FLOATING_TYPES(result_dtype, "bmm", [&] {
+            const scalar_t* A_data = A.data_ptr<scalar_t>();
+            const scalar_t* B_data = B.data_ptr<scalar_t>();
+            scalar_t* C = result.mutable_data_ptr<scalar_t>();
+            for (int64_t b = 0; b < batch; ++b) {
+                const scalar_t* A_b = A_data + b * M * K;
+                const scalar_t* B_b = B_data + b * K * N;
+                scalar_t* C_b = C + b * M * N;
+                for (int64_t i = 0; i < M; ++i) {
+                    for (int64_t j = 0; j < N; ++j) {
+                        scalar_t sum = 0;
+                        for (int64_t k = 0; k < K; ++k) {
+                            sum += A_b[i * K + k] * B_b[k * N + j];
+                        }
+                        C_b[i * N + j] = sum;
                     }
-                    C_b[i * N + j] = sum;
                 }
             }
-        }
-    });
+        });
+    }
 
     return result;
 }
@@ -167,17 +202,18 @@ inline Tensor dot(const Tensor& self, const Tensor& other) {
     c10::ScalarType result_dtype = c10::promoteTypes(a.dtype(), b.dtype());
     Tensor result = zeros({}, TensorOptions().dtype(result_dtype).device(a.device()));
 
-    PT_DISPATCH_FLOATING_TYPES(result_dtype, "dot", [&] {
-        const scalar_t* a_data = a.data_ptr<scalar_t>();
-        const scalar_t* b_data = b.data_ptr<scalar_t>();
-        scalar_t sum = 0;
-
-        for (int64_t i = 0; i < n; ++i) {
-            sum += a_data[i] * b_data[i];
-        }
-
-        result.mutable_data_ptr<scalar_t>()[0] = sum;
-    });
+    if (result_dtype == c10::ScalarType::Float) {
+        float val = blas::sdot(n, a.data_ptr<float>(), b.data_ptr<float>());
+        result.mutable_data_ptr<float>()[0] = val;
+    } else {
+        PT_DISPATCH_FLOATING_TYPES(result_dtype, "dot", [&] {
+            const scalar_t* a_data = a.data_ptr<scalar_t>();
+            const scalar_t* b_data = b.data_ptr<scalar_t>();
+            scalar_t sum = 0;
+            for (int64_t i = 0; i < n; ++i) sum += a_data[i] * b_data[i];
+            result.mutable_data_ptr<scalar_t>()[0] = sum;
+        });
+    }
 
     return result;
 }
@@ -367,44 +403,54 @@ inline Tensor addmm(
     PT_CHECK_MSG(mat1.dim() == 2, "addmm: mat1 must be 2D");
     PT_CHECK_MSG(mat2.dim() == 2, "addmm: mat2 must be 2D");
 
-    // Make tensors contiguous for correct memory access
-    Tensor A = mat1.contiguous();
-    Tensor B = mat2.contiguous();
+    int64_t M = mat1.size(0);
+    int64_t K = mat1.size(1);
+    int64_t N = mat2.size(1);
 
-    int64_t M = A.size(0);
-    int64_t K = A.size(1);
-    int64_t N = B.size(1);
-
-    PT_CHECK_MSG(K == B.size(0), "addmm: mat1 and mat2 shapes cannot be multiplied");
+    PT_CHECK_MSG(K == mat2.size(0), "addmm: mat1 and mat2 shapes cannot be multiplied");
 
     // Broadcast self to result shape
     Tensor result = self.expand({M, N}).clone();
 
-    PT_DISPATCH_FLOATING_TYPES(result.dtype(), "addmm", [&] {
-        scalar_t beta_val = beta.to<scalar_t>();
-        scalar_t alpha_val = alpha.to<scalar_t>();
+    if (result.dtype() == c10::ScalarType::Float) {
+        Tensor A = mat1.contiguous();
+        float beta_val = beta.to<float>();
+        float alpha_val = alpha.to<float>();
+        const float* A_data = A.data_ptr<float>();
+        float* C = result.mutable_data_ptr<float>();
 
-        const scalar_t* A_data = A.data_ptr<scalar_t>();
-        const scalar_t* B_data = B.data_ptr<scalar_t>();
-        scalar_t* C = result.mutable_data_ptr<scalar_t>();
-
-        // Scale existing values by beta
-        int64_t total = M * N;
-        for (int64_t i = 0; i < total; ++i) {
-            C[i] *= beta_val;
+        // Check if B is a simple 2D transpose
+        bool b_is_transpose = (mat2.stride(0) == 1 && mat2.stride(1) == mat2.size(0));
+        if (b_is_transpose) {
+            blas::sgemm_nt(M, K, N, alpha_val, A_data, K,
+                           mat2.data_ptr<float>(), mat2.stride(1),
+                           beta_val, C, N);
+        } else {
+            Tensor B = mat2.contiguous();
+            blas::sgemm(M, K, N, alpha_val, A_data, K,
+                        B.data_ptr<float>(), N,
+                        beta_val, C, N);
         }
-
-        // Add alpha * A @ B
-        for (int64_t i = 0; i < M; ++i) {
-            for (int64_t j = 0; j < N; ++j) {
-                scalar_t sum = 0;
-                for (int64_t k = 0; k < K; ++k) {
-                    sum += A_data[i * K + k] * B_data[k * N + j];
+    } else {
+        Tensor A = mat1.contiguous();
+        Tensor B = mat2.contiguous();
+        PT_DISPATCH_FLOATING_TYPES(result.dtype(), "addmm", [&] {
+            scalar_t beta_val = beta.to<scalar_t>();
+            scalar_t alpha_val = alpha.to<scalar_t>();
+            const scalar_t* A_data = A.data_ptr<scalar_t>();
+            const scalar_t* B_data = B.data_ptr<scalar_t>();
+            scalar_t* C = result.mutable_data_ptr<scalar_t>();
+            int64_t total = M * N;
+            for (int64_t i = 0; i < total; ++i) C[i] *= beta_val;
+            for (int64_t i = 0; i < M; ++i) {
+                for (int64_t j = 0; j < N; ++j) {
+                    scalar_t sum = 0;
+                    for (int64_t k = 0; k < K; ++k) sum += A_data[i * K + k] * B_data[k * N + j];
+                    C[i * N + j] += alpha_val * sum;
                 }
-                C[i * N + j] += alpha_val * sum;
             }
-        }
-    });
+        });
+    }
 
     return result;
 }

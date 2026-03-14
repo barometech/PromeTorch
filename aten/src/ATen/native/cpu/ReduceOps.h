@@ -2,6 +2,7 @@
 
 #include "aten/src/ATen/core/Tensor.h"
 #include "aten/src/ATen/core/TensorFactory.h"
+#include "aten/src/ATen/native/cpu/VectorizedOps.h"
 #include <cmath>
 #include <limits>
 #include <tuple>
@@ -19,15 +20,18 @@ namespace native {
 inline Tensor sum(const Tensor& self) {
     Tensor result = zeros({}, TensorOptions().dtype(self.dtype()).device(self.device()));
 
+    // AVX2 fast path for contiguous float
+    if (self.dtype() == c10::ScalarType::Float && self.is_contiguous()) {
+        result.mutable_data_ptr<float>()[0] =
+            vec::vectorized_sum(self.data_ptr<float>(), self.numel());
+        return result;
+    }
+
     PT_DISPATCH_ALL_TYPES(self.dtype(), "sum", [&] {
         const scalar_t* data = self.data_ptr<scalar_t>();
         scalar_t total = 0;
         int64_t n = self.numel();
-
-        for (int64_t i = 0; i < n; ++i) {
-            total += data[i];
-        }
-
+        for (int64_t i = 0; i < n; ++i) total += data[i];
         result.mutable_data_ptr<scalar_t>()[0] = total;
     });
 
@@ -40,7 +44,6 @@ inline Tensor sum(const Tensor& self, int64_t dim, bool keepdim = false) {
     if (dim < 0) dim += ndim;
     PT_CHECK(dim >= 0 && dim < ndim);
 
-    // Compute result shape
     std::vector<int64_t> result_shape;
     for (int64_t i = 0; i < ndim; ++i) {
         if (i == dim) {
@@ -50,34 +53,63 @@ inline Tensor sum(const Tensor& self, int64_t dim, bool keepdim = false) {
         }
     }
 
+    Tensor input = self.is_contiguous() ? self : self.contiguous();
     Tensor result = zeros(result_shape, TensorOptions().dtype(self.dtype()).device(self.device()));
 
+    int64_t outer_size = 1;
+    for (int64_t i = 0; i < dim; ++i) outer_size *= input.size(i);
+    int64_t reduce_size = input.size(dim);
+    int64_t inner_size = 1;
+    for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= input.size(i);
+
+    // AVX2 fast path for float
+    if (self.dtype() == c10::ScalarType::Float) {
+        const float* in = input.data_ptr<float>();
+        float* out = result.mutable_data_ptr<float>();
+
+        if (inner_size == 1) {
+            // Reducing last dim or 1D: contiguous sum of reduce_size elements
+            for (int64_t outer = 0; outer < outer_size; ++outer) {
+                out[outer] = vec::vectorized_sum(in + outer * reduce_size, reduce_size);
+            }
+        } else {
+            // AVX2 accumulation along inner dimension (handles dim=0/middle/all cases)
+            // Data layout: in[(outer * reduce_size + r) * inner_size + inner]
+            // We accumulate reduce_size rows, each of length inner_size
+            for (int64_t outer = 0; outer < outer_size; ++outer) {
+                float* out_row = out + outer * inner_size;
+                std::memset(out_row, 0, inner_size * sizeof(float));
+                for (int64_t r = 0; r < reduce_size; ++r) {
+                    const float* in_row = in + (outer * reduce_size + r) * inner_size;
+                    int64_t j = 0;
+                    for (; j + 32 <= inner_size; j += 32) {
+                        _mm256_storeu_ps(out_row + j,      _mm256_add_ps(_mm256_loadu_ps(out_row + j),      _mm256_loadu_ps(in_row + j)));
+                        _mm256_storeu_ps(out_row + j + 8,  _mm256_add_ps(_mm256_loadu_ps(out_row + j + 8),  _mm256_loadu_ps(in_row + j + 8)));
+                        _mm256_storeu_ps(out_row + j + 16, _mm256_add_ps(_mm256_loadu_ps(out_row + j + 16), _mm256_loadu_ps(in_row + j + 16)));
+                        _mm256_storeu_ps(out_row + j + 24, _mm256_add_ps(_mm256_loadu_ps(out_row + j + 24), _mm256_loadu_ps(in_row + j + 24)));
+                    }
+                    for (; j + 8 <= inner_size; j += 8)
+                        _mm256_storeu_ps(out_row + j, _mm256_add_ps(
+                            _mm256_loadu_ps(out_row + j), _mm256_loadu_ps(in_row + j)));
+                    for (; j < inner_size; ++j)
+                        out_row[j] += in_row[j];
+                }
+            }
+        }
+        return result;
+    }
+
     PT_DISPATCH_ALL_TYPES(self.dtype(), "sum_dim", [&] {
-        const scalar_t* in = self.data_ptr<scalar_t>();
+        const scalar_t* in = input.data_ptr<scalar_t>();
         scalar_t* out = result.mutable_data_ptr<scalar_t>();
-
-        // Calculate strides for iteration
-        int64_t outer_size = 1;
-        for (int64_t i = 0; i < dim; ++i) {
-            outer_size *= self.size(i);
-        }
-
-        int64_t reduce_size = self.size(dim);
-
-        int64_t inner_size = 1;
-        for (int64_t i = dim + 1; i < ndim; ++i) {
-            inner_size *= self.size(i);
-        }
 
         for (int64_t outer = 0; outer < outer_size; ++outer) {
             for (int64_t inner = 0; inner < inner_size; ++inner) {
                 scalar_t sum_val = 0;
                 for (int64_t r = 0; r < reduce_size; ++r) {
-                    int64_t in_idx = (outer * reduce_size + r) * inner_size + inner;
-                    sum_val += in[in_idx];
+                    sum_val += in[(outer * reduce_size + r) * inner_size + inner];
                 }
-                int64_t out_idx = outer * inner_size + inner;
-                out[out_idx] = sum_val;
+                out[outer * inner_size + inner] = sum_val;
             }
         }
     });
@@ -140,17 +172,18 @@ inline Tensor max(const Tensor& self) {
 
     Tensor result = empty({}, TensorOptions().dtype(self.dtype()).device(self.device()));
 
+    if (self.dtype() == c10::ScalarType::Float && self.is_contiguous()) {
+        result.mutable_data_ptr<float>()[0] =
+            vec::vectorized_max(self.data_ptr<float>(), self.numel());
+        return result;
+    }
+
     PT_DISPATCH_ALL_TYPES(self.dtype(), "max", [&] {
         const scalar_t* data = self.data_ptr<scalar_t>();
         scalar_t max_val = data[0];
         int64_t n = self.numel();
-
-        for (int64_t i = 1; i < n; ++i) {
-            if (data[i] > max_val) {
-                max_val = data[i];
-            }
-        }
-
+        for (int64_t i = 1; i < n; ++i)
+            if (data[i] > max_val) max_val = data[i];
         result.mutable_data_ptr<scalar_t>()[0] = max_val;
     });
 
@@ -222,17 +255,18 @@ inline Tensor min(const Tensor& self) {
 
     Tensor result = empty({}, TensorOptions().dtype(self.dtype()).device(self.device()));
 
+    if (self.dtype() == c10::ScalarType::Float && self.is_contiguous()) {
+        result.mutable_data_ptr<float>()[0] =
+            vec::vectorized_min(self.data_ptr<float>(), self.numel());
+        return result;
+    }
+
     PT_DISPATCH_ALL_TYPES(self.dtype(), "min", [&] {
         const scalar_t* data = self.data_ptr<scalar_t>();
         scalar_t min_val = data[0];
         int64_t n = self.numel();
-
-        for (int64_t i = 1; i < n; ++i) {
-            if (data[i] < min_val) {
-                min_val = data[i];
-            }
-        }
-
+        for (int64_t i = 1; i < n; ++i)
+            if (data[i] < min_val) min_val = data[i];
         result.mutable_data_ptr<scalar_t>()[0] = min_val;
     });
 
@@ -450,17 +484,35 @@ inline Tensor argmin(const Tensor& self, int64_t dim, bool keepdim = false) {
 inline Tensor var(const Tensor& self, bool unbiased = true) {
     Tensor m = mean(self);
 
+    if (self.dtype() == c10::ScalarType::Float && self.is_contiguous()) {
+        const float* data = self.data_ptr<float>();
+        float mean_val = m.data_ptr<float>()[0];
+        int64_t n = self.numel();
+        __m256 vmean = _mm256_set1_ps(mean_val);
+        __m256 acc0 = _mm256_setzero_ps(), acc1 = _mm256_setzero_ps();
+        int64_t i = 0;
+        for (; i + 16 <= n; i += 16) {
+            __m256 d0 = _mm256_sub_ps(_mm256_loadu_ps(data + i), vmean);
+            __m256 d1 = _mm256_sub_ps(_mm256_loadu_ps(data + i + 8), vmean);
+            acc0 = _mm256_fmadd_ps(d0, d0, acc0);
+            acc1 = _mm256_fmadd_ps(d1, d1, acc1);
+        }
+        float sum_sq = vec::hsum_avx2(_mm256_add_ps(acc0, acc1));
+        for (; i < n; ++i) { float d = data[i] - mean_val; sum_sq += d * d; }
+        int64_t divisor = unbiased ? (n - 1) : n;
+        m.mutable_data_ptr<float>()[0] = sum_sq / static_cast<float>(divisor);
+        return m;
+    }
+
     PT_DISPATCH_FLOATING_TYPES(self.dtype(), "var", [&] {
         const scalar_t* data = self.data_ptr<scalar_t>();
         scalar_t mean_val = m.data_ptr<scalar_t>()[0];
         scalar_t sum_sq = 0;
         int64_t n = self.numel();
-
         for (int64_t i = 0; i < n; ++i) {
             scalar_t diff = data[i] - mean_val;
             sum_sq += diff * diff;
         }
-
         int64_t divisor = unbiased ? (n - 1) : n;
         m.mutable_data_ptr<scalar_t>()[0] = sum_sq / static_cast<scalar_t>(divisor);
     });
@@ -484,13 +536,30 @@ inline Tensor norm(const Tensor& self, Scalar p = 2) {
     double p_val = p.toDouble();
     Tensor result = zeros({}, TensorOptions().dtype(self.dtype()).device(self.device()));
 
+    // AVX2 fast path for L2 norm on float
+    if (p_val == 2.0 && self.dtype() == c10::ScalarType::Float && self.is_contiguous()) {
+        const float* data = self.data_ptr<float>();
+        int64_t n = self.numel();
+        __m256 acc0 = _mm256_setzero_ps(), acc1 = _mm256_setzero_ps();
+        int64_t i = 0;
+        for (; i + 16 <= n; i += 16) {
+            __m256 v0 = _mm256_loadu_ps(data + i);
+            __m256 v1 = _mm256_loadu_ps(data + i + 8);
+            acc0 = _mm256_fmadd_ps(v0, v0, acc0);
+            acc1 = _mm256_fmadd_ps(v1, v1, acc1);
+        }
+        float sum_sq = vec::hsum_avx2(_mm256_add_ps(acc0, acc1));
+        for (; i < n; ++i) sum_sq += data[i] * data[i];
+        result.mutable_data_ptr<float>()[0] = std::sqrt(sum_sq);
+        return result;
+    }
+
     PT_DISPATCH_FLOATING_TYPES(self.dtype(), "norm", [&] {
         const scalar_t* data = self.data_ptr<scalar_t>();
         double sum = 0;
         int64_t n = self.numel();
 
         if (p_val == 2.0) {
-            // L2 norm (Euclidean)
             for (int64_t i = 0; i < n; ++i) {
                 double val = static_cast<double>(data[i]);
                 sum += val * val;

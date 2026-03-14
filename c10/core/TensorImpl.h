@@ -604,6 +604,7 @@ public:
     bool is_cpu() const { return device_type() == DeviceType::CPU; }
     bool is_cuda() const { return device_type() == DeviceType::CUDA; }
     bool is_meta() const { return device_type() == DeviceType::Meta; }
+    bool is_nmcard() const { return device_type() == DeviceType::PrivateUse1; }
 
     // ========================================================================
     // Autograd
