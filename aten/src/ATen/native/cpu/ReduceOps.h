@@ -3,6 +3,7 @@
 #include "aten/src/ATen/core/Tensor.h"
 #include "aten/src/ATen/core/TensorFactory.h"
 #include "aten/src/ATen/native/cpu/VectorizedOps.h"
+#include "aten/src/ATen/native/cpu/tuda/TudaVec.h"
 #include <cmath>
 #include <limits>
 #include <tuple>
@@ -82,15 +83,15 @@ inline Tensor sum(const Tensor& self, int64_t dim, bool keepdim = false) {
                 for (int64_t r = 0; r < reduce_size; ++r) {
                     const float* in_row = in + (outer * reduce_size + r) * inner_size;
                     int64_t j = 0;
-                    for (; j + 32 <= inner_size; j += 32) {
-                        _mm256_storeu_ps(out_row + j,      _mm256_add_ps(_mm256_loadu_ps(out_row + j),      _mm256_loadu_ps(in_row + j)));
-                        _mm256_storeu_ps(out_row + j + 8,  _mm256_add_ps(_mm256_loadu_ps(out_row + j + 8),  _mm256_loadu_ps(in_row + j + 8)));
-                        _mm256_storeu_ps(out_row + j + 16, _mm256_add_ps(_mm256_loadu_ps(out_row + j + 16), _mm256_loadu_ps(in_row + j + 16)));
-                        _mm256_storeu_ps(out_row + j + 24, _mm256_add_ps(_mm256_loadu_ps(out_row + j + 24), _mm256_loadu_ps(in_row + j + 24)));
+                    constexpr int W = tuda::VecF::width;
+                    for (; j + 4*W <= inner_size; j += 4*W) {
+                        (tuda::VecF::load(out_row + j)       + tuda::VecF::load(in_row + j)).store(out_row + j);
+                        (tuda::VecF::load(out_row + j + W)   + tuda::VecF::load(in_row + j + W)).store(out_row + j + W);
+                        (tuda::VecF::load(out_row + j + 2*W) + tuda::VecF::load(in_row + j + 2*W)).store(out_row + j + 2*W);
+                        (tuda::VecF::load(out_row + j + 3*W) + tuda::VecF::load(in_row + j + 3*W)).store(out_row + j + 3*W);
                     }
-                    for (; j + 8 <= inner_size; j += 8)
-                        _mm256_storeu_ps(out_row + j, _mm256_add_ps(
-                            _mm256_loadu_ps(out_row + j), _mm256_loadu_ps(in_row + j)));
+                    for (; j + W <= inner_size; j += W)
+                        (tuda::VecF::load(out_row + j) + tuda::VecF::load(in_row + j)).store(out_row + j);
                     for (; j < inner_size; ++j)
                         out_row[j] += in_row[j];
                 }
@@ -488,16 +489,17 @@ inline Tensor var(const Tensor& self, bool unbiased = true) {
         const float* data = self.data_ptr<float>();
         float mean_val = m.data_ptr<float>()[0];
         int64_t n = self.numel();
-        __m256 vmean = _mm256_set1_ps(mean_val);
-        __m256 acc0 = _mm256_setzero_ps(), acc1 = _mm256_setzero_ps();
+        constexpr int W = tuda::VecF::width;
+        tuda::VecF vmean = tuda::VecF::broadcast(mean_val);
+        tuda::VecF acc0 = tuda::VecF::zero(), acc1 = tuda::VecF::zero();
         int64_t i = 0;
-        for (; i + 16 <= n; i += 16) {
-            __m256 d0 = _mm256_sub_ps(_mm256_loadu_ps(data + i), vmean);
-            __m256 d1 = _mm256_sub_ps(_mm256_loadu_ps(data + i + 8), vmean);
-            acc0 = _mm256_fmadd_ps(d0, d0, acc0);
-            acc1 = _mm256_fmadd_ps(d1, d1, acc1);
+        for (; i + 2*W <= n; i += 2*W) {
+            tuda::VecF d0 = tuda::VecF::load(data + i) - vmean;
+            tuda::VecF d1 = tuda::VecF::load(data + i + W) - vmean;
+            acc0 = tuda::VecF::fmadd(d0, d0, acc0);
+            acc1 = tuda::VecF::fmadd(d1, d1, acc1);
         }
-        float sum_sq = vec::hsum_avx2(_mm256_add_ps(acc0, acc1));
+        float sum_sq = (acc0 + acc1).hsum();
         for (; i < n; ++i) { float d = data[i] - mean_val; sum_sq += d * d; }
         int64_t divisor = unbiased ? (n - 1) : n;
         m.mutable_data_ptr<float>()[0] = sum_sq / static_cast<float>(divisor);
@@ -536,19 +538,20 @@ inline Tensor norm(const Tensor& self, Scalar p = 2) {
     double p_val = p.toDouble();
     Tensor result = zeros({}, TensorOptions().dtype(self.dtype()).device(self.device()));
 
-    // AVX2 fast path for L2 norm on float
+    // TUDA VecF fast path for L2 norm on float
     if (p_val == 2.0 && self.dtype() == c10::ScalarType::Float && self.is_contiguous()) {
         const float* data = self.data_ptr<float>();
         int64_t n = self.numel();
-        __m256 acc0 = _mm256_setzero_ps(), acc1 = _mm256_setzero_ps();
+        constexpr int W = tuda::VecF::width;
+        tuda::VecF acc0 = tuda::VecF::zero(), acc1 = tuda::VecF::zero();
         int64_t i = 0;
-        for (; i + 16 <= n; i += 16) {
-            __m256 v0 = _mm256_loadu_ps(data + i);
-            __m256 v1 = _mm256_loadu_ps(data + i + 8);
-            acc0 = _mm256_fmadd_ps(v0, v0, acc0);
-            acc1 = _mm256_fmadd_ps(v1, v1, acc1);
+        for (; i + 2*W <= n; i += 2*W) {
+            tuda::VecF v0 = tuda::VecF::load(data + i);
+            tuda::VecF v1 = tuda::VecF::load(data + i + W);
+            acc0 = tuda::VecF::fmadd(v0, v0, acc0);
+            acc1 = tuda::VecF::fmadd(v1, v1, acc1);
         }
-        float sum_sq = vec::hsum_avx2(_mm256_add_ps(acc0, acc1));
+        float sum_sq = (acc0 + acc1).hsum();
         for (; i < n; ++i) sum_sq += data[i] * data[i];
         result.mutable_data_ptr<float>()[0] = std::sqrt(sum_sq);
         return result;

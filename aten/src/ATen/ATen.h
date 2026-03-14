@@ -20,6 +20,11 @@
 #ifdef PT_USE_NMCARD
 #include "aten/src/ATen/nmcard/NMCardDispatch.h"
 #endif
+
+// LinQ Operations (when enabled)
+#ifdef PT_USE_LINQ
+#include "aten/src/ATen/linq/LinQDispatch.h"
+#endif
 #include "aten/src/ATen/native/cpu/ReduceOps.h"
 #include "aten/src/ATen/native/cpu/LinearAlgebra.h"
 #include "aten/src/ATen/native/cpu/ShapeOps.h"
@@ -155,6 +160,15 @@ inline Tensor Tensor::to(c10::Device device) const {
         return at::nmcard_to_cpu(*this);
     }
 #endif
+#ifdef PT_USE_LINQ
+    if (device.is_linq()) {
+        if (this->device().is_linq()) return *this;
+        return at::to_linq(*this, device.index() >= 0 ? device.index() : 0);
+    }
+    if (device.is_cpu() && this->device().is_linq()) {
+        return at::linq_to_cpu(*this);
+    }
+#endif
 #ifdef PT_USE_CUDA
     if (device.is_cpu()) {
         return at::to_cpu(*this);
@@ -166,6 +180,9 @@ inline Tensor Tensor::to(c10::Device device) const {
         if (is_cpu()) return *this;
 #ifdef PT_USE_NMCARD
         if (is_nmcard()) return at::nmcard_to_cpu(*this);
+#endif
+#ifdef PT_USE_LINQ
+        if (this->device().is_linq()) return at::linq_to_cpu(*this);
 #endif
         return *this;
     }
@@ -249,6 +266,9 @@ inline Tensor Tensor::neg() const {
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) { return nmc_ops::neg(*this); }
 #endif
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::neg(*this); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::neg(*this); }
 #endif
@@ -257,6 +277,9 @@ inline Tensor Tensor::neg() const {
 inline Tensor Tensor::abs() const {
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) { return nmc_ops::abs(*this); }
+#endif
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::abs(*this); }
 #endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::abs(*this); }
@@ -267,6 +290,9 @@ inline Tensor Tensor::sqrt() const {
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) { return nmc_ops::sqrt(*this); }
 #endif
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::sqrt(*this); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::sqrt(*this); }
 #endif
@@ -275,6 +301,9 @@ inline Tensor Tensor::sqrt() const {
 inline Tensor Tensor::rsqrt() const {
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) { return nmc_ops::rsqrt(*this); }
+#endif
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::rsqrt(*this); }
 #endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::rsqrt(*this); }
@@ -285,6 +314,9 @@ inline Tensor Tensor::square() const {
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) { return nmc_ops::square(*this); }
 #endif
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::square(*this); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::square(*this); }
 #endif
@@ -293,6 +325,9 @@ inline Tensor Tensor::square() const {
 inline Tensor Tensor::exp() const {
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) { return nmc_ops::exp(*this); }
+#endif
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::exp(*this); }
 #endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::exp(*this); }
@@ -303,6 +338,9 @@ inline Tensor Tensor::log() const {
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) { return nmc_ops::log(*this); }
 #endif
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::log(*this); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::log(*this); }
 #endif
@@ -311,6 +349,9 @@ inline Tensor Tensor::log() const {
 inline Tensor Tensor::log2() const {
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) { return nmc_ops::log2(*this); }
+#endif
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::log2(*this); }
 #endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::log2(*this); }
@@ -321,6 +362,9 @@ inline Tensor Tensor::log10() const {
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) { return nmc_ops::log10(*this); }
 #endif
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::log10(*this); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::log10(*this); }
 #endif
@@ -329,6 +373,9 @@ inline Tensor Tensor::log10() const {
 inline Tensor Tensor::sin() const {
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) { return nmc_ops::sin(*this); }
+#endif
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::sin(*this); }
 #endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::sin(*this); }
@@ -339,6 +386,9 @@ inline Tensor Tensor::cos() const {
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) { return nmc_ops::cos(*this); }
 #endif
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::cos(*this); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::cos(*this); }
 #endif
@@ -347,6 +397,9 @@ inline Tensor Tensor::cos() const {
 inline Tensor Tensor::tan() const {
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) { return nmc_ops::tan(*this); }
+#endif
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::tan(*this); }
 #endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::tan(*this); }
@@ -357,12 +410,18 @@ inline Tensor Tensor::tanh() const {
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) { return nmc_ops::tanh(*this); }
 #endif
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::tanh(*this); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::tanh(*this); }
 #endif
     return native::tanh(*this);
 }
 inline Tensor Tensor::sigmoid() const {
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::sigmoid(*this); }
+#endif
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) { return nmc_ops::sigmoid(*this); }
 #endif
@@ -372,6 +431,9 @@ inline Tensor Tensor::sigmoid() const {
     return native::sigmoid(*this);
 }
 inline Tensor Tensor::relu() const {
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::relu(*this); }
+#endif
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) { return nmc_ops::relu(*this); }
 #endif
@@ -384,6 +446,9 @@ inline Tensor Tensor::ceil() const {
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) { return nmc_ops::ceil(*this); }
 #endif
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::ceil(*this); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::ceil(*this); }
 #endif
@@ -392,6 +457,9 @@ inline Tensor Tensor::ceil() const {
 inline Tensor Tensor::floor() const {
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) { return nmc_ops::floor(*this); }
+#endif
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::floor(*this); }
 #endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::floor(*this); }
@@ -402,6 +470,9 @@ inline Tensor Tensor::round() const {
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) { return nmc_ops::round(*this); }
 #endif
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::round(*this); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::round(*this); }
 #endif
@@ -410,6 +481,9 @@ inline Tensor Tensor::round() const {
 inline Tensor Tensor::sign() const {
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) { return nmc_ops::sign(*this); }
+#endif
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::sign(*this); }
 #endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::sign(*this); }
@@ -420,6 +494,9 @@ inline Tensor Tensor::reciprocal() const {
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) { return nmc_ops::reciprocal(*this); }
 #endif
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::reciprocal(*this); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::reciprocal(*this); }
 #endif
@@ -428,6 +505,9 @@ inline Tensor Tensor::reciprocal() const {
 inline Tensor Tensor::clamp(Scalar min_val, Scalar max_val) const {
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) { return nmc_ops::clamp(*this, min_val.to<float>(), max_val.to<float>()); }
+#endif
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::clamp(*this, min_val.to<float>(), max_val.to<float>()); }
 #endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::clamp(*this, min_val.to<float>(), max_val.to<float>()); }
@@ -463,6 +543,12 @@ inline Tensor& Tensor::zero_() {
         return *this;
     }
 #endif
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) {
+        linq_dispatch::zero_(*this);
+        return *this;
+    }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) {
         cuda_ops::fill_(*this, 0.0f);
@@ -478,6 +564,12 @@ inline Tensor& Tensor::fill_(Scalar value) {
         return *this;
     }
 #endif
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) {
+        linq_dispatch::fill_(*this, static_cast<float>(value.toDouble()));
+        return *this;
+    }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) {
         cuda_ops::fill_(*this, static_cast<float>(value.toDouble()));
@@ -489,6 +581,9 @@ inline Tensor& Tensor::fill_(Scalar value) {
 
 // Binary operations with device dispatch
 inline Tensor Tensor::add(const Tensor& other, Scalar alpha) const {
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::add(*this, other); }
+#endif
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) {
         if (numel() != other.numel() && dim() == 2 && other.dim() == 1 && other.size(0) == size(1)) {
@@ -508,6 +603,9 @@ inline Tensor Tensor::add(const Tensor& other, Scalar alpha) const {
     return native::add(*this, other, alpha);
 }
 inline Tensor Tensor::sub(const Tensor& other, Scalar alpha) const {
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::sub(*this, other); }
+#endif
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) { return nmc_ops::sub(*this, other); }
 #endif
@@ -517,6 +615,9 @@ inline Tensor Tensor::sub(const Tensor& other, Scalar alpha) const {
     return native::sub(*this, other, alpha);
 }
 inline Tensor Tensor::mul(const Tensor& other) const {
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::mul(*this, other); }
+#endif
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) { return nmc_ops::mul(*this, other); }
 #endif
@@ -535,6 +636,9 @@ inline Tensor Tensor::mul_broadcast(const Tensor& other) const {
     return native::mul(*this, other);
 }
 inline Tensor Tensor::div(const Tensor& other) const {
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::div(*this, other); }
+#endif
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) { return nmc_ops::div(*this, other); }
 #endif
@@ -556,6 +660,9 @@ inline Tensor Tensor::pow(Scalar exponent) const {
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) { return nmc_ops::pow_scalar(*this, exponent.to<float>()); }
 #endif
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::pow_scalar(*this, exponent.to<float>()); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::pow_scalar(*this, exponent.to<float>()); }
 #endif
@@ -575,6 +682,12 @@ inline Tensor Tensor::add(Scalar other, Scalar alpha) const {
         return nmc_ops::add_scalar(*this, val);
     }
 #endif
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) {
+        float val = other.to<float>() * alpha.to<float>();
+        return linq_dispatch::add_scalar(*this, val);
+    }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) {
         float val = other.to<float>() * alpha.to<float>();
@@ -590,6 +703,12 @@ inline Tensor Tensor::sub(Scalar other, Scalar alpha) const {
         return nmc_ops::add_scalar(*this, val);
     }
 #endif
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) {
+        float val = -(other.to<float>() * alpha.to<float>());
+        return linq_dispatch::add_scalar(*this, val);
+    }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) {
         float val = -(other.to<float>() * alpha.to<float>());
@@ -602,6 +721,9 @@ inline Tensor Tensor::mul(Scalar other) const {
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) { return nmc_ops::mul_scalar(*this, other.to<float>()); }
 #endif
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::mul_scalar(*this, other.to<float>()); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::mul_scalar(*this, other.to<float>()); }
 #endif
@@ -610,6 +732,9 @@ inline Tensor Tensor::mul(Scalar other) const {
 inline Tensor Tensor::div(Scalar other) const {
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) { return nmc_ops::mul_scalar(*this, 1.0f / other.to<float>()); }
+#endif
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::mul_scalar(*this, 1.0f / other.to<float>()); }
 #endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::mul_scalar(*this, 1.0f / other.to<float>()); }
@@ -759,6 +884,9 @@ inline Tensor Tensor::addcmul(const Tensor& tensor1, const Tensor& tensor2, Scal
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) { return nmc_ops::addcmul(*this, tensor1, tensor2, value.to<float>()); }
 #endif
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::addcmul(*this, tensor1, tensor2, value.to<float>()); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::addcmul(*this, tensor1, tensor2, value.to<float>()); }
 #endif
@@ -784,6 +912,9 @@ inline Tensor& Tensor::addcmul_(const Tensor& tensor1, const Tensor& tensor2, Sc
 inline Tensor Tensor::addcdiv(const Tensor& tensor1, const Tensor& tensor2, Scalar value) const {
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) { return nmc_ops::addcdiv(*this, tensor1, tensor2, value.to<float>()); }
+#endif
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::addcdiv(*this, tensor1, tensor2, value.to<float>()); }
 #endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::addcdiv(*this, tensor1, tensor2, value.to<float>()); }
@@ -813,6 +944,9 @@ inline Tensor maximum(const Tensor& a, const Tensor& b) {
 #ifdef PT_USE_NMCARD
     if (a.is_nmcard()) { return nmc_ops::maximum(a, b); }
 #endif
+#ifdef PT_USE_LINQ
+    if (a.device().is_linq()) { return linq_dispatch::maximum(a, b); }
+#endif
 #ifdef PT_USE_CUDA
     if (a.is_cuda()) { return cuda_ops::maximum(a, b); }
 #endif
@@ -822,6 +956,9 @@ inline Tensor maximum(const Tensor& a, const Tensor& b) {
 inline Tensor minimum(const Tensor& a, const Tensor& b) {
 #ifdef PT_USE_NMCARD
     if (a.is_nmcard()) { return nmc_ops::minimum(a, b); }
+#endif
+#ifdef PT_USE_LINQ
+    if (a.device().is_linq()) { return linq_dispatch::minimum(a, b); }
 #endif
 #ifdef PT_USE_CUDA
     if (a.is_cuda()) { return cuda_ops::minimum(a, b); }
@@ -834,6 +971,9 @@ inline Tensor Tensor::eq(const Tensor& other) const {
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) { return nmc_ops::eq(*this, other); }
 #endif
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::eq(*this, other); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::eq(*this, other); }
 #endif
@@ -842,6 +982,9 @@ inline Tensor Tensor::eq(const Tensor& other) const {
 inline Tensor Tensor::ne(const Tensor& other) const {
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) { return nmc_ops::ne(*this, other); }
+#endif
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::ne(*this, other); }
 #endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::ne(*this, other); }
@@ -852,6 +995,9 @@ inline Tensor Tensor::lt(const Tensor& other) const {
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) { return nmc_ops::lt(*this, other); }
 #endif
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::lt(*this, other); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::lt(*this, other); }
 #endif
@@ -860,6 +1006,9 @@ inline Tensor Tensor::lt(const Tensor& other) const {
 inline Tensor Tensor::le(const Tensor& other) const {
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) { return nmc_ops::le(*this, other); }
+#endif
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::le(*this, other); }
 #endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::le(*this, other); }
@@ -870,6 +1019,9 @@ inline Tensor Tensor::gt(const Tensor& other) const {
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) { return nmc_ops::gt(*this, other); }
 #endif
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::gt(*this, other); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::gt(*this, other); }
 #endif
@@ -878,6 +1030,9 @@ inline Tensor Tensor::gt(const Tensor& other) const {
 inline Tensor Tensor::ge(const Tensor& other) const {
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) { return nmc_ops::ge(*this, other); }
+#endif
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::ge(*this, other); }
 #endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::ge(*this, other); }
@@ -890,6 +1045,9 @@ inline Tensor Tensor::eq(Scalar other) const {
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) { return nmc_ops::eq_scalar(*this, other.to<float>()); }
 #endif
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::eq_scalar(*this, other.to<float>()); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::eq_scalar(*this, other.to<float>()); }
 #endif
@@ -898,6 +1056,9 @@ inline Tensor Tensor::eq(Scalar other) const {
 inline Tensor Tensor::ne(Scalar other) const {
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) { return nmc_ops::ne_scalar(*this, other.to<float>()); }
+#endif
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::ne_scalar(*this, other.to<float>()); }
 #endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::ne_scalar(*this, other.to<float>()); }
@@ -908,6 +1069,9 @@ inline Tensor Tensor::lt(Scalar other) const {
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) { return nmc_ops::lt_scalar(*this, other.to<float>()); }
 #endif
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::lt_scalar(*this, other.to<float>()); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::lt_scalar(*this, other.to<float>()); }
 #endif
@@ -916,6 +1080,9 @@ inline Tensor Tensor::lt(Scalar other) const {
 inline Tensor Tensor::le(Scalar other) const {
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) { return nmc_ops::le_scalar(*this, other.to<float>()); }
+#endif
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::le_scalar(*this, other.to<float>()); }
 #endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::le_scalar(*this, other.to<float>()); }
@@ -926,6 +1093,9 @@ inline Tensor Tensor::gt(Scalar other) const {
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) { return nmc_ops::gt_scalar(*this, other.to<float>()); }
 #endif
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::gt_scalar(*this, other.to<float>()); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::gt_scalar(*this, other.to<float>()); }
 #endif
@@ -934,6 +1104,9 @@ inline Tensor Tensor::gt(Scalar other) const {
 inline Tensor Tensor::ge(Scalar other) const {
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) { return nmc_ops::ge_scalar(*this, other.to<float>()); }
+#endif
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::ge_scalar(*this, other.to<float>()); }
 #endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::ge_scalar(*this, other.to<float>()); }
@@ -945,6 +1118,9 @@ inline Tensor Tensor::ge(Scalar other) const {
 inline Tensor Tensor::sum() const {
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) { return nmc_ops::sum(*this); }
+#endif
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::sum(*this); }
 #endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::sum(*this); }
@@ -963,6 +1139,9 @@ inline Tensor Tensor::sum(int64_t dim, bool keepdim) const {
 inline Tensor Tensor::mean() const {
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) { return nmc_ops::mean(*this); }
+#endif
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::mean(*this); }
 #endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::mean(*this); }
@@ -1018,6 +1197,9 @@ inline Tensor Tensor::argmax() const {
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) { return nmc_ops::argmax(*this); }
 #endif
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::argmax(*this); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::argmax(*this); }
 #endif
@@ -1027,6 +1209,9 @@ inline Tensor Tensor::argmax(int64_t dim, bool keepdim) const { return native::a
 inline Tensor Tensor::argmin() const {
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) { return nmc_ops::argmin(*this); }
+#endif
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::argmin(*this); }
 #endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::argmin(*this); }
@@ -1067,6 +1252,9 @@ inline Tensor Tensor::matmul(const Tensor& other) const {
     return native::matmul(*this, other);
 }
 inline Tensor Tensor::mm(const Tensor& other) const {
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::mm(*this, other); }
+#endif
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) {
         return nmc_ops::mm(*this, other);
@@ -1082,6 +1270,9 @@ inline Tensor Tensor::mm(const Tensor& other) const {
     return native::mm(*this, other);
 }
 inline Tensor Tensor::mv(const Tensor& vec) const {
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::mv(*this, vec); }
+#endif
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) {
         return nmc_ops::mv(*this, vec);
@@ -1112,6 +1303,9 @@ inline Tensor Tensor::bmm(const Tensor& other) const {
     return native::bmm(*this, other);
 }
 inline Tensor Tensor::dot(const Tensor& other) const {
+#ifdef PT_USE_LINQ
+    if (device().is_linq()) { return linq_dispatch::dot(*this, other); }
+#endif
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) {
         return nmc_ops::dot(*this, other);
@@ -1304,6 +1498,9 @@ inline Tensor tanh(const Tensor& input) {
 }
 
 inline Tensor silu(const Tensor& input) {
+#ifdef PT_USE_LINQ
+    if (input.device().is_linq()) { return at::linq_dispatch::silu(input); }
+#endif
 #ifdef PT_USE_CUDA
     if (input.is_cuda()) {
         return at::cuda_ops::silu(input);
@@ -1314,6 +1511,9 @@ inline Tensor silu(const Tensor& input) {
 }
 
 inline Tensor gelu(const Tensor& input) {
+#ifdef PT_USE_LINQ
+    if (input.device().is_linq()) { return at::linq_dispatch::gelu(input); }
+#endif
 #ifdef PT_USE_CUDA
     if (input.is_cuda()) {
         return at::cuda_ops::gelu(input);
@@ -1325,6 +1525,9 @@ inline Tensor gelu(const Tensor& input) {
 }
 
 inline Tensor matmul(const Tensor& a, const Tensor& b) {
+#ifdef PT_USE_LINQ
+    if (a.device().is_linq()) { return at::linq_dispatch::mm(a, b); }
+#endif
 #ifdef PT_USE_CUDA
     if (a.is_cuda()) {
         // matmul dispatches to mm for 2D tensors
@@ -1338,6 +1541,9 @@ inline Tensor matmul(const Tensor& a, const Tensor& b) {
     return at::native::matmul(a, b);
 }
 inline Tensor mm(const Tensor& a, const Tensor& b) {
+#ifdef PT_USE_LINQ
+    if (a.device().is_linq()) { return at::linq_dispatch::mm(a, b); }
+#endif
 #ifdef PT_USE_CUDA
     if (a.is_cuda()) {
         return at::cuda_ops::mm(a, b);
