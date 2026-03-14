@@ -1,0 +1,11 @@
+FROM debian:bullseye-slim AS baikal-cross
+RUN apt-get update && apt-get install -y build-essential cmake gcc-aarch64-linux-gnu g++-aarch64-linux-gnu && rm -rf /var/lib/apt/lists/*
+WORKDIR /opt/promethorch
+COPY . .
+# Cross-compile for Baikal-M (ARM aarch64)
+RUN mkdir build_baikal_m && cd build_baikal_m && \
+    cmake .. -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/aarch64-baikal-m.cmake \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DPT_USE_TUDA=ON -DPT_USE_LINQ=OFF \
+    -DPT_BUILD_TESTS=ON && \
+    cmake --build . -j$(nproc)

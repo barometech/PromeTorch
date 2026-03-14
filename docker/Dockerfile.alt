@@ -1,0 +1,10 @@
+FROM alt:p10 AS alt-build
+RUN apt-get update && apt-get install -y gcc-c++ cmake make git && rm -rf /var/lib/apt/lists/*
+WORKDIR /opt/promethorch
+COPY . .
+RUN mkdir build_alt && cd build_alt && \
+    cmake .. -DCMAKE_BUILD_TYPE=Release \
+    -DPT_USE_TUDA=ON -DPT_USE_LINQ=OFF -DPT_USE_CUDA=OFF \
+    -DPT_BUILD_TESTS=ON -DPT_BUILD_SHARED_LIBS=ON && \
+    cmake --build . -j$(nproc)
+RUN cd build_alt && ./tuda_tests

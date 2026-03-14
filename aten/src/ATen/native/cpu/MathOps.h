@@ -2,7 +2,8 @@
 
 #include "aten/src/ATen/core/Tensor.h"
 #include "aten/src/ATen/core/TensorFactory.h"
-#include "aten/src/ATen/native/cpu/VectorizedOps.h"
+#include "aten/src/ATen/native/cpu/tuda/TudaVec.h"
+#include "aten/src/ATen/native/cpu/tuda/TudaMath.h"
 #include "c10/core/ScalarType.h"
 #include <cmath>
 #include <algorithm>
@@ -121,10 +122,10 @@ namespace unary_ops {
     template<typename T> static inline T reciprocal_val(T x) { return T(1) / x; }
 } // namespace unary_ops
 
-// Unary op: AVX2 fast path for float32, generic dispatch for other types
-// avx_body: expression using __m256 variable 'v', producing __m256
+// Unary op: TUDA VecF fast path for float32, generic dispatch for other types
+// vec_body: expression using tuda::VecF variable 'v', producing tuda::VecF
 // scalar_fn: templated function from unary_ops namespace
-#define DEFINE_UNARY_OP(name, avx_body, scalar_fn) \
+#define DEFINE_UNARY_OP(name, vec_body, scalar_fn) \
 inline Tensor name(const Tensor& self) { \
     Tensor input = self.is_contiguous() ? self : self.contiguous(); \
     Tensor result = empty_like(input); \
@@ -132,16 +133,17 @@ inline Tensor name(const Tensor& self) { \
         const float* in = input.data_ptr<float>(); \
         float* out = result.mutable_data_ptr<float>(); \
         int64_t n = input.numel(); \
+        constexpr int W = tuda::VecF::width; \
         int64_t i = 0; \
-        for (; i + 32 <= n; i += 32) { \
-            { __m256 v = _mm256_loadu_ps(in + i);      _mm256_storeu_ps(out + i,      avx_body); } \
-            { __m256 v = _mm256_loadu_ps(in + i + 8);  _mm256_storeu_ps(out + i + 8,  avx_body); } \
-            { __m256 v = _mm256_loadu_ps(in + i + 16); _mm256_storeu_ps(out + i + 16, avx_body); } \
-            { __m256 v = _mm256_loadu_ps(in + i + 24); _mm256_storeu_ps(out + i + 24, avx_body); } \
+        for (; i + 4*W <= n; i += 4*W) { \
+            { tuda::VecF v = tuda::VecF::load(in + i);       (vec_body).store(out + i); } \
+            { tuda::VecF v = tuda::VecF::load(in + i + W);   (vec_body).store(out + i + W); } \
+            { tuda::VecF v = tuda::VecF::load(in + i + 2*W); (vec_body).store(out + i + 2*W); } \
+            { tuda::VecF v = tuda::VecF::load(in + i + 3*W); (vec_body).store(out + i + 3*W); } \
         } \
-        for (; i + 8 <= n; i += 8) { \
-            __m256 v = _mm256_loadu_ps(in + i); \
-            _mm256_storeu_ps(out + i, avx_body); \
+        for (; i + W <= n; i += W) { \
+            tuda::VecF v = tuda::VecF::load(in + i); \
+            (vec_body).store(out + i); \
         } \
         for (; i < n; ++i) out[i] = scalar_fn<float>(in[i]); \
         return result; \
@@ -155,7 +157,7 @@ inline Tensor name(const Tensor& self) { \
     return result; \
 }
 
-#define DEFINE_UNARY_OP_INPLACE(name, avx_body, scalar_fn) \
+#define DEFINE_UNARY_OP_INPLACE(name, vec_body, scalar_fn) \
 inline Tensor& name##_(Tensor& self) { \
     if (!self.is_contiguous()) { \
         Tensor tmp = name(self); \
@@ -165,10 +167,11 @@ inline Tensor& name##_(Tensor& self) { \
     if (self.dtype() == c10::ScalarType::Float) { \
         float* data = self.mutable_data_ptr<float>(); \
         int64_t n = self.numel(); \
+        constexpr int W = tuda::VecF::width; \
         int64_t i = 0; \
-        for (; i + 8 <= n; i += 8) { \
-            __m256 v = _mm256_loadu_ps(data + i); \
-            _mm256_storeu_ps(data + i, avx_body); \
+        for (; i + W <= n; i += W) { \
+            tuda::VecF v = tuda::VecF::load(data + i); \
+            (vec_body).store(data + i); \
         } \
         for (; i < n; ++i) data[i] = scalar_fn<float>(data[i]); \
         return self; \
@@ -181,42 +184,42 @@ inline Tensor& name##_(Tensor& self) { \
     return self; \
 }
 
-// Unary ops with AVX2 intrinsics
-DEFINE_UNARY_OP(neg,    _mm256_xor_ps(v, vec::_ps256_sign_mask()),       unary_ops::neg_val)
-DEFINE_UNARY_OP(abs,    _mm256_and_ps(v, vec::_ps256_abs_mask()),        unary_ops::abs_val)
-DEFINE_UNARY_OP(sqrt,   _mm256_sqrt_ps(v),                              unary_ops::sqrt_val)
-DEFINE_UNARY_OP(rsqrt,  _mm256_div_ps(vec::_ps256_1(), _mm256_sqrt_ps(v)), unary_ops::rsqrt_val)
-DEFINE_UNARY_OP(square, _mm256_mul_ps(v, v),                            unary_ops::square_val)
-DEFINE_UNARY_OP(exp,    vec::exp256_ps(v),                              unary_ops::exp_val)
-DEFINE_UNARY_OP(log,    vec::log256_ps(v),                              unary_ops::log_val)
-DEFINE_UNARY_OP(log2,   _mm256_mul_ps(vec::log256_ps(v), _mm256_set1_ps(1.4426950408889634f)), unary_ops::log2_val)
-DEFINE_UNARY_OP(log10,  _mm256_mul_ps(vec::log256_ps(v), _mm256_set1_ps(0.4342944819032518f)), unary_ops::log10_val)
-DEFINE_UNARY_OP(sin,    vec::sin256_ps(v),                              unary_ops::sin_val)
-DEFINE_UNARY_OP(cos,    vec::cos256_ps(v),                              unary_ops::cos_val)
-DEFINE_UNARY_OP(tan,    _mm256_div_ps(vec::sin256_ps(v), vec::cos256_ps(v)), unary_ops::tan_val)
-DEFINE_UNARY_OP(tanh,   vec::tanh256_ps(v),                             unary_ops::tanh_val)
-DEFINE_UNARY_OP(sigmoid, vec::sigmoid256_ps(v),                         unary_ops::sigmoid_val)
-DEFINE_UNARY_OP(relu,   _mm256_max_ps(v, _mm256_setzero_ps()),          unary_ops::relu_val)
-DEFINE_UNARY_OP(ceil,   _mm256_ceil_ps(v),                              unary_ops::ceil_val)
-DEFINE_UNARY_OP(floor,  _mm256_floor_ps(v),                             unary_ops::floor_val)
-DEFINE_UNARY_OP(round,  _mm256_round_ps(v, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC), unary_ops::round_val)
-DEFINE_UNARY_OP(sign,   _mm256_or_ps(_mm256_and_ps(_mm256_cmp_ps(v, _mm256_setzero_ps(), _CMP_GT_OS), _mm256_set1_ps(1.0f)), _mm256_and_ps(_mm256_cmp_ps(v, _mm256_setzero_ps(), _CMP_LT_OS), _mm256_set1_ps(-1.0f))), unary_ops::sign_val)
-DEFINE_UNARY_OP(reciprocal, _mm256_div_ps(vec::_ps256_1(), v),          unary_ops::reciprocal_val)
+// Unary ops with TUDA VecF (portable across AVX2/NEON/E2K/Scalar)
+DEFINE_UNARY_OP(neg,        tuda::neg_vec(v),        unary_ops::neg_val)
+DEFINE_UNARY_OP(abs,        tuda::abs_vec(v),        unary_ops::abs_val)
+DEFINE_UNARY_OP(sqrt,       tuda::sqrt_vec(v),       unary_ops::sqrt_val)
+DEFINE_UNARY_OP(rsqrt,      tuda::rsqrt_vec(v),      unary_ops::rsqrt_val)
+DEFINE_UNARY_OP(square,     tuda::square_vec(v),     unary_ops::square_val)
+DEFINE_UNARY_OP(exp,        tuda::exp_vec(v),        unary_ops::exp_val)
+DEFINE_UNARY_OP(log,        tuda::log_vec(v),        unary_ops::log_val)
+DEFINE_UNARY_OP(log2,       tuda::log2_vec(v),       unary_ops::log2_val)
+DEFINE_UNARY_OP(log10,      tuda::log10_vec(v),      unary_ops::log10_val)
+DEFINE_UNARY_OP(sin,        tuda::sin_vec(v),        unary_ops::sin_val)
+DEFINE_UNARY_OP(cos,        tuda::cos_vec(v),        unary_ops::cos_val)
+DEFINE_UNARY_OP(tan,        tuda::tan_vec(v),        unary_ops::tan_val)
+DEFINE_UNARY_OP(tanh,       tuda::tanh_vec(v),       unary_ops::tanh_val)
+DEFINE_UNARY_OP(sigmoid,    tuda::sigmoid_vec(v),    unary_ops::sigmoid_val)
+DEFINE_UNARY_OP(relu,       tuda::relu_vec(v),       unary_ops::relu_val)
+DEFINE_UNARY_OP(ceil,       tuda::ceil_vec(v),       unary_ops::ceil_val)
+DEFINE_UNARY_OP(floor,      tuda::floor_vec(v),      unary_ops::floor_val)
+DEFINE_UNARY_OP(round,      tuda::round_vec(v),      unary_ops::round_val)
+DEFINE_UNARY_OP(sign,       tuda::sign_vec(v),       unary_ops::sign_val)
+DEFINE_UNARY_OP(reciprocal, tuda::reciprocal_vec(v), unary_ops::reciprocal_val)
 
 // In-place variants
-DEFINE_UNARY_OP_INPLACE(neg,     _mm256_xor_ps(v, vec::_ps256_sign_mask()),       unary_ops::neg_val)
-DEFINE_UNARY_OP_INPLACE(abs,     _mm256_and_ps(v, vec::_ps256_abs_mask()),        unary_ops::abs_val)
-DEFINE_UNARY_OP_INPLACE(sqrt,    _mm256_sqrt_ps(v),                              unary_ops::sqrt_val)
-DEFINE_UNARY_OP_INPLACE(exp,     vec::exp256_ps(v),                              unary_ops::exp_val)
-DEFINE_UNARY_OP_INPLACE(log,     vec::log256_ps(v),                              unary_ops::log_val)
-DEFINE_UNARY_OP_INPLACE(sin,     vec::sin256_ps(v),                              unary_ops::sin_val)
-DEFINE_UNARY_OP_INPLACE(cos,     vec::cos256_ps(v),                              unary_ops::cos_val)
-DEFINE_UNARY_OP_INPLACE(tanh,    vec::tanh256_ps(v),                             unary_ops::tanh_val)
-DEFINE_UNARY_OP_INPLACE(sigmoid, vec::sigmoid256_ps(v),                          unary_ops::sigmoid_val)
-DEFINE_UNARY_OP_INPLACE(relu,    _mm256_max_ps(v, _mm256_setzero_ps()),          unary_ops::relu_val)
-DEFINE_UNARY_OP_INPLACE(ceil,    _mm256_ceil_ps(v),                              unary_ops::ceil_val)
-DEFINE_UNARY_OP_INPLACE(floor,   _mm256_floor_ps(v),                             unary_ops::floor_val)
-DEFINE_UNARY_OP_INPLACE(round,   _mm256_round_ps(v, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC), unary_ops::round_val)
+DEFINE_UNARY_OP_INPLACE(neg,     tuda::neg_vec(v),        unary_ops::neg_val)
+DEFINE_UNARY_OP_INPLACE(abs,     tuda::abs_vec(v),        unary_ops::abs_val)
+DEFINE_UNARY_OP_INPLACE(sqrt,    tuda::sqrt_vec(v),       unary_ops::sqrt_val)
+DEFINE_UNARY_OP_INPLACE(exp,     tuda::exp_vec(v),        unary_ops::exp_val)
+DEFINE_UNARY_OP_INPLACE(log,     tuda::log_vec(v),        unary_ops::log_val)
+DEFINE_UNARY_OP_INPLACE(sin,     tuda::sin_vec(v),        unary_ops::sin_val)
+DEFINE_UNARY_OP_INPLACE(cos,     tuda::cos_vec(v),        unary_ops::cos_val)
+DEFINE_UNARY_OP_INPLACE(tanh,    tuda::tanh_vec(v),       unary_ops::tanh_val)
+DEFINE_UNARY_OP_INPLACE(sigmoid, tuda::sigmoid_vec(v),    unary_ops::sigmoid_val)
+DEFINE_UNARY_OP_INPLACE(relu,    tuda::relu_vec(v),       unary_ops::relu_val)
+DEFINE_UNARY_OP_INPLACE(ceil,    tuda::ceil_vec(v),       unary_ops::ceil_val)
+DEFINE_UNARY_OP_INPLACE(floor,   tuda::floor_vec(v),      unary_ops::floor_val)
+DEFINE_UNARY_OP_INPLACE(round,   tuda::round_vec(v),      unary_ops::round_val)
 
 #undef DEFINE_UNARY_OP
 #undef DEFINE_UNARY_OP_INPLACE
@@ -248,10 +251,10 @@ inline Tensor& zero_(Tensor& self) {
 }
 
 inline Tensor& fill_(Tensor& self, Scalar value) {
-    // AVX2 fast path for contiguous float
+    // SIMD fast path for contiguous float
     if (self.dtype() == c10::ScalarType::Float && self.is_contiguous()) {
-        vec::vectorized_fill(self.mutable_data_ptr<float>(),
-                             static_cast<float>(value.toDouble()), self.numel());
+        tuda::vec_fill(self.mutable_data_ptr<float>(),
+                       static_cast<float>(value.toDouble()), self.numel());
         return self;
     }
 
@@ -451,32 +454,33 @@ inline Tensor add(const Tensor& self, const Tensor& other, Scalar alpha = 1) {
         float* out = result.mutable_data_ptr<float>();
         float alpha_val = static_cast<float>(alpha.toDouble());
         int64_t n = result.numel();
+        constexpr int W = tuda::VecF::width;
         int64_t i = 0;
         if (alpha_val == 1.0f) {
-            for (; i + 32 <= n; i += 32) {
-                _mm256_storeu_ps(out + i,      _mm256_add_ps(_mm256_loadu_ps(a + i),      _mm256_loadu_ps(b + i)));
-                _mm256_storeu_ps(out + i + 8,  _mm256_add_ps(_mm256_loadu_ps(a + i + 8),  _mm256_loadu_ps(b + i + 8)));
-                _mm256_storeu_ps(out + i + 16, _mm256_add_ps(_mm256_loadu_ps(a + i + 16), _mm256_loadu_ps(b + i + 16)));
-                _mm256_storeu_ps(out + i + 24, _mm256_add_ps(_mm256_loadu_ps(a + i + 24), _mm256_loadu_ps(b + i + 24)));
+            for (; i + 4*W <= n; i += 4*W) {
+                (tuda::VecF::load(a+i)     + tuda::VecF::load(b+i)).store(out+i);
+                (tuda::VecF::load(a+i+W)   + tuda::VecF::load(b+i+W)).store(out+i+W);
+                (tuda::VecF::load(a+i+2*W) + tuda::VecF::load(b+i+2*W)).store(out+i+2*W);
+                (tuda::VecF::load(a+i+3*W) + tuda::VecF::load(b+i+3*W)).store(out+i+3*W);
             }
-            for (; i + 8 <= n; i += 8)
-                _mm256_storeu_ps(out + i, _mm256_add_ps(_mm256_loadu_ps(a + i), _mm256_loadu_ps(b + i)));
+            for (; i + W <= n; i += W)
+                (tuda::VecF::load(a+i) + tuda::VecF::load(b+i)).store(out+i);
         } else {
-            __m256 valpha = _mm256_set1_ps(alpha_val);
-            for (; i + 32 <= n; i += 32) {
-                _mm256_storeu_ps(out + i,      _mm256_fmadd_ps(valpha, _mm256_loadu_ps(b + i),      _mm256_loadu_ps(a + i)));
-                _mm256_storeu_ps(out + i + 8,  _mm256_fmadd_ps(valpha, _mm256_loadu_ps(b + i + 8),  _mm256_loadu_ps(a + i + 8)));
-                _mm256_storeu_ps(out + i + 16, _mm256_fmadd_ps(valpha, _mm256_loadu_ps(b + i + 16), _mm256_loadu_ps(a + i + 16)));
-                _mm256_storeu_ps(out + i + 24, _mm256_fmadd_ps(valpha, _mm256_loadu_ps(b + i + 24), _mm256_loadu_ps(a + i + 24)));
+            tuda::VecF valpha = tuda::VecF::broadcast(alpha_val);
+            for (; i + 4*W <= n; i += 4*W) {
+                tuda::VecF::fmadd(valpha, tuda::VecF::load(b+i),     tuda::VecF::load(a+i)).store(out+i);
+                tuda::VecF::fmadd(valpha, tuda::VecF::load(b+i+W),   tuda::VecF::load(a+i+W)).store(out+i+W);
+                tuda::VecF::fmadd(valpha, tuda::VecF::load(b+i+2*W), tuda::VecF::load(a+i+2*W)).store(out+i+2*W);
+                tuda::VecF::fmadd(valpha, tuda::VecF::load(b+i+3*W), tuda::VecF::load(a+i+3*W)).store(out+i+3*W);
             }
-            for (; i + 8 <= n; i += 8)
-                _mm256_storeu_ps(out + i, _mm256_fmadd_ps(valpha, _mm256_loadu_ps(b + i), _mm256_loadu_ps(a + i)));
+            for (; i + W <= n; i += W)
+                tuda::VecF::fmadd(valpha, tuda::VecF::load(b+i), tuda::VecF::load(a+i)).store(out+i);
         }
         for (; i < n; ++i) out[i] = a[i] + alpha_val * b[i];
         return result;
     }
 
-    // AVX2 broadcast fast path: [*, N] + [N] (bias addition pattern)
+    // SIMD broadcast fast path: [*, N] + [N] (bias addition pattern)
     if (self.dtype() == c10::ScalarType::Float && other.dtype() == c10::ScalarType::Float &&
         self.is_contiguous() && other.is_contiguous() && other.dim() == 1 &&
         self.dim() >= 2 && self.size(-1) == other.size(0)) {
@@ -487,25 +491,24 @@ inline Tensor add(const Tensor& self, const Tensor& other, Scalar alpha = 1) {
         float alpha_val = static_cast<float>(alpha.toDouble());
         int64_t inner = other.size(0);
         int64_t outer = self.numel() / inner;
+        constexpr int W = tuda::VecF::width;
         if (alpha_val == 1.0f) {
             for (int64_t o = 0; o < outer; ++o) {
                 const float* row_a = a + o * inner;
                 float* row_out = out + o * inner;
                 int64_t j = 0;
-                for (; j + 8 <= inner; j += 8)
-                    _mm256_storeu_ps(row_out + j, _mm256_add_ps(
-                        _mm256_loadu_ps(row_a + j), _mm256_loadu_ps(b + j)));
+                for (; j + W <= inner; j += W)
+                    (tuda::VecF::load(row_a+j) + tuda::VecF::load(b+j)).store(row_out+j);
                 for (; j < inner; ++j) row_out[j] = row_a[j] + b[j];
             }
         } else {
-            __m256 valpha = _mm256_set1_ps(alpha_val);
+            tuda::VecF valpha = tuda::VecF::broadcast(alpha_val);
             for (int64_t o = 0; o < outer; ++o) {
                 const float* row_a = a + o * inner;
                 float* row_out = out + o * inner;
                 int64_t j = 0;
-                for (; j + 8 <= inner; j += 8)
-                    _mm256_storeu_ps(row_out + j, _mm256_fmadd_ps(
-                        valpha, _mm256_loadu_ps(b + j), _mm256_loadu_ps(row_a + j)));
+                for (; j + W <= inner; j += W)
+                    tuda::VecF::fmadd(valpha, tuda::VecF::load(b+j), tuda::VecF::load(row_a+j)).store(row_out+j);
                 for (; j < inner; ++j) row_out[j] = row_a[j] + alpha_val * b[j];
             }
         }
@@ -541,7 +544,7 @@ inline Tensor add(const Tensor& self, const Tensor& other, Scalar alpha = 1) {
 }
 
 inline Tensor sub(const Tensor& self, const Tensor& other, Scalar alpha = 1) {
-    // Direct AVX2 fast path for sub (avoids alpha dispatch in add)
+    // Direct SIMD fast path for sub (avoids alpha dispatch in add)
     if (alpha.toDouble() == 1.0 &&
         self.dtype() == c10::ScalarType::Float && other.dtype() == c10::ScalarType::Float &&
         self.sizes() == other.sizes() && self.is_contiguous() && other.is_contiguous()) {
@@ -550,9 +553,10 @@ inline Tensor sub(const Tensor& self, const Tensor& other, Scalar alpha = 1) {
         const float* b = other.data_ptr<float>();
         float* out = result.mutable_data_ptr<float>();
         int64_t n = result.numel();
+        constexpr int W = tuda::VecF::width;
         int64_t i = 0;
-        for (; i + 8 <= n; i += 8)
-            _mm256_storeu_ps(out + i, _mm256_sub_ps(_mm256_loadu_ps(a + i), _mm256_loadu_ps(b + i)));
+        for (; i + W <= n; i += W)
+            (tuda::VecF::load(a+i) - tuda::VecF::load(b+i)).store(out+i);
         for (; i < n; ++i) out[i] = a[i] - b[i];
         return result;
     }
@@ -568,15 +572,16 @@ inline Tensor mul(const Tensor& self, const Tensor& other) {
         const float* b = other.data_ptr<float>();
         float* out = result.mutable_data_ptr<float>();
         int64_t n = result.numel();
+        constexpr int W = tuda::VecF::width;
         int64_t i = 0;
-        for (; i + 32 <= n; i += 32) {
-            _mm256_storeu_ps(out + i,      _mm256_mul_ps(_mm256_loadu_ps(a + i),      _mm256_loadu_ps(b + i)));
-            _mm256_storeu_ps(out + i + 8,  _mm256_mul_ps(_mm256_loadu_ps(a + i + 8),  _mm256_loadu_ps(b + i + 8)));
-            _mm256_storeu_ps(out + i + 16, _mm256_mul_ps(_mm256_loadu_ps(a + i + 16), _mm256_loadu_ps(b + i + 16)));
-            _mm256_storeu_ps(out + i + 24, _mm256_mul_ps(_mm256_loadu_ps(a + i + 24), _mm256_loadu_ps(b + i + 24)));
+        for (; i + 4*W <= n; i += 4*W) {
+            (tuda::VecF::load(a+i)     * tuda::VecF::load(b+i)).store(out+i);
+            (tuda::VecF::load(a+i+W)   * tuda::VecF::load(b+i+W)).store(out+i+W);
+            (tuda::VecF::load(a+i+2*W) * tuda::VecF::load(b+i+2*W)).store(out+i+2*W);
+            (tuda::VecF::load(a+i+3*W) * tuda::VecF::load(b+i+3*W)).store(out+i+3*W);
         }
-        for (; i + 8 <= n; i += 8)
-            _mm256_storeu_ps(out + i, _mm256_mul_ps(_mm256_loadu_ps(a + i), _mm256_loadu_ps(b + i)));
+        for (; i + W <= n; i += W)
+            (tuda::VecF::load(a+i) * tuda::VecF::load(b+i)).store(out+i);
         for (; i < n; ++i) out[i] = a[i] * b[i];
         return result;
     }
@@ -616,9 +621,10 @@ inline Tensor div(const Tensor& self, const Tensor& other) {
         const float* b = other.data_ptr<float>();
         float* out = result.mutable_data_ptr<float>();
         int64_t n = result.numel();
+        constexpr int W = tuda::VecF::width;
         int64_t i = 0;
-        for (; i + 8 <= n; i += 8)
-            _mm256_storeu_ps(out + i, _mm256_div_ps(_mm256_loadu_ps(a + i), _mm256_loadu_ps(b + i)));
+        for (; i + W <= n; i += W)
+            (tuda::VecF::load(a+i) / tuda::VecF::load(b+i)).store(out+i);
         for (; i < n; ++i) out[i] = a[i] / b[i];
         return result;
     }
@@ -664,10 +670,11 @@ inline Tensor add(const Tensor& self, Scalar other, Scalar alpha = 1) {
         const float* in = input.data_ptr<float>();
         float* out = result.mutable_data_ptr<float>();
         float fval = static_cast<float>(val);
-        __m256 vval = _mm256_set1_ps(fval);
+        tuda::VecF vval = tuda::VecF::broadcast(fval);
+        constexpr int W = tuda::VecF::width;
         int64_t n = input.numel(), i = 0;
-        for (; i + 8 <= n; i += 8)
-            _mm256_storeu_ps(out + i, _mm256_add_ps(_mm256_loadu_ps(in + i), vval));
+        for (; i + W <= n; i += W)
+            (tuda::VecF::load(in+i) + vval).store(out+i);
         for (; i < n; ++i) out[i] = in[i] + fval;
         return result;
     }
@@ -695,10 +702,11 @@ inline Tensor mul(const Tensor& self, Scalar other) {
         const float* in = input.data_ptr<float>();
         float* out = result.mutable_data_ptr<float>();
         float fval = static_cast<float>(other.toDouble());
-        __m256 vval = _mm256_set1_ps(fval);
+        tuda::VecF vval = tuda::VecF::broadcast(fval);
+        constexpr int W = tuda::VecF::width;
         int64_t n = input.numel(), i = 0;
-        for (; i + 8 <= n; i += 8)
-            _mm256_storeu_ps(out + i, _mm256_mul_ps(_mm256_loadu_ps(in + i), vval));
+        for (; i + W <= n; i += W)
+            (tuda::VecF::load(in+i) * vval).store(out+i);
         for (; i < n; ++i) out[i] = in[i] * fval;
         return result;
     }
@@ -776,14 +784,15 @@ inline Tensor& add_(Tensor& self, const Tensor& other, Scalar alpha = 1) {
         float* data = self.mutable_data_ptr<float>();
         const float* other_data = other.data_ptr<float>();
         float alpha_val = static_cast<float>(alpha.toDouble());
+        constexpr int W = tuda::VecF::width;
         int64_t n = self.numel(), i = 0;
         if (alpha_val == 1.0f) {
-            for (; i + 8 <= n; i += 8)
-                _mm256_storeu_ps(data + i, _mm256_add_ps(_mm256_loadu_ps(data + i), _mm256_loadu_ps(other_data + i)));
+            for (; i + W <= n; i += W)
+                (tuda::VecF::load(data+i) + tuda::VecF::load(other_data+i)).store(data+i);
         } else {
-            __m256 va = _mm256_set1_ps(alpha_val);
-            for (; i + 8 <= n; i += 8)
-                _mm256_storeu_ps(data + i, _mm256_fmadd_ps(va, _mm256_loadu_ps(other_data + i), _mm256_loadu_ps(data + i)));
+            tuda::VecF va = tuda::VecF::broadcast(alpha_val);
+            for (; i + W <= n; i += W)
+                tuda::VecF::fmadd(va, tuda::VecF::load(other_data+i), tuda::VecF::load(data+i)).store(data+i);
         }
         for (; i < n; ++i) data[i] += alpha_val * other_data[i];
         return self;
@@ -810,9 +819,10 @@ inline Tensor& mul_(Tensor& self, const Tensor& other) {
     if (self.dtype() == c10::ScalarType::Float && self.is_contiguous() && other.is_contiguous()) {
         float* data = self.mutable_data_ptr<float>();
         const float* other_data = other.data_ptr<float>();
+        constexpr int W = tuda::VecF::width;
         int64_t n = self.numel(), i = 0;
-        for (; i + 8 <= n; i += 8)
-            _mm256_storeu_ps(data + i, _mm256_mul_ps(_mm256_loadu_ps(data + i), _mm256_loadu_ps(other_data + i)));
+        for (; i + W <= n; i += W)
+            (tuda::VecF::load(data+i) * tuda::VecF::load(other_data+i)).store(data+i);
         for (; i < n; ++i) data[i] *= other_data[i];
         return self;
     }
@@ -847,10 +857,11 @@ inline Tensor& add_(Tensor& self, Scalar other, Scalar alpha = 1) {
     if (self.dtype() == c10::ScalarType::Float && self.is_contiguous()) {
         float* data = self.mutable_data_ptr<float>();
         float val = static_cast<float>(other.toDouble() * alpha.toDouble());
-        __m256 vval = _mm256_set1_ps(val);
+        tuda::VecF vval = tuda::VecF::broadcast(val);
+        constexpr int W = tuda::VecF::width;
         int64_t n = self.numel(), i = 0;
-        for (; i + 8 <= n; i += 8)
-            _mm256_storeu_ps(data + i, _mm256_add_ps(_mm256_loadu_ps(data + i), vval));
+        for (; i + W <= n; i += W)
+            (tuda::VecF::load(data+i) + vval).store(data+i);
         for (; i < n; ++i) data[i] += val;
         return self;
     }
@@ -873,10 +884,11 @@ inline Tensor& mul_(Tensor& self, Scalar other) {
     if (self.dtype() == c10::ScalarType::Float && self.is_contiguous()) {
         float* data = self.mutable_data_ptr<float>();
         float val = static_cast<float>(other.toDouble());
-        __m256 vval = _mm256_set1_ps(val);
+        tuda::VecF vval = tuda::VecF::broadcast(val);
+        constexpr int W = tuda::VecF::width;
         int64_t n = self.numel(), i = 0;
-        for (; i + 8 <= n; i += 8)
-            _mm256_storeu_ps(data + i, _mm256_mul_ps(_mm256_loadu_ps(data + i), vval));
+        for (; i + W <= n; i += W)
+            (tuda::VecF::load(data+i) * vval).store(data+i);
         for (; i < n; ++i) data[i] *= val;
         return self;
     }
@@ -910,12 +922,12 @@ inline Tensor& addcmul_(Tensor& self, const Tensor& tensor1, const Tensor& tenso
         const float* t1 = tensor1.data_ptr<float>();
         const float* t2 = tensor2.data_ptr<float>();
         float val = static_cast<float>(value.toDouble());
-        __m256 vval = _mm256_set1_ps(val);
+        tuda::VecF vval = tuda::VecF::broadcast(val);
+        constexpr int W = tuda::VecF::width;
         int64_t n = self.numel(), i = 0;
-        for (; i + 8 <= n; i += 8)
-            _mm256_storeu_ps(data + i, _mm256_fmadd_ps(vval,
-                _mm256_mul_ps(_mm256_loadu_ps(t1 + i), _mm256_loadu_ps(t2 + i)),
-                _mm256_loadu_ps(data + i)));
+        for (; i + W <= n; i += W)
+            tuda::VecF::fmadd(vval, tuda::VecF::load(t1+i) * tuda::VecF::load(t2+i),
+                              tuda::VecF::load(data+i)).store(data+i);
         for (; i < n; ++i) data[i] += val * t1[i] * t2[i];
         return self;
     }
@@ -949,12 +961,12 @@ inline Tensor& addcdiv_(Tensor& self, const Tensor& tensor1, const Tensor& tenso
         const float* t1 = tensor1.data_ptr<float>();
         const float* t2 = tensor2.data_ptr<float>();
         float val = static_cast<float>(value.toDouble());
-        __m256 vval = _mm256_set1_ps(val);
+        tuda::VecF vval = tuda::VecF::broadcast(val);
+        constexpr int W = tuda::VecF::width;
         int64_t n = self.numel(), i = 0;
-        for (; i + 8 <= n; i += 8)
-            _mm256_storeu_ps(data + i, _mm256_fmadd_ps(vval,
-                _mm256_div_ps(_mm256_loadu_ps(t1 + i), _mm256_loadu_ps(t2 + i)),
-                _mm256_loadu_ps(data + i)));
+        for (; i + W <= n; i += W)
+            tuda::VecF::fmadd(vval, tuda::VecF::load(t1+i) / tuda::VecF::load(t2+i),
+                              tuda::VecF::load(data+i)).store(data+i);
         for (; i < n; ++i) data[i] += val * t1[i] / t2[i];
         return self;
     }

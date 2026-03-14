@@ -1,0 +1,22 @@
+version: "3.8"
+services:
+  astra:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.astra
+  alt:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.alt
+  redos:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.redos
+  elbrus:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.elbrus
+  baikal:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.baikal

@@ -17,6 +17,8 @@ option(PT_USE_OPENMP "Enable OpenMP for CPU parallelization" OFF)
 option(PT_USE_AVX "Enable AVX instructions" ON)
 option(PT_USE_AVX2 "Enable AVX2 instructions" ON)
 option(PT_USE_NMCARD "Enable NM Card Mini support (emulator)" OFF)
+option(PT_USE_TUDA "Enable TUDA CPU arch dispatch (AVX2/NEON/E2K/Scalar)" ON)
+option(PT_USE_LINQ "Enable LinQ H1M accelerator (emulator)" OFF)
 
 # ============================================================================
 # C++ Standard
@@ -70,6 +72,33 @@ else()
 
     # Enable fast math (optional, can cause precision issues)
     # add_compile_options(-ffast-math)
+endif()
+
+# ============================================================================
+# TUDA — CPU ISA auto-detection for cross-compilation
+# ============================================================================
+
+if(PT_USE_TUDA)
+    add_compile_definitions(PT_USE_TUDA)
+
+    # Auto-detect target architecture for cross-compile
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
+        message(STATUS "TUDA: ARM64 detected — NEON path will be used")
+        # Check for dotprod (Baikal-S / Cortex-A75+)
+        include(CheckCXXCompilerFlag)
+        check_cxx_compiler_flag("-march=armv8.2-a+dotprod" HAS_DOTPROD)
+        if(HAS_DOTPROD)
+            message(STATUS "TUDA: ARM dotprod available — NEON_A75 micro-kernel")
+        else()
+            message(STATUS "TUDA: ARM without dotprod — NEON_A57 micro-kernel")
+        endif()
+    elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "e2k|elbrus")
+        message(STATUS "TUDA: Elbrus E2K detected — E2K path will be used")
+    elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|x86")
+        message(STATUS "TUDA: x86_64 detected — AVX2 path will be used")
+    else()
+        message(STATUS "TUDA: Unknown arch '${CMAKE_SYSTEM_PROCESSOR}' — Scalar fallback")
+    endif()
 endif()
 
 # ============================================================================
@@ -308,6 +337,38 @@ if(PT_USE_NMCARD)
 
     target_link_libraries(aten INTERFACE aten_nmcard)
     target_compile_definitions(aten INTERFACE PT_USE_NMCARD)
+endif()
+
+# ============================================================================
+# LinQ H1M Backend (Emulator)
+# ============================================================================
+
+if(PT_USE_LINQ)
+    set(LINQ_SOURCES
+        c10/linq/LinQAllocator.cpp
+    )
+
+    if(PT_BUILD_SHARED_LIBS)
+        add_library(aten_linq SHARED ${LINQ_SOURCES})
+        target_compile_definitions(aten_linq PRIVATE BUILDING_ATEN_LINQ PT_BUILD_SHARED_LIBS)
+    else()
+        add_library(aten_linq STATIC ${LINQ_SOURCES})
+        target_compile_definitions(aten_linq PRIVATE BUILDING_ATEN_LINQ)
+    endif()
+
+    target_include_directories(aten_linq PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+    )
+    target_link_libraries(aten_linq PUBLIC c10)
+
+    set_target_properties(aten_linq PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+        ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+    )
+
+    target_link_libraries(aten INTERFACE aten_linq)
+    target_compile_definitions(aten INTERFACE PT_USE_LINQ)
 endif()
 
 if(PT_USE_OPENMP AND OpenMP_CXX_FOUND)
@@ -643,6 +704,30 @@ if(PT_BUILD_TESTS)
         )
         add_test(NAME nmcard_tests COMMAND nmcard_tests)
     endif()
+
+    # LinQ H1M Emulator Test (only when LinQ is enabled)
+    if(PT_USE_LINQ)
+        add_executable(linq_tests
+            test/cpp/test_linq.cpp
+        )
+        target_link_libraries(linq_tests
+            PRIVATE
+            aten
+        )
+        add_test(NAME linq_tests COMMAND linq_tests)
+    endif()
+
+    # TUDA CPU Architecture Test
+    if(PT_USE_TUDA)
+        add_executable(tuda_tests
+            test/cpp/test_tuda.cpp
+        )
+        target_link_libraries(tuda_tests
+            PRIVATE
+            aten
+        )
+        add_test(NAME tuda_tests COMMAND tuda_tests)
+    endif()
 endif()
 
 # ============================================================================
@@ -727,6 +812,9 @@ endif()
 if(PT_USE_NMCARD)
     list(APPEND INSTALL_TARGETS aten_nmcard)
 endif()
+if(PT_USE_LINQ)
+    list(APPEND INSTALL_TARGETS aten_linq)
+endif()
 
 install(TARGETS ${INSTALL_TARGETS}
     EXPORT PromeTorchTargets
@@ -801,6 +889,8 @@ else()
     message(STATUS "  cuDNN: OFF")
 endif()
 message(STATUS "  NMCard Mini: ${PT_USE_NMCARD}")
+message(STATUS "  LinQ H1M: ${PT_USE_LINQ}")
+message(STATUS "  TUDA CPU Dispatch: ${PT_USE_TUDA}")
 message(STATUS "  AVX: ${PT_USE_AVX}")
 message(STATUS "  AVX2: ${PT_USE_AVX2}")
 message(STATUS "")

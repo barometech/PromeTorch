@@ -34,10 +34,11 @@ enum class DeviceType : int8_t {
     Lazy = 17,      // Lazy tensors
     IPU = 18,       // Graphcore IPU
     MTIA = 19,      // Meta Training and Inference Accelerator
-    PrivateUse1 = 20,  // Reserved for custom backends
+    PrivateUse1 = 20,  // Reserved for custom backends (NMCard)
+    PrivateUse2 = 21,  // Reserved for custom backends (LinQ)
 
     // Compile time constant for number of device types
-    COMPILE_TIME_MAX_DEVICE_TYPES = 21
+    COMPILE_TIME_MAX_DEVICE_TYPES = 22
 };
 
 constexpr int kNumDeviceTypes = static_cast<int>(DeviceType::COMPILE_TIME_MAX_DEVICE_TYPES);
@@ -88,6 +89,8 @@ inline const char* DeviceTypeName(DeviceType type, bool lower_case = false) {
             return lower_case ? "mtia" : "MTIA";
         case DeviceType::PrivateUse1:
             return lower_case ? "nmcard" : "NMCard";
+        case DeviceType::PrivateUse2:
+            return lower_case ? "linq" : "LinQ";
         default:
             return lower_case ? "unknown" : "Unknown";
     }
@@ -146,6 +149,7 @@ public:
     bool is_vulkan() const noexcept { return type_ == DeviceType::Vulkan; }
     bool is_metal() const noexcept { return type_ == DeviceType::Metal; }
     bool is_nmcard() const noexcept { return type_ == DeviceType::PrivateUse1; }
+    bool is_linq() const noexcept { return type_ == DeviceType::PrivateUse2; }
 
     bool has_index() const noexcept { return index_ != kNoDeviceIndex; }
 
@@ -250,6 +254,8 @@ private:
             type_ = DeviceType::Metal;
         } else if (type_lower == "nmcard") {
             type_ = DeviceType::PrivateUse1;
+        } else if (type_lower == "linq") {
+            type_ = DeviceType::PrivateUse2;
         } else {
             PT_ERROR("Unknown device type: ", type_str);
         }
@@ -332,6 +338,10 @@ inline Device kCUDA(DeviceIndex index = 0) {
 
 inline Device kNMCard(DeviceIndex index = 0) {
     return Device{DeviceType::PrivateUse1, index};
+}
+
+inline Device kLinQ(DeviceIndex index = 0) {
+    return Device{DeviceType::PrivateUse2, index};
 }
 
 } // namespace c10
