@@ -1,6 +1,11 @@
 #pragma once
 
 #include "torch/optim/optimizer.h"
+#ifdef _MSC_VER
+#include <intrin.h>
+#else
+#include <immintrin.h>
+#endif
 
 namespace torch {
 namespace optim {
@@ -73,30 +78,70 @@ public:
                 if (!param->defined()) continue;
 
                 Tensor grad = param->grad();
-                if (!grad.defined()) {
+                if (!grad.defined()) continue;
+
+                // ================================================================
+                // Fast path: no momentum, CPU, float — fused AVX2
+                // ================================================================
+                if (momentum == 0.0 && param->data().dtype() == c10::ScalarType::Float &&
+                    !param->data().is_cuda()) {
+                    Tensor grad_c = grad.contiguous();
+                    float* p_data = param->data().mutable_data_ptr<float>();
+                    const float* g_data = grad_c.data_ptr<float>();
+                    int64_t n = param->numel();
+                    float lrf = static_cast<float>(lr);
+                    float wdf = static_cast<float>(wd);
+
+                    if (wdf != 0.0f) {
+                        // param = param * (1 - lr*wd) - lr * grad
+                        __m256 decay = _mm256_set1_ps(1.0f - lrf * wdf);
+                        __m256 neg_lr = _mm256_set1_ps(-lrf);
+                        int64_t i = 0;
+                        for (; i + 8 <= n; i += 8) {
+                            __m256 p = _mm256_loadu_ps(p_data + i);
+                            __m256 g = _mm256_loadu_ps(g_data + i);
+                            p = _mm256_fmadd_ps(neg_lr, g, _mm256_mul_ps(p, decay));
+                            _mm256_storeu_ps(p_data + i, p);
+                        }
+                        for (; i < n; ++i) {
+                            p_data[i] = p_data[i] * (1.0f - lrf * wdf) - lrf * g_data[i];
+                        }
+                    } else {
+                        // param -= lr * grad
+                        __m256 neg_lr = _mm256_set1_ps(-lrf);
+                        int64_t i = 0;
+                        for (; i + 8 <= n; i += 8) {
+                            __m256 p = _mm256_loadu_ps(p_data + i);
+                            __m256 g = _mm256_loadu_ps(g_data + i);
+                            p = _mm256_fmadd_ps(neg_lr, g, p);
+                            _mm256_storeu_ps(p_data + i, p);
+                        }
+                        for (; i < n; ++i) {
+                            p_data[i] -= lrf * g_data[i];
+                        }
+                    }
                     continue;
                 }
 
+                // ================================================================
+                // General path: momentum, nesterov, non-float
+                // ================================================================
                 // Apply weight decay
                 if (wd != 0.0) {
                     grad = grad.add(param->data(), at::Scalar(wd));
                 }
 
-                // Get or create momentum buffer - SKIP FOR NOW since no momentum
                 if (momentum != 0.0) {
                     auto* state = get_or_create_state<SGDParamState>(param);
 
                     if (!state->momentum_buffer.defined()) {
-                        // First step - initialize momentum buffer
                         state->momentum_buffer = grad.clone();
                     } else {
-                        // v = momentum * v + (1 - dampening) * grad
                         state->momentum_buffer.mul_(at::Scalar(momentum));
                         state->momentum_buffer.add_(grad, at::Scalar(1.0 - dampening));
                     }
 
                     if (nesterov) {
-                        // grad = grad + momentum * v
                         grad = grad.add(state->momentum_buffer, at::Scalar(momentum));
                     } else {
                         grad = state->momentum_buffer;

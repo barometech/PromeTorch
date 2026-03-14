@@ -2,6 +2,7 @@
 
 #include "aten/src/ATen/core/Tensor.h"
 #include "aten/src/ATen/core/TensorFactory.h"
+#include "aten/src/ATen/native/cpu/VectorizedOps.h"
 #include "c10/core/ScalarType.h"
 #include <cmath>
 #include <algorithm>
@@ -93,77 +94,129 @@ inline int64_t broadcast_index(
 } // namespace detail
 
 // ============================================================================
-// Unary Operations Implementation
+// Unary Operations — AVX2 SIMD + scalar fallback
 // ============================================================================
 
-#define DEFINE_UNARY_OP(name, op) \
+// Scalar helper functions (templated for float/double dispatch)
+namespace unary_ops {
+    template<typename T> static inline T neg_val(T x) { return -x; }
+    template<typename T> static inline T abs_val(T x) { return std::abs(x); }
+    template<typename T> static inline T sqrt_val(T x) { return std::sqrt(x); }
+    template<typename T> static inline T rsqrt_val(T x) { return T(1) / std::sqrt(x); }
+    template<typename T> static inline T square_val(T x) { return x * x; }
+    template<typename T> static inline T exp_val(T x) { return std::exp(x); }
+    template<typename T> static inline T log_val(T x) { return std::log(x); }
+    template<typename T> static inline T log2_val(T x) { return std::log2(x); }
+    template<typename T> static inline T log10_val(T x) { return std::log10(x); }
+    template<typename T> static inline T sin_val(T x) { return std::sin(x); }
+    template<typename T> static inline T cos_val(T x) { return std::cos(x); }
+    template<typename T> static inline T tan_val(T x) { return std::tan(x); }
+    template<typename T> static inline T tanh_val(T x) { return std::tanh(x); }
+    template<typename T> static inline T sigmoid_val(T x) { return T(1) / (T(1) + std::exp(-x)); }
+    template<typename T> static inline T relu_val(T x) { return x > T(0) ? x : T(0); }
+    template<typename T> static inline T ceil_val(T x) { return std::ceil(x); }
+    template<typename T> static inline T floor_val(T x) { return std::floor(x); }
+    template<typename T> static inline T round_val(T x) { return std::round(x); }
+    template<typename T> static inline T sign_val(T x) { return (x > T(0)) ? T(1) : ((x < T(0)) ? T(-1) : T(0)); }
+    template<typename T> static inline T reciprocal_val(T x) { return T(1) / x; }
+} // namespace unary_ops
+
+// Unary op: AVX2 fast path for float32, generic dispatch for other types
+// avx_body: expression using __m256 variable 'v', producing __m256
+// scalar_fn: templated function from unary_ops namespace
+#define DEFINE_UNARY_OP(name, avx_body, scalar_fn) \
 inline Tensor name(const Tensor& self) { \
     Tensor input = self.is_contiguous() ? self : self.contiguous(); \
     Tensor result = empty_like(input); \
+    if (input.dtype() == c10::ScalarType::Float) { \
+        const float* in = input.data_ptr<float>(); \
+        float* out = result.mutable_data_ptr<float>(); \
+        int64_t n = input.numel(); \
+        int64_t i = 0; \
+        for (; i + 32 <= n; i += 32) { \
+            { __m256 v = _mm256_loadu_ps(in + i);      _mm256_storeu_ps(out + i,      avx_body); } \
+            { __m256 v = _mm256_loadu_ps(in + i + 8);  _mm256_storeu_ps(out + i + 8,  avx_body); } \
+            { __m256 v = _mm256_loadu_ps(in + i + 16); _mm256_storeu_ps(out + i + 16, avx_body); } \
+            { __m256 v = _mm256_loadu_ps(in + i + 24); _mm256_storeu_ps(out + i + 24, avx_body); } \
+        } \
+        for (; i + 8 <= n; i += 8) { \
+            __m256 v = _mm256_loadu_ps(in + i); \
+            _mm256_storeu_ps(out + i, avx_body); \
+        } \
+        for (; i < n; ++i) out[i] = scalar_fn<float>(in[i]); \
+        return result; \
+    } \
     PT_DISPATCH_FLOATING_TYPES(input.dtype(), #name, [&] { \
         const scalar_t* in = input.data_ptr<scalar_t>(); \
         scalar_t* out = result.mutable_data_ptr<scalar_t>(); \
         int64_t n = input.numel(); \
-        _Pragma("omp parallel for if(n > 10000)") \
-        for (int64_t i = 0; i < n; ++i) { \
-            out[i] = op; \
-        } \
+        for (int64_t i = 0; i < n; ++i) out[i] = scalar_fn<scalar_t>(in[i]); \
     }); \
     return result; \
 }
 
-#define DEFINE_UNARY_OP_INPLACE(name, op) \
+#define DEFINE_UNARY_OP_INPLACE(name, avx_body, scalar_fn) \
 inline Tensor& name##_(Tensor& self) { \
     if (!self.is_contiguous()) { \
         Tensor tmp = name(self); \
         self.copy_(tmp); \
         return self; \
     } \
+    if (self.dtype() == c10::ScalarType::Float) { \
+        float* data = self.mutable_data_ptr<float>(); \
+        int64_t n = self.numel(); \
+        int64_t i = 0; \
+        for (; i + 8 <= n; i += 8) { \
+            __m256 v = _mm256_loadu_ps(data + i); \
+            _mm256_storeu_ps(data + i, avx_body); \
+        } \
+        for (; i < n; ++i) data[i] = scalar_fn<float>(data[i]); \
+        return self; \
+    } \
     PT_DISPATCH_FLOATING_TYPES(self.dtype(), #name "_", [&] { \
         scalar_t* data = self.mutable_data_ptr<scalar_t>(); \
         int64_t n = self.numel(); \
-        _Pragma("omp parallel for if(n > 10000)") \
-        for (int64_t i = 0; i < n; ++i) { \
-            data[i] = op; \
-        } \
+        for (int64_t i = 0; i < n; ++i) data[i] = scalar_fn<scalar_t>(data[i]); \
     }); \
     return self; \
 }
 
-DEFINE_UNARY_OP(neg, -in[i])
-DEFINE_UNARY_OP(abs, std::abs(in[i]))
-DEFINE_UNARY_OP(sqrt, std::sqrt(in[i]))
-DEFINE_UNARY_OP(rsqrt, static_cast<scalar_t>(1) / std::sqrt(in[i]))
-DEFINE_UNARY_OP(square, in[i] * in[i])
-DEFINE_UNARY_OP(exp, std::exp(in[i]))
-DEFINE_UNARY_OP(log, std::log(in[i]))
-DEFINE_UNARY_OP(log2, std::log2(in[i]))
-DEFINE_UNARY_OP(log10, std::log10(in[i]))
-DEFINE_UNARY_OP(sin, std::sin(in[i]))
-DEFINE_UNARY_OP(cos, std::cos(in[i]))
-DEFINE_UNARY_OP(tan, std::tan(in[i]))
-DEFINE_UNARY_OP(tanh, std::tanh(in[i]))
-DEFINE_UNARY_OP(sigmoid, static_cast<scalar_t>(1) / (static_cast<scalar_t>(1) + std::exp(-in[i])))
-DEFINE_UNARY_OP(relu, in[i] > 0 ? in[i] : static_cast<scalar_t>(0))
-DEFINE_UNARY_OP(ceil, std::ceil(in[i]))
-DEFINE_UNARY_OP(floor, std::floor(in[i]))
-DEFINE_UNARY_OP(round, std::round(in[i]))
-DEFINE_UNARY_OP(sign, (in[i] > 0) ? static_cast<scalar_t>(1) : ((in[i] < 0) ? static_cast<scalar_t>(-1) : static_cast<scalar_t>(0)))
-DEFINE_UNARY_OP(reciprocal, static_cast<scalar_t>(1) / in[i])
+// Unary ops with AVX2 intrinsics
+DEFINE_UNARY_OP(neg,    _mm256_xor_ps(v, vec::_ps256_sign_mask()),       unary_ops::neg_val)
+DEFINE_UNARY_OP(abs,    _mm256_and_ps(v, vec::_ps256_abs_mask()),        unary_ops::abs_val)
+DEFINE_UNARY_OP(sqrt,   _mm256_sqrt_ps(v),                              unary_ops::sqrt_val)
+DEFINE_UNARY_OP(rsqrt,  _mm256_div_ps(vec::_ps256_1(), _mm256_sqrt_ps(v)), unary_ops::rsqrt_val)
+DEFINE_UNARY_OP(square, _mm256_mul_ps(v, v),                            unary_ops::square_val)
+DEFINE_UNARY_OP(exp,    vec::exp256_ps(v),                              unary_ops::exp_val)
+DEFINE_UNARY_OP(log,    vec::log256_ps(v),                              unary_ops::log_val)
+DEFINE_UNARY_OP(log2,   _mm256_mul_ps(vec::log256_ps(v), _mm256_set1_ps(1.4426950408889634f)), unary_ops::log2_val)
+DEFINE_UNARY_OP(log10,  _mm256_mul_ps(vec::log256_ps(v), _mm256_set1_ps(0.4342944819032518f)), unary_ops::log10_val)
+DEFINE_UNARY_OP(sin,    vec::sin256_ps(v),                              unary_ops::sin_val)
+DEFINE_UNARY_OP(cos,    vec::cos256_ps(v),                              unary_ops::cos_val)
+DEFINE_UNARY_OP(tan,    _mm256_div_ps(vec::sin256_ps(v), vec::cos256_ps(v)), unary_ops::tan_val)
+DEFINE_UNARY_OP(tanh,   vec::tanh256_ps(v),                             unary_ops::tanh_val)
+DEFINE_UNARY_OP(sigmoid, vec::sigmoid256_ps(v),                         unary_ops::sigmoid_val)
+DEFINE_UNARY_OP(relu,   _mm256_max_ps(v, _mm256_setzero_ps()),          unary_ops::relu_val)
+DEFINE_UNARY_OP(ceil,   _mm256_ceil_ps(v),                              unary_ops::ceil_val)
+DEFINE_UNARY_OP(floor,  _mm256_floor_ps(v),                             unary_ops::floor_val)
+DEFINE_UNARY_OP(round,  _mm256_round_ps(v, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC), unary_ops::round_val)
+DEFINE_UNARY_OP(sign,   _mm256_or_ps(_mm256_and_ps(_mm256_cmp_ps(v, _mm256_setzero_ps(), _CMP_GT_OS), _mm256_set1_ps(1.0f)), _mm256_and_ps(_mm256_cmp_ps(v, _mm256_setzero_ps(), _CMP_LT_OS), _mm256_set1_ps(-1.0f))), unary_ops::sign_val)
+DEFINE_UNARY_OP(reciprocal, _mm256_div_ps(vec::_ps256_1(), v),          unary_ops::reciprocal_val)
 
-DEFINE_UNARY_OP_INPLACE(neg, -data[i])
-DEFINE_UNARY_OP_INPLACE(abs, std::abs(data[i]))
-DEFINE_UNARY_OP_INPLACE(sqrt, std::sqrt(data[i]))
-DEFINE_UNARY_OP_INPLACE(exp, std::exp(data[i]))
-DEFINE_UNARY_OP_INPLACE(log, std::log(data[i]))
-DEFINE_UNARY_OP_INPLACE(sin, std::sin(data[i]))
-DEFINE_UNARY_OP_INPLACE(cos, std::cos(data[i]))
-DEFINE_UNARY_OP_INPLACE(tanh, std::tanh(data[i]))
-DEFINE_UNARY_OP_INPLACE(sigmoid, static_cast<scalar_t>(1) / (static_cast<scalar_t>(1) + std::exp(-data[i])))
-DEFINE_UNARY_OP_INPLACE(relu, data[i] > 0 ? data[i] : static_cast<scalar_t>(0))
-DEFINE_UNARY_OP_INPLACE(ceil, std::ceil(data[i]))
-DEFINE_UNARY_OP_INPLACE(floor, std::floor(data[i]))
-DEFINE_UNARY_OP_INPLACE(round, std::round(data[i]))
+// In-place variants
+DEFINE_UNARY_OP_INPLACE(neg,     _mm256_xor_ps(v, vec::_ps256_sign_mask()),       unary_ops::neg_val)
+DEFINE_UNARY_OP_INPLACE(abs,     _mm256_and_ps(v, vec::_ps256_abs_mask()),        unary_ops::abs_val)
+DEFINE_UNARY_OP_INPLACE(sqrt,    _mm256_sqrt_ps(v),                              unary_ops::sqrt_val)
+DEFINE_UNARY_OP_INPLACE(exp,     vec::exp256_ps(v),                              unary_ops::exp_val)
+DEFINE_UNARY_OP_INPLACE(log,     vec::log256_ps(v),                              unary_ops::log_val)
+DEFINE_UNARY_OP_INPLACE(sin,     vec::sin256_ps(v),                              unary_ops::sin_val)
+DEFINE_UNARY_OP_INPLACE(cos,     vec::cos256_ps(v),                              unary_ops::cos_val)
+DEFINE_UNARY_OP_INPLACE(tanh,    vec::tanh256_ps(v),                             unary_ops::tanh_val)
+DEFINE_UNARY_OP_INPLACE(sigmoid, vec::sigmoid256_ps(v),                          unary_ops::sigmoid_val)
+DEFINE_UNARY_OP_INPLACE(relu,    _mm256_max_ps(v, _mm256_setzero_ps()),          unary_ops::relu_val)
+DEFINE_UNARY_OP_INPLACE(ceil,    _mm256_ceil_ps(v),                              unary_ops::ceil_val)
+DEFINE_UNARY_OP_INPLACE(floor,   _mm256_floor_ps(v),                             unary_ops::floor_val)
+DEFINE_UNARY_OP_INPLACE(round,   _mm256_round_ps(v, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC), unary_ops::round_val)
 
 #undef DEFINE_UNARY_OP
 #undef DEFINE_UNARY_OP_INPLACE
@@ -195,14 +248,19 @@ inline Tensor& zero_(Tensor& self) {
 }
 
 inline Tensor& fill_(Tensor& self, Scalar value) {
+    // AVX2 fast path for contiguous float
+    if (self.dtype() == c10::ScalarType::Float && self.is_contiguous()) {
+        vec::vectorized_fill(self.mutable_data_ptr<float>(),
+                             static_cast<float>(value.toDouble()), self.numel());
+        return self;
+    }
+
     PT_DISPATCH_ALL_TYPES(self.dtype(), "fill_", [&] {
         scalar_t val = value.to<scalar_t>();
         if (self.is_contiguous()) {
             scalar_t* data = self.mutable_data_ptr<scalar_t>();
             int64_t numel = self.numel();
-            for (int64_t i = 0; i < numel; ++i) {
-                data[i] = val;
-            }
+            for (int64_t i = 0; i < numel; ++i) data[i] = val;
         } else {
             scalar_t* base = self.mutable_data_ptr<scalar_t>();
             int64_t n = self.numel();
@@ -384,9 +442,79 @@ inline Tensor diag(const Tensor& self, int64_t diagonal = 0) {
 
 // Tensor + Tensor with broadcasting
 inline Tensor add(const Tensor& self, const Tensor& other, Scalar alpha = 1) {
+    // Ultra-fast path: float, same shape, contiguous — skip all dispatch overhead
+    if (self.dtype() == c10::ScalarType::Float && other.dtype() == c10::ScalarType::Float &&
+        self.sizes() == other.sizes() && self.is_contiguous() && other.is_contiguous()) {
+        Tensor result = empty_like(self);
+        const float* a = self.data_ptr<float>();
+        const float* b = other.data_ptr<float>();
+        float* out = result.mutable_data_ptr<float>();
+        float alpha_val = static_cast<float>(alpha.toDouble());
+        int64_t n = result.numel();
+        int64_t i = 0;
+        if (alpha_val == 1.0f) {
+            for (; i + 32 <= n; i += 32) {
+                _mm256_storeu_ps(out + i,      _mm256_add_ps(_mm256_loadu_ps(a + i),      _mm256_loadu_ps(b + i)));
+                _mm256_storeu_ps(out + i + 8,  _mm256_add_ps(_mm256_loadu_ps(a + i + 8),  _mm256_loadu_ps(b + i + 8)));
+                _mm256_storeu_ps(out + i + 16, _mm256_add_ps(_mm256_loadu_ps(a + i + 16), _mm256_loadu_ps(b + i + 16)));
+                _mm256_storeu_ps(out + i + 24, _mm256_add_ps(_mm256_loadu_ps(a + i + 24), _mm256_loadu_ps(b + i + 24)));
+            }
+            for (; i + 8 <= n; i += 8)
+                _mm256_storeu_ps(out + i, _mm256_add_ps(_mm256_loadu_ps(a + i), _mm256_loadu_ps(b + i)));
+        } else {
+            __m256 valpha = _mm256_set1_ps(alpha_val);
+            for (; i + 32 <= n; i += 32) {
+                _mm256_storeu_ps(out + i,      _mm256_fmadd_ps(valpha, _mm256_loadu_ps(b + i),      _mm256_loadu_ps(a + i)));
+                _mm256_storeu_ps(out + i + 8,  _mm256_fmadd_ps(valpha, _mm256_loadu_ps(b + i + 8),  _mm256_loadu_ps(a + i + 8)));
+                _mm256_storeu_ps(out + i + 16, _mm256_fmadd_ps(valpha, _mm256_loadu_ps(b + i + 16), _mm256_loadu_ps(a + i + 16)));
+                _mm256_storeu_ps(out + i + 24, _mm256_fmadd_ps(valpha, _mm256_loadu_ps(b + i + 24), _mm256_loadu_ps(a + i + 24)));
+            }
+            for (; i + 8 <= n; i += 8)
+                _mm256_storeu_ps(out + i, _mm256_fmadd_ps(valpha, _mm256_loadu_ps(b + i), _mm256_loadu_ps(a + i)));
+        }
+        for (; i < n; ++i) out[i] = a[i] + alpha_val * b[i];
+        return result;
+    }
+
+    // AVX2 broadcast fast path: [*, N] + [N] (bias addition pattern)
+    if (self.dtype() == c10::ScalarType::Float && other.dtype() == c10::ScalarType::Float &&
+        self.is_contiguous() && other.is_contiguous() && other.dim() == 1 &&
+        self.dim() >= 2 && self.size(-1) == other.size(0)) {
+        Tensor result = empty_like(self);
+        const float* a = self.data_ptr<float>();
+        const float* b = other.data_ptr<float>();
+        float* out = result.mutable_data_ptr<float>();
+        float alpha_val = static_cast<float>(alpha.toDouble());
+        int64_t inner = other.size(0);
+        int64_t outer = self.numel() / inner;
+        if (alpha_val == 1.0f) {
+            for (int64_t o = 0; o < outer; ++o) {
+                const float* row_a = a + o * inner;
+                float* row_out = out + o * inner;
+                int64_t j = 0;
+                for (; j + 8 <= inner; j += 8)
+                    _mm256_storeu_ps(row_out + j, _mm256_add_ps(
+                        _mm256_loadu_ps(row_a + j), _mm256_loadu_ps(b + j)));
+                for (; j < inner; ++j) row_out[j] = row_a[j] + b[j];
+            }
+        } else {
+            __m256 valpha = _mm256_set1_ps(alpha_val);
+            for (int64_t o = 0; o < outer; ++o) {
+                const float* row_a = a + o * inner;
+                float* row_out = out + o * inner;
+                int64_t j = 0;
+                for (; j + 8 <= inner; j += 8)
+                    _mm256_storeu_ps(row_out + j, _mm256_fmadd_ps(
+                        valpha, _mm256_loadu_ps(b + j), _mm256_loadu_ps(row_a + j)));
+                for (; j < inner; ++j) row_out[j] = row_a[j] + alpha_val * b[j];
+            }
+        }
+        return result;
+    }
+
+    // General path with broadcasting and type promotion
     auto result_shape = detail::broadcast_shapes(self.sizes(), other.sizes());
     c10::ScalarType result_dtype = c10::promoteTypes(self.dtype(), other.dtype());
-
     Tensor result = empty(result_shape, TensorOptions().dtype(result_dtype).device(self.device()));
 
     PT_DISPATCH_ALL_TYPES(result_dtype, "add", [&] {
@@ -394,19 +522,13 @@ inline Tensor add(const Tensor& self, const Tensor& other, Scalar alpha = 1) {
         scalar_t* out = result.mutable_data_ptr<scalar_t>();
         int64_t n = result.numel();
 
-        // Simple case: same shape, contiguous
         if (self.sizes() == other.sizes() && self.is_contiguous() && other.is_contiguous()) {
             const scalar_t* a = self.data_ptr<scalar_t>();
             const scalar_t* b = other.data_ptr<scalar_t>();
-
-            for (int64_t i = 0; i < n; ++i) {
-                out[i] = a[i] + alpha_val * b[i];
-            }
+            for (int64_t i = 0; i < n; ++i) out[i] = a[i] + alpha_val * b[i];
         } else {
-            // Broadcasting case - simplified implementation
             const scalar_t* a = self.data_ptr<scalar_t>();
             const scalar_t* b = other.data_ptr<scalar_t>();
-
             for (int64_t i = 0; i < n; ++i) {
                 int64_t idx_a = detail::broadcast_index(i, result.sizes(), self.sizes(), self.strides());
                 int64_t idx_b = detail::broadcast_index(i, result.sizes(), other.sizes(), other.strides());
@@ -419,13 +541,48 @@ inline Tensor add(const Tensor& self, const Tensor& other, Scalar alpha = 1) {
 }
 
 inline Tensor sub(const Tensor& self, const Tensor& other, Scalar alpha = 1) {
+    // Direct AVX2 fast path for sub (avoids alpha dispatch in add)
+    if (alpha.toDouble() == 1.0 &&
+        self.dtype() == c10::ScalarType::Float && other.dtype() == c10::ScalarType::Float &&
+        self.sizes() == other.sizes() && self.is_contiguous() && other.is_contiguous()) {
+        Tensor result = empty_like(self);
+        const float* a = self.data_ptr<float>();
+        const float* b = other.data_ptr<float>();
+        float* out = result.mutable_data_ptr<float>();
+        int64_t n = result.numel();
+        int64_t i = 0;
+        for (; i + 8 <= n; i += 8)
+            _mm256_storeu_ps(out + i, _mm256_sub_ps(_mm256_loadu_ps(a + i), _mm256_loadu_ps(b + i)));
+        for (; i < n; ++i) out[i] = a[i] - b[i];
+        return result;
+    }
     return add(self, other, Scalar(-alpha.toDouble()));
 }
 
 inline Tensor mul(const Tensor& self, const Tensor& other) {
+    // Ultra-fast path: float, same shape, contiguous
+    if (self.dtype() == c10::ScalarType::Float && other.dtype() == c10::ScalarType::Float &&
+        self.sizes() == other.sizes() && self.is_contiguous() && other.is_contiguous()) {
+        Tensor result = empty_like(self);
+        const float* a = self.data_ptr<float>();
+        const float* b = other.data_ptr<float>();
+        float* out = result.mutable_data_ptr<float>();
+        int64_t n = result.numel();
+        int64_t i = 0;
+        for (; i + 32 <= n; i += 32) {
+            _mm256_storeu_ps(out + i,      _mm256_mul_ps(_mm256_loadu_ps(a + i),      _mm256_loadu_ps(b + i)));
+            _mm256_storeu_ps(out + i + 8,  _mm256_mul_ps(_mm256_loadu_ps(a + i + 8),  _mm256_loadu_ps(b + i + 8)));
+            _mm256_storeu_ps(out + i + 16, _mm256_mul_ps(_mm256_loadu_ps(a + i + 16), _mm256_loadu_ps(b + i + 16)));
+            _mm256_storeu_ps(out + i + 24, _mm256_mul_ps(_mm256_loadu_ps(a + i + 24), _mm256_loadu_ps(b + i + 24)));
+        }
+        for (; i + 8 <= n; i += 8)
+            _mm256_storeu_ps(out + i, _mm256_mul_ps(_mm256_loadu_ps(a + i), _mm256_loadu_ps(b + i)));
+        for (; i < n; ++i) out[i] = a[i] * b[i];
+        return result;
+    }
+
     auto result_shape = detail::broadcast_shapes(self.sizes(), other.sizes());
     c10::ScalarType result_dtype = c10::promoteTypes(self.dtype(), other.dtype());
-
     Tensor result = empty(result_shape, TensorOptions().dtype(result_dtype).device(self.device()));
 
     PT_DISPATCH_ALL_TYPES(result_dtype, "mul", [&] {
@@ -435,14 +592,10 @@ inline Tensor mul(const Tensor& self, const Tensor& other) {
         if (self.sizes() == other.sizes() && self.is_contiguous() && other.is_contiguous()) {
             const scalar_t* a = self.data_ptr<scalar_t>();
             const scalar_t* b = other.data_ptr<scalar_t>();
-
-            for (int64_t i = 0; i < n; ++i) {
-                out[i] = a[i] * b[i];
-            }
+            for (int64_t i = 0; i < n; ++i) out[i] = a[i] * b[i];
         } else {
             const scalar_t* a = self.data_ptr<scalar_t>();
             const scalar_t* b = other.data_ptr<scalar_t>();
-
             for (int64_t i = 0; i < n; ++i) {
                 int64_t idx_a = detail::broadcast_index(i, result.sizes(), self.sizes(), self.strides());
                 int64_t idx_b = detail::broadcast_index(i, result.sizes(), other.sizes(), other.strides());
@@ -455,10 +608,24 @@ inline Tensor mul(const Tensor& self, const Tensor& other) {
 }
 
 inline Tensor div(const Tensor& self, const Tensor& other) {
+    // Ultra-fast path: float, same shape, contiguous
+    if (self.dtype() == c10::ScalarType::Float && other.dtype() == c10::ScalarType::Float &&
+        self.sizes() == other.sizes() && self.is_contiguous() && other.is_contiguous()) {
+        Tensor result = empty_like(self);
+        const float* a = self.data_ptr<float>();
+        const float* b = other.data_ptr<float>();
+        float* out = result.mutable_data_ptr<float>();
+        int64_t n = result.numel();
+        int64_t i = 0;
+        for (; i + 8 <= n; i += 8)
+            _mm256_storeu_ps(out + i, _mm256_div_ps(_mm256_loadu_ps(a + i), _mm256_loadu_ps(b + i)));
+        for (; i < n; ++i) out[i] = a[i] / b[i];
+        return result;
+    }
+
     auto result_shape = detail::broadcast_shapes(self.sizes(), other.sizes());
     c10::ScalarType result_dtype = c10::promoteTypes(self.dtype(), other.dtype());
 
-    // Division always promotes to float
     if (c10::isIntegralType(result_dtype, true)) {
         result_dtype = c10::ScalarType::Float;
     }
@@ -472,14 +639,10 @@ inline Tensor div(const Tensor& self, const Tensor& other) {
         if (self.sizes() == other.sizes() && self.is_contiguous() && other.is_contiguous()) {
             const scalar_t* a = self.data_ptr<scalar_t>();
             const scalar_t* b = other.data_ptr<scalar_t>();
-
-            for (int64_t i = 0; i < n; ++i) {
-                out[i] = a[i] / b[i];
-            }
+            for (int64_t i = 0; i < n; ++i) out[i] = a[i] / b[i];
         } else {
             const scalar_t* a = self.data_ptr<scalar_t>();
             const scalar_t* b = other.data_ptr<scalar_t>();
-
             for (int64_t i = 0; i < n; ++i) {
                 int64_t idx_a = detail::broadcast_index(i, result.sizes(), self.sizes(), self.strides());
                 int64_t idx_b = detail::broadcast_index(i, result.sizes(), other.sizes(), other.strides());
@@ -497,15 +660,24 @@ inline Tensor add(const Tensor& self, Scalar other, Scalar alpha = 1) {
     Tensor result = empty_like(input);
     double val = other.toDouble() * alpha.toDouble();
 
+    if (input.dtype() == c10::ScalarType::Float) {
+        const float* in = input.data_ptr<float>();
+        float* out = result.mutable_data_ptr<float>();
+        float fval = static_cast<float>(val);
+        __m256 vval = _mm256_set1_ps(fval);
+        int64_t n = input.numel(), i = 0;
+        for (; i + 8 <= n; i += 8)
+            _mm256_storeu_ps(out + i, _mm256_add_ps(_mm256_loadu_ps(in + i), vval));
+        for (; i < n; ++i) out[i] = in[i] + fval;
+        return result;
+    }
+
     PT_DISPATCH_ALL_TYPES(input.dtype(), "add_scalar", [&] {
         const scalar_t* in = input.data_ptr<scalar_t>();
         scalar_t* out = result.mutable_data_ptr<scalar_t>();
         scalar_t scalar_val = static_cast<scalar_t>(val);
         int64_t n = input.numel();
-
-        for (int64_t i = 0; i < n; ++i) {
-            out[i] = in[i] + scalar_val;
-        }
+        for (int64_t i = 0; i < n; ++i) out[i] = in[i] + scalar_val;
     });
 
     return result;
@@ -519,15 +691,24 @@ inline Tensor mul(const Tensor& self, Scalar other) {
     Tensor input = self.is_contiguous() ? self : self.contiguous();
     Tensor result = empty_like(input);
 
+    if (input.dtype() == c10::ScalarType::Float) {
+        const float* in = input.data_ptr<float>();
+        float* out = result.mutable_data_ptr<float>();
+        float fval = static_cast<float>(other.toDouble());
+        __m256 vval = _mm256_set1_ps(fval);
+        int64_t n = input.numel(), i = 0;
+        for (; i + 8 <= n; i += 8)
+            _mm256_storeu_ps(out + i, _mm256_mul_ps(_mm256_loadu_ps(in + i), vval));
+        for (; i < n; ++i) out[i] = in[i] * fval;
+        return result;
+    }
+
     PT_DISPATCH_ALL_TYPES(input.dtype(), "mul_scalar", [&] {
         const scalar_t* in = input.data_ptr<scalar_t>();
         scalar_t* out = result.mutable_data_ptr<scalar_t>();
         scalar_t scalar_val = other.to<scalar_t>();
         int64_t n = input.numel();
-
-        for (int64_t i = 0; i < n; ++i) {
-            out[i] = in[i] * scalar_val;
-        }
+        for (int64_t i = 0; i < n; ++i) out[i] = in[i] * scalar_val;
     });
 
     return result;
@@ -591,15 +772,29 @@ inline Tensor pow(const Tensor& self, const Tensor& exponent) {
 inline Tensor& add_(Tensor& self, const Tensor& other, Scalar alpha = 1) {
     PT_CHECK_MSG(self.sizes() == other.sizes(), "In-place operation requires same shapes");
 
+    if (self.dtype() == c10::ScalarType::Float && self.is_contiguous() && other.is_contiguous()) {
+        float* data = self.mutable_data_ptr<float>();
+        const float* other_data = other.data_ptr<float>();
+        float alpha_val = static_cast<float>(alpha.toDouble());
+        int64_t n = self.numel(), i = 0;
+        if (alpha_val == 1.0f) {
+            for (; i + 8 <= n; i += 8)
+                _mm256_storeu_ps(data + i, _mm256_add_ps(_mm256_loadu_ps(data + i), _mm256_loadu_ps(other_data + i)));
+        } else {
+            __m256 va = _mm256_set1_ps(alpha_val);
+            for (; i + 8 <= n; i += 8)
+                _mm256_storeu_ps(data + i, _mm256_fmadd_ps(va, _mm256_loadu_ps(other_data + i), _mm256_loadu_ps(data + i)));
+        }
+        for (; i < n; ++i) data[i] += alpha_val * other_data[i];
+        return self;
+    }
+
     PT_DISPATCH_ALL_TYPES(self.dtype(), "add_", [&] {
         scalar_t* data = self.mutable_data_ptr<scalar_t>();
         const scalar_t* other_data = other.data_ptr<scalar_t>();
         scalar_t alpha_val = alpha.to<scalar_t>();
         int64_t n = self.numel();
-
-        for (int64_t i = 0; i < n; ++i) {
-            data[i] += alpha_val * other_data[i];
-        }
+        for (int64_t i = 0; i < n; ++i) data[i] += alpha_val * other_data[i];
     });
 
     return self;
@@ -612,14 +807,21 @@ inline Tensor& sub_(Tensor& self, const Tensor& other, Scalar alpha = 1) {
 inline Tensor& mul_(Tensor& self, const Tensor& other) {
     PT_CHECK_MSG(self.sizes() == other.sizes(), "In-place operation requires same shapes");
 
+    if (self.dtype() == c10::ScalarType::Float && self.is_contiguous() && other.is_contiguous()) {
+        float* data = self.mutable_data_ptr<float>();
+        const float* other_data = other.data_ptr<float>();
+        int64_t n = self.numel(), i = 0;
+        for (; i + 8 <= n; i += 8)
+            _mm256_storeu_ps(data + i, _mm256_mul_ps(_mm256_loadu_ps(data + i), _mm256_loadu_ps(other_data + i)));
+        for (; i < n; ++i) data[i] *= other_data[i];
+        return self;
+    }
+
     PT_DISPATCH_ALL_TYPES(self.dtype(), "mul_", [&] {
         scalar_t* data = self.mutable_data_ptr<scalar_t>();
         const scalar_t* other_data = other.data_ptr<scalar_t>();
         int64_t n = self.numel();
-
-        for (int64_t i = 0; i < n; ++i) {
-            data[i] *= other_data[i];
-        }
+        for (int64_t i = 0; i < n; ++i) data[i] *= other_data[i];
     });
 
     return self;
@@ -642,14 +844,22 @@ inline Tensor& div_(Tensor& self, const Tensor& other) {
 }
 
 inline Tensor& add_(Tensor& self, Scalar other, Scalar alpha = 1) {
+    if (self.dtype() == c10::ScalarType::Float && self.is_contiguous()) {
+        float* data = self.mutable_data_ptr<float>();
+        float val = static_cast<float>(other.toDouble() * alpha.toDouble());
+        __m256 vval = _mm256_set1_ps(val);
+        int64_t n = self.numel(), i = 0;
+        for (; i + 8 <= n; i += 8)
+            _mm256_storeu_ps(data + i, _mm256_add_ps(_mm256_loadu_ps(data + i), vval));
+        for (; i < n; ++i) data[i] += val;
+        return self;
+    }
+
     PT_DISPATCH_ALL_TYPES(self.dtype(), "add_scalar_", [&] {
         scalar_t* data = self.mutable_data_ptr<scalar_t>();
         scalar_t val = static_cast<scalar_t>(other.toDouble() * alpha.toDouble());
         int64_t n = self.numel();
-
-        for (int64_t i = 0; i < n; ++i) {
-            data[i] += val;
-        }
+        for (int64_t i = 0; i < n; ++i) data[i] += val;
     });
 
     return self;
@@ -660,14 +870,22 @@ inline Tensor& sub_(Tensor& self, Scalar other, Scalar alpha = 1) {
 }
 
 inline Tensor& mul_(Tensor& self, Scalar other) {
+    if (self.dtype() == c10::ScalarType::Float && self.is_contiguous()) {
+        float* data = self.mutable_data_ptr<float>();
+        float val = static_cast<float>(other.toDouble());
+        __m256 vval = _mm256_set1_ps(val);
+        int64_t n = self.numel(), i = 0;
+        for (; i + 8 <= n; i += 8)
+            _mm256_storeu_ps(data + i, _mm256_mul_ps(_mm256_loadu_ps(data + i), vval));
+        for (; i < n; ++i) data[i] *= val;
+        return self;
+    }
+
     PT_DISPATCH_ALL_TYPES(self.dtype(), "mul_scalar_", [&] {
         scalar_t* data = self.mutable_data_ptr<scalar_t>();
         scalar_t val = other.to<scalar_t>();
         int64_t n = self.numel();
-
-        for (int64_t i = 0; i < n; ++i) {
-            data[i] *= val;
-        }
+        for (int64_t i = 0; i < n; ++i) data[i] *= val;
     });
 
     return self;
@@ -686,16 +904,29 @@ inline Tensor& addcmul_(Tensor& self, const Tensor& tensor1, const Tensor& tenso
     PT_CHECK_MSG(self.sizes() == tensor1.sizes() && self.sizes() == tensor2.sizes(),
                  "addcmul_ requires all tensors to have the same shape");
 
+    if (self.dtype() == c10::ScalarType::Float && self.is_contiguous() &&
+        tensor1.is_contiguous() && tensor2.is_contiguous()) {
+        float* data = self.mutable_data_ptr<float>();
+        const float* t1 = tensor1.data_ptr<float>();
+        const float* t2 = tensor2.data_ptr<float>();
+        float val = static_cast<float>(value.toDouble());
+        __m256 vval = _mm256_set1_ps(val);
+        int64_t n = self.numel(), i = 0;
+        for (; i + 8 <= n; i += 8)
+            _mm256_storeu_ps(data + i, _mm256_fmadd_ps(vval,
+                _mm256_mul_ps(_mm256_loadu_ps(t1 + i), _mm256_loadu_ps(t2 + i)),
+                _mm256_loadu_ps(data + i)));
+        for (; i < n; ++i) data[i] += val * t1[i] * t2[i];
+        return self;
+    }
+
     PT_DISPATCH_FLOATING_TYPES(self.dtype(), "addcmul_", [&] {
         scalar_t* data = self.mutable_data_ptr<scalar_t>();
         const scalar_t* t1 = tensor1.data_ptr<scalar_t>();
         const scalar_t* t2 = tensor2.data_ptr<scalar_t>();
         scalar_t val = value.to<scalar_t>();
         int64_t n = self.numel();
-
-        for (int64_t i = 0; i < n; ++i) {
-            data[i] += val * t1[i] * t2[i];
-        }
+        for (int64_t i = 0; i < n; ++i) data[i] += val * t1[i] * t2[i];
     });
 
     return self;
@@ -712,16 +943,29 @@ inline Tensor& addcdiv_(Tensor& self, const Tensor& tensor1, const Tensor& tenso
     PT_CHECK_MSG(self.sizes() == tensor1.sizes() && self.sizes() == tensor2.sizes(),
                  "addcdiv_ requires all tensors to have the same shape");
 
+    if (self.dtype() == c10::ScalarType::Float && self.is_contiguous() &&
+        tensor1.is_contiguous() && tensor2.is_contiguous()) {
+        float* data = self.mutable_data_ptr<float>();
+        const float* t1 = tensor1.data_ptr<float>();
+        const float* t2 = tensor2.data_ptr<float>();
+        float val = static_cast<float>(value.toDouble());
+        __m256 vval = _mm256_set1_ps(val);
+        int64_t n = self.numel(), i = 0;
+        for (; i + 8 <= n; i += 8)
+            _mm256_storeu_ps(data + i, _mm256_fmadd_ps(vval,
+                _mm256_div_ps(_mm256_loadu_ps(t1 + i), _mm256_loadu_ps(t2 + i)),
+                _mm256_loadu_ps(data + i)));
+        for (; i < n; ++i) data[i] += val * t1[i] / t2[i];
+        return self;
+    }
+
     PT_DISPATCH_FLOATING_TYPES(self.dtype(), "addcdiv_", [&] {
         scalar_t* data = self.mutable_data_ptr<scalar_t>();
         const scalar_t* t1 = tensor1.data_ptr<scalar_t>();
         const scalar_t* t2 = tensor2.data_ptr<scalar_t>();
         scalar_t val = value.to<scalar_t>();
         int64_t n = self.numel();
-
-        for (int64_t i = 0; i < n; ++i) {
-            data[i] += val * t1[i] / t2[i];
-        }
+        for (int64_t i = 0; i < n; ++i) data[i] += val * t1[i] / t2[i];
     });
 
     return self;

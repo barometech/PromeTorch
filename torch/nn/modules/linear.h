@@ -3,6 +3,13 @@
 #include "torch/nn/module.h"
 #include "torch/nn/init.h"
 #include "torch/csrc/autograd/autograd.h"
+#include "torch/csrc/autograd/grad_mode.h"
+#include "aten/src/ATen/native/cpu/PromeBLAS.h"
+#ifdef _MSC_VER
+#include <intrin.h>
+#else
+#include <immintrin.h>
+#endif
 #include <cmath>
 
 namespace torch {
@@ -79,42 +86,83 @@ public:
     }
 
     Tensor forward(const Tensor& input) override {
-        // y = xW^T + b
-        // Use autograd-tracked operations for gradient computation
-        auto* weight = get_parameter("weight");
-        // CRITICAL: Use t_autograd() to maintain gradient flow through transpose!
-        Tensor weight_t = torch::autograd::t_autograd(weight->data());
+        auto* weight_param = get_parameter("weight");
+        Tensor W = weight_param->data();  // [out_features, in_features]
+
+        // ================================================================
+        // Fast path: no autograd needed (inference or NoGradGuard)
+        // Bypass all autograd wrappers — direct sgemm_nt + AVX2 bias
+        // ================================================================
+        bool need_grad = torch::autograd::GradMode::is_enabled() &&
+                         (input.requires_grad() || W.requires_grad());
+
+        if (!need_grad && input.dim() >= 2 && W.dtype() == c10::ScalarType::Float) {
+            Tensor x = input.contiguous();
+            const float* x_data = x.data_ptr<float>();
+            const float* w_data = W.data_ptr<float>();
+
+            // Flatten to 2D if needed
+            int64_t M = 1;
+            for (int64_t d = 0; d < input.dim() - 1; ++d) M *= input.size(d);
+            int64_t K = in_features_;
+            int64_t N = out_features_;
+
+            Tensor result = at::empty({M, N});
+            float* out = result.mutable_data_ptr<float>();
+
+            // y = x @ W^T  (W is [N, K], we want x[M,K] @ W^T[K,N])
+            at::native::blas::sgemm_nt(M, K, N, 1.0f, x_data, K, w_data, K, 0.0f, out, N);
+
+            // Fused bias add with AVX2
+            if (has_bias_) {
+                auto* bias_param = get_parameter("bias");
+                const float* b = bias_param->data().data_ptr<float>();
+                for (int64_t i = 0; i < M; ++i) {
+                    float* row = out + i * N;
+                    int64_t j = 0;
+                    for (; j + 8 <= N; j += 8) {
+                        _mm256_storeu_ps(row + j,
+                            _mm256_add_ps(_mm256_loadu_ps(row + j), _mm256_loadu_ps(b + j)));
+                    }
+                    for (; j < N; ++j) row[j] += b[j];
+                }
+            }
+
+            // Reshape back if input was >2D
+            if (input.dim() > 2) {
+                std::vector<int64_t> out_shape(input.sizes().begin(), input.sizes().end() - 1);
+                out_shape.push_back(N);
+                result = result.reshape(out_shape);
+            }
+            return result;
+        }
+
+        // ================================================================
+        // Autograd path: full gradient tracking
+        // ================================================================
+        Tensor weight_t = torch::autograd::t_autograd(W);
         Tensor output;
 
         if (input.dim() == 1) {
-            // Input is [in_features], output is [out_features]
-            output = torch::autograd::mv_autograd(weight->data(), input);
+            output = torch::autograd::mv_autograd(W, input);
         } else if (input.dim() == 2) {
-            // Input is [batch, in_features], output is [batch, out_features]
-            // y = x @ W^T
             output = torch::autograd::mm_autograd(input, weight_t);
         } else {
-            // Input is [*, in_features], output is [*, out_features]
-            // Flatten to 2D, compute, reshape back
-            // IMPORTANT: Use autograd-aware reshape to maintain gradient flow!
             auto input_shape = input.sizes().vec();
             int64_t batch = 1;
             for (size_t i = 0; i < input_shape.size() - 1; ++i) {
                 batch *= input_shape[i];
             }
-
             Tensor input_2d = torch::autograd::reshape_autograd(input, {batch, in_features_});
             Tensor output_2d = torch::autograd::mm_autograd(input_2d, weight_t);
-
-            // Reshape back - use autograd-aware reshape
             std::vector<int64_t> output_shape(input_shape.begin(), input_shape.end() - 1);
             output_shape.push_back(out_features_);
             output = torch::autograd::reshape_autograd(output_2d, output_shape);
         }
 
         if (has_bias_) {
-            auto* bias = get_parameter("bias");
-            output = torch::autograd::add_autograd(output, bias->data());
+            auto* bias_param = get_parameter("bias");
+            output = torch::autograd::add_autograd(output, bias_param->data());
         }
 
         return output;

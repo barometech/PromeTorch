@@ -16,6 +16,7 @@ option(PT_USE_CUDA "Enable CUDA support" OFF)
 option(PT_USE_OPENMP "Enable OpenMP for CPU parallelization" OFF)
 option(PT_USE_AVX "Enable AVX instructions" ON)
 option(PT_USE_AVX2 "Enable AVX2 instructions" ON)
+option(PT_USE_NMCARD "Enable NM Card Mini support (emulator)" OFF)
 
 # ============================================================================
 # C++ Standard
@@ -274,6 +275,38 @@ target_link_libraries(aten INTERFACE c10)
 if(PT_USE_CUDA)
     target_link_libraries(aten INTERFACE aten_cuda)
     target_compile_definitions(aten INTERFACE PT_USE_CUDA)
+endif()
+
+# ============================================================================
+# NM Card Mini Backend (Emulator)
+# ============================================================================
+
+if(PT_USE_NMCARD)
+    set(NMCARD_SOURCES
+        c10/nmcard/NMCardAllocator.cpp
+        aten/src/ATen/nmcard/NMCardEmulator.cpp
+    )
+
+    if(PT_BUILD_SHARED_LIBS)
+        add_library(aten_nmcard SHARED ${NMCARD_SOURCES})
+        target_compile_definitions(aten_nmcard PRIVATE ATEN_NMCARD_EXPORTS PT_BUILD_SHARED_LIBS)
+    else()
+        add_library(aten_nmcard STATIC ${NMCARD_SOURCES})
+    endif()
+
+    target_include_directories(aten_nmcard PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+    )
+    target_link_libraries(aten_nmcard PUBLIC c10)
+
+    set_target_properties(aten_nmcard PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+        ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+    )
+
+    target_link_libraries(aten INTERFACE aten_nmcard)
+    target_compile_definitions(aten INTERFACE PT_USE_NMCARD)
 endif()
 
 if(PT_USE_OPENMP AND OpenMP_CXX_FOUND)
@@ -597,6 +630,18 @@ if(PT_BUILD_TESTS)
     )
 
     gtest_discover_tests(edge_case_tests)
+
+    # NM Card Mini Emulator Test (only when NMCard is enabled)
+    if(PT_USE_NMCARD)
+        add_executable(nmcard_tests
+            test/cpp/test_nmcard.cpp
+        )
+        target_link_libraries(nmcard_tests
+            PRIVATE
+            aten
+        )
+        add_test(NAME nmcard_tests COMMAND nmcard_tests)
+    endif()
 endif()
 
 # ============================================================================
@@ -665,6 +710,10 @@ add_subdirectory(examples/rnn)
 add_subdirectory(examples/transformer)
 add_subdirectory(examples/vit)
 add_subdirectory(examples/gguf)
+if(PT_USE_NMCARD)
+    add_subdirectory(examples/nmcard)
+endif()
+add_subdirectory(benchmarks)
 
 # ============================================================================
 # Installation
@@ -673,6 +722,9 @@ add_subdirectory(examples/gguf)
 set(INSTALL_TARGETS c10 aten torch_autograd torch_nn torch_optim torch_data)
 if(PT_USE_CUDA)
     list(APPEND INSTALL_TARGETS aten_cuda)
+endif()
+if(PT_USE_NMCARD)
+    list(APPEND INSTALL_TARGETS aten_nmcard)
 endif()
 
 install(TARGETS ${INSTALL_TARGETS}
@@ -747,6 +799,7 @@ if(PT_USE_CUDA AND PT_USE_CUDNN)
 else()
     message(STATUS "  cuDNN: OFF")
 endif()
+message(STATUS "  NMCard Mini: ${PT_USE_NMCARD}")
 message(STATUS "  AVX: ${PT_USE_AVX}")
 message(STATUS "  AVX2: ${PT_USE_AVX2}")
 message(STATUS "")

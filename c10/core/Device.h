@@ -87,7 +87,7 @@ inline const char* DeviceTypeName(DeviceType type, bool lower_case = false) {
         case DeviceType::MTIA:
             return lower_case ? "mtia" : "MTIA";
         case DeviceType::PrivateUse1:
-            return lower_case ? "privateuseone" : "PrivateUseOne";
+            return lower_case ? "nmcard" : "NMCard";
         default:
             return lower_case ? "unknown" : "Unknown";
     }
@@ -145,6 +145,7 @@ public:
     bool is_meta() const noexcept { return type_ == DeviceType::Meta; }
     bool is_vulkan() const noexcept { return type_ == DeviceType::Vulkan; }
     bool is_metal() const noexcept { return type_ == DeviceType::Metal; }
+    bool is_nmcard() const noexcept { return type_ == DeviceType::PrivateUse1; }
 
     bool has_index() const noexcept { return index_ != kNoDeviceIndex; }
 
@@ -247,6 +248,8 @@ private:
             type_ = DeviceType::Vulkan;
         } else if (type_lower == "metal") {
             type_ = DeviceType::Metal;
+        } else if (type_lower == "nmcard") {
+            type_ = DeviceType::PrivateUse1;
         } else {
             PT_ERROR("Unknown device type: ", type_str);
         }
@@ -325,6 +328,10 @@ constexpr Device kCPU{DeviceType::CPU};
 
 inline Device kCUDA(DeviceIndex index = 0) {
     return Device{DeviceType::CUDA, index};
+}
+
+inline Device kNMCard(DeviceIndex index = 0) {
+    return Device{DeviceType::PrivateUse1, index};
 }
 
 } // namespace c10

@@ -15,6 +15,11 @@
 #ifdef PT_USE_CUDA
 #include "aten/src/ATen/cuda/CUDADispatch.h"
 #endif
+
+// NMCard Operations (when enabled)
+#ifdef PT_USE_NMCARD
+#include "aten/src/ATen/nmcard/NMCardDispatch.h"
+#endif
 #include "aten/src/ATen/native/cpu/ReduceOps.h"
 #include "aten/src/ATen/native/cpu/LinearAlgebra.h"
 #include "aten/src/ATen/native/cpu/ShapeOps.h"
@@ -34,11 +39,20 @@ inline Scalar Tensor::item() const {
 
 #ifdef PT_USE_CUDA
     if (is_cuda()) {
-        // Move to CPU first to read the value
         Tensor cpu_copy = to_cpu(*this);
         Scalar result;
         PT_DISPATCH_ALL_TYPES(dtype(), "item", [&] {
             result = Scalar(static_cast<double>(cpu_copy.data_ptr<scalar_t>()[0]));
+        });
+        return result;
+    }
+#endif
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) {
+        // Emulator: data is host RAM, can read directly
+        Scalar result;
+        PT_DISPATCH_ALL_TYPES(dtype(), "item", [&] {
+            result = Scalar(static_cast<double>(data_ptr<scalar_t>()[0]));
         });
         return result;
     }
@@ -132,6 +146,15 @@ inline Tensor& Tensor::copy_(const Tensor& src) {
 
 // Device transfer operations
 inline Tensor Tensor::to(c10::Device device) const {
+#ifdef PT_USE_NMCARD
+    if (device.is_nmcard()) {
+        if (is_nmcard()) return *this;
+        return at::to_nmcard(*this, device.index() >= 0 ? device.index() : 0);
+    }
+    if (device.is_cpu() && is_nmcard()) {
+        return at::nmcard_to_cpu(*this);
+    }
+#endif
 #ifdef PT_USE_CUDA
     if (device.is_cpu()) {
         return at::to_cpu(*this);
@@ -140,7 +163,11 @@ inline Tensor Tensor::to(c10::Device device) const {
     }
 #else
     if (device.is_cpu()) {
-        return *this;  // Already on CPU
+        if (is_cpu()) return *this;
+#ifdef PT_USE_NMCARD
+        if (is_nmcard()) return at::nmcard_to_cpu(*this);
+#endif
+        return *this;
     }
 #endif
     PT_CHECK_MSG(false, "Unsupported device type");
@@ -217,129 +244,191 @@ inline Tensor Tensor::slice(int64_t dim, int64_t start, int64_t end, int64_t ste
     return native::slice(*this, dim, start, end, step);
 }
 
-// Unary operations
 // Unary operations with device dispatch
 inline Tensor Tensor::neg() const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::neg(*this); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::neg(*this); }
 #endif
     return native::neg(*this);
 }
 inline Tensor Tensor::abs() const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::abs(*this); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::abs(*this); }
 #endif
     return native::abs(*this);
 }
 inline Tensor Tensor::sqrt() const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::sqrt(*this); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::sqrt(*this); }
 #endif
     return native::sqrt(*this);
 }
 inline Tensor Tensor::rsqrt() const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::rsqrt(*this); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::rsqrt(*this); }
 #endif
     return native::rsqrt(*this);
 }
 inline Tensor Tensor::square() const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::square(*this); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::square(*this); }
 #endif
     return native::square(*this);
 }
 inline Tensor Tensor::exp() const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::exp(*this); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::exp(*this); }
 #endif
     return native::exp(*this);
 }
 inline Tensor Tensor::log() const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::log(*this); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::log(*this); }
 #endif
     return native::log(*this);
 }
 inline Tensor Tensor::log2() const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::log2(*this); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::log2(*this); }
 #endif
     return native::log2(*this);
 }
 inline Tensor Tensor::log10() const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::log10(*this); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::log10(*this); }
 #endif
     return native::log10(*this);
 }
 inline Tensor Tensor::sin() const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::sin(*this); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::sin(*this); }
 #endif
     return native::sin(*this);
 }
 inline Tensor Tensor::cos() const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::cos(*this); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::cos(*this); }
 #endif
     return native::cos(*this);
 }
 inline Tensor Tensor::tan() const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::tan(*this); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::tan(*this); }
 #endif
     return native::tan(*this);
 }
 inline Tensor Tensor::tanh() const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::tanh(*this); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::tanh(*this); }
 #endif
     return native::tanh(*this);
 }
 inline Tensor Tensor::sigmoid() const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::sigmoid(*this); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::sigmoid(*this); }
 #endif
     return native::sigmoid(*this);
 }
 inline Tensor Tensor::relu() const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::relu(*this); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::relu(*this); }
 #endif
     return native::relu(*this);
 }
 inline Tensor Tensor::ceil() const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::ceil(*this); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::ceil(*this); }
 #endif
     return native::ceil(*this);
 }
 inline Tensor Tensor::floor() const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::floor(*this); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::floor(*this); }
 #endif
     return native::floor(*this);
 }
 inline Tensor Tensor::round() const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::round(*this); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::round(*this); }
 #endif
     return native::round(*this);
 }
 inline Tensor Tensor::sign() const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::sign(*this); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::sign(*this); }
 #endif
     return native::sign(*this);
 }
 inline Tensor Tensor::reciprocal() const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::reciprocal(*this); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::reciprocal(*this); }
 #endif
     return native::reciprocal(*this);
 }
 inline Tensor Tensor::clamp(Scalar min_val, Scalar max_val) const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::clamp(*this, min_val.to<float>(), max_val.to<float>()); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::clamp(*this, min_val.to<float>(), max_val.to<float>()); }
 #endif
@@ -368,6 +457,12 @@ inline Tensor& Tensor::ceil_() { return native::ceil_(*this); }
 inline Tensor& Tensor::floor_() { return native::floor_(*this); }
 inline Tensor& Tensor::round_() { return native::round_(*this); }
 inline Tensor& Tensor::zero_() {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) {
+        nmc_ops::fill_(*this, 0.0f);
+        return *this;
+    }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) {
         cuda_ops::fill_(*this, 0.0f);
@@ -377,6 +472,12 @@ inline Tensor& Tensor::zero_() {
     return native::zero_(*this);
 }
 inline Tensor& Tensor::fill_(Scalar value) {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) {
+        nmc_ops::fill_(*this, static_cast<float>(value.toDouble()));
+        return *this;
+    }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) {
         cuda_ops::fill_(*this, static_cast<float>(value.toDouble()));
@@ -388,9 +489,16 @@ inline Tensor& Tensor::fill_(Scalar value) {
 
 // Binary operations with device dispatch
 inline Tensor Tensor::add(const Tensor& other, Scalar alpha) const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) {
+        if (numel() != other.numel() && dim() == 2 && other.dim() == 1 && other.size(0) == size(1)) {
+            return nmc_ops::add_broadcast(*this, other);
+        }
+        return nmc_ops::add(*this, other);
+    }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) {
-        // Check for broadcasting case: [outer, inner] + [inner] (for bias addition)
         if (numel() != other.numel() && dim() == 2 && other.dim() == 1 && other.size(0) == size(1)) {
             return cuda_ops::add_broadcast(*this, other);
         }
@@ -400,37 +508,54 @@ inline Tensor Tensor::add(const Tensor& other, Scalar alpha) const {
     return native::add(*this, other, alpha);
 }
 inline Tensor Tensor::sub(const Tensor& other, Scalar alpha) const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::sub(*this, other); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::sub(*this, other); }
 #endif
     return native::sub(*this, other, alpha);
 }
 inline Tensor Tensor::mul(const Tensor& other) const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::mul(*this, other); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::mul(*this, other); }
 #endif
     return native::mul(*this, other);
 }
 inline Tensor Tensor::mul_broadcast(const Tensor& other) const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::mul_broadcast(*this, other); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::mul_broadcast(*this, other); }
 #endif
-    // CPU fallback uses native::mul which supports broadcasting
     return native::mul(*this, other);
 }
 inline Tensor Tensor::div(const Tensor& other) const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::div(*this, other); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::div(*this, other); }
 #endif
     return native::div(*this, other);
 }
 inline Tensor Tensor::pow(const Tensor& exponent) const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::pow(*this, exponent); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::pow(*this, exponent); }
 #endif
     return native::pow(*this, exponent);
 }
 inline Tensor Tensor::pow(Scalar exponent) const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::pow_scalar(*this, exponent.to<float>()); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::pow_scalar(*this, exponent.to<float>()); }
 #endif
@@ -444,6 +569,12 @@ inline Tensor Tensor::remainder(const Tensor& other) const {
 }
 
 inline Tensor Tensor::add(Scalar other, Scalar alpha) const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) {
+        float val = other.to<float>() * alpha.to<float>();
+        return nmc_ops::add_scalar(*this, val);
+    }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) {
         float val = other.to<float>() * alpha.to<float>();
@@ -453,6 +584,12 @@ inline Tensor Tensor::add(Scalar other, Scalar alpha) const {
     return native::add(*this, other, alpha);
 }
 inline Tensor Tensor::sub(Scalar other, Scalar alpha) const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) {
+        float val = -(other.to<float>() * alpha.to<float>());
+        return nmc_ops::add_scalar(*this, val);
+    }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) {
         float val = -(other.to<float>() * alpha.to<float>());
@@ -462,20 +599,43 @@ inline Tensor Tensor::sub(Scalar other, Scalar alpha) const {
     return native::sub(*this, other, alpha);
 }
 inline Tensor Tensor::mul(Scalar other) const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::mul_scalar(*this, other.to<float>()); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::mul_scalar(*this, other.to<float>()); }
 #endif
     return native::mul(*this, other);
 }
 inline Tensor Tensor::div(Scalar other) const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::mul_scalar(*this, 1.0f / other.to<float>()); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::mul_scalar(*this, 1.0f / other.to<float>()); }
 #endif
     return native::div(*this, other);
 }
 
-// In-place binary (with CUDA dispatch)
+// In-place binary (with device dispatch)
 inline Tensor& Tensor::add_(const Tensor& other, Scalar alpha) {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) {
+        Tensor other_c = nmc_ops::ensure_contiguous_nmcard(other);
+        Tensor self_c = is_contiguous() ? *this : nmc_ops::ensure_contiguous_nmcard(*this);
+        Tensor scaled = (alpha.toDouble() != 1.0)
+            ? nmc_ops::mul_scalar(other_c, static_cast<float>(alpha.toDouble()))
+            : other_c;
+        if (numel() != scaled.numel() && dim() == 2 && scaled.dim() == 1 && scaled.size(0) == size(1)) {
+            Tensor result = nmc_ops::add_broadcast(self_c, scaled);
+            nmc_ops::copy_(*this, result);
+        } else {
+            Tensor result = nmc_ops::add(self_c, scaled);
+            nmc_ops::copy_(*this, result);
+        }
+        return *this;
+    }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) {
         // CUDA element-wise ops read data_ptr sequentially — must be contiguous
@@ -499,12 +659,22 @@ inline Tensor& Tensor::add_(const Tensor& other, Scalar alpha) {
     return native::add_(*this, other, alpha);
 }
 inline Tensor& Tensor::sub_(const Tensor& other, Scalar alpha) {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) {
+        Tensor other_c = nmc_ops::ensure_contiguous_nmcard(other);
+        Tensor self_c = is_contiguous() ? *this : nmc_ops::ensure_contiguous_nmcard(*this);
+        Tensor scaled = (alpha.toDouble() != 1.0)
+            ? nmc_ops::mul_scalar(other_c, static_cast<float>(alpha.toDouble()))
+            : other_c;
+        Tensor result = nmc_ops::sub(self_c, scaled);
+        nmc_ops::copy_(*this, result);
+        return *this;
+    }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) {
-        // CUDA element-wise ops read data_ptr sequentially — must be contiguous
         Tensor other_c = other.is_contiguous() ? other : other.contiguous();
         Tensor self_c = is_contiguous() ? *this : contiguous();
-        // CUDA: param -= alpha * other
         Tensor scaled = (alpha.toDouble() != 1.0)
             ? cuda_ops::mul_scalar(other_c, static_cast<float>(alpha.toDouble()))
             : other_c;
@@ -516,6 +686,15 @@ inline Tensor& Tensor::sub_(const Tensor& other, Scalar alpha) {
     return native::sub_(*this, other, alpha);
 }
 inline Tensor& Tensor::mul_(const Tensor& other) {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) {
+        Tensor other_c = nmc_ops::ensure_contiguous_nmcard(other);
+        Tensor self_c = is_contiguous() ? *this : nmc_ops::ensure_contiguous_nmcard(*this);
+        Tensor result = nmc_ops::mul(self_c, other_c);
+        nmc_ops::copy_(*this, result);
+        return *this;
+    }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) {
         Tensor other_c = other.is_contiguous() ? other : other.contiguous();
@@ -528,6 +707,15 @@ inline Tensor& Tensor::mul_(const Tensor& other) {
     return native::mul_(*this, other);
 }
 inline Tensor& Tensor::div_(const Tensor& other) {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) {
+        Tensor other_c = nmc_ops::ensure_contiguous_nmcard(other);
+        Tensor self_c = is_contiguous() ? *this : nmc_ops::ensure_contiguous_nmcard(*this);
+        Tensor result = nmc_ops::div(self_c, other_c);
+        nmc_ops::copy_(*this, result);
+        return *this;
+    }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) {
         Tensor other_c = other.is_contiguous() ? other : other.contiguous();
@@ -546,9 +734,15 @@ inline Tensor& Tensor::sub_(Scalar other, Scalar alpha) {
     return native::sub_(*this, other, alpha);
 }
 inline Tensor& Tensor::mul_(Scalar other) {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) {
+        Tensor result = nmc_ops::mul_scalar(*this, other.to<float>());
+        nmc_ops::copy_(*this, result);
+        return *this;
+    }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) {
-        // Create scaled result then copy back to this tensor
         Tensor result = cuda_ops::mul_scalar(*this, other.to<float>());
         cuda_ops::copy_(*this, result);
         return *this;
@@ -562,12 +756,22 @@ inline Tensor& Tensor::div_(Scalar other) {
 
 // Fused operations
 inline Tensor Tensor::addcmul(const Tensor& tensor1, const Tensor& tensor2, Scalar value) const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::addcmul(*this, tensor1, tensor2, value.to<float>()); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::addcmul(*this, tensor1, tensor2, value.to<float>()); }
 #endif
     return native::addcmul(*this, tensor1, tensor2, value);
 }
 inline Tensor& Tensor::addcmul_(const Tensor& tensor1, const Tensor& tensor2, Scalar value) {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) {
+        Tensor result = nmc_ops::addcmul(*this, tensor1, tensor2, value.to<float>());
+        nmc_ops::copy_(*this, result);
+        return *this;
+    }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) {
         Tensor result = cuda_ops::addcmul(*this, tensor1, tensor2, value.to<float>());
@@ -578,12 +782,22 @@ inline Tensor& Tensor::addcmul_(const Tensor& tensor1, const Tensor& tensor2, Sc
     return native::addcmul_(*this, tensor1, tensor2, value);
 }
 inline Tensor Tensor::addcdiv(const Tensor& tensor1, const Tensor& tensor2, Scalar value) const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::addcdiv(*this, tensor1, tensor2, value.to<float>()); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::addcdiv(*this, tensor1, tensor2, value.to<float>()); }
 #endif
     return native::addcdiv(*this, tensor1, tensor2, value);
 }
 inline Tensor& Tensor::addcdiv_(const Tensor& tensor1, const Tensor& tensor2, Scalar value) {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) {
+        Tensor result = nmc_ops::addcdiv(*this, tensor1, tensor2, value.to<float>());
+        nmc_ops::copy_(*this, result);
+        return *this;
+    }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) {
         Tensor result = cuda_ops::addcdiv(*this, tensor1, tensor2, value.to<float>());
@@ -596,6 +810,9 @@ inline Tensor& Tensor::addcdiv_(const Tensor& tensor1, const Tensor& tensor2, Sc
 
 // Element-wise maximum/minimum (free functions for optimizers)
 inline Tensor maximum(const Tensor& a, const Tensor& b) {
+#ifdef PT_USE_NMCARD
+    if (a.is_nmcard()) { return nmc_ops::maximum(a, b); }
+#endif
 #ifdef PT_USE_CUDA
     if (a.is_cuda()) { return cuda_ops::maximum(a, b); }
 #endif
@@ -603,6 +820,9 @@ inline Tensor maximum(const Tensor& a, const Tensor& b) {
 }
 
 inline Tensor minimum(const Tensor& a, const Tensor& b) {
+#ifdef PT_USE_NMCARD
+    if (a.is_nmcard()) { return nmc_ops::minimum(a, b); }
+#endif
 #ifdef PT_USE_CUDA
     if (a.is_cuda()) { return cuda_ops::minimum(a, b); }
 #endif
@@ -611,36 +831,54 @@ inline Tensor minimum(const Tensor& a, const Tensor& b) {
 
 // Comparison operations (tensor vs tensor)
 inline Tensor Tensor::eq(const Tensor& other) const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::eq(*this, other); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::eq(*this, other); }
 #endif
     return native::eq(*this, other);
 }
 inline Tensor Tensor::ne(const Tensor& other) const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::ne(*this, other); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::ne(*this, other); }
 #endif
     return native::ne(*this, other);
 }
 inline Tensor Tensor::lt(const Tensor& other) const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::lt(*this, other); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::lt(*this, other); }
 #endif
     return native::lt(*this, other);
 }
 inline Tensor Tensor::le(const Tensor& other) const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::le(*this, other); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::le(*this, other); }
 #endif
     return native::le(*this, other);
 }
 inline Tensor Tensor::gt(const Tensor& other) const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::gt(*this, other); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::gt(*this, other); }
 #endif
     return native::gt(*this, other);
 }
 inline Tensor Tensor::ge(const Tensor& other) const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::ge(*this, other); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::ge(*this, other); }
 #endif
@@ -649,36 +887,54 @@ inline Tensor Tensor::ge(const Tensor& other) const {
 
 // Comparison operations (tensor vs scalar)
 inline Tensor Tensor::eq(Scalar other) const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::eq_scalar(*this, other.to<float>()); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::eq_scalar(*this, other.to<float>()); }
 #endif
     return native::eq(*this, other);
 }
 inline Tensor Tensor::ne(Scalar other) const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::ne_scalar(*this, other.to<float>()); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::ne_scalar(*this, other.to<float>()); }
 #endif
     return native::ne(*this, other);
 }
 inline Tensor Tensor::lt(Scalar other) const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::lt_scalar(*this, other.to<float>()); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::lt_scalar(*this, other.to<float>()); }
 #endif
     return native::lt(*this, other);
 }
 inline Tensor Tensor::le(Scalar other) const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::le_scalar(*this, other.to<float>()); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::le_scalar(*this, other.to<float>()); }
 #endif
     return native::le(*this, other);
 }
 inline Tensor Tensor::gt(Scalar other) const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::gt_scalar(*this, other.to<float>()); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::gt_scalar(*this, other.to<float>()); }
 #endif
     return native::gt(*this, other);
 }
 inline Tensor Tensor::ge(Scalar other) const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::ge_scalar(*this, other.to<float>()); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::ge_scalar(*this, other.to<float>()); }
 #endif
@@ -687,27 +943,43 @@ inline Tensor Tensor::ge(Scalar other) const {
 
 // Reduction operations
 inline Tensor Tensor::sum() const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::sum(*this); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::sum(*this); }
 #endif
     return native::sum(*this);
 }
 inline Tensor Tensor::sum(int64_t dim, bool keepdim) const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::sum_dim(*this, dim, keepdim); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::sum_dim(*this, dim, keepdim); }
 #endif
     return native::sum(*this, dim, keepdim);
 }
 inline Tensor Tensor::mean() const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::mean(*this); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::mean(*this); }
 #endif
     return native::mean(*this);
 }
 inline Tensor Tensor::mean(int64_t dim, bool keepdim) const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) {
+        Tensor s = nmc_ops::sum_dim(*this, dim, keepdim);
+        int64_t actual_dim = dim < 0 ? dim + this->dim() : dim;
+        float reduce_size = static_cast<float>(this->size(actual_dim));
+        return nmc_ops::mul_scalar(s, 1.0f / reduce_size);
+    }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) {
-        // Use CUDA sum_dim then divide
         Tensor s = cuda_ops::sum_dim(*this, dim, keepdim);
         int64_t actual_dim = dim < 0 ? dim + this->dim() : dim;
         float reduce_size = static_cast<float>(this->size(actual_dim));
@@ -719,6 +991,9 @@ inline Tensor Tensor::mean(int64_t dim, bool keepdim) const {
 inline Tensor Tensor::prod() const { return native::prod(*this); }
 inline Tensor Tensor::prod(int64_t dim, bool keepdim) const { return native::prod(*this, dim, keepdim); }
 inline Tensor Tensor::max() const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::max(*this); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::max(*this); }
 #endif
@@ -728,6 +1003,9 @@ inline std::tuple<Tensor, Tensor> Tensor::max(int64_t dim, bool keepdim) const {
     return native::max(*this, dim, keepdim);
 }
 inline Tensor Tensor::min() const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::min(*this); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::min(*this); }
 #endif
@@ -737,6 +1015,9 @@ inline std::tuple<Tensor, Tensor> Tensor::min(int64_t dim, bool keepdim) const {
     return native::min(*this, dim, keepdim);
 }
 inline Tensor Tensor::argmax() const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::argmax(*this); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::argmax(*this); }
 #endif
@@ -744,6 +1025,9 @@ inline Tensor Tensor::argmax() const {
 }
 inline Tensor Tensor::argmax(int64_t dim, bool keepdim) const { return native::argmax(*this, dim, keepdim); }
 inline Tensor Tensor::argmin() const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) { return nmc_ops::argmin(*this); }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) { return cuda_ops::argmin(*this); }
 #endif
@@ -766,6 +1050,13 @@ inline Tensor Tensor::cumprod(int64_t dim) const { return native::cumprod(*this,
 
 // Linear algebra
 inline Tensor Tensor::matmul(const Tensor& other) const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) {
+        if (dim() == 2 && other.dim() == 2) return mm(other);
+        if (dim() == 2 && other.dim() == 1) return mv(other);
+        if (dim() >= 3 && other.dim() >= 3) return bmm(other);
+    }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) {
         if (dim() == 2 && other.dim() == 2) return mm(other);
@@ -776,9 +1067,13 @@ inline Tensor Tensor::matmul(const Tensor& other) const {
     return native::matmul(*this, other);
 }
 inline Tensor Tensor::mm(const Tensor& other) const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) {
+        return nmc_ops::mm(*this, other);
+    }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) {
-        // Make both tensors contiguous if needed for CUDA mm
         Tensor self_contig = is_contiguous() ? *this : contiguous();
         Tensor other_contig = other.is_contiguous() ? other : other.contiguous();
         return cuda_ops::mm(self_contig, other_contig);
@@ -787,6 +1082,11 @@ inline Tensor Tensor::mm(const Tensor& other) const {
     return native::mm(*this, other);
 }
 inline Tensor Tensor::mv(const Tensor& vec) const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) {
+        return nmc_ops::mv(*this, vec);
+    }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) {
         Tensor self_c = is_contiguous() ? *this : contiguous();
@@ -797,6 +1097,11 @@ inline Tensor Tensor::mv(const Tensor& vec) const {
     return native::mv(*this, vec);
 }
 inline Tensor Tensor::bmm(const Tensor& other) const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) {
+        return nmc_ops::bmm(*this, other);
+    }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) {
         Tensor self_c = is_contiguous() ? *this : contiguous();
@@ -807,6 +1112,11 @@ inline Tensor Tensor::bmm(const Tensor& other) const {
     return native::bmm(*this, other);
 }
 inline Tensor Tensor::dot(const Tensor& other) const {
+#ifdef PT_USE_NMCARD
+    if (is_nmcard()) {
+        return nmc_ops::dot(*this, other);
+    }
+#endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) {
         Tensor self_c = is_contiguous() ? *this : contiguous();

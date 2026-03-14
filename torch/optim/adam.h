@@ -4,6 +4,11 @@
 #ifdef PT_USE_CUDA
 #include "aten/src/ATen/cuda/CUDADispatch.h"
 #endif
+#ifdef _MSC_VER
+#include <intrin.h>
+#else
+#include <immintrin.h>
+#endif
 #include <cmath>
 
 namespace torch {
@@ -89,12 +94,6 @@ public:
                 // Increment step counter
                 state->step++;
 
-                // Apply L2 weight decay (classic Adam style - add to gradient)
-                Tensor grad_wd = grad;
-                if (wd != 0.0) {
-                    grad_wd = grad.add(param->data(), at::Scalar(wd));
-                }
-
                 // Initialize moment buffers
                 if (!state->exp_avg.defined()) {
                     state->exp_avg = at::zeros(param->sizes());
@@ -113,86 +112,133 @@ public:
 #endif
                 }
 
-                // Move to CPU for CUDA tensors
+                // CUDA path: fallback to tensor ops
                 bool is_cuda = false;
 #ifdef PT_USE_CUDA
                 is_cuda = param->data().is_cuda();
 #endif
-                Tensor grad_cpu = grad_wd;
-                Tensor exp_avg_cpu = state->exp_avg;
-                Tensor exp_avg_sq_cpu = state->exp_avg_sq;
-#ifdef PT_USE_CUDA
                 if (is_cuda) {
-                    grad_cpu = at::to_cpu(grad_wd);
-                    exp_avg_cpu = at::to_cpu(state->exp_avg);
-                    exp_avg_sq_cpu = at::to_cpu(state->exp_avg_sq);
+                    step_cuda(param, grad, state, lr, wd, beta1, beta2, eps, amsgrad);
+                    continue;
                 }
-#endif
 
-                // m_t = beta1 * m_{t-1} + (1 - beta1) * g_t
-                exp_avg_cpu.mul_(at::Scalar(beta1));
-                exp_avg_cpu.add_(grad_cpu, at::Scalar(1.0 - beta1));
+                // ================================================================
+                // CPU fast path: fused AVX2 Adam step
+                // ================================================================
+                Tensor grad_c = grad.contiguous();
+                float* p_data = param->data().mutable_data_ptr<float>();
+                const float* g_data = grad_c.data_ptr<float>();
+                float* m_data = state->exp_avg.mutable_data_ptr<float>();
+                float* v_data = state->exp_avg_sq.mutable_data_ptr<float>();
+                int64_t n = param->numel();
 
-                // v_t = beta2 * v_{t-1} + (1 - beta2) * g_t^2
-                exp_avg_sq_cpu.mul_(at::Scalar(beta2));
-                exp_avg_sq_cpu.addcmul_(grad_cpu, grad_cpu, at::Scalar(1.0 - beta2));
-
-#ifdef PT_USE_CUDA
-                if (is_cuda) {
-                    state->exp_avg = at::to_cuda(exp_avg_cpu);
-                    state->exp_avg_sq = at::to_cuda(exp_avg_sq_cpu);
-                }
-#else
-                state->exp_avg = exp_avg_cpu;
-                state->exp_avg_sq = exp_avg_sq_cpu;
-#endif
-
-                // Bias correction
                 double bias_correction1 = 1.0 - std::pow(beta1, state->step);
                 double bias_correction2 = 1.0 - std::pow(beta2, state->step);
+                float step_size = static_cast<float>(lr / bias_correction1);
+                float inv_sqrt_bc2 = static_cast<float>(1.0 / std::sqrt(bias_correction2));
+                float b1f = static_cast<float>(beta1);
+                float b2f = static_cast<float>(beta2);
+                float one_minus_b1 = static_cast<float>(1.0 - beta1);
+                float one_minus_b2 = static_cast<float>(1.0 - beta2);
+                float wdf = static_cast<float>(wd);
+                float epsf = static_cast<float>(eps);
 
-                // Standard PyTorch Adam update:
-                // denom = sqrt(v_t) / sqrt(bias_correction2) + eps
-                // p_t = p_{t-1} - (lr / bias_correction1) * m_t / denom
-                double step_size = lr / bias_correction1;
+                if (!amsgrad) {
+                    __m256 vb1 = _mm256_set1_ps(b1f);
+                    __m256 vb2 = _mm256_set1_ps(b2f);
+                    __m256 v1mb1 = _mm256_set1_ps(one_minus_b1);
+                    __m256 v1mb2 = _mm256_set1_ps(one_minus_b2);
+                    __m256 vneg_ss = _mm256_set1_ps(-step_size);
+                    __m256 veps = _mm256_set1_ps(epsf);
+                    __m256 v_isbc2 = _mm256_set1_ps(inv_sqrt_bc2);
+                    __m256 vwd = _mm256_set1_ps(wdf);
 
-                Tensor denom;
-                if (amsgrad) {
-                    Tensor max_sq_cpu = state->max_exp_avg_sq;
-#ifdef PT_USE_CUDA
-                    if (is_cuda) max_sq_cpu = at::to_cpu(state->max_exp_avg_sq);
-#endif
-                    float* max_d = max_sq_cpu.mutable_data_ptr<float>();
-                    const float* sq_d = exp_avg_sq_cpu.data_ptr<float>();
-                    for (int64_t i = 0; i < max_sq_cpu.numel(); ++i) {
-                        max_d[i] = std::max(max_d[i], sq_d[i]);
+                    int64_t i = 0;
+                    for (; i + 8 <= n; i += 8) {
+                        __m256 g = _mm256_loadu_ps(g_data + i);
+                        __m256 p = _mm256_loadu_ps(p_data + i);
+
+                        // Apply weight decay to gradient
+                        if (wdf != 0.0f) {
+                            g = _mm256_fmadd_ps(vwd, p, g);
+                        }
+
+                        __m256 m = _mm256_loadu_ps(m_data + i);
+                        __m256 v = _mm256_loadu_ps(v_data + i);
+
+                        // m = beta1 * m + (1-beta1) * g
+                        m = _mm256_fmadd_ps(vb1, m, _mm256_mul_ps(v1mb1, g));
+                        // v = beta2 * v + (1-beta2) * g^2
+                        v = _mm256_fmadd_ps(vb2, v, _mm256_mul_ps(v1mb2, _mm256_mul_ps(g, g)));
+
+                        // denom = sqrt(v) * inv_sqrt_bc2 + eps
+                        __m256 denom = _mm256_fmadd_ps(_mm256_sqrt_ps(v), v_isbc2, veps);
+                        // p -= step_size * m / denom
+                        p = _mm256_fmadd_ps(vneg_ss, _mm256_div_ps(m, denom), p);
+
+                        _mm256_storeu_ps(m_data + i, m);
+                        _mm256_storeu_ps(v_data + i, v);
+                        _mm256_storeu_ps(p_data + i, p);
                     }
-#ifdef PT_USE_CUDA
-                    if (is_cuda) state->max_exp_avg_sq = at::to_cuda(max_sq_cpu);
-                    else state->max_exp_avg_sq = max_sq_cpu;
-#else
-                    state->max_exp_avg_sq = max_sq_cpu;
-#endif
-                    denom = max_sq_cpu.sqrt().div(at::Scalar(std::sqrt(bias_correction2)));
+                    // Scalar tail
+                    for (; i < n; ++i) {
+                        float g = g_data[i];
+                        if (wdf != 0.0f) g += wdf * p_data[i];
+                        m_data[i] = b1f * m_data[i] + one_minus_b1 * g;
+                        v_data[i] = b2f * v_data[i] + one_minus_b2 * g * g;
+                        float denom = std::sqrt(v_data[i]) * inv_sqrt_bc2 + epsf;
+                        p_data[i] -= step_size * m_data[i] / denom;
+                    }
                 } else {
-                    denom = exp_avg_sq_cpu.sqrt().div(at::Scalar(std::sqrt(bias_correction2)));
+                    // AMSGrad path: scalar (rare case)
+                    float* max_v_data = state->max_exp_avg_sq.mutable_data_ptr<float>();
+                    for (int64_t i = 0; i < n; ++i) {
+                        float g = g_data[i];
+                        if (wdf != 0.0f) g += wdf * p_data[i];
+                        m_data[i] = b1f * m_data[i] + one_minus_b1 * g;
+                        v_data[i] = b2f * v_data[i] + one_minus_b2 * g * g;
+                        max_v_data[i] = std::max(max_v_data[i], v_data[i]);
+                        float denom = std::sqrt(max_v_data[i]) * inv_sqrt_bc2 + epsf;
+                        p_data[i] -= step_size * m_data[i] / denom;
+                    }
                 }
-                denom.add_(at::Scalar(eps));
-
-                // p = p - step_size * m / denom
-                Tensor param_cpu = param->data();
-#ifdef PT_USE_CUDA
-                if (is_cuda) param_cpu = at::to_cpu(param->data());
-#endif
-                param_cpu.addcdiv_(exp_avg_cpu, denom, at::Scalar(-step_size));
-#ifdef PT_USE_CUDA
-                if (is_cuda) {
-                    at::cuda_ops::copy_(param->data(), at::to_cuda(param_cpu));
-                }
-#endif
             }
         }
     }
+
+private:
+    // CUDA fallback: uses tensor ops + CPU transfer
+    void step_cuda(Parameter* param, const Tensor& grad, AdamParamState* state,
+                   double lr, double wd, double beta1, double beta2, double eps, bool amsgrad) {
+#ifdef PT_USE_CUDA
+        Tensor grad_wd = grad;
+        if (wd != 0.0) grad_wd = grad.add(param->data(), at::Scalar(wd));
+        Tensor grad_cpu = at::to_cpu(grad_wd);
+        Tensor exp_avg_cpu = at::to_cpu(state->exp_avg);
+        Tensor exp_avg_sq_cpu = at::to_cpu(state->exp_avg_sq);
+
+        exp_avg_cpu.mul_(at::Scalar(beta1));
+        exp_avg_cpu.add_(grad_cpu, at::Scalar(1.0 - beta1));
+        exp_avg_sq_cpu.mul_(at::Scalar(beta2));
+        exp_avg_sq_cpu.addcmul_(grad_cpu, grad_cpu, at::Scalar(1.0 - beta2));
+
+        state->exp_avg = at::to_cuda(exp_avg_cpu);
+        state->exp_avg_sq = at::to_cuda(exp_avg_sq_cpu);
+
+        double bias_correction1 = 1.0 - std::pow(beta1, state->step);
+        double bias_correction2 = 1.0 - std::pow(beta2, state->step);
+        double step_size = lr / bias_correction1;
+
+        Tensor denom = exp_avg_sq_cpu.sqrt().div(at::Scalar(std::sqrt(bias_correction2)));
+        denom.add_(at::Scalar(eps));
+
+        Tensor param_cpu = at::to_cpu(param->data());
+        param_cpu.addcdiv_(exp_avg_cpu, denom, at::Scalar(-step_size));
+        at::cuda_ops::copy_(param->data(), at::to_cuda(param_cpu));
+#endif
+    }
+
+public:
 
     // Get options
     AdamOptions& options() { return options_; }

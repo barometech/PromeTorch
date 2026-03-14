@@ -484,6 +484,59 @@ Tensor B = other.contiguous();
 
 ---
 
+## 2026-03-14: NM Card Mini — Третий Backend (Эмулятор)
+
+Интеграция NM Card Mini (К1879ВМ8Я, 16 NMC4 ядер @ 1GHz) как третьего backend рядом с CPU и CUDA. Программный эмулятор — без реального железа.
+
+### Архитектура
+
+- **DeviceType::PrivateUse1** = nmcard. `Device("nmcard:0")`, `tensor.is_nmcard()`, `model.to("nmcard")`
+- **NMCardAllocator**: Caching allocator (aligned host RAM, тегирован device=nmcard)
+- **NMCardEmulator**: 16 виртуальных NMC4 ядер, два режима — float32 и Q16.16 fixed-point
+- **NMCardMath.h**: Порт mymath.h на x86 (Q16.16 арифметика без libgcc)
+- **NMCardDispatch.h**: `empty_nmcard()`, `to_nmcard()`, `nmcard_to_cpu()`, mm/relu/softmax/etc.
+- **NMCardOps.h**: 40+ операций (forward, backward, optimizers, loss)
+
+### Новые файлы (11 файлов)
+
+| Файл | Назначение |
+|------|-----------|
+| `c10/nmcard/NMCardAllocator.h/.cpp` | Caching allocator (DLL singleton pattern) |
+| `aten/src/ATen/nmcard/NMCardMath.h` | Q16.16 fixed-point math (x86 port) |
+| `aten/src/ATen/nmcard/NMCardEmulator.h/.cpp` | Программный эмулятор dispatcher.cpp |
+| `aten/src/ATen/nmcard/NMCardOps.h` | Operation wrappers (аналог CUDAOps.h) |
+| `aten/src/ATen/nmcard/NMCardDispatch.h` | Dispatch layer (аналог CUDADispatch.h) |
+| `test/cpp/test_nmcard.cpp` | 32 теста эмулятора |
+| `examples/nmcard/train_mnist_nmcard.cpp` | MNIST MLP на device nmcard |
+
+### Модифицированные файлы
+
+- `c10/core/Device.h` — parse "nmcard", is_nmcard(), DeviceTypeName
+- `c10/core/TensorImpl.h` — is_nmcard()
+- `aten/src/ATen/core/Tensor.h` — is_nmcard()
+- `aten/src/ATen/ATen.h` — `#ifdef PT_USE_NMCARD` dispatch (~40 операций)
+- `torch/csrc/autograd/engine.h` — grad тензоры на nmcard device
+- `CMakeLists.txt` — `PT_USE_NMCARD`, aten_nmcard library
+
+### Критический баг: DLL Singleton Boundary
+
+**Проблема**: `AllocatorRegistry::get()` — inline static в header. Каждая DLL получает свою копию. `register_nmcard_allocator()` регистрирует в aten_nmcard.dll, но `at::empty()` (inline в exe) ищет в exe's AllocatorRegistry → crash.
+
+**Решение**: Двойная регистрация:
+```cpp
+c10::nmcard::register_nmcard_allocator();       // DLL-internal
+c10::nmcard::register_nmcard_allocator_local();  // Caller's registry (inline)
+```
+
+### Результаты
+
+- **32/32 тестов** прошли (matmul, rmsnorm, softmax, silu, rope, backward, optimizer, Q16.16)
+- **MNIST на NMCard**: 3 эпохи → **93.64% test accuracy** (SGD lr=0.01, batch=64)
+- Время: ~25.6 сек/эпоху (эмулятор, float32 mode)
+- Сборка: `cmake -DPT_USE_NMCARD=ON`, build dir: `build_nmcard/`
+
+---
+
 ## Статистика (на 2026-01-25)
 
 | Метрика | Значение |

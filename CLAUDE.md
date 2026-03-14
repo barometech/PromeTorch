@@ -15,7 +15,7 @@
 
 ## Статус проекта
 
-**14 основных фаз + 7 критических фич ЗАВЕРШЕНЫ.** ~40,000+ строк C++/CUDA, 97+ файлов.
+**15 основных фаз + 7 критических фич ЗАВЕРШЕНЫ.** ~48,000+ строк C++/CUDA, 108+ файлов.
 
 | Фаза | Компонент | Статус |
 |------|-----------|--------|
@@ -33,6 +33,7 @@
 | 12 | cuDNN Integration (conv, pool, batchnorm, activations) | DONE |
 | 13 | Mixed Precision AMP (GradScaler, Autocast) | DONE |
 | 14 | FlashAttention (O(N) memory, causal masking) | DONE |
+| 15 | NM Card Mini Backend (эмулятор, Q16.16, 32 теста, MNIST 93.64%) | DONE |
 
 ### Критические фичи (2026-03-07)
 
@@ -65,6 +66,7 @@
 build_final3/examples/mnist/train_mnist_mlp.exe    # CPU, MNIST (новейшая)
 build_examples/examples/mnist/train_mnist_mlp.exe   # CPU, MNIST
 build_cudnn/examples/pir/train_pir.exe              # CUDA+cuDNN, PIR
+build_nmcard/train_mnist_nmcard.exe                 # NMCard эмулятор, MNIST
 ```
 
 ### Запуск MNIST
@@ -97,11 +99,13 @@ nmake
 
 ```
 c10/                          # Ядро: Allocator, Device, Storage, TensorImpl, ScalarType
+  nmcard/                     # NMCardAllocator (caching, PrivateUse1)
 aten/src/ATen/
   core/                       # Tensor.h, TensorFactory.h
   native/cpu/                 # MathOps, ReduceOps, LinearAlgebra, ShapeOps, IndexOps
   cuda/                       # CUDAKernels.cu, CUDAReduce.cu, CUDABlas.cu, FlashAttention.cu
   cudnn/                      # CuDNNConvolution, Pooling, BatchNorm, Activation
+  nmcard/                     # NMCardEmulator, NMCardOps, NMCardDispatch, NMCardMath (Q16.16)
 torch/
   csrc/autograd/              # edge, node, engine, autograd_meta, backward functions
   autograd/                   # function.h (custom autograd functions)
@@ -115,6 +119,7 @@ python/                       # pybind11 bindings, promethorch package
 examples/
   mnist/train_mnist_mlp.cpp   # MNIST MLP training
   pir/train_pir.cpp           # PIR Shakespeare training
+  nmcard/train_mnist_nmcard.cpp # MNIST на NMCard эмуляторе
 ```
 
 ---
@@ -140,17 +145,18 @@ examples/
 3. **Linear init** — было `sqrt(3)/sqrt(fan_in)`, надо `1/sqrt(fan_in)` (PyTorch default)
 4. **nvcc + MSVC flags** — использовать `$<$<COMPILE_LANGUAGE:CXX>:...>` в CMake
 5. **Python bindings** — 19 исправлений (см. `JOURNAL.md`)
+6. **NMCard DLL Allocator** — AllocatorRegistry inline static → разные instances per DLL. Решение: двойная регистрация (`register_nmcard_allocator()` + `register_nmcard_allocator_local()`)
 
 ---
 
 ## Будущие фазы (опционально)
 
-- Фаза 15: Distributed Training (DDP, NCCL)
-- Фаза 16: TorchScript/JIT
-- Фаза 17: Дополнительные операции (einsum, scatter_reduce)
-- Фаза 18: Quantization (INT8)
-- Фаза 19: ONNX export
-- Фаза 20: Profiling tools
+- Фаза 16: Distributed Training (DDP, NCCL)
+- Фаза 17: TorchScript/JIT
+- Фаза 18: Дополнительные операции (einsum, scatter_reduce)
+- Фаза 19: Quantization (INT8)
+- Фаза 20: ONNX export
+- Фаза 21: Profiling tools
 
 ---
 

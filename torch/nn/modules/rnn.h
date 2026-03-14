@@ -3,7 +3,16 @@
 #include "torch/nn/module.h"
 #include "torch/nn/modules/linear.h"
 #include "torch/csrc/autograd/autograd.h"
+#include "torch/csrc/autograd/grad_mode.h"
+#include "aten/src/ATen/native/cpu/PromeBLAS.h"
+#include "aten/src/ATen/native/cpu/VectorizedOps.h"
+#ifdef _MSC_VER
+#include <intrin.h>
+#else
+#include <immintrin.h>
+#endif
 #include <cmath>
+#include <cstring>
 #include <vector>
 
 namespace torch {
@@ -70,6 +79,19 @@ public:
 
     // Forward: x [batch, input], (h, c) -> (h', c')
     std::pair<Tensor, Tensor> forward_lstm(const Tensor& input, const Tensor& hx, const Tensor& cx) {
+        // ================================================================
+        // Fast path: no autograd needed (inference / NoGradGuard)
+        // Direct sgemm_nt + fused AVX2 gate activations
+        // ================================================================
+        bool need_grad = torch::autograd::GradMode::is_enabled() &&
+                         (input.requires_grad() || hx.requires_grad() || cx.requires_grad());
+        if (!need_grad && input.dtype() == c10::ScalarType::Float) {
+            return forward_lstm_fast(input, hx, cx);
+        }
+
+        // ================================================================
+        // Autograd path: full gradient tracking
+        // ================================================================
         // gates = x @ W_ih^T + h @ W_hh^T  [batch, 4*hidden]
         Tensor gates = torch::autograd::add_autograd((*ih_)(input), (*hh_)(hx));
 
@@ -91,6 +113,93 @@ public:
 
         return {h_new, c_new};
     }
+
+private:
+    // Fast LSTM cell: direct GEMM + fused AVX2 gate activations
+    std::pair<Tensor, Tensor> forward_lstm_fast(const Tensor& input, const Tensor& hx, const Tensor& cx) {
+        int64_t H = hidden_size_;
+        int64_t batch = input.size(0);
+        int64_t gates_size = 4 * H;
+
+        // Get weight/bias from Linear submodules
+        auto* w_ih = ih_->get_parameter("weight");
+        auto* w_hh = hh_->get_parameter("weight");
+        const float* W_ih = w_ih->data().data_ptr<float>(); // [4H, input_size]
+        const float* W_hh = w_hh->data().data_ptr<float>(); // [4H, hidden_size]
+
+        Tensor x = input.contiguous();
+        Tensor h = hx.contiguous();
+        Tensor c = cx.contiguous();
+
+        // gates[batch, 4H] = x @ W_ih^T + h @ W_hh^T
+        Tensor gates = at::empty({batch, gates_size});
+        float* g = gates.mutable_data_ptr<float>();
+
+        // gates = x @ W_ih^T
+        at::native::blas::sgemm_nt(batch, input_size_, gates_size, 1.0f,
+                                    x.data_ptr<float>(), input_size_,
+                                    W_ih, input_size_, 0.0f, g, gates_size);
+        // gates += h @ W_hh^T
+        at::native::blas::sgemm_nt(batch, hidden_size_, gates_size, 1.0f,
+                                    h.data_ptr<float>(), hidden_size_,
+                                    W_hh, hidden_size_, 1.0f, g, gates_size);
+
+        // Add biases (fused ih + hh)
+        auto* b_ih = ih_->get_parameter("bias");
+        auto* b_hh = hh_->get_parameter("bias");
+        if (b_ih && b_ih->defined() && b_hh && b_hh->defined()) {
+            const float* B_ih = b_ih->data().data_ptr<float>();
+            const float* B_hh = b_hh->data().data_ptr<float>();
+            for (int64_t i = 0; i < batch; ++i) {
+                float* row = g + i * gates_size;
+                int64_t j = 0;
+                for (; j + 8 <= gates_size; j += 8) {
+                    __m256 val = _mm256_loadu_ps(row + j);
+                    val = _mm256_add_ps(val, _mm256_loadu_ps(B_ih + j));
+                    val = _mm256_add_ps(val, _mm256_loadu_ps(B_hh + j));
+                    _mm256_storeu_ps(row + j, val);
+                }
+                for (; j < gates_size; ++j) row[j] += B_ih[j] + B_hh[j];
+            }
+        }
+
+        // Fused gate activations: sigmoid(i,f,o) + tanh(g) + cell/hidden update
+        Tensor c_new = at::empty({batch, H});
+        Tensor h_new = at::empty({batch, H});
+        float* c_out = c_new.mutable_data_ptr<float>();
+        float* h_out = h_new.mutable_data_ptr<float>();
+        const float* c_in = c.data_ptr<float>();
+
+        for (int64_t i = 0; i < batch; ++i) {
+            const float* gate_row = g + i * gates_size;
+            const float* c_row = c_in + i * H;
+            float* cn_row = c_out + i * H;
+            float* hn_row = h_out + i * H;
+            int64_t j = 0;
+            for (; j + 8 <= H; j += 8) {
+                __m256 ig = at::native::vec::sigmoid256_ps(_mm256_loadu_ps(gate_row + j));
+                __m256 fg = at::native::vec::sigmoid256_ps(_mm256_loadu_ps(gate_row + H + j));
+                __m256 gg = at::native::vec::tanh256_ps(_mm256_loadu_ps(gate_row + 2*H + j));
+                __m256 og = at::native::vec::sigmoid256_ps(_mm256_loadu_ps(gate_row + 3*H + j));
+                __m256 c_old = _mm256_loadu_ps(c_row + j);
+                __m256 c_val = _mm256_fmadd_ps(fg, c_old, _mm256_mul_ps(ig, gg));
+                _mm256_storeu_ps(cn_row + j, c_val);
+                __m256 h_val = _mm256_mul_ps(og, at::native::vec::tanh256_ps(c_val));
+                _mm256_storeu_ps(hn_row + j, h_val);
+            }
+            for (; j < H; ++j) {
+                float ig = 1.0f / (1.0f + std::exp(-gate_row[j]));
+                float fg = 1.0f / (1.0f + std::exp(-gate_row[H + j]));
+                float gg = std::tanh(gate_row[2*H + j]);
+                float og = 1.0f / (1.0f + std::exp(-gate_row[3*H + j]));
+                cn_row[j] = fg * c_row[j] + ig * gg;
+                hn_row[j] = og * std::tanh(cn_row[j]);
+            }
+        }
+        return {h_new, c_new};
+    }
+
+public:
 
     // Convenience: single input forward
     Tensor forward(const Tensor& input) override {
@@ -340,6 +449,53 @@ public:
         Tensor hx = h0.defined() ? h0 : at::zeros({num_layers_ * num_directions, batch, hidden_size_});
         Tensor cx = c0.defined() ? c0 : at::zeros({num_layers_ * num_directions, batch, hidden_size_});
 
+        // ================================================================
+        // Fast path: non-bidirectional, no autograd — pre-allocate output
+        // ================================================================
+        bool need_grad = torch::autograd::GradMode::is_enabled();
+        if (!bidirectional_ && !need_grad && x.dtype() == c10::ScalarType::Float) {
+            int64_t out_size = hidden_size_;
+            // Pre-allocate output: [seq_len, batch, hidden_size]
+            Tensor output = at::empty({seq_len, batch, out_size});
+            float* out_ptr = output.mutable_data_ptr<float>();
+            int64_t slice_bytes = batch * out_size * sizeof(float);
+
+            Tensor h_fwd = at::native::select(hx, 0, 0).contiguous();
+            Tensor c_fwd = at::native::select(cx, 0, 0).contiguous();
+
+            auto fwd_cell = std::dynamic_pointer_cast<LSTMCellImpl>(cells_[0]);
+            Tensor layer_input_t = x;
+
+            for (int64_t layer = 0; layer < num_layers_; ++layer) {
+                if (layer > 0) {
+                    fwd_cell = std::dynamic_pointer_cast<LSTMCellImpl>(cells_[layer]);
+                    h_fwd = at::native::select(hx, 0, layer).contiguous();
+                    c_fwd = at::native::select(cx, 0, layer).contiguous();
+                    layer_input_t = output.clone(); // use previous layer's output
+                }
+
+                for (int64_t t = 0; t < seq_len; ++t) {
+                    Tensor xt = at::native::select(layer_input_t, 0, t);
+                    auto [h_new, c_new] = fwd_cell->forward_lstm(xt, h_fwd, c_fwd);
+                    h_fwd = h_new;
+                    c_fwd = c_new;
+                    // Copy h_fwd directly into output[t]
+                    std::memcpy(out_ptr + t * batch * out_size,
+                                h_fwd.data_ptr<float>(), slice_bytes);
+                }
+            }
+
+            Tensor h_n = h_fwd.unsqueeze(0);
+            Tensor c_n = c_fwd.unsqueeze(0);
+            if (batch_first_) {
+                output = output.transpose(0, 1).contiguous();
+            }
+            return {output, h_n, c_n};
+        }
+
+        // ================================================================
+        // General path: supports bidirectional, autograd
+        // ================================================================
         std::vector<Tensor> h_n_list, c_n_list;
         Tensor layer_input = x;
 

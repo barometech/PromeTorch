@@ -1,6 +1,12 @@
 #pragma once
 
 #include "aten/src/ATen/ATen.h"
+#include "aten/src/ATen/native/cpu/VectorizedOps.h"
+#ifdef _MSC_VER
+#include <intrin.h>
+#else
+#include <immintrin.h>
+#endif
 #include <cmath>
 #include <algorithm>
 #include <limits>
@@ -269,42 +275,81 @@ inline Tensor softmax(const Tensor& input, int64_t dim = -1) {
     }
 #endif
 
-    std::vector<int64_t> sizes = input.sizes().vec();
+    Tensor inp = input.is_contiguous() ? input : input.contiguous();
+    std::vector<int64_t> sizes = inp.sizes().vec();
     int64_t dim_size = sizes[dim];
 
-    // Calculate strides
     int64_t outer_size = 1;
     for (int64_t i = 0; i < dim; ++i) outer_size *= sizes[i];
     int64_t inner_size = 1;
     for (int64_t i = dim + 1; i < static_cast<int64_t>(sizes.size()); ++i) inner_size *= sizes[i];
 
-    Tensor output = at::empty(input.sizes());
-    const float* in_data = input.data_ptr<float>();
+    Tensor output = at::empty(inp.sizes());
+    const float* in_data = inp.data_ptr<float>();
     float* out_data = output.mutable_data_ptr<float>();
 
-    #pragma omp parallel for collapse(2) if(outer_size * inner_size > 1000)
-    for (int64_t o = 0; o < outer_size; ++o) {
-        for (int64_t i = 0; i < inner_size; ++i) {
-            // Find max
-            float max_val = -std::numeric_limits<float>::infinity();
-            for (int64_t d = 0; d < dim_size; ++d) {
-                int64_t idx = o * dim_size * inner_size + d * inner_size + i;
-                max_val = std::max(max_val, in_data[idx]);
+    if (inner_size == 1) {
+        // Fused AVX2 softmax for contiguous rows (most common: softmax over last dim)
+        for (int64_t o = 0; o < outer_size; ++o) {
+            const float* row_in = in_data + o * dim_size;
+            float* row_out = out_data + o * dim_size;
+
+            // Pass 1: AVX2 max
+            float max_val = at::native::vec::vectorized_max(row_in, dim_size);
+            __m256 vmax = _mm256_set1_ps(max_val);
+
+            // Pass 2: fused exp(x - max) + sum
+            __m256 vsum0 = _mm256_setzero_ps(), vsum1 = _mm256_setzero_ps();
+            int64_t d = 0;
+            for (; d + 16 <= dim_size; d += 16) {
+                __m256 e0 = at::native::vec::exp256_ps(_mm256_sub_ps(_mm256_loadu_ps(row_in + d), vmax));
+                __m256 e1 = at::native::vec::exp256_ps(_mm256_sub_ps(_mm256_loadu_ps(row_in + d + 8), vmax));
+                _mm256_storeu_ps(row_out + d, e0);
+                _mm256_storeu_ps(row_out + d + 8, e1);
+                vsum0 = _mm256_add_ps(vsum0, e0);
+                vsum1 = _mm256_add_ps(vsum1, e1);
+            }
+            for (; d + 8 <= dim_size; d += 8) {
+                __m256 e = at::native::vec::exp256_ps(_mm256_sub_ps(_mm256_loadu_ps(row_in + d), vmax));
+                _mm256_storeu_ps(row_out + d, e);
+                vsum0 = _mm256_add_ps(vsum0, e);
+            }
+            float sum = at::native::vec::hsum_avx2(_mm256_add_ps(vsum0, vsum1));
+            for (; d < dim_size; ++d) {
+                float e = std::exp(row_in[d] - max_val);
+                row_out[d] = e;
+                sum += e;
             }
 
-            // Compute exp and sum
-            float sum = 0.0f;
-            for (int64_t d = 0; d < dim_size; ++d) {
-                int64_t idx = o * dim_size * inner_size + d * inner_size + i;
-                float exp_val = std::exp(in_data[idx] - max_val);
-                out_data[idx] = exp_val;
-                sum += exp_val;
+            // Pass 3: AVX2 normalize
+            __m256 vinv = _mm256_set1_ps(1.0f / sum);
+            d = 0;
+            for (; d + 8 <= dim_size; d += 8) {
+                _mm256_storeu_ps(row_out + d, _mm256_mul_ps(_mm256_loadu_ps(row_out + d), vinv));
             }
-
-            // Normalize
-            for (int64_t d = 0; d < dim_size; ++d) {
-                int64_t idx = o * dim_size * inner_size + d * inner_size + i;
-                out_data[idx] /= sum;
+            for (; d < dim_size; ++d) row_out[d] /= sum;
+        }
+    } else {
+        // General case: non-contiguous softmax dimension
+        for (int64_t o = 0; o < outer_size; ++o) {
+            for (int64_t i = 0; i < inner_size; ++i) {
+                float max_val = -std::numeric_limits<float>::infinity();
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    int64_t idx = o * dim_size * inner_size + d * inner_size + i;
+                    max_val = std::max(max_val, in_data[idx]);
+                }
+                float sum = 0.0f;
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    int64_t idx = o * dim_size * inner_size + d * inner_size + i;
+                    float exp_val = std::exp(in_data[idx] - max_val);
+                    out_data[idx] = exp_val;
+                    sum += exp_val;
+                }
+                float inv_sum = 1.0f / sum;
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    int64_t idx = o * dim_size * inner_size + d * inner_size + i;
+                    out_data[idx] *= inv_sum;
+                }
             }
         }
     }
@@ -315,7 +360,8 @@ inline Tensor softmax(const Tensor& input, int64_t dim = -1) {
 inline Tensor log_softmax(const Tensor& input, int64_t dim = -1) {
     if (dim < 0) dim = input.dim() + dim;
 
-    std::vector<int64_t> sizes = input.sizes().vec();
+    Tensor inp = input.is_contiguous() ? input : input.contiguous();
+    std::vector<int64_t> sizes = inp.sizes().vec();
     int64_t dim_size = sizes[dim];
 
     int64_t outer_size = 1;
@@ -323,33 +369,65 @@ inline Tensor log_softmax(const Tensor& input, int64_t dim = -1) {
     int64_t inner_size = 1;
     for (int64_t i = dim + 1; i < static_cast<int64_t>(sizes.size()); ++i) inner_size *= sizes[i];
 
-    Tensor output = at::empty(input.sizes());
-    const float* in_data = input.data_ptr<float>();
+    Tensor output = at::empty(inp.sizes());
+    const float* in_data = inp.data_ptr<float>();
     float* out_data = output.mutable_data_ptr<float>();
 
-    #pragma omp parallel for collapse(2) if(outer_size * inner_size > 1000)
-    for (int64_t o = 0; o < outer_size; ++o) {
-        for (int64_t i = 0; i < inner_size; ++i) {
-            // Find max
-            float max_val = -std::numeric_limits<float>::infinity();
-            for (int64_t d = 0; d < dim_size; ++d) {
-                int64_t idx = o * dim_size * inner_size + d * inner_size + i;
-                max_val = std::max(max_val, in_data[idx]);
-            }
+    if (inner_size == 1) {
+        // Fused AVX2 log_softmax for contiguous rows
+        for (int64_t o = 0; o < outer_size; ++o) {
+            const float* row_in = in_data + o * dim_size;
+            float* row_out = out_data + o * dim_size;
 
-            // Compute sum of exp
-            float sum = 0.0f;
-            for (int64_t d = 0; d < dim_size; ++d) {
-                int64_t idx = o * dim_size * inner_size + d * inner_size + i;
-                sum += std::exp(in_data[idx] - max_val);
+            // Pass 1: AVX2 max
+            float max_val = at::native::vec::vectorized_max(row_in, dim_size);
+            __m256 vmax = _mm256_set1_ps(max_val);
+
+            // Pass 2: fused exp(x - max) + sum
+            __m256 vsum0 = _mm256_setzero_ps(), vsum1 = _mm256_setzero_ps();
+            int64_t d = 0;
+            for (; d + 16 <= dim_size; d += 16) {
+                __m256 e0 = at::native::vec::exp256_ps(_mm256_sub_ps(_mm256_loadu_ps(row_in + d), vmax));
+                __m256 e1 = at::native::vec::exp256_ps(_mm256_sub_ps(_mm256_loadu_ps(row_in + d + 8), vmax));
+                vsum0 = _mm256_add_ps(vsum0, e0);
+                vsum1 = _mm256_add_ps(vsum1, e1);
             }
+            for (; d + 8 <= dim_size; d += 8) {
+                __m256 e = at::native::vec::exp256_ps(_mm256_sub_ps(_mm256_loadu_ps(row_in + d), vmax));
+                vsum0 = _mm256_add_ps(vsum0, e);
+            }
+            float sum = at::native::vec::hsum_avx2(_mm256_add_ps(vsum0, vsum1));
+            for (; d < dim_size; ++d) sum += std::exp(row_in[d] - max_val);
 
             float log_sum = max_val + std::log(sum);
+            __m256 vlog_sum = _mm256_set1_ps(log_sum);
 
-            // Compute log_softmax
-            for (int64_t d = 0; d < dim_size; ++d) {
-                int64_t idx = o * dim_size * inner_size + d * inner_size + i;
-                out_data[idx] = in_data[idx] - log_sum;
+            // Pass 3: log_softmax = x - log_sum_exp
+            d = 0;
+            for (; d + 8 <= dim_size; d += 8) {
+                _mm256_storeu_ps(row_out + d, _mm256_sub_ps(_mm256_loadu_ps(row_in + d), vlog_sum));
+            }
+            for (; d < dim_size; ++d) row_out[d] = row_in[d] - log_sum;
+        }
+    } else {
+        // General case
+        for (int64_t o = 0; o < outer_size; ++o) {
+            for (int64_t i = 0; i < inner_size; ++i) {
+                float max_val = -std::numeric_limits<float>::infinity();
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    int64_t idx = o * dim_size * inner_size + d * inner_size + i;
+                    max_val = std::max(max_val, in_data[idx]);
+                }
+                float sum = 0.0f;
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    int64_t idx = o * dim_size * inner_size + d * inner_size + i;
+                    sum += std::exp(in_data[idx] - max_val);
+                }
+                float log_sum = max_val + std::log(sum);
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    int64_t idx = o * dim_size * inner_size + d * inner_size + i;
+                    out_data[idx] = in_data[idx] - log_sum;
+                }
             }
         }
     }

@@ -2,7 +2,7 @@
 
 A complete deep learning framework built from scratch in C++17/CUDA. Implements the PyTorch API with custom tensor operations, automatic differentiation, neural network modules, and GPU acceleration.
 
-**~45,000 lines of C++/CUDA** | **110+ tensor operations** | **90+ autograd backward functions** | **57+ NN modules**
+**~48,000 lines of C++/CUDA** | **110+ tensor operations** | **90+ autograd backward functions** | **57+ NN modules**
 
 ## Features
 
@@ -49,6 +49,15 @@ A complete deep learning framework built from scratch in C++17/CUDA. Implements 
 - GPU inference: ~55 tok/s on A100 (qwen3:4b)
 - Quantization formats: Q4_K_M, Q5_K_M, Q6_K, Q8_0, F16, F32
 
+### NM Card Mini Backend (NTC Module)
+- Third backend alongside CPU and CUDA, targeting the [NM Card Mini](https://www.module.ru/products/2-moduli/nm-card-mini) accelerator by NTC Module (K1879VM8YA processor, 16 NMC4 tensor cores @ 1 GHz)
+- Software emulator reproducing all 16 virtual NMC4 cores with two precision modes: native float32 and Q16.16 fixed-point (matching real hardware arithmetic)
+- Full device integration: `Device("nmcard:0")`, `tensor.is_nmcard()`, `model.to("nmcard")`
+- Caching allocator, 40+ dispatched operations (forward, backward, optimizers, loss)
+- Q16.16 fixed-point math library ported from NMC4's mymath.h to x86
+- 32 emulator tests passing, MNIST trains to 93.64% accuracy on `--device nmcard`
+- Build with `-DPT_USE_NMCARD=ON`
+
 ### Additional Features
 - Serialization (save/load tensors and state dicts)
 - Python bindings via pybind11
@@ -62,6 +71,7 @@ A complete deep learning framework built from scratch in C++17/CUDA. Implements 
 - CMake 3.18+
 - (Optional) CUDA Toolkit 12.x for GPU support
 - (Optional) cuDNN 9.x for accelerated convolutions
+- (Optional) `-DPT_USE_NMCARD=ON` for NM Card Mini emulator backend
 
 ### CPU Build
 ```bash
@@ -132,11 +142,13 @@ std::string response = model.chat("What is 2+2?", /*max_tokens=*/64);
 
 ```
 c10/                    Core: Allocator, Device, Storage, TensorImpl, ScalarType
+  nmcard/               NMCardAllocator (caching, PrivateUse1)
 aten/src/ATen/
   core/                 Tensor, TensorFactory, TensorOptions
   native/cpu/           MathOps, ReduceOps, LinearAlgebra, ShapeOps, IndexOps, FFTOps
   cuda/                 CUDAKernels, CUDABlas, CUDAReduce, FlashAttention, CUDAQuantGemv
   cudnn/                CuDNN wrappers (Conv, Pool, BatchNorm, Activation)
+  nmcard/               NMCardEmulator, NMCardOps, NMCardDispatch, NMCardMath (Q16.16)
 torch/
   csrc/autograd/        Engine, Node, Edge, 90+ backward functions
   nn/modules/           57+ NN module implementations
@@ -145,7 +157,7 @@ torch/
   amp/                  Mixed precision (GradScaler, Autocast)
   data/                 Dataset, DataLoader, Samplers
 test/cpp/               Google Test suite (16 test files, 300+ tests)
-examples/               MNIST, PIR, RNN, Transformer, ViT, GGUF inference
+examples/               MNIST, PIR, RNN, Transformer, ViT, GGUF inference, NMCard MNIST
 python/                 pybind11 bindings
 ```
 
