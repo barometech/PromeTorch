@@ -1,5 +1,14 @@
-"""Optimizers."""
+"""
+Optimizers.
+
+Usage:
+    optimizer = pt.optim.Adam(model.parameters(), lr=0.001)
+"""
+
 try:
-    from promethorch._C import SGD, Adam, AdamW, RMSprop
+    from promethorch._C.optim import *
 except ImportError:
-    pass
+    try:
+        from promethorch._C import SGD, Adam, AdamW, RMSprop
+    except ImportError:
+        pass
