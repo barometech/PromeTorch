@@ -283,12 +283,12 @@ static inline float vec_max(const float* data, int64_t n) {
     lo = _mm_max_ps(lo, _mm_movehl_ps(lo, lo));
     lo = _mm_max_ss(lo, _mm_movehdup_ps(lo));
     result = _mm_cvtss_f32(lo);
-#elif VecF::width == 4
+#elif defined(TUDA_NEON) || defined(TUDA_E2K)
     float tmp[4];
     vmax.store(tmp);
     result = std::max(std::max(tmp[0], tmp[1]), std::max(tmp[2], tmp[3]));
-#elif VecF::width == 1
-    result = vmax.val;
+#else
+    result = vmax.hsum(); // scalar: single element
 #endif
     for (; i < n; ++i) if (data[i] > result) result = data[i];
     return result;
@@ -310,12 +310,12 @@ static inline float vec_min(const float* data, int64_t n) {
     lo = _mm_min_ps(lo, _mm_movehl_ps(lo, lo));
     lo = _mm_min_ss(lo, _mm_movehdup_ps(lo));
     result = _mm_cvtss_f32(lo);
-#elif VecF::width == 4
+#elif defined(TUDA_NEON) || defined(TUDA_E2K)
     float tmp[4];
     vmin.store(tmp);
     result = std::min(std::min(tmp[0], tmp[1]), std::min(tmp[2], tmp[3]));
-#elif VecF::width == 1
-    result = vmin.val;
+#else
+    result = vmin.hsum(); // scalar: single element
 #endif
     for (; i < n; ++i) if (data[i] < result) result = data[i];
     return result;

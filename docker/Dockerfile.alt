@@ -1,10 +1,25 @@
-FROM alt:p10 AS alt-build
-RUN apt-get update && apt-get install -y gcc-c++ cmake make git && rm -rf /var/lib/apt/lists/*
+# ALT Linux SP simulation (Debian bookworm as proxy — same GCC/CMake stack)
+FROM debian:bookworm-slim
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends build-essential cmake git ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
 WORKDIR /opt/promethorch
 COPY . .
-RUN mkdir build_alt && cd build_alt && \
+
+RUN mkdir -p build && cd build && \
     cmake .. -DCMAKE_BUILD_TYPE=Release \
-    -DPT_USE_TUDA=ON -DPT_USE_LINQ=OFF -DPT_USE_CUDA=OFF \
-    -DPT_BUILD_TESTS=ON -DPT_BUILD_SHARED_LIBS=ON && \
-    cmake --build . -j$(nproc)
-RUN cd build_alt && ./tuda_tests
+    -DPT_USE_TUDA=ON \
+    -DPT_USE_LINQ=ON \
+    -DPT_USE_CUDA=OFF \
+    -DPT_USE_NMCARD=OFF \
+    -DPT_BUILD_TESTS=ON \
+    -DPT_BUILD_SHARED_LIBS=OFF && \
+    cmake --build . --target tuda_tests -j$(nproc) && \
+    cmake --build . --target linq_tests -j$(nproc) && \
+    cmake --build . --target train_mnist_mlp -j$(nproc)
+
+RUN cd build && echo "=== TUDA ===" && ./tuda_tests && \
+    echo "=== LinQ ===" && ./linq_tests && \
+    echo "=== ALL PASS ==="
