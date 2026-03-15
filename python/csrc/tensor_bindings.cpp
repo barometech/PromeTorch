@@ -152,10 +152,10 @@ void init_tensor_bindings(py::module& m) {
         .def_property_readonly("ndim", &at::Tensor::dim)
         .def_property_readonly("dim", &at::Tensor::dim)
         .def_property_readonly("numel", &at::Tensor::numel)
-        .def_property_readonly("is_contiguous", &at::Tensor::is_contiguous)
-        .def_property_readonly("requires_grad", &at::Tensor::requires_grad)
-        .def_property_readonly("grad", &at::Tensor::grad)
-        .def_property_readonly("is_leaf", &at::Tensor::is_leaf)
+        .def_property_readonly("is_contiguous", [](const at::Tensor& t) { return t.is_contiguous(); })
+        .def_property_readonly("requires_grad", [](const at::Tensor& t) { return t.requires_grad(); })
+        .def_property_readonly("grad", [](const at::Tensor& t) { return t.grad(); })
+        .def_property_readonly("is_leaf", [](const at::Tensor& t) { return t.is_leaf(); })
 
         // Methods
         .def("numpy", &tensor_to_numpy)
@@ -170,7 +170,7 @@ void init_tensor_bindings(py::module& m) {
         })
         .def("clone", &at::Tensor::clone)
         .def("detach", &at::Tensor::detach)
-        .def("contiguous", &at::Tensor::contiguous)
+        .def("contiguous", [](const at::Tensor& t) { return t.contiguous(); })
         .def("requires_grad_", [](at::Tensor& t, bool requires_grad) {
             return t.set_requires_grad(requires_grad);
         }, py::arg("requires_grad") = true)
