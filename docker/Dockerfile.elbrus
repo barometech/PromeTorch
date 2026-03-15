@@ -1,15 +1,15 @@
-# Elbrus simulation (E2K is VLIW — cannot run in x86 Docker)
-# This builds with Scalar fallback to verify code compiles on GCC/Linux
-FROM debian:bullseye-slim
+# Elbrus simulation (Scalar TUDA path — simulates non-x86 E2K VLIW)
+FROM debian:bookworm-slim
 
-RUN apt-get update && \
+RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
+    echo 'Acquire::http::Timeout "30";' >> /etc/apt/apt.conf.d/80-retries && \
+    apt-get update && \
     apt-get install -y --no-install-recommends build-essential cmake git ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/promethorch
 COPY . .
 
-# Build without AVX2 — forces TUDA Scalar path (simulates non-x86)
 RUN mkdir -p build && cd build && \
     cmake .. -DCMAKE_BUILD_TYPE=Release \
     -DPT_USE_TUDA=ON \

@@ -1,7 +1,10 @@
-# Astra Linux SE simulation (Debian bullseye-based, ФСТЭК certified)
-FROM debian:bullseye-slim
+# Astra Linux SE simulation (Debian bookworm-based, ФСТЭК certified)
+FROM debian:bookworm-slim
 
-RUN apt-get update && \
+# Use CDN mirror + retries to avoid timeout issues
+RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
+    echo 'Acquire::http::Timeout "30";' >> /etc/apt/apt.conf.d/80-retries && \
+    apt-get update && \
     apt-get install -y --no-install-recommends build-essential cmake git ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
@@ -20,7 +23,6 @@ RUN mkdir -p build && cd build && \
     cmake --build . --target linq_tests -j$(nproc) && \
     cmake --build . --target train_mnist_mlp -j$(nproc)
 
-# Run all tests
 RUN cd build && echo "=== TUDA ===" && ./tuda_tests && \
     echo "=== LinQ ===" && ./linq_tests && \
     echo "=== ALL PASS ==="
