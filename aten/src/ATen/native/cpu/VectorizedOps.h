@@ -2,7 +2,10 @@
 // ============================================================================
 // VectorizedOps.h — AVX2 SIMD implementations for transcendental functions
 // Cephes-derived polynomial approximations, float32 accuracy ~1e-7
+// NOTE: This file is AVX2-only. On non-x86 platforms, use TudaMath.h instead.
 // ============================================================================
+
+#if defined(__AVX2__) || defined(__AVX__) || defined(_MSC_VER)
 
 #ifdef _MSC_VER
 #include <intrin.h>
@@ -371,3 +374,5 @@ static inline float vectorized_min(const float* data, int64_t n) {
 } // namespace vec
 } // namespace native
 } // namespace at
+
+#endif // defined(__AVX2__) || defined(__AVX__) || defined(_MSC_VER)

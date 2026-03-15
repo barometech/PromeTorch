@@ -1,10 +1,23 @@
-FROM centos:8 AS redos-build
-RUN dnf group install -y "Development Tools" && dnf install -y cmake && dnf clean all
+# RED OS simulation (RHEL-based — use Rocky Linux 9 as proxy)
+FROM rockylinux:9-minimal
+
+RUN microdnf install -y gcc gcc-c++ cmake make git && microdnf clean all
+
 WORKDIR /opt/promethorch
 COPY . .
-RUN mkdir build_redos && cd build_redos && \
+
+RUN mkdir -p build && cd build && \
     cmake .. -DCMAKE_BUILD_TYPE=Release \
-    -DPT_USE_TUDA=ON -DPT_USE_LINQ=OFF -DPT_USE_CUDA=OFF \
-    -DPT_BUILD_TESTS=ON -DPT_BUILD_SHARED_LIBS=ON && \
-    cmake --build . -j$(nproc)
-RUN cd build_redos && ./tuda_tests
+    -DPT_USE_TUDA=ON \
+    -DPT_USE_LINQ=ON \
+    -DPT_USE_CUDA=OFF \
+    -DPT_USE_NMCARD=OFF \
+    -DPT_BUILD_TESTS=ON \
+    -DPT_BUILD_SHARED_LIBS=OFF && \
+    cmake --build . --target tuda_tests -j$(nproc) && \
+    cmake --build . --target linq_tests -j$(nproc) && \
+    cmake --build . --target train_mnist_mlp -j$(nproc)
+
+RUN cd build && echo "=== TUDA ===" && ./tuda_tests && \
+    echo "=== LinQ ===" && ./linq_tests && \
+    echo "=== ALL PASS ==="
