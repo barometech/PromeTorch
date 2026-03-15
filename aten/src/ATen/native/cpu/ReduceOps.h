@@ -4,6 +4,7 @@
 #include "aten/src/ATen/core/TensorFactory.h"
 #include "aten/src/ATen/native/cpu/VectorizedOps.h"
 #include "aten/src/ATen/native/cpu/tuda/TudaVec.h"
+#include "aten/src/ATen/native/cpu/tuda/TudaMath.h"
 #include <cmath>
 #include <limits>
 #include <tuple>
@@ -24,7 +25,7 @@ inline Tensor sum(const Tensor& self) {
     // AVX2 fast path for contiguous float
     if (self.dtype() == c10::ScalarType::Float && self.is_contiguous()) {
         result.mutable_data_ptr<float>()[0] =
-            vec::vectorized_sum(self.data_ptr<float>(), self.numel());
+            tuda::vec_sum(self.data_ptr<float>(), self.numel());
         return result;
     }
 
@@ -71,7 +72,7 @@ inline Tensor sum(const Tensor& self, int64_t dim, bool keepdim = false) {
         if (inner_size == 1) {
             // Reducing last dim or 1D: contiguous sum of reduce_size elements
             for (int64_t outer = 0; outer < outer_size; ++outer) {
-                out[outer] = vec::vectorized_sum(in + outer * reduce_size, reduce_size);
+                out[outer] = tuda::vec_sum(in + outer * reduce_size, reduce_size);
             }
         } else {
             // AVX2 accumulation along inner dimension (handles dim=0/middle/all cases)
@@ -175,7 +176,7 @@ inline Tensor max(const Tensor& self) {
 
     if (self.dtype() == c10::ScalarType::Float && self.is_contiguous()) {
         result.mutable_data_ptr<float>()[0] =
-            vec::vectorized_max(self.data_ptr<float>(), self.numel());
+            tuda::vec_max(self.data_ptr<float>(), self.numel());
         return result;
     }
 
@@ -258,7 +259,7 @@ inline Tensor min(const Tensor& self) {
 
     if (self.dtype() == c10::ScalarType::Float && self.is_contiguous()) {
         result.mutable_data_ptr<float>()[0] =
-            vec::vectorized_min(self.data_ptr<float>(), self.numel());
+            tuda::vec_min(self.data_ptr<float>(), self.numel());
         return result;
     }
 
