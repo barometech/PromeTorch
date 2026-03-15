@@ -7,7 +7,7 @@ RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
     apt-get install -y --no-install-recommends build-essential cmake git ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir numpy pybind11
+RUN pip install --no-cache-dir --retries 5 --timeout 60 numpy pybind11 wheel build
 
 WORKDIR /opt/promethorch
 COPY . .
@@ -26,9 +26,9 @@ RUN mkdir -p build_python && cd build_python && \
     cmake --build . --target _C -j$(nproc) && \
     cmake --build . --target c10 -j$(nproc)
 
-# Copy built .so into promethorch package
-RUN find build_python -name "_C*.so" -exec cp {} promethorch/ \; && \
-    find build_python -name "libc10*" -exec cp {} promethorch/ \; && \
+# Copy built extension to the right place
+RUN find / -name "_C*.so" -not -path "*/CMakeFiles/*" 2>/dev/null -exec cp {} promethorch/ \; && \
+    find build_python -name "libc10*" -type f -exec cp {} promethorch/ \; && \
     ls -la promethorch/_C* promethorch/libc10*
 
 # Install package
