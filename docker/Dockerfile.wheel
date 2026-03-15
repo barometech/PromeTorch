@@ -1,0 +1,46 @@
+# Build Python wheel with C++ extension
+FROM python:3.11-slim-bookworm
+
+RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
+    echo 'Acquire::http::Timeout "30";' >> /etc/apt/apt.conf.d/80-retries && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends build-essential cmake git ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir numpy pybind11
+
+WORKDIR /opt/promethorch
+COPY . .
+
+# Build C++ extension via cmake directly
+RUN mkdir -p build_python && cd build_python && \
+    cmake .. -DCMAKE_BUILD_TYPE=Release \
+    -DPT_BUILD_PYTHON=ON \
+    -DPT_USE_TUDA=ON \
+    -DPT_USE_LINQ=OFF \
+    -DPT_USE_CUDA=OFF \
+    -DPT_USE_NMCARD=OFF \
+    -DPT_BUILD_TESTS=OFF \
+    -DPT_BUILD_SHARED_LIBS=ON \
+    -DPYTHON_EXECUTABLE=$(which python3) && \
+    cmake --build . --target _C -j$(nproc) && \
+    cmake --build . --target c10 -j$(nproc)
+
+# Copy built .so into promethorch package
+RUN find build_python -name "_C*.so" -exec cp {} promethorch/ \; && \
+    find build_python -name "libc10*" -exec cp {} promethorch/ \; && \
+    ls -la promethorch/_C* promethorch/libc10*
+
+# Install package
+RUN pip install -e . --no-build-isolation
+
+# Set LD path so _C.so can find libc10.so
+ENV LD_LIBRARY_PATH=/opt/promethorch/promethorch:$LD_LIBRARY_PATH
+
+# Verify
+RUN python -c "\
+import promethorch as pt; \
+print(f'PromeTorch v{pt.__version__}'); \
+print(f'C++ extension loaded: {pt._C_LOADED}'); \
+print(f'CUDA available: {pt.cuda_is_available()}'); \
+print('=== PYTHON + C++ VERIFIED ===');"

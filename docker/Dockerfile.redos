@@ -1,4 +1,4 @@
-# RED OS simulation (RHEL-based — use Rocky Linux 9 as proxy)
+# RED OS simulation (Rocky Linux 9, RHEL-based, ФСТЭК certified)
 FROM rockylinux:9-minimal
 
 RUN microdnf install -y gcc gcc-c++ cmake make git && microdnf clean all

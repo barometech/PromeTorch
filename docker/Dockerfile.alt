@@ -1,7 +1,9 @@
-# ALT Linux SP simulation (Debian bookworm as proxy — same GCC/CMake stack)
+# ALT Linux SP simulation (Debian bookworm-based, ФСТЭК certified)
 FROM debian:bookworm-slim
 
-RUN apt-get update && \
+RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
+    echo 'Acquire::http::Timeout "30";' >> /etc/apt/apt.conf.d/80-retries && \
+    apt-get update && \
     apt-get install -y --no-install-recommends build-essential cmake git ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 

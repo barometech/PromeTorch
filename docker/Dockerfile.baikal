@@ -1,7 +1,9 @@
 # Baikal cross-compilation (ARM aarch64 from x86 host)
-FROM debian:bullseye-slim
+FROM debian:bookworm-slim
 
-RUN apt-get update && \
+RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
+    echo 'Acquire::http::Timeout "30";' >> /etc/apt/apt.conf.d/80-retries && \
+    apt-get update && \
     apt-get install -y --no-install-recommends \
     build-essential cmake git ca-certificates \
     gcc-aarch64-linux-gnu g++-aarch64-linux-gnu && \
@@ -10,7 +12,6 @@ RUN apt-get update && \
 WORKDIR /opt/promethorch
 COPY . .
 
-# Cross-compile for Baikal-M (Cortex-A57, NEON)
 RUN mkdir -p build && cd build && \
     cmake .. \
     -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/aarch64-baikal-m.cmake \
@@ -23,5 +24,4 @@ RUN mkdir -p build && cd build && \
     -DPT_BUILD_SHARED_LIBS=OFF && \
     cmake --build . --target tuda_tests -j$(nproc)
 
-# Can't run ARM binaries on x86 — just verify they built
 RUN cd build && ls -la tuda_tests && echo "=== BAIKAL-M ARM64 CROSS-BUILD SUCCESS ==="
