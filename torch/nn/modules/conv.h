@@ -3,11 +3,7 @@
 #include "torch/nn/module.h"
 #include "torch/nn/init.h"
 #include "aten/src/ATen/native/cpu/PromeBLAS.h"
-#ifdef _MSC_VER
-#include <intrin.h>
-#else
-#include <immintrin.h>
-#endif
+#include "aten/src/ATen/native/cpu/tuda/TudaVec.h"
 #ifdef PT_USE_CUDA
 #include "aten/src/ATen/cuda/CUDADispatch.h"
 #endif
@@ -195,12 +191,11 @@ public:
             for (int64_t n = 0; n < batch_size; ++n) {
                 for (int64_t c = 0; c < out_channels_; ++c) {
                     float* out_c = output_data + n * out_channels_ * out_length + c * out_length;
-                    __m256 vb = _mm256_set1_ps(bias_data[c]);
+                    constexpr int W = at::native::tuda::VecF::width;
+                    auto vb = at::native::tuda::VecF::broadcast(bias_data[c]);
                     int64_t j = 0;
-                    for (; j + 8 <= out_length; j += 8) {
-                        __m256 v = _mm256_loadu_ps(out_c + j);
-                        _mm256_storeu_ps(out_c + j, _mm256_add_ps(v, vb));
-                    }
+                    for (; j + W <= out_length; j += W)
+                        (at::native::tuda::VecF::load(out_c + j) + vb).store(out_c + j);
                     for (; j < out_length; ++j) out_c[j] += bias_data[c];
                 }
             }
@@ -459,12 +454,11 @@ public:
                 for (int64_t c = 0; c < out_channels_; ++c) {
                     float* out_channel = output_data +
                         n * out_channels_ * col_width + c * col_width;
-                    __m256 vbias = _mm256_set1_ps(bias_data[c]);
+                    constexpr int W = at::native::tuda::VecF::width;
+                    auto vbias = at::native::tuda::VecF::broadcast(bias_data[c]);
                     int64_t j = 0;
-                    for (; j + 8 <= col_width; j += 8) {
-                        __m256 v = _mm256_loadu_ps(out_channel + j);
-                        _mm256_storeu_ps(out_channel + j, _mm256_add_ps(v, vbias));
-                    }
+                    for (; j + W <= col_width; j += W)
+                        (at::native::tuda::VecF::load(out_channel + j) + vbias).store(out_channel + j);
                     for (; j < col_width; ++j) {
                         out_channel[j] += bias_data[c];
                     }

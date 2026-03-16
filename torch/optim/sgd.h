@@ -1,11 +1,7 @@
 #pragma once
 
 #include "torch/optim/optimizer.h"
-#ifdef _MSC_VER
-#include <intrin.h>
-#else
-#include <immintrin.h>
-#endif
+#include "aten/src/ATen/native/cpu/tuda/TudaVec.h"
 
 namespace torch {
 namespace optim {
@@ -92,33 +88,29 @@ public:
                     float lrf = static_cast<float>(lr);
                     float wdf = static_cast<float>(wd);
 
+                    using VF = at::native::tuda::VecF;
+                    constexpr int W = VF::width;
                     if (wdf != 0.0f) {
-                        // param = param * (1 - lr*wd) - lr * grad
-                        __m256 decay = _mm256_set1_ps(1.0f - lrf * wdf);
-                        __m256 neg_lr = _mm256_set1_ps(-lrf);
+                        VF decay = VF::broadcast(1.0f - lrf * wdf);
+                        VF neg_lr = VF::broadcast(-lrf);
                         int64_t i = 0;
-                        for (; i + 8 <= n; i += 8) {
-                            __m256 p = _mm256_loadu_ps(p_data + i);
-                            __m256 g = _mm256_loadu_ps(g_data + i);
-                            p = _mm256_fmadd_ps(neg_lr, g, _mm256_mul_ps(p, decay));
-                            _mm256_storeu_ps(p_data + i, p);
+                        for (; i + W <= n; i += W) {
+                            VF p = VF::load(p_data + i);
+                            VF g = VF::load(g_data + i);
+                            VF::fmadd(neg_lr, g, p * decay).store(p_data + i);
                         }
-                        for (; i < n; ++i) {
+                        for (; i < n; ++i)
                             p_data[i] = p_data[i] * (1.0f - lrf * wdf) - lrf * g_data[i];
-                        }
                     } else {
-                        // param -= lr * grad
-                        __m256 neg_lr = _mm256_set1_ps(-lrf);
+                        VF neg_lr = VF::broadcast(-lrf);
                         int64_t i = 0;
-                        for (; i + 8 <= n; i += 8) {
-                            __m256 p = _mm256_loadu_ps(p_data + i);
-                            __m256 g = _mm256_loadu_ps(g_data + i);
-                            p = _mm256_fmadd_ps(neg_lr, g, p);
-                            _mm256_storeu_ps(p_data + i, p);
+                        for (; i + W <= n; i += W) {
+                            VF p = VF::load(p_data + i);
+                            VF g = VF::load(g_data + i);
+                            VF::fmadd(neg_lr, g, p).store(p_data + i);
                         }
-                        for (; i < n; ++i) {
+                        for (; i < n; ++i)
                             p_data[i] -= lrf * g_data[i];
-                        }
                     }
                     continue;
                 }
