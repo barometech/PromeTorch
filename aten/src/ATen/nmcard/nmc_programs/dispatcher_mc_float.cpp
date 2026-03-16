@@ -9,11 +9,7 @@
 // No Q16.16, no mymath.h. Native IEEE 754.
 // ============================================================
 
-// NMC4 multi-core identification
-extern "C" {
-    int ncl_getCoreID(void);
-    int ncl_getClusterID(void);
-}
+// No ncl_getCoreID — broken with float libgcc. Host writes core_index to DDR[29].
 
 // Stubs for missing libgcc symbols (required by nm6408load_nmc)
 extern "C" unsigned int LShift32(unsigned int a, unsigned int b) {
@@ -139,9 +135,16 @@ void op_sgd() {
 }
 
 int main() {
-    int core_id = ncl_getCoreID();
-    int cluster_id = ncl_getClusterID();
-    unsigned int core_index = (unsigned int)((cluster_id << 2) + core_id);
+    // Core index passed by host in DDR_BASE word 29 BEFORE loading program
+    // Host writes core_index to each core's expected CMD block location
+    // Since ncl_getCoreID may not work with float libgcc, we use a different approach:
+    // Each core reads its core_index from a fixed location that host pre-sets
+
+    // Host pre-writes core_index at DDR_BASE + 29 for each core
+    // before loading program. Read it from there.
+    volatile unsigned int* boot = (volatile unsigned int*)DDR_BASE;
+    unsigned int core_index = boot[29];
+    if (core_index > 15) core_index = 0;
 
     // Point to this core's CMD block
     mem = (volatile unsigned int*)(DDR_BASE + (core_index << 5));
