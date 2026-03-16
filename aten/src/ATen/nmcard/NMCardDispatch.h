@@ -38,11 +38,37 @@ inline Tensor empty_nmcard(c10::IntArrayRef sizes,
     return Tensor(impl);
 }
 
+// Auto-initialize hardware on first use
+inline void ensure_hardware_init() {
+    static bool tried = false;
+    if (!tried) {
+        tried = true;
+        auto& hw = nmcard::NMCardHardware::get();
+        if (!hw.is_available()) {
+            // Try default dispatcher locations
+            const char* paths[] = {
+                "aten/src/ATen/nmcard/nmc_programs/dispatcher.abs",
+                "dispatcher.abs",
+                nullptr
+            };
+            for (int i = 0; paths[i]; ++i) {
+                if (hw.init(paths[i])) {
+                    std::cout << "NMCard hardware auto-initialized" << std::endl;
+                    break;
+                }
+            }
+        }
+    }
+}
+
 // Copy tensor to NMCard device
 inline Tensor to_nmcard(const Tensor& src, int device = 0) {
     if (src.is_nmcard()) {
         return src; // Already on NMCard
     }
+
+    // Auto-init hardware
+    ensure_hardware_init();
 
     auto dst = empty_nmcard(src.sizes().vec(), src.dtype(), device);
 
