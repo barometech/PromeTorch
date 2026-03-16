@@ -6,6 +6,6 @@
   "layers": 2,
   "chars": "\n !$&',-.3:;?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
   "params": 13185,
-  "loss": 2.069865412101084,
-  "card_matmuls": 1001
+  "loss": 1.6471895915896841,
+  "card_matmuls": 20001
 }
