@@ -65,3 +65,4 @@ pytorch_*.py
 benchmark_*.py
 fix_*.py
 run_*.py
+vendor/
