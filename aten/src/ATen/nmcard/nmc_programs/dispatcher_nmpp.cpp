@@ -11,10 +11,13 @@
 
 #include "mymath.h"
 
-// nmpp matrix multiply declaration
+// nmpp matrix multiply declarations
 extern "C" {
     void nmppmMul_mm_32s32s(int* pSrcMtr1, int nHeight1, int nWidth1,
                              int* pSrcMtr2, int* pDstMtr, int nWidth2);
+    void nmppmMul_mm_32f(float* pSrcMtr1, int nHeight1, int nStride1,
+                          float* pSrcMtr2, int nWidth1, int nStride2,
+                          float* pDstMtr, int nWidth2, int nStrideDst, int bPlusDst);
 }
 
 #define DDR_BASE 0x00340000
@@ -30,56 +33,38 @@ volatile unsigned int* mem = (volatile unsigned int*)DDR_BASE;
 #define WATCHDOG_ADDR    31
 
 // ============================================================
-// Convert float array in DDR to Q16.16 in-place
+// Q8.8 scaling for nmpp (avoids 32-bit overflow)
+// nmpp does integer C = sum(A_int * B_int)
+// With Q8.8: A_int = round(A * 256), B_int = round(B * 256)
+// C_int = 256^2 * sum(A*B), so C_float = C_int / 65536
 // ============================================================
-void convert_float_to_q16(unsigned int* data, unsigned int count) {
+#define NMPP_S 256
+#define NMPP_S2 65536
+
+void convert_float_to_q8(unsigned int* data, unsigned int count) {
     for (unsigned int i = 0; i < count; i++) {
-        data[i] = (unsigned int)float_to_fixed(data[i]);
+        fixed32 f = float_to_fixed(data[i]);  // IEEE float → Q16.16
+        int val = ((int)f) >> 8;              // Q16.16 → Q8.8 (= int * 256)
+        data[i] = (unsigned int)val;
     }
 }
 
 // ============================================================
-// Convert Q16.16 array in DDR to float in-place
-// ============================================================
-void convert_q16_to_float(unsigned int* data, unsigned int count) {
-    for (unsigned int i = 0; i < count; i++) {
-        data[i] = fixed_to_float((fixed32)data[i]);
-    }
-}
-
-// ============================================================
-// MatMul via nmpp: C[M,N] = A[M,K] @ B[K,N]
-// args: [M, K, N, addr_A, addr_B, addr_C]
-// Input A,B in IEEE float. Output C in IEEE float.
+// MatMul via nmpp FLOAT: C[M,N] = A[M,K] @ B[K,N]
+// Input/output: IEEE 754 float DIRECTLY — no Q16.16 conversion!
 // ============================================================
 void op_matmul_nmpp() {
     unsigned int M = mem[1];
     unsigned int K = mem[2];
     unsigned int N = mem[3];
-    unsigned int* A = (unsigned int*)mem[4];
-    unsigned int* B = (unsigned int*)mem[5];
-    unsigned int* C = (unsigned int*)mem[6];
+    float* A = (float*)mem[4];
+    float* B = (float*)mem[5];
+    float* C = (float*)mem[6];
 
-    // Step 1: Convert A,B from float to Q16.16
-    convert_float_to_q16(A, mul_u32(M, K));
-    convert_float_to_q16(B, mul_u32(K, N));
-
-    // Step 2: Vectorized matmul via nmpp
-    // nmppmMul_mm_32s32s(A, M, K, B, C, N)
-    nmppmMul_mm_32s32s((int*)A, (int)M, (int)K, (int*)B, (int*)C, (int)N);
-
-    // Step 3: Convert C from Q16.16 to float
-    // Note: nmpp result is in 32s32s = 32-bit accumulation of 32-bit inputs
-    // The result needs to be scaled by 1/FIXED_ONE since both inputs were Q16.16
-    // Result = sum(a_q16 * b_q16) which is Q32.32 truncated to 32 bits
-    // For Q16.16 * Q16.16 = Q32.32, we need to right-shift by 16
-    unsigned int MN = mul_u32(M, N);
-    for (unsigned int i = 0; i < MN; i++) {
-        int val = (int)C[i];
-        // Right shift by 16 to go from Q32.32 to Q16.16
-        val = (val >> 16);  // This is the Q16.16 result
-        C[i] = fixed_to_float((fixed32)val);
-    }
+    // Direct float matmul — nmpp handles FP32 natively!
+    // nmppmMul_mm_32f(A, M, K, B, K, N, C, N, N, 0)
+    // stride1=K (row stride of A), stride2=N (row stride of B), strideDst=N, bPlusDst=0
+    nmppmMul_mm_32f(A, (int)M, (int)K, B, (int)K, (int)N, C, (int)N, (int)N, 0);
 }
 
 // ============================================================
