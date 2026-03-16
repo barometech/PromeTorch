@@ -62,7 +62,7 @@ C=card_mm(np.array([[1,2],[3,4]],dtype=np.float32),np.array([[5,6],[7,8]],dtype=
 print(f'MatMul check: {C.flatten()} (expect [19 22 43 50])')
 
 # Model: 200K, self-attention
-D=96; H=6; HD=D//H; F=256; T=64; L=3
+D=64; H=4; HD=D//H; F=128; T=32; L=3
 np.random.seed(42)
 he=lambda fi,fo: np.random.randn(fi,fo).astype(np.float32)*np.sqrt(2/(fi+fo))
 
@@ -82,10 +82,20 @@ print(f'Model: {total:,} params, D={D}, H={H}, F={F}, T={T}, L={L}')
 
 def sm(x): e=np.exp(x-x.max(-1,keepdims=True)); return e/e.sum(-1,keepdims=True)
 def rn(x,g): r=np.sqrt(np.mean(x**2,-1,keepdims=True)+1e-6); return x/r*g, r
+def rn_bwd(dy, x, g, r):
+    """Full RMS norm backward: d/dx (x/rms * g)"""
+    D_ = x.shape[-1]
+    xn = x / r  # normalized
+    # dy_g = dy * g
+    dy_g = dy * g
+    # dx = (dy_g - xn * mean(dy_g * xn)) / r
+    dot = np.sum(dy_g * xn, axis=-1, keepdims=True) / D_
+    dx = (dy_g - xn * dot) / r
+    return dx
 
 # Training
 print(f'\n=== TRAINING 200K TRANSFORMER ON NM CARD MINI ===')
-lr=0.003; best=99; step=0; start=time.time(); card_mm_count=0
+lr=0.0003; best=99; step=0; start=time.time(); card_mm_count=0
 
 while best > 1.0 and step < 10000:
     idx=np.random.randint(0,len(data)-T-1)
@@ -123,13 +133,14 @@ while best > 1.0 and step < 10000:
 
     # Backward (CPU)
     dl=probs.copy(); dl[np.arange(Tl),tgt]-=1; dl/=Tl
-    dWh=xf.T@dl; dbh=dl.sum(0); dx=dl@Wh.T*gf/rf
+    dWh=xf.T@dl; dbh=dl.sum(0)
+    dx=rn_bwd(dl@Wh.T, x, gf, rf)
 
     for li in range(L-1,-1,-1):
         l=layers[li]; x_in,xn,r1,Q,K_,V_,at,ao,xr,xn2,r2,h,a=cache[li]
         do=dx; dW2=a.T@do; db2=do.sum(0); da=do@l['W2'].T*(h>0)
         dW1=xn2.T@da; db1=da.sum(0); dxn2=da@l['W1'].T
-        dx_r=dx+dxn2*l['g2']/r2
+        dx_r=dx+rn_bwd(dxn2, xr, l['g2'], r2)
         dpr=dx_r; dWo=ao.T@dpr; dao=dpr@l['Wo'].T
         dao_h=dao.reshape(Tl,H,HD).transpose(1,0,2)
         dV_=np.matmul(at.transpose(0,2,1),dao_h)
@@ -139,19 +150,37 @@ while best > 1.0 and step < 10000:
         dQ=dQ.transpose(1,0,2).reshape(Tl,D); dK=dK.transpose(1,0,2).reshape(Tl,D)
         dV_=dV_.transpose(1,0,2).reshape(Tl,D)
         dWq=xn.T@dQ; dWk=xn.T@dK; dWv=xn.T@dV_
-        dx=dx_r+(dQ@l['Wq'].T+dK@l['Wk'].T+dV_@l['Wv'].T)*l['g1']/r1
+        dxn_attn=dQ@l['Wq'].T+dK@l['Wk'].T+dV_@l['Wv'].T
+        dx=dx_r+rn_bwd(dxn_attn, x_in, l['g1'], r1)
         l['Wq']-=lr*dWq; l['Wk']-=lr*dWk; l['Wv']-=lr*dWv; l['Wo']-=lr*dWo
         l['W1']-=lr*dW1; l['b1']-=lr*db1; l['W2']-=lr*dW2; l['b2']-=lr*db2
 
     Wh-=lr*dWh; bh-=lr*dbh; pos[:Tl]-=lr*0.1*dx
     for t in range(Tl): embed[tok[t]]-=lr*0.1*dx[t]
 
-    if step==2000: lr=0.001
-    if step==5000: lr=0.0003
+    if step==3000: lr=0.0002
+    if step==6000: lr=0.0001
 
     if step%100==0:
         el=time.time()-start
         print(f'Step {step:5d} | loss={loss:.3f} | best={best:.3f} | mm={card_mm_count} | {el:.0f}s')
+    if step%200==0 and step>0:
+        p=list(ch2idx.get(c,0) for c in 'ROMEO:\n')
+        for _ in range(100):
+            inp=p[-T:];xg=embed[inp]+pos[:len(inp)]
+            for l in layers:
+                xn=xg/np.sqrt(np.mean(xg**2,-1,keepdims=True)+1e-6)*l['g1']
+                Qg=(xn@l['Wq']).reshape(-1,H,HD).transpose(1,0,2)
+                Kg=(xn@l['Wk']).reshape(-1,H,HD).transpose(1,0,2)
+                Vg=(xn@l['Wv']).reshape(-1,H,HD).transpose(1,0,2)
+                sc=np.matmul(Qg,Kg.transpose(0,2,1))/np.sqrt(HD)+np.triu(np.full((Qg.shape[1],Qg.shape[1]),-1e9),k=1)
+                xg=xg+(sm(sc)@Vg).transpose(1,0,2).reshape(-1,D)@l['Wo']
+                xn2=xg/np.sqrt(np.mean(xg**2,-1,keepdims=True)+1e-6)*l['g2']
+                xg=xg+np.maximum(xn2@l['W1']+l['b1'],0)@l['W2']+l['b2']
+            xf=xg/np.sqrt(np.mean(xg**2,-1,keepdims=True)+1e-6)*gf
+            pp=sm((xf@Wh+bh)[-1]/0.9);pp/=pp.sum()
+            p.append(np.random.choice(V,p=pp))
+        print(f'  Gen: {"".join(idx2ch.get(t,"?") for t in p)[:150]}')
     step+=1
 
 el=time.time()-start
