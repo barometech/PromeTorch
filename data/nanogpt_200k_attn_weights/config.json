@@ -1,0 +1,15 @@
+{
+  "V": 65,
+  "D": 64,
+  "H": 4,
+  "F": 128,
+  "T": 32,
+  "L": 3,
+  "HD": 16,
+  "params": 109761,
+  "loss": 2.6465489864349365,
+  "card_matmuls": 190000,
+  "steps": 10000,
+  "time": 11397.620469331741,
+  "chars": "\n !$&',-.3:;?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+}
