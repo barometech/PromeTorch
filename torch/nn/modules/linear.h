@@ -5,11 +5,7 @@
 #include "torch/csrc/autograd/autograd.h"
 #include "torch/csrc/autograd/grad_mode.h"
 #include "aten/src/ATen/native/cpu/PromeBLAS.h"
-#ifdef _MSC_VER
-#include <intrin.h>
-#else
-#include <immintrin.h>
-#endif
+#include "aten/src/ATen/native/cpu/tuda/TudaVec.h"
 #include <cmath>
 
 namespace torch {
@@ -120,10 +116,9 @@ public:
                 for (int64_t i = 0; i < M; ++i) {
                     float* row = out + i * N;
                     int64_t j = 0;
-                    for (; j + 8 <= N; j += 8) {
-                        _mm256_storeu_ps(row + j,
-                            _mm256_add_ps(_mm256_loadu_ps(row + j), _mm256_loadu_ps(b + j)));
-                    }
+                    constexpr int W = at::native::tuda::VecF::width;
+                    for (; j + W <= N; j += W)
+                        (at::native::tuda::VecF::load(row + j) + at::native::tuda::VecF::load(b + j)).store(row + j);
                     for (; j < N; ++j) row[j] += b[j];
                 }
             }

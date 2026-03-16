@@ -1,12 +1,8 @@
 #pragma once
 
 #include "aten/src/ATen/ATen.h"
-#include "aten/src/ATen/native/cpu/VectorizedOps.h"
-#ifdef _MSC_VER
-#include <intrin.h>
-#else
-#include <immintrin.h>
-#endif
+#include "aten/src/ATen/native/cpu/tuda/TudaVec.h"
+#include "aten/src/ATen/native/cpu/tuda/TudaMath.h"
 #include <cmath>
 #include <algorithm>
 #include <limits>
@@ -289,43 +285,45 @@ inline Tensor softmax(const Tensor& input, int64_t dim = -1) {
     float* out_data = output.mutable_data_ptr<float>();
 
     if (inner_size == 1) {
-        // Fused AVX2 softmax for contiguous rows (most common: softmax over last dim)
+        // Fused vectorized softmax for contiguous rows (most common: softmax over last dim)
+        using tuda = at::native::tuda;
+        constexpr int W = tuda::VecF::width;
         for (int64_t o = 0; o < outer_size; ++o) {
             const float* row_in = in_data + o * dim_size;
             float* row_out = out_data + o * dim_size;
 
-            // Pass 1: AVX2 max
-            float max_val = at::native::vec::vectorized_max(row_in, dim_size);
-            __m256 vmax = _mm256_set1_ps(max_val);
+            // Pass 1: vectorized max
+            float max_val = tuda::vec_max(row_in, dim_size);
+            tuda::VecF vmax = tuda::VecF::broadcast(max_val);
 
             // Pass 2: fused exp(x - max) + sum
-            __m256 vsum0 = _mm256_setzero_ps(), vsum1 = _mm256_setzero_ps();
+            tuda::VecF vsum0 = tuda::VecF::zero(), vsum1 = tuda::VecF::zero();
             int64_t d = 0;
-            for (; d + 16 <= dim_size; d += 16) {
-                __m256 e0 = at::native::vec::exp256_ps(_mm256_sub_ps(_mm256_loadu_ps(row_in + d), vmax));
-                __m256 e1 = at::native::vec::exp256_ps(_mm256_sub_ps(_mm256_loadu_ps(row_in + d + 8), vmax));
-                _mm256_storeu_ps(row_out + d, e0);
-                _mm256_storeu_ps(row_out + d + 8, e1);
-                vsum0 = _mm256_add_ps(vsum0, e0);
-                vsum1 = _mm256_add_ps(vsum1, e1);
+            for (; d + 2*W <= dim_size; d += 2*W) {
+                tuda::VecF e0 = tuda::exp_vec(tuda::VecF::load(row_in + d) - vmax);
+                tuda::VecF e1 = tuda::exp_vec(tuda::VecF::load(row_in + d + W) - vmax);
+                e0.store(row_out + d);
+                e1.store(row_out + d + W);
+                vsum0 = vsum0 + e0;
+                vsum1 = vsum1 + e1;
             }
-            for (; d + 8 <= dim_size; d += 8) {
-                __m256 e = at::native::vec::exp256_ps(_mm256_sub_ps(_mm256_loadu_ps(row_in + d), vmax));
-                _mm256_storeu_ps(row_out + d, e);
-                vsum0 = _mm256_add_ps(vsum0, e);
+            for (; d + W <= dim_size; d += W) {
+                tuda::VecF e = tuda::exp_vec(tuda::VecF::load(row_in + d) - vmax);
+                e.store(row_out + d);
+                vsum0 = vsum0 + e;
             }
-            float sum = at::native::vec::hsum_avx2(_mm256_add_ps(vsum0, vsum1));
+            float sum = (vsum0 + vsum1).hsum();
             for (; d < dim_size; ++d) {
                 float e = std::exp(row_in[d] - max_val);
                 row_out[d] = e;
                 sum += e;
             }
 
-            // Pass 3: AVX2 normalize
-            __m256 vinv = _mm256_set1_ps(1.0f / sum);
+            // Pass 3: vectorized normalize
+            tuda::VecF vinv = tuda::VecF::broadcast(1.0f / sum);
             d = 0;
-            for (; d + 8 <= dim_size; d += 8) {
-                _mm256_storeu_ps(row_out + d, _mm256_mul_ps(_mm256_loadu_ps(row_out + d), vinv));
+            for (; d + W <= dim_size; d += W) {
+                (tuda::VecF::load(row_out + d) * vinv).store(row_out + d);
             }
             for (; d < dim_size; ++d) row_out[d] /= sum;
         }
@@ -374,38 +372,40 @@ inline Tensor log_softmax(const Tensor& input, int64_t dim = -1) {
     float* out_data = output.mutable_data_ptr<float>();
 
     if (inner_size == 1) {
-        // Fused AVX2 log_softmax for contiguous rows
+        // Fused vectorized log_softmax for contiguous rows
+        using tuda = at::native::tuda;
+        constexpr int W = tuda::VecF::width;
         for (int64_t o = 0; o < outer_size; ++o) {
             const float* row_in = in_data + o * dim_size;
             float* row_out = out_data + o * dim_size;
 
-            // Pass 1: AVX2 max
-            float max_val = at::native::vec::vectorized_max(row_in, dim_size);
-            __m256 vmax = _mm256_set1_ps(max_val);
+            // Pass 1: vectorized max
+            float max_val = tuda::vec_max(row_in, dim_size);
+            tuda::VecF vmax = tuda::VecF::broadcast(max_val);
 
             // Pass 2: fused exp(x - max) + sum
-            __m256 vsum0 = _mm256_setzero_ps(), vsum1 = _mm256_setzero_ps();
+            tuda::VecF vsum0 = tuda::VecF::zero(), vsum1 = tuda::VecF::zero();
             int64_t d = 0;
-            for (; d + 16 <= dim_size; d += 16) {
-                __m256 e0 = at::native::vec::exp256_ps(_mm256_sub_ps(_mm256_loadu_ps(row_in + d), vmax));
-                __m256 e1 = at::native::vec::exp256_ps(_mm256_sub_ps(_mm256_loadu_ps(row_in + d + 8), vmax));
-                vsum0 = _mm256_add_ps(vsum0, e0);
-                vsum1 = _mm256_add_ps(vsum1, e1);
+            for (; d + 2*W <= dim_size; d += 2*W) {
+                tuda::VecF e0 = tuda::exp_vec(tuda::VecF::load(row_in + d) - vmax);
+                tuda::VecF e1 = tuda::exp_vec(tuda::VecF::load(row_in + d + W) - vmax);
+                vsum0 = vsum0 + e0;
+                vsum1 = vsum1 + e1;
             }
-            for (; d + 8 <= dim_size; d += 8) {
-                __m256 e = at::native::vec::exp256_ps(_mm256_sub_ps(_mm256_loadu_ps(row_in + d), vmax));
-                vsum0 = _mm256_add_ps(vsum0, e);
+            for (; d + W <= dim_size; d += W) {
+                tuda::VecF e = tuda::exp_vec(tuda::VecF::load(row_in + d) - vmax);
+                vsum0 = vsum0 + e;
             }
-            float sum = at::native::vec::hsum_avx2(_mm256_add_ps(vsum0, vsum1));
+            float sum = (vsum0 + vsum1).hsum();
             for (; d < dim_size; ++d) sum += std::exp(row_in[d] - max_val);
 
             float log_sum = max_val + std::log(sum);
-            __m256 vlog_sum = _mm256_set1_ps(log_sum);
+            tuda::VecF vlog_sum = tuda::VecF::broadcast(log_sum);
 
             // Pass 3: log_softmax = x - log_sum_exp
             d = 0;
-            for (; d + 8 <= dim_size; d += 8) {
-                _mm256_storeu_ps(row_out + d, _mm256_sub_ps(_mm256_loadu_ps(row_in + d), vlog_sum));
+            for (; d + W <= dim_size; d += W) {
+                (tuda::VecF::load(row_in + d) - vlog_sum).store(row_out + d);
             }
             for (; d < dim_size; ++d) row_out[d] = row_in[d] - log_sum;
         }
