@@ -37,7 +37,7 @@ nm.PL_GetAccess(board,ctypes.byref(core_no),ctypes.byref(access))
 # CRITICAL: clear DDR before loading dispatcher to prevent stale cmd execution
 zeros=(ctypes.c_uint*1024)(*([0]*1024))
 nm.PL_WriteMemBlock(access,zeros,DDR,1024)
-disp=os.path.join(os.path.dirname(__file__),'..','..','aten','src','ATen','nmcard','nmc_programs','dispatcher_nmpp.abs')
+disp=os.path.join(os.path.dirname(__file__),'..','..','aten','src','ATen','nmcard','nmc_programs','dispatcher_float.abs')
 nm.PL_LoadProgramFile(access,disp.encode())
 time.sleep(2)
 buf1=(ctypes.c_uint*1)()
@@ -62,7 +62,7 @@ def nmcard_matmul(A, B):
     args=(ctypes.c_uint*6)(M,K,N,DATA+a_off,DATA+b_off,DATA+c_off)
     nm.PL_WriteMemBlock(access,args,DDR+1,6)
     zero=(ctypes.c_uint*1)(0); nm.PL_WriteMemBlock(access,zero,DDR+30,1)
-    cmd=(ctypes.c_uint*1)(25); nm.PL_WriteMemBlock(access,cmd,DDR,1)  # OP_MATMUL_NMPP
+    cmd=(ctypes.c_uint*1)(1); nm.PL_WriteMemBlock(access,cmd,DDR,1)  # OP_MATMUL float
     for _ in range(500):
         nm.PL_ReadMemBlock(access,buf1,DDR+30,1)
         if buf1[0]==1:
