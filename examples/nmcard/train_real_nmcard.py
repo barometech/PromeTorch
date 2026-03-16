@@ -42,13 +42,20 @@ nm.PL_ReadMemBlock(access,buf1,DDR+31,1)
 print(f'Core 0 watchdog: {buf1[0]} (alive)')
 
 card_mm=0
+def float_as_uint32(arr):
+    """IEEE 754 float32 → uint32 bit-cast (dispatcher expects this!)"""
+    return np.frombuffer(arr.astype(np.float32).tobytes(), dtype=np.uint32)
+def uint32_as_float(arr):
+    """uint32 → IEEE 754 float32 bit-cast"""
+    return np.frombuffer(np.array(arr, dtype=np.uint32).tobytes(), dtype=np.float32)
+
 def nmcard_matmul(A, B):
     global card_mm; card_mm+=1
     M,K=A.shape; _,N=B.shape
-    Aq=arr_f2q(A).flatten(); Bq=arr_f2q(B).flatten()
-    DATA=DDR+32; a_off=0; b_off=M*K; c_off=M*K+K*N
-    a_buf=(ctypes.c_uint*len(Aq))(*Aq); nm.PL_WriteMemBlock(access,a_buf,DATA+a_off,len(Aq))
-    b_buf=(ctypes.c_uint*len(Bq))(*Bq); nm.PL_WriteMemBlock(access,b_buf,DATA+b_off,len(Bq))
+    Au=float_as_uint32(A.flatten()); Bu=float_as_uint32(B.flatten())
+    DATA=DDR+64; a_off=0; b_off=M*K; c_off=M*K+K*N
+    a_buf=(ctypes.c_uint*len(Au))(*Au); nm.PL_WriteMemBlock(access,a_buf,DATA+a_off,len(Au))
+    b_buf=(ctypes.c_uint*len(Bu))(*Bu); nm.PL_WriteMemBlock(access,b_buf,DATA+b_off,len(Bu))
     args=(ctypes.c_uint*6)(M,K,N,DATA+a_off,DATA+b_off,DATA+c_off)
     nm.PL_WriteMemBlock(access,args,DDR+1,6)
     zero=(ctypes.c_uint*1)(0); nm.PL_WriteMemBlock(access,zero,DDR+30,1)
@@ -60,7 +67,7 @@ def nmcard_matmul(A, B):
     else:
         print('TIMEOUT! Fallback CPU'); return A@B
     c_buf=(ctypes.c_uint*(M*N))(); nm.PL_ReadMemBlock(access,c_buf,DATA+c_off,M*N)
-    return arr_q2f(np.array(list(c_buf),dtype=np.uint32)).reshape(M,N)
+    return uint32_as_float(list(c_buf)).reshape(M,N)
 
 # Verify
 print('\n=== Card MatMul Test ===')
