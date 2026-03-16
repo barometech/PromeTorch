@@ -15,13 +15,7 @@ volatile unsigned int* mem = (volatile unsigned int*)DDR_BASE;
 #define STATUS_ADDR 30
 #define WATCHDOG_ADDR 31
 
-// nmpp float matmul
-extern "C" {
-    void nmppmMul_mm_32f(float* A, int M, int strideA,
-                          float* B, int K, int strideB,
-                          float* C, int N, int strideC, int bPlusDst);
-}
-
+// Pure C float matmul — NMC4 float VPU auto-vectorizes this
 void op_matmul() {
     unsigned int M = mem[1];
     unsigned int K = mem[2];
@@ -30,8 +24,21 @@ void op_matmul() {
     float* B = (float*)mem[5];
     float* C = (float*)mem[6];
 
-    // Direct float matmul on NMC4 float VPU
-    nmppmMul_mm_32f(A, (int)M, (int)K, B, (int)K, (int)N, C, (int)N, (int)N, 0);
+    // C[i,j] = sum_k A[i,k] * B[k,j]
+    unsigned int c_idx = 0;
+    for (unsigned int i = 0; i < M; i++) {
+        unsigned int a_row = i * K;
+        for (unsigned int j = 0; j < N; j++) {
+            float sum = 0.0f;
+            unsigned int b_col = j;
+            for (unsigned int k = 0; k < K; k++) {
+                sum += A[a_row + k] * B[b_col];
+                b_col += N;
+            }
+            C[c_idx] = sum;
+            c_idx++;
+        }
+    }
 }
 
 int main() {
