@@ -37,7 +37,7 @@ nm.PL_GetAccess(board,ctypes.byref(core_no),ctypes.byref(access))
 # CRITICAL: clear DDR before loading dispatcher to prevent stale cmd execution
 zeros=(ctypes.c_uint*1024)(*([0]*1024))
 nm.PL_WriteMemBlock(access,zeros,DDR,1024)
-disp=os.path.join(os.path.dirname(__file__),'..','..','aten','src','ATen','nmcard','nmc_programs','dispatcher.abs')
+disp=os.path.join(os.path.dirname(__file__),'..','..','aten','src','ATen','nmcard','nmc_programs','dispatcher_nmpp.abs')
 nm.PL_LoadProgramFile(access,disp.encode())
 time.sleep(2)
 buf1=(ctypes.c_uint*1)()
@@ -62,7 +62,7 @@ def nmcard_matmul(A, B):
     args=(ctypes.c_uint*6)(M,K,N,DATA+a_off,DATA+b_off,DATA+c_off)
     nm.PL_WriteMemBlock(access,args,DDR+1,6)
     zero=(ctypes.c_uint*1)(0); nm.PL_WriteMemBlock(access,zero,DDR+30,1)
-    cmd=(ctypes.c_uint*1)(1); nm.PL_WriteMemBlock(access,cmd,DDR,1)
+    cmd=(ctypes.c_uint*1)(25); nm.PL_WriteMemBlock(access,cmd,DDR,1)  # OP_MATMUL_NMPP
     for _ in range(500):
         nm.PL_ReadMemBlock(access,buf1,DDR+30,1)
         if buf1[0]==1:
@@ -102,7 +102,7 @@ def drelu(x): return (x>0).astype(np.float32)
 
 # Training
 print('\n=== TRAINING (MatMul on NMC4) ===')
-lr=0.05; steps=6000; start=time.time(); best=99
+lr=0.05; steps=10000; start=time.time(); best=99
 
 for step in range(steps):
     idx=np.random.randint(0,len(data)-T-1)
@@ -132,7 +132,10 @@ for step in range(steps):
     W1-=lr*dW1; b1-=lr*db1; pos-=lr*dx0
     for t in range(T): embed[tok[t]]-=lr*dx0[t]
 
-    if step%50==0 or step==steps-1:
+    if step==3000: lr=0.02
+    if step==6000: lr=0.01
+    if step==8000: lr=0.005
+    if step%100==0 or step==steps-1:
         el=time.time()-start
         print(f'Step {step:4d} | loss={loss:.3f} | best={best:.3f} | card_mm={card_mm} | {el:.1f}s')
 
