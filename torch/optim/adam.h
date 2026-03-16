@@ -1,13 +1,9 @@
 #pragma once
 
 #include "torch/optim/optimizer.h"
+#include "aten/src/ATen/native/cpu/tuda/TudaVec.h"
 #ifdef PT_USE_CUDA
 #include "aten/src/ATen/cuda/CUDADispatch.h"
-#endif
-#ifdef _MSC_VER
-#include <intrin.h>
-#else
-#include <immintrin.h>
 #endif
 #include <cmath>
 
@@ -144,41 +140,42 @@ public:
                 float epsf = static_cast<float>(eps);
 
                 if (!amsgrad) {
-                    __m256 vb1 = _mm256_set1_ps(b1f);
-                    __m256 vb2 = _mm256_set1_ps(b2f);
-                    __m256 v1mb1 = _mm256_set1_ps(one_minus_b1);
-                    __m256 v1mb2 = _mm256_set1_ps(one_minus_b2);
-                    __m256 vneg_ss = _mm256_set1_ps(-step_size);
-                    __m256 veps = _mm256_set1_ps(epsf);
-                    __m256 v_isbc2 = _mm256_set1_ps(inv_sqrt_bc2);
-                    __m256 vwd = _mm256_set1_ps(wdf);
+                    using VF = at::native::tuda::VecF;
+                    VF vb1 = VF::broadcast(b1f);
+                    VF vb2 = VF::broadcast(b2f);
+                    VF v1mb1 = VF::broadcast(one_minus_b1);
+                    VF v1mb2 = VF::broadcast(one_minus_b2);
+                    VF vneg_ss = VF::broadcast(-step_size);
+                    VF veps = VF::broadcast(epsf);
+                    VF v_isbc2 = VF::broadcast(inv_sqrt_bc2);
+                    VF vwd = VF::broadcast(wdf);
 
                     int64_t i = 0;
-                    for (; i + 8 <= n; i += 8) {
-                        __m256 g = _mm256_loadu_ps(g_data + i);
-                        __m256 p = _mm256_loadu_ps(p_data + i);
+                    constexpr int W = VF::width;
+                    for (; i + W <= n; i += W) {
+                        VF g = VF::load(g_data + i);
+                        VF p = VF::load(p_data + i);
 
-                        // Apply weight decay to gradient
                         if (wdf != 0.0f) {
-                            g = _mm256_fmadd_ps(vwd, p, g);
+                            g = VF::fmadd(vwd, p, g);
                         }
 
-                        __m256 m = _mm256_loadu_ps(m_data + i);
-                        __m256 v = _mm256_loadu_ps(v_data + i);
+                        VF m = VF::load(m_data + i);
+                        VF v = VF::load(v_data + i);
 
                         // m = beta1 * m + (1-beta1) * g
-                        m = _mm256_fmadd_ps(vb1, m, _mm256_mul_ps(v1mb1, g));
+                        m = VF::fmadd(vb1, m, v1mb1 * g);
                         // v = beta2 * v + (1-beta2) * g^2
-                        v = _mm256_fmadd_ps(vb2, v, _mm256_mul_ps(v1mb2, _mm256_mul_ps(g, g)));
+                        v = VF::fmadd(vb2, v, v1mb2 * (g * g));
 
                         // denom = sqrt(v) * inv_sqrt_bc2 + eps
-                        __m256 denom = _mm256_fmadd_ps(_mm256_sqrt_ps(v), v_isbc2, veps);
+                        VF denom = VF::fmadd(v.sqrt(), v_isbc2, veps);
                         // p -= step_size * m / denom
-                        p = _mm256_fmadd_ps(vneg_ss, _mm256_div_ps(m, denom), p);
+                        p = VF::fmadd(vneg_ss, m / denom, p);
 
-                        _mm256_storeu_ps(m_data + i, m);
-                        _mm256_storeu_ps(v_data + i, v);
-                        _mm256_storeu_ps(p_data + i, p);
+                        m.store(m_data + i);
+                        v.store(v_data + i);
+                        p.store(p_data + i);
                     }
                     // Scalar tail
                     for (; i < n; ++i) {

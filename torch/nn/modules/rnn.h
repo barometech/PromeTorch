@@ -5,12 +5,8 @@
 #include "torch/csrc/autograd/autograd.h"
 #include "torch/csrc/autograd/grad_mode.h"
 #include "aten/src/ATen/native/cpu/PromeBLAS.h"
-#include "aten/src/ATen/native/cpu/VectorizedOps.h"
-#ifdef _MSC_VER
-#include <intrin.h>
-#else
-#include <immintrin.h>
-#endif
+#include "aten/src/ATen/native/cpu/tuda/TudaVec.h"
+#include "aten/src/ATen/native/cpu/tuda/TudaMath.h"
 #include <cmath>
 #include <cstring>
 #include <vector>
@@ -153,11 +149,12 @@ private:
             for (int64_t i = 0; i < batch; ++i) {
                 float* row = g + i * gates_size;
                 int64_t j = 0;
-                for (; j + 8 <= gates_size; j += 8) {
-                    __m256 val = _mm256_loadu_ps(row + j);
-                    val = _mm256_add_ps(val, _mm256_loadu_ps(B_ih + j));
-                    val = _mm256_add_ps(val, _mm256_loadu_ps(B_hh + j));
-                    _mm256_storeu_ps(row + j, val);
+                constexpr int W = at::native::tuda::VecF::width;
+                for (; j + W <= gates_size; j += W) {
+                    auto val = at::native::tuda::VecF::load(row + j);
+                    val = val + at::native::tuda::VecF::load(B_ih + j);
+                    val = val + at::native::tuda::VecF::load(B_hh + j);
+                    val.store(row + j);
                 }
                 for (; j < gates_size; ++j) row[j] += B_ih[j] + B_hh[j];
             }
@@ -176,16 +173,17 @@ private:
             float* cn_row = c_out + i * H;
             float* hn_row = h_out + i * H;
             int64_t j = 0;
-            for (; j + 8 <= H; j += 8) {
-                __m256 ig = at::native::vec::sigmoid256_ps(_mm256_loadu_ps(gate_row + j));
-                __m256 fg = at::native::vec::sigmoid256_ps(_mm256_loadu_ps(gate_row + H + j));
-                __m256 gg = at::native::vec::tanh256_ps(_mm256_loadu_ps(gate_row + 2*H + j));
-                __m256 og = at::native::vec::sigmoid256_ps(_mm256_loadu_ps(gate_row + 3*H + j));
-                __m256 c_old = _mm256_loadu_ps(c_row + j);
-                __m256 c_val = _mm256_fmadd_ps(fg, c_old, _mm256_mul_ps(ig, gg));
-                _mm256_storeu_ps(cn_row + j, c_val);
-                __m256 h_val = _mm256_mul_ps(og, at::native::vec::tanh256_ps(c_val));
-                _mm256_storeu_ps(hn_row + j, h_val);
+            constexpr int W = at::native::tuda::VecF::width;
+            for (; j + W <= H; j += W) {
+                auto ig = at::native::tuda::sigmoid_vec(at::native::tuda::VecF::load(gate_row + j));
+                auto fg = at::native::tuda::sigmoid_vec(at::native::tuda::VecF::load(gate_row + H + j));
+                auto gg = at::native::tuda::tanh_vec(at::native::tuda::VecF::load(gate_row + 2*H + j));
+                auto og = at::native::tuda::sigmoid_vec(at::native::tuda::VecF::load(gate_row + 3*H + j));
+                auto c_old = at::native::tuda::VecF::load(c_row + j);
+                auto c_val = at::native::tuda::VecF::fmadd(fg, c_old, ig * gg);
+                c_val.store(cn_row + j);
+                auto h_val = og * at::native::tuda::tanh_vec(c_val);
+                h_val.store(hn_row + j);
             }
             for (; j < H; ++j) {
                 float ig = 1.0f / (1.0f + std::exp(-gate_row[j]));
