@@ -34,9 +34,12 @@ board=ctypes.c_void_p(); nm.PL_GetBoardDesc(0,ctypes.byref(board))
 nm.PL_ResetBoard(board); nm.PL_LoadInitCode(board)
 core_no=(ctypes.c_int*2)(0,0); access=ctypes.c_void_p()
 nm.PL_GetAccess(board,ctypes.byref(core_no),ctypes.byref(access))
+# CRITICAL: clear DDR before loading dispatcher to prevent stale cmd execution
+zeros=(ctypes.c_uint*1024)(*([0]*1024))
+nm.PL_WriteMemBlock(access,zeros,DDR,1024)
 disp=os.path.join(os.path.dirname(__file__),'..','..','aten','src','ATen','nmcard','nmc_programs','dispatcher.abs')
 nm.PL_LoadProgramFile(access,disp.encode())
-time.sleep(0.5)
+time.sleep(2)
 buf1=(ctypes.c_uint*1)()
 nm.PL_ReadMemBlock(access,buf1,DDR+31,1)
 print(f'Core 0 watchdog: {buf1[0]} (alive)')
@@ -62,9 +65,13 @@ def nmcard_matmul(A, B):
     cmd=(ctypes.c_uint*1)(1); nm.PL_WriteMemBlock(access,cmd,DDR,1)
     for _ in range(500):
         nm.PL_ReadMemBlock(access,buf1,DDR+30,1)
-        if buf1[0]==1: break
+        if buf1[0]==1:
+            # CRITICAL: reset cmd to NOP so dispatcher doesn't re-execute
+            nop=(ctypes.c_uint*1)(0); nm.PL_WriteMemBlock(access,nop,DDR,1)
+            break
         time.sleep(0.002)
     else:
+        nop=(ctypes.c_uint*1)(0); nm.PL_WriteMemBlock(access,nop,DDR,1)
         print('TIMEOUT! Fallback CPU'); return A@B
     c_buf=(ctypes.c_uint*(M*N))(); nm.PL_ReadMemBlock(access,c_buf,DATA+c_off,M*N)
     return uint32_as_float(list(c_buf)).reshape(M,N)
@@ -95,7 +102,7 @@ def drelu(x): return (x>0).astype(np.float32)
 
 # Training
 print('\n=== TRAINING (MatMul on NMC4) ===')
-lr=0.05; steps=500; start=time.time(); best=99
+lr=0.05; steps=6000; start=time.time(); best=99
 
 for step in range(steps):
     idx=np.random.randint(0,len(data)-T-1)
