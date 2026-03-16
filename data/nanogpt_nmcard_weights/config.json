@@ -1,0 +1,11 @@
+{
+  "V": 65,
+  "D": 32,
+  "F": 64,
+  "T": 16,
+  "layers": 2,
+  "chars": "\n !$&',-.3:;?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
+  "params": 13185,
+  "loss": 15.542449377459807,
+  "card_matmuls": 1001
+}
