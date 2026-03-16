@@ -11,12 +11,15 @@ volatile unsigned int* mem = (volatile unsigned int*)DDR_BASE;
 
 #define OP_NOP          0
 #define OP_MATMUL       1
-#define OP_RMSNORM      2
-#define OP_SOFTMAX      3
+#define OP_MATMUL_AT    2
+#define OP_MATMUL_BT    3
 #define OP_RELU         4
+#define OP_RELU_BWD     5
+#define OP_RMSNORM      6
+#define OP_SOFTMAX      7
 #define OP_ELEM_ADD     10
-#define OP_CAUSAL_ATTN  20
-#define OP_FUSED_LAYER  30
+#define OP_SGD          20
+#define OP_CAUSAL_ATTN  21
 #define OP_EXIT         255
 #define STATUS_ADDR     30
 #define WATCHDOG_ADDR   31
@@ -158,6 +161,45 @@ void op_causal_attn() {
     }
 }
 
+// C[K,N] = A^T[K,M] @ B[M,N]
+void op_matmul_at() {
+    unsigned int M=mem[1];unsigned int K=mem[2];unsigned int N=mem[3];
+    float*A=(float*)mem[4];float*B=(float*)mem[5];float*C=(float*)mem[6];
+    unsigned int ci=0;
+    for(unsigned int k=0;k<K;k++){
+        for(unsigned int n=0;n<N;n++){
+            float s=0.0f;
+            for(unsigned int i=0;i<M;i++) s+=A[i*K+k]*B[i*N+n];
+            C[ci++]=s;
+        }
+    }
+}
+
+// C[M,K] = A[M,N] @ B^T[K,N]
+void op_matmul_bt() {
+    unsigned int M=mem[1];unsigned int K=mem[2];unsigned int N=mem[3];
+    float*A=(float*)mem[4];float*B=(float*)mem[5];float*C=(float*)mem[6];
+    unsigned int ci=0;
+    for(unsigned int m=0;m<M;m++){
+        for(unsigned int k=0;k<K;k++){
+            float s=0.0f;
+            for(unsigned int n=0;n<N;n++) s+=A[m*N+n]*B[k*N+n];
+            C[ci++]=s;
+        }
+    }
+}
+
+void op_relu_bwd() {
+    unsigned int n=mem[1];float*dy=(float*)mem[2];float*x=(float*)mem[3];float*dx=(float*)mem[4];
+    for(unsigned int i=0;i<n;i++) dx[i]=x[i]>0.0f?dy[i]:0.0f;
+}
+
+void op_sgd() {
+    unsigned int n=mem[1];float*w=(float*)mem[2];float*g=(float*)mem[3];
+    unsigned int lr_u=mem[4];float*lr_p=(float*)&lr_u;float lr=*lr_p;
+    for(unsigned int i=0;i<n;i++) w[i]-=lr*g[i];
+}
+
 // ============================================================
 // Main
 // ============================================================
@@ -178,10 +220,14 @@ int main() {
 
         switch (op) {
             case OP_MATMUL:      op_matmul(); break;
+            case OP_MATMUL_AT:   op_matmul_at(); break;
+            case OP_MATMUL_BT:   op_matmul_bt(); break;
+            case OP_RELU:        op_relu(); break;
+            case OP_RELU_BWD:    op_relu_bwd(); break;
             case OP_RMSNORM:     op_rmsnorm(); break;
             case OP_SOFTMAX:     op_softmax(); break;
-            case OP_RELU:        op_relu(); break;
             case OP_ELEM_ADD:    op_elem_add(); break;
+            case OP_SGD:         op_sgd(); break;
             case OP_CAUSAL_ATTN: op_causal_attn(); break;
             default: mem[STATUS_ADDR] = 2; mem[0] = OP_NOP; continue;
         }
