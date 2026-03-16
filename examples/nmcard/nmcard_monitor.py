@@ -223,13 +223,20 @@ class MonitorApp:
 
             self.current_op = OP_NAMES.get(cmd, f'OP_{cmd}')
 
+            # Save matmul args for DDR display
+            if cmd == 1 and data['args'][0] > 0:
+                self._last_args = (data['args'][0], data['args'][1], data['args'][2])
+
             # Count busy (status=0 and cmd!=0 means computing)
             if status == 0 and cmd != 0:
                 self.busy_samples += 1
             self.total_samples += 1
 
-            if cmd != 0 and status == 1:
+            # Track ops via busy→idle transitions
+            was_busy = getattr(self, '_prev_status', 1) == 0
+            if was_busy and status == 1:
                 self.total_ops += 1
+            self._prev_status = status
 
             if dt >= 1.0:
                 self.wd_rate = (wd - self.prev_wd) / dt if self.prev_wd > 0 else 0
@@ -276,8 +283,16 @@ class MonitorApp:
         self.lbl_ops.configure(text=f"{self.total_ops:,}")
         uptime = time.time() - self.start_time
         self.lbl_uptime.configure(text=f"{int(uptime//60)}m {int(uptime%60)}s")
-        self.lbl_cores.configure(text="1 / 16 active")
-        self.lbl_peak.configure(text=f"{self.util_pct/100*32:.1f} / 32")
+        active = "1 / 16" if self.card_alive and self.util_pct > 0 else ("1 / 16 idle" if self.card_alive else "0 / 16")
+        self.lbl_cores.configure(text=active)
+        self.lbl_peak.configure(text=f"{self.util_pct/100*32:.1f} / 512 GFLOPS")
+        # DDR estimate from last seen matmul args
+        ddr_txt = "-- / 5 GB"
+        if self.card_alive and hasattr(self, '_last_args') and self._last_args:
+            M,K,N = self._last_args
+            if 0 < M < 10000 and 0 < K < 10000 and 0 < N < 10000:
+                ddr_txt = f"{(M*K+K*N+M*N)*4/1024:.0f} KB / 5 GB"
+        self.lbl_ddr.configure(text=ddr_txt)
         self.lbl_temp.configure(text="OK" if self.card_alive else "OFFLINE",
                                 fg='#4caf50' if self.card_alive else '#f44336')
 
