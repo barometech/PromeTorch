@@ -4,6 +4,49 @@
 
 ---
 
+## 2026-03-17: nmpp vectorized dispatcher + NTC Module analysis + SUDA compiler plan
+
+### Анализ для НТЦ "Модуль"
+5 агентов Claude Opus 4.6 провели глубокий анализ кодовой базы:
+1. **TUDA NMC4 vector kernels** — TUDA готов для NMC4, нужен MicroKernel_NMC4
+2. **NMCard hardware backend** — 70% готовности, нет watchdog monitor/retry/weight caching
+3. **nmpp vectorized library** — nmppmMul_mm_32f ЕСТЬ в SDK, 10-100x ускорение matmul
+4. **Benchmarks** — 4.37 GFLOPS (0.85% утилизации), PCIe НЕ bottleneck
+5. **model.to("nmcard")** — 41 op работает, autograd не подключён
+
+### Ключевая находка
+`MullMatrix_f.asm` — ассемблер NMC4 с 4 FPU cores (`fpu 0..3 rep vlen vreg0`).
+Это vector pipeline который даёт 10-100x. Уже слинкован в `libnmpps-nmc4.a`.
+
+### Новые файлы
+- **`dispatcher_float_vec.cpp`** — dispatcher с `nmppmMul_mm_32f()` вместо скалярного matmul
+- **`build_gas.bat`** — добавлен `:compile_nmpp` target для линковки с nmpp
+- **`train_parallel_16core.py`** — true parallel training (send_all → wait_all)
+- **`partner folder/ANALYSIS_REPORT.txt`** — сводный отчёт 5 агентов
+- **`partner folder/CODEBASE_INDEX.txt`** — индекс 48K+ строк для партнёра
+
+### План SUDA compiler
+1. ✅ Линковка nmpp (dispatcher_float_vec.abs собран, 15.2 KB)
+2. TUDA NMC4 backend (Config + Vec + MicroKernel)
+3. Кодогенератор ассемблерных ядер из DSL
+4. Бенчмарки для partner
+
+### Подтверждённые результаты тренировок на NM Card Mini
+| Модель | Параметры | Loss | Метод | Время | Card ops |
+|--------|-----------|------|-------|-------|----------|
+| MLP (MNIST) | ~50K | 93.64% accuracy | Эмулятор, SGD | 3 epochs | — |
+| Tiny Shakespeare | 13K | 9.53→1.647 | 1 ядро, float | ~2 часа | 20,001 matmuls |
+| 109K Transformer | 109,761 | 4.67→2.647 | 1 ядро, float | 3.17 часа | 190,000 matmuls |
+| 109K (attention) | 109,761 | D=64,H=4,F=128,T=32,L=3 | RMS+attention | lr=3e-4 warmup | Verified exact |
+
+### Верифицировано на реальной карте
+- Все forward ops: matmul, matmul_AT, matmul_BT, relu, relu_bwd, SGD — exact match vs CPU
+- 16/16 ядер рабочих (dispatcher_mc_float.abs)
+- RMS norm backward: полная chain rule `(dy*g - xn*mean(dy*g*xn)) / r`
+- Gradient check: <0.1% error на всех параметрах
+
+---
+
 ## 2026-03-14: NM Card Mini — Hardware Backend (подготовка к реальному железу)
 
 ### Что сделано

@@ -5,7 +5,7 @@
 // Provides exp, log, sin, cos, tanh, sigmoid, etc. using the VecF abstraction.
 // AVX2: uses existing Cephes implementations from VectorizedOps.h
 // NEON: Cephes polynomial with NEON intrinsics
-// E2K/Scalar: std::math (LCC optimizes to packed FMA on Elbrus)
+// E2K/NMC4/Scalar: std::math (LCC optimizes to packed FMA on Elbrus)
 // ============================================================================
 
 #include "aten/src/ATen/native/cpu/tuda/TudaVec.h"
@@ -71,7 +71,7 @@ static inline VecF exp_vec(VecF x) {
 #else
     // E2K / Scalar: element-wise std::exp
     VecF result;
-#if defined(TUDA_E2K)
+#if defined(TUDA_E2K) || defined(TUDA_NMC4)
     result.v[0] = std::exp(x.v[0]); result.v[1] = std::exp(x.v[1]);
     result.v[2] = std::exp(x.v[2]); result.v[3] = std::exp(x.v[3]);
 #else
@@ -88,7 +88,7 @@ static inline VecF exp_vec(VecF x) {
 static inline VecF log_vec(VecF x) {
 #if defined(TUDA_AVX2)
     return VecF(vec::log256_ps(x.val));
-#elif defined(TUDA_E2K)
+#elif defined(TUDA_E2K) || defined(TUDA_NMC4)
     VecF r;
     r.v[0] = std::log(x.v[0]); r.v[1] = std::log(x.v[1]);
     r.v[2] = std::log(x.v[2]); r.v[3] = std::log(x.v[3]);
@@ -112,7 +112,7 @@ static inline VecF log_vec(VecF x) {
 static inline VecF sin_vec(VecF x) {
 #if defined(TUDA_AVX2)
     return VecF(vec::sin256_ps(x.val));
-#elif defined(TUDA_E2K)
+#elif defined(TUDA_E2K) || defined(TUDA_NMC4)
     VecF r;
     r.v[0] = std::sin(x.v[0]); r.v[1] = std::sin(x.v[1]);
     r.v[2] = std::sin(x.v[2]); r.v[3] = std::sin(x.v[3]);
@@ -131,7 +131,7 @@ static inline VecF sin_vec(VecF x) {
 static inline VecF cos_vec(VecF x) {
 #if defined(TUDA_AVX2)
     return VecF(vec::cos256_ps(x.val));
-#elif defined(TUDA_E2K)
+#elif defined(TUDA_E2K) || defined(TUDA_NMC4)
     VecF r;
     r.v[0] = std::cos(x.v[0]); r.v[1] = std::cos(x.v[1]);
     r.v[2] = std::cos(x.v[2]); r.v[3] = std::cos(x.v[3]);
@@ -248,7 +248,7 @@ static inline VecF sign_vec(VecF v) {
     __m256 pos = _mm256_and_ps(_mm256_cmp_ps(v.val, zero, _CMP_GT_OS), _mm256_set1_ps(1.0f));
     __m256 neg = _mm256_and_ps(_mm256_cmp_ps(v.val, zero, _CMP_LT_OS), _mm256_set1_ps(-1.0f));
     return VecF(_mm256_or_ps(pos, neg));
-#elif defined(TUDA_E2K)
+#elif defined(TUDA_E2K) || defined(TUDA_NMC4)
     VecF r;
     for (int i = 0; i < 4; ++i) r.v[i] = (v.v[i] > 0.0f) ? 1.0f : ((v.v[i] < 0.0f) ? -1.0f : 0.0f);
     return r;
@@ -283,7 +283,7 @@ static inline float vec_max(const float* data, int64_t n) {
     lo = _mm_max_ps(lo, _mm_movehl_ps(lo, lo));
     lo = _mm_max_ss(lo, _mm_movehdup_ps(lo));
     result = _mm_cvtss_f32(lo);
-#elif defined(TUDA_NEON) || defined(TUDA_E2K)
+#elif defined(TUDA_NEON) || defined(TUDA_E2K) || defined(TUDA_NMC4)
     float tmp[4];
     vmax.store(tmp);
     result = std::max(std::max(tmp[0], tmp[1]), std::max(tmp[2], tmp[3]));
@@ -310,7 +310,7 @@ static inline float vec_min(const float* data, int64_t n) {
     lo = _mm_min_ps(lo, _mm_movehl_ps(lo, lo));
     lo = _mm_min_ss(lo, _mm_movehdup_ps(lo));
     result = _mm_cvtss_f32(lo);
-#elif defined(TUDA_NEON) || defined(TUDA_E2K)
+#elif defined(TUDA_NEON) || defined(TUDA_E2K) || defined(TUDA_NMC4)
     float tmp[4];
     vmin.store(tmp);
     result = std::min(std::min(tmp[0], tmp[1]), std::min(tmp[2], tmp[3]));
