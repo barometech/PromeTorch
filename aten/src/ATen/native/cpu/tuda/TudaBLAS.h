@@ -18,6 +18,9 @@
 #if defined(TUDA_E2K)
 #include "aten/src/ATen/native/cpu/tuda/kernels/e2k/MicroKernel_4x4.h"
 #endif
+#if defined(TUDA_NMC4)
+#include "aten/src/ATen/native/cpu/tuda/kernels/nmc4/MicroKernel_4x4.h"
+#endif
 #include "aten/src/ATen/native/cpu/tuda/kernels/scalar/MicroKernel_Scalar.h"
 
 #if defined(TUDA_AVX2)
@@ -157,6 +160,8 @@ static inline void dispatch_microkernel(
     kernels::microkernel_4x8_neon(K, A, B, C, ldc, alpha, beta);
 #elif defined(TUDA_E2K)
     kernels::microkernel_4x4_e2k(K, A, B, C, ldc, alpha, beta);
+#elif defined(TUDA_NMC4)
+    kernels::microkernel_4x4_nmc4(K, A, B, C, ldc, alpha, beta);
 #else
     kernels::microkernel_scalar(MR, NR, K, A, B, C, ldc, alpha, beta, MR, NR);
 #endif

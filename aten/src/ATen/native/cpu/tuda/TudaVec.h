@@ -196,6 +196,60 @@ struct Vec4 {
 using VecF = Vec4;
 
 // ============================================================================
+// NMC4 NeuroMatrix: Vec4 — plain C arrays, nmpp handles vectorization
+// Same as E2K pattern. On NMC4 the vector pipeline is accessed through
+// nmpp library (nmppmMul_mm_32f), not through compiler auto-vectorization.
+// Element-wise ops run on scalar RISC core — acceptable since matmul
+// dominates 90% of ML compute and is vectorized via nmpp.
+// ============================================================================
+
+#elif defined(TUDA_NMC4)
+
+struct Vec4 {
+    float v[4];
+
+    Vec4() : v{0,0,0,0} {}
+    explicit Vec4(float s) : v{s,s,s,s} {}
+    Vec4(float a, float b, float c, float d) : v{a,b,c,d} {}
+
+    static Vec4 load(const float* p) {
+        Vec4 r; r.v[0]=p[0]; r.v[1]=p[1]; r.v[2]=p[2]; r.v[3]=p[3]; return r;
+    }
+    void store(float* p) const { p[0]=v[0]; p[1]=v[1]; p[2]=v[2]; p[3]=v[3]; }
+
+    static Vec4 zero() { return Vec4(0.0f); }
+    static Vec4 broadcast(float s) { return Vec4(s); }
+
+    Vec4 operator+(Vec4 b) const { return {v[0]+b.v[0], v[1]+b.v[1], v[2]+b.v[2], v[3]+b.v[3]}; }
+    Vec4 operator-(Vec4 b) const { return {v[0]-b.v[0], v[1]-b.v[1], v[2]-b.v[2], v[3]-b.v[3]}; }
+    Vec4 operator*(Vec4 b) const { return {v[0]*b.v[0], v[1]*b.v[1], v[2]*b.v[2], v[3]*b.v[3]}; }
+    Vec4 operator/(Vec4 b) const { return {v[0]/b.v[0], v[1]/b.v[1], v[2]/b.v[2], v[3]/b.v[3]}; }
+    Vec4 operator-() const { return {-v[0], -v[1], -v[2], -v[3]}; }
+
+    static Vec4 fmadd(Vec4 a, Vec4 b, Vec4 c) {
+        return {a.v[0]*b.v[0]+c.v[0], a.v[1]*b.v[1]+c.v[1],
+                a.v[2]*b.v[2]+c.v[2], a.v[3]*b.v[3]+c.v[3]};
+    }
+
+    Vec4 abs() const { return {std::fabs(v[0]), std::fabs(v[1]), std::fabs(v[2]), std::fabs(v[3])}; }
+    Vec4 neg() const { return -(*this); }
+    Vec4 max(Vec4 b) const { return {std::fmax(v[0],b.v[0]), std::fmax(v[1],b.v[1]), std::fmax(v[2],b.v[2]), std::fmax(v[3],b.v[3])}; }
+    Vec4 min(Vec4 b) const { return {std::fmin(v[0],b.v[0]), std::fmin(v[1],b.v[1]), std::fmin(v[2],b.v[2]), std::fmin(v[3],b.v[3])}; }
+    Vec4 sqrt() const { return {std::sqrt(v[0]), std::sqrt(v[1]), std::sqrt(v[2]), std::sqrt(v[3])}; }
+    Vec4 rsqrt() const { return {1.0f/std::sqrt(v[0]), 1.0f/std::sqrt(v[1]), 1.0f/std::sqrt(v[2]), 1.0f/std::sqrt(v[3])}; }
+    Vec4 reciprocal() const { return {1.0f/v[0], 1.0f/v[1], 1.0f/v[2], 1.0f/v[3]}; }
+    Vec4 ceil() const { return {std::ceil(v[0]), std::ceil(v[1]), std::ceil(v[2]), std::ceil(v[3])}; }
+    Vec4 floor() const { return {std::floor(v[0]), std::floor(v[1]), std::floor(v[2]), std::floor(v[3])}; }
+    Vec4 round() const { return {std::round(v[0]), std::round(v[1]), std::round(v[2]), std::round(v[3])}; }
+
+    float hsum() const { return v[0]+v[1]+v[2]+v[3]; }
+
+    static constexpr int width = 4;
+};
+
+using VecF = Vec4;
+
+// ============================================================================
 // Scalar fallback: Vec1 — single float
 // ============================================================================
 
