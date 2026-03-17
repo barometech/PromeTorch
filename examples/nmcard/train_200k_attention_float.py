@@ -95,9 +95,10 @@ def rn_bwd(dy, x, g, r):
 
 # Training
 print(f'\n=== TRAINING 200K TRANSFORMER ON NM CARD MINI ===')
-lr=0.0003; best=99; step=0; start=time.time(); card_mm_count=0
+base_lr=0.0006; lr=0.00001; best=99; step=0; start=time.time(); card_mm_count=0
+WARMUP=500
 
-while best > 1.0 and step < 10000:
+while best > 1.0 and step < 15000:
     idx=np.random.randint(0,len(data)-T-1)
     tok=data[idx:idx+T]; tgt=data[idx+1:idx+T+1]; Tl=T
     x=embed[tok]+pos
@@ -158,8 +159,15 @@ while best > 1.0 and step < 10000:
     Wh-=lr*dWh; bh-=lr*dbh; pos[:Tl]-=lr*0.1*dx
     for t in range(Tl): embed[tok[t]]-=lr*0.1*dx[t]
 
-    if step==3000: lr=0.0002
-    if step==6000: lr=0.0001
+    # Warmup + cosine decay
+    if step < WARMUP:
+        lr = base_lr * (step + 1) / WARMUP
+    elif step < 8000:
+        lr = base_lr
+    elif step < 12000:
+        lr = base_lr * 0.3
+    else:
+        lr = base_lr * 0.1
 
     if step%100==0:
         el=time.time()-start
