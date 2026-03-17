@@ -27,9 +27,9 @@
 
 ### План SUDA compiler
 1. ✅ Линковка nmpp (dispatcher_float_vec.abs собран, 15.2 KB)
-2. TUDA NMC4 backend (Config + Vec + MicroKernel)
-3. Кодогенератор ассемблерных ядер из DSL
-4. Бенчмарки для partner
+2. ✅ TUDA NMC4 backend — 6-й architecture (Config + Vec4 + MicroKernel_4x4 + Math + BLAS dispatch)
+3. ✅ SUDA Codegen v1.0 (`python suda/codegen.py --op all`) → dispatcher_suda.abs (12.5 KB), dispatcher_suda_mc.abs (13.4 KB)
+4. ⏳ Бенчмарки — ждут перезагрузки NM Card
 
 ### Подтверждённые результаты тренировок на NM Card Mini
 | Модель | Параметры | Loss | Метод | Время | Card ops |
