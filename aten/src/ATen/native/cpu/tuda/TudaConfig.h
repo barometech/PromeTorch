@@ -10,6 +10,7 @@
 //   NEON_A57 — ARM Cortex-A57 (Baikal-M, BE-M1000)
 //   NEON_A75 — ARM Cortex-A75 (Baikal-S, BE-S1000)
 //   E2K      — MCST Elbrus VLIW (8C, 8SV, 16C)
+//   NMC4     — RC Module NeuroMatrix NMC4 (K1879VM8YA, NM Card Mini)
 //   SCALAR   — Generic fallback for any platform
 // ============================================================================
 
@@ -29,6 +30,7 @@ enum class Arch {
     NEON_A75,
     E2K_V5,
     E2K_V6,
+    NMC4,       // RC Module NeuroMatrix NMC4 (K1879VM8YA)
     SCALAR
 };
 
@@ -55,6 +57,9 @@ enum class Arch {
         constexpr Arch kArch = Arch::E2K_V5;
     #endif
     #define TUDA_E2K 1
+#elif defined(__nmc__) || defined(__nmc4__) || defined(TUDA_FORCE_NMC4)
+    constexpr Arch kArch = Arch::NMC4;
+    #define TUDA_NMC4 1
 #else
     constexpr Arch kArch = Arch::SCALAR;
     #define TUDA_SCALAR 1
@@ -88,6 +93,11 @@ constexpr GemmTuning kNEON_A75 = {8, 12, 64, 256, 2048, 16};
 // 4×4=16 scalar FMA per K-step → fills 4 FMA units in 4 cycles
 constexpr GemmTuning kE2K = {4, 4, 64, 256, 2048, 16};
 
+// NMC4 NeuroMatrix: 4 FPU cores, 512KB NMMB local memory
+// On-card GEMM via nmpp (nmppmMul_mm_32f), TUDA tiles for host-side fallback
+// MR=4, NR=4: 16 scalar FMA accumulators → maps to 4 FPU cores
+constexpr GemmTuning kNMC4 = {4, 4, 64, 128, 2048, 16};
+
 // Scalar fallback
 constexpr GemmTuning kScalar = {4, 4, 64, 64, 512, 8};
 
@@ -101,6 +111,8 @@ constexpr GemmTuning kTuning =
     kNEON_A57;
 #elif defined(TUDA_E2K)
     kE2K;
+#elif defined(TUDA_NMC4)
+    kNMC4;
 #else
     kScalar;
 #endif
@@ -113,6 +125,8 @@ constexpr int64_t kVecWidth =
     4;
 #elif defined(TUDA_E2K)
     4;
+#elif defined(TUDA_NMC4)
+    4;  // 4 FPU cores process in parallel
 #else
     1;
 #endif
@@ -127,6 +141,8 @@ constexpr const char* kArchName =
     "NEON-A57 (Baikal-M)";
 #elif defined(TUDA_E2K)
     "E2K (Elbrus)";
+#elif defined(TUDA_NMC4)
+    "NMC4 (NeuroMatrix)";
 #else
     "Scalar";
 #endif
