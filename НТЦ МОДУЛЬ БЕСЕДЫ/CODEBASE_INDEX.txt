@@ -1,0 +1,158 @@
+================================================================================
+PROMETHORCH — ПОЛНЫЙ ИНДЕКС КОДОВОЙ БАЗЫ
+================================================================================
+Проект: PyTorch-аналог с нуля. C++17, CUDA, pybind11. ~48,000+ строк.
+Дата: 2026-03-17
+Для: Инженеры НТЦ "Модуль"
+================================================================================
+
+== 1. C10 CORE RUNTIME (~4,200 строк) ==
+
+c10/core/Allocator.h          (446)  — Интерфейс аллокатора, DataPtr
+c10/core/Allocator.cpp          (61)  — CPU аллокатор
+c10/core/Device.h              (360)  — Device type (CPU, CUDA, PrivateUse1/NMCard)
+c10/core/Device.cpp            (104)  — Global state
+c10/core/ScalarType.h          (443)  — Float, Double, Int, Bool, Complex dispatch
+c10/core/Storage.h             (429)  — Opaque data container
+c10/core/TensorImpl.h          (864)  — Low-level tensor metadata, strides, memory format
+c10/core/TensorImpl.cpp         (28)  — Init
+
+c10/cuda/CUDAAllocator.h      (447)  — CUDA caching allocator
+c10/cuda/CUDAAllocator.cpp     (90)  — Singleton
+
+c10/nmcard/NMCardAllocator.h   (190)  — NM Card PrivateUse1 аллокатор
+c10/nmcard/NMCardAllocator.cpp  (47)  — DLL double-registration fix
+
+c10/linq/LinQAllocator.h      (133)  — LinQ H1M allocator
+c10/linq/LinQAllocator.cpp     (35)  — Implementation
+
+c10/util/Exception.h           (167)  — PT_CHECK, PT_ASSERT
+c10/macros/Macros.h            (214)  — PT_API, PT_DISPATCH_ALL_TYPES
+
+== 2. ATEN — ТЕНЗОРНЫЕ ОПЕРАЦИИ (~20,000 строк) ==
+
+--- 2.1 Core ---
+aten/src/ATen/ATen.h           (625)  — Master dispatch header
+aten/src/ATen/core/Tensor.h    (625)  — Tensor API (900+ методов)
+aten/src/ATen/core/TensorFactory.h (667) — zeros, randn, arange, linspace
+
+--- 2.2 CPU Native ---
+aten/src/ATen/native/cpu/MathOps.h      (~900) — 20 unary + 12 binary ops, AVX2
+aten/src/ATen/native/cpu/ReduceOps.h    (~800) — sum, mean, min, max, std, var, argmax (AVX2)
+aten/src/ATen/native/cpu/LinearAlgebra.h (~900) — mm, mv, bmm, dot, outer, addmm
+aten/src/ATen/native/cpu/ShapeOps.h    (1253) — reshape, transpose, cat, stack, squeeze
+aten/src/ATen/native/cpu/IndexOps.h     (~700) — index, gather, scatter, boolean_index
+aten/src/ATen/native/cpu/VectorizedOps.h (378) — AVX2 SIMD: exp, log, sin, cos, tanh
+aten/src/ATen/native/cpu/PromeBLAS.h    (~850) — Cache-tiled 6×16 GEMM (AVX2 FMA), GEMV, DOT
+
+--- 2.3 TUDA — Cross-Platform SIMD (КЛЮЧЕВОЕ для НТЦ Модуль) ---
+aten/src/ATen/native/cpu/tuda/TudaBLAS.h    (~400) — Generic BLAS dispatcher
+aten/src/ATen/native/cpu/tuda/TudaConfig.h  (~150) — ISA selection (AVX2/NEON/E2K/NMC)
+aten/src/ATen/native/cpu/tuda/TudaMath.h    (326)  — Scalar math functions
+aten/src/ATen/native/cpu/tuda/TudaVec.h     (334)  — VecF abstraction (Vec8/Vec4/Vec1)
+tuda/kernels/scalar/MicroKernel_Scalar.h    (~200) — Generic C++ fallback
+tuda/kernels/neon/MicroKernel_4x8.h         (~220) — ARM NEON 4×8
+tuda/kernels/neon/MicroKernel_8x12.h        (~250) — ARM NEON 8×12
+tuda/kernels/e2k/MicroKernel_4x4.h          (~200) — Эльбрус E2K
+
+--- 2.4 CUDA ---
+aten/src/ATen/cuda/CUDAKernels.cu      (~900)  — Element-wise GPU kernels
+aten/src/ATen/cuda/CUDABlas.cu         (~800)  — GEMM, GEMV через cuBLAS
+aten/src/ATen/cuda/CUDAReduce.cu       (731)   — Reduction kernels
+aten/src/ATen/cuda/CUDAQuantGemv.cu    (~550)  — INT4 quantized GEMV (49.9 tok/s)
+aten/src/ATen/cuda/FlashAttention.cu   (645)   — O(N) memory attention
+
+--- 2.5 NM Card Mini ---
+aten/src/ATen/nmcard/NMCardDispatch.h    (~400) — Op dispatcher
+aten/src/ATen/nmcard/NMCardHardware.h    (~800) — DLL loading, DDR protocol
+aten/src/ATen/nmcard/NMCardHardware.cpp  (517)  — Board init, memory transfer
+aten/src/ATen/nmcard/NMCardOps.h         (~500) — matmul, relu, softmax, rmsnorm
+aten/src/ATen/nmcard/NMCardEmulator.h    (~600) — Q16.16 fixed-point emulator
+aten/src/ATen/nmcard/NMCardMultiCore.h   (~350) — 16-core task scheduling
+
+nmc_programs/dispatcher_float.cpp     (240)   — Single-core IEEE754 float dispatcher
+nmc_programs/dispatcher_mc_float.cpp  (192)   — 16-core float dispatcher
+nmc_programs/dispatcher_nmpp.cpp      (164)   — nmpp vectorized matmul dispatcher
+nmc_programs/ (ещё ~60 файлов)       (~6000)  — Kernels, tests, backward ops
+
+--- 2.6 LinQ ---
+aten/src/ATen/linq/LinQDispatch.h    (~400) — Op dispatcher
+aten/src/ATen/linq/LinQEmulator.h    (431)  — Instruction emulator
+aten/src/ATen/linq/LinQOps.h         (257)  — Operations
+
+== 3. TORCH — ВЫСОКОУРОВНЕВЫЙ ФРЕЙМВОРК (~20,000 строк) ==
+
+--- 3.1 Autograd ---
+torch/csrc/autograd/engine.h         (~400)  — Backward engine
+torch/csrc/autograd/node.h           (281)   — Граф вычислений
+torch/csrc/autograd/autograd.h       (~300)  — Forward/backward integration
+torch/csrc/autograd/functions/       (~3900) — 50+ backward functions
+
+--- 3.2 NN Modules ---
+torch/nn/module.h                    (~1000) — Base Module, hooks, parameters
+torch/nn/modules/linear.h           (~400)  — Linear
+torch/nn/modules/conv.h             (~400)  — Conv1d/2d/3d
+torch/nn/modules/normalization.h    (~500)  — BatchNorm, LayerNorm, GroupNorm
+torch/nn/modules/transformer.h      (619)   — Transformer, MultiheadAttention
+torch/nn/modules/rnn.h              (~600)  — RNN, LSTM, GRU
+torch/nn/modules/loss.h             (~600)  — MSE, CrossEntropy, BCE
+(ещё 10 модулей)
+
+--- 3.3 Optimizers ---
+torch/optim/ (12 файлов)            (~2400) — SGD, Adam, AdamW, RMSprop, RAdam, NAdam...
+torch/optim/lr_scheduler.h          (~550)  — 13 LR schedulers
+
+--- 3.4 Data Loading ---
+torch/data/ (6 файлов)              (~1800) — Dataset, DataLoader, Sampler, Transforms
+
+--- 3.5 AMP ---
+torch/amp/autocast.h                (380)   — Mixed precision
+torch/amp/grad_scaler.h             (297)   — Loss scaling
+
+--- 3.6 I/O & Inference ---
+torch/io/gguf_loader.h              (~500)  — GGUF format (Llama, Qwen, Gemma)
+torch/io/tokenizer.h                (511)   — BPE tokenizer
+
+== 4. PYTHON BINDINGS (~1,400 строк) ==
+python/csrc/tensor_bindings.cpp     (589)  — Tensor ↔ Python
+python/csrc/nn_bindings.cpp         (~400) — NN modules
+python/promethorch/__init__.py      (~100) — Package
+
+== 5. ПРИМЕРЫ (~6,900 строк) ==
+examples/mnist/train_mnist_mlp.cpp  (~450) — MNIST 97.65%
+examples/pir/train_pir.cpp          (~400) — PIR Shakespeare
+examples/nmcard/ (12 файлов)        (~3000) — NM Card тренировки
+examples/gguf/                      (~300) — LLM inference
+
+== 6. ИТОГО ==
+
+| Категория          | Файлов | Строк  | Доля |
+|--------------------|--------|--------|------|
+| C10 Core           |    ~15 |  4,200 |   9% |
+| ATen CPU           |    ~10 |  6,500 |  14% |
+| ATen TUDA          |    ~10 |  2,400 |   5% |
+| ATen CUDA          |    ~12 |  6,400 |  13% |
+| ATen NMCard        |    ~70 |  9,000 |  19% |
+| Torch (autograd+nn)|    ~40 | 14,000 |  29% |
+| Python             |    ~10 |  1,400 |   3% |
+| Examples           |    ~20 |  6,900 |  14% |
+| ВСЕГО              |  ~180+ | 48,000+|      |
+
+== 7. КЛЮЧЕВОЕ ДЛЯ НТЦ МОДУЛЬ ==
+
+ПРОБЛЕМА (Дмитрий): NMC GCC не векторизует → 1% КПД на скалярном RISC ядре.
+
+РЕШЕНИЕ (PromeTorch):
+1. TUDA — кросс-платформенные ядра с абстракцией VecF:
+   - Vec8 (AVX2), Vec4 (NEON/E2K), Vec1 (Scalar), ПЛАНИРУЕТСЯ: VecNM (NMC4 vector)
+2. PromeBLAS — cache-tiled GEMM 6×16 с FMA
+3. Dispatcher_float — ВСЕ ML ops на IEEE754 float VPU NMC4
+4. 16-core параллелизация — batch=16, data-parallel
+5. Полный forward+backward+SGD на карте — не CPU fallback
+
+СТАТУС ТЕСТОВ:
+- 32/32 тестов NMCard эмулятор
+- MNIST 93.64% (3 epochs, SGD lr=0.01)
+- Все 6 forward ops (matmul, relu, softmax, rmsnorm, attention, elem_add) верифицированы на реальной карте
+- Все backward ops (matmul_at, matmul_bt, relu_bwd, sgd) верифицированы
+- 16/16 ядер рабочих (dispatcher_mc_float.abs)

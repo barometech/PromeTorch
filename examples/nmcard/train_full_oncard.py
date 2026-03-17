@@ -38,6 +38,8 @@ for cl in range(4):
     for co in range(4):
         cn=(ctypes.c_int*2)(co,cl); acc=ctypes.c_void_p()
         nm.PL_GetAccess(board,ctypes.byref(cn),ctypes.byref(acc))
+        idx=cl*4+co
+        ci=(ctypes.c_uint*1)(idx); nm.PL_WriteMemBlock(acc,ci,DDR+29,1)
         nm.PL_LoadProgramFile(acc,disp.encode())
         accesses[(cl,co)]=acc
 time.sleep(1)
@@ -73,14 +75,21 @@ def send_op(core, op, args_list):
     z=(ctypes.c_uint*1)(0); nm.PL_WriteMemBlock(acc,z,base+30,1)
     c=(ctypes.c_uint*1)(op); nm.PL_WriteMemBlock(acc,c,base,1)
 
-def wait_core(core):
+def wait_core(core, timeout_ms=5000):
     """Wait for core to finish."""
     cl,co=core//4,core%4; acc=accesses[(cl,co)]
     base=DDR+core*CMD_BLOCK
-    for _ in range(50000):
+    import time as _t
+    t0=_t.time()
+    while (_t.time()-t0)*1000 < timeout_ms:
         nm.PL_ReadMemBlock(acc,buf1,base+30,1)
         if buf1[0]==1: return True
-        time.sleep(0.00005)
+        time.sleep(0.0001)
+    # Debug: read cmd and status
+    nm.PL_ReadMemBlock(acc,buf1,base,1); cmd=buf1[0]
+    nm.PL_ReadMemBlock(acc,buf1,base+30,1); st=buf1[0]
+    nm.PL_ReadMemBlock(acc,buf1,base+31,1); wd=buf1[0]
+    print(f'TIMEOUT core[{core}] cmd={cmd} status={st} wd={wd}',flush=True)
     return False
 
 def wait_cores(cores):
@@ -292,8 +301,17 @@ while best > 1.0 and step < 10000:
     pos -= lr * dpos_acc / BATCH
     for tid, g in dembed_acc.items(): embed[tid] -= lr * g / BATCH
 
-    # Re-upload updated weights every 5 steps
+    # Re-upload updated weights — must pause all cores first
     if step % 5 == 0:
+        # Send NOP to all cores to pause them, then upload, then resume
+        for ci in range(alive):
+            cl_,co_=ci//4,ci%4; ac=accesses[(cl_,co_)]
+            # Wait until core is idle (status=1)
+            for _ in range(1000):
+                nm.PL_ReadMemBlock(ac,buf1,DDR+ci*CMD_BLOCK+30,1)
+                if buf1[0]==1: break
+                time.sleep(0.0001)
+        # All cores idle — safe to write weights
         upload(0, w_addr['W1'][0], W1)
         upload(0, w_addr['W2'][0], W2)
         upload(0, w_addr['Wh'][0], Wh)

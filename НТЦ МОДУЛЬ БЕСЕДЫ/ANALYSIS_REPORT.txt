@@ -1,0 +1,240 @@
+================================================================================
+СВОДНЫЙ ОТЧЁТ: АНАЛИЗ PROMETHORCH ДЛЯ НТЦ "МОДУЛЬ"
+5 агентов Claude Opus 4.6 | 2026-03-17
+================================================================================
+
+== КРАТКОЕ РЕЗЮМЕ ==
+
+PromeTorch — 48,000+ строк C++/CUDA, 180+ файлов. Три backend: CPU (AVX2),
+CUDA (cuBLAS, FlashAttention), NM Card Mini (DDR polling, 16 ядер).
+Утилизация NMC4: 0.85% (скалярный RISC). С векторизацией через nmpp: 10-100x.
+
+================================================================================
+1. TUDA — КРОСС-ПЛАТФОРМЕННЫЕ ЯДРА (Агент 1)
+================================================================================
+
+СТАТУС: Архитектура готова для NMC4. 8 файлов, 4 backend.
+
+СУЩЕСТВУЮЩИЕ BACKEND:
+  - AVX2 (Intel/AMD): Vec8, MicroKernel 6×16, FMA
+  - NEON-A57 (Baikal-M): Vec4, MicroKernel 4×8
+  - NEON-A75 (Baikal-S): Vec4, MicroKernel 8×12
+  - E2K (Эльбрус): Vec4, MicroKernel 4×4
+
+ПЛАН ДОБАВЛЕНИЯ NMC4:
+  1. TudaConfig.h — enum Arch::NMC4 + define TUDA_NMC4     [30 мин]
+  2. TudaVec.h — Vec4 для NMC4 (копия E2K паттерна)        [1 час]
+  3. TudaMath.h — элементные функции (std::exp/log/sin)     [30 мин]
+  4. MicroKernel_4x4_NMC4.h — скалярный C, 16 аккумуляторов [2 часа]
+  5. TudaBLAS.h — dispatch_microkernel() + NMC4 case        [30 мин]
+
+БЛОКЕР: NMC GCC не векторизует C/C++ код. Скалярный microkernel даст те же 1%.
+Для 10-100x нужны:
+  - nmpp intrinsics (nmppmMul_mm_32f) — ЕСТЬ в SDK
+  - Ассемблер NMC4 (ISA документация) — НУЖНА от Дмитрия
+  - Или: обходной путь — вызывать nmpp для целых матриц вместо microkernel
+
+================================================================================
+2. NM CARD HARDWARE BACKEND (Агент 2)
+================================================================================
+
+РАБОТАЕТ:
+  ✅ DLL loading (nm_card_load.dll), 11 PL_* функций
+  ✅ Board init: Reset → LoadInitCode → GetAccess → LoadProgramFile
+  ✅ DDR bump allocator (0x00340000 - 0x1FF00000, ~500MB)
+  ✅ PCIe transfer: PL_WriteMemBlock / PL_ReadMemBlock (синхронный)
+  ✅ Polling dispatcher: 8 opcodes (matmul, rmsnorm, softmax, silu, rope, elem_*)
+  ✅ Watchdog на стороне ядра (mem[31] инкрементируется)
+  ✅ Graceful shutdown (OP_EXIT → status=1 → CloseAccess)
+
+НЕ РАБОТАЕТ / ОТСУТСТВУЕТ:
+  ❌ Watchdog НЕ ЧИТАЕТСЯ хостом — нельзя отличить hang от slow compute
+  ❌ Нет retry/recovery — timeout = exception, ядро не перезапускается
+  ❌ Нет weight persistence — DDR allocator сбрасывается каждый op
+  ❌ Нет пайплайнинга PCIe — upload → compute → download строго последовательно
+  ❌ Multi-core НЕ интегрирован в C++ runtime (только Python скрипты)
+  ❌ Нет error logging — PL_* коды ошибок не разбираются (PL_TIMEOUT, PL_AGAIN)
+  ❌ Нет PL_SyncArray — используется DDR polling вместо официального API
+
+РЕКОМЕНДАЦИИ ДЛЯ ДМИТРИЯ:
+  Приоритет 1: Watchdog monitoring + emergency restart     [2-3 дня]
+  Приоритет 2: Retry logic + error logging                 [2-3 дня]
+  Приоритет 3: Weight caching в DDR (не сбрасывать)        [1 неделя]
+  Приоритет 4: Миграция на PL_SyncArray                    [3-4 недели]
+
+================================================================================
+3. NMPP VECTORIZED LIBRARY (Агент 3)
+================================================================================
+
+ПОЛНЫЙ СПИСОК NMPP ФУНКЦИЙ ДЛЯ ML:
+
+  МАТРИЧНОЕ УМНОЖЕНИЕ (главное):
+    nmppmMul_mm_32f   — IEEE 754 float32, со stride параметрами  ← КЛЮЧЕВАЯ
+    nmppmMul_mt_32f   — float32 с транспонированием B
+    nmppmMul_mm_32s32s — int32 × int32 → int32
+    nmppmMul_mm_8s64s  — int8 × int64 → int64 (квантизация!)
+    + ещё 10 целочисленных вариантов (2s, 4s, 8s, 16s, 32s, 64s)
+
+  МАТРИЦА × ВЕКТОР:
+    nmppmMul_mv_32s64s — матрица × вектор (для bias add)
+    + 8s, 16s варианты
+
+  COPY/MEMSET:
+    nmppmCopy_32s, nmppmCopy_8s, etc. — быстрое копирование
+    nmppmCopyua_*/nmppmCopyau_* — aligned ↔ unaligned
+
+  ЧЕГО НЕТ в nmpp:
+    ❌ Activation (relu, sigmoid, tanh, softmax, gelu)
+    ❌ Normalization (layernorm, batchnorm, rmsnorm)
+    ❌ Loss functions
+    ❌ Backward/gradient ops
+    ❌ Optimizer kernels (SGD, Adam)
+    ❌ Reduction (sum, argmax, topk)
+
+МЕХАНИЗМ ВЕКТОРИЗАЦИИ:
+  - 4 независимых FPU cores (FPU0–FPU3) параллельно
+  - `rep vlen` — цикл без branch overhead
+  - `.matrix` modifier — аппаратное ускорение матричных операций
+  - Stride-based access: [ar0++gr0] — автоинкремент
+  - Библиотека написана на АССЕМБЛЕРЕ NMC4
+
+ТИПЫ ДАННЫХ NMC4:
+  nm1 (1-bit, 64/reg), nm2s (2-bit, 32/reg), nm4s (4-bit, 16/reg),
+  nm8s (8-bit, 8/reg), nm16s (16-bit, 4/reg), nm32s (32-bit, 2/reg),
+  nm64s (64-bit, 1/reg), float32 (IEEE 754)
+
+TOOLCHAIN СБОРКИ:
+  cc1plus -quiet src.cpp -mnmc4 -mgas -O2 -o src_gas.s
+  nmc-as-gnu -o src_gas.o src_gas.s
+  nmc-ld -o program.abs startup.o src.o libnmpps-nmc4.a -T nm6408brd.lds -e start
+
+================================================================================
+4. БЕНЧМАРКИ И ПРОИЗВОДИТЕЛЬНОСТЬ (Агент 4)
+================================================================================
+
+ИЗМЕРЕННАЯ ПРОИЗВОДИТЕЛЬНОСТЬ:
+
+  | Метрика                    | NM Card Mini | RTX 3080   | Разница  |
+  |----------------------------|-------------|------------|----------|
+  | Peak GFLOPS (FP32)         | 512         | 29,760     | 1:58     |
+  | Измерено GFLOPS            | 4.37        | 20,000     | 1:4,576  |
+  | Утилизация                 | 0.85%       | 67%        | 79× хуже|
+  | Matmul 32×64×64            | 60 ms       | 0.075 ms   | 800×     |
+  | 1B LLaMA tok/s             | 0.1         | 40         | 400×     |
+  | 109K transformer training  | 3.17 часа   | ~2 мин     | 95×      |
+  | PCIe BW (actual/theoretical)| 0.96/2500 MB/s | 8000/16000 | —    |
+
+АНАЛИЗ BOTTLENECK:
+  ■ ГЛАВНЫЙ: Скалярный RISC код (0.85% утилизации) — НЕ железо!
+  ■ PCIe НЕ bottleneck: 0.037% утилизации (0.96 MB/s из 2500 MB/s)
+  ■ DDR не bottleneck: 32 GB/s внутри карты, используется <1%
+  ■ NM Quad x1: МЁРТВ для inference (80 ms/layer загрузка)
+
+С ВЕКТОРИЗАЦИЕЙ (ПРОГНОЗ):
+  Скалярный → nmpp matmul: 10-100× ускорение
+  4.37 GFLOPS → 50-100 GFLOPS (10-20% утилизации)
+  60 ms/matmul → 2-5 ms/matmul
+  0.1 tok/s → ~1 tok/s (1B LLaMA)
+  3.17 часа → 20-30 мин (109K transformer)
+
+ТРЕБУЕМЫЕ БЕНЧМАРКИ ДЛЯ ДМИТРИЯ:
+  1. benchmark_matmul.py — 256×256×256, GFLOPS, точность vs numpy
+  2. benchmark_pcie.cpp — 1 MB chunks × 1000, GB/s sustained
+  3. benchmark_inference.py — 1B LLaMA, tok/s, peak memory
+  4. benchmark_training.py — 200K model, breakdown (PCIe/compute/backward)
+  5. benchmark_vectorized.py — nmpp matmul vs scalar (proof of speedup)
+
+================================================================================
+5. model.to("nmcard") ИНТЕГРАЦИЯ (Агент 5)
+================================================================================
+
+ТЕКУЩЕЕ СОСТОЯНИЕ: 70% готовности
+
+  РАБОТАЕТ:
+    ✅ Device registration (PrivateUse1 = nmcard)
+    ✅ Tensor allocation (NMCardAllocator, 64-byte aligned)
+    ✅ Device transfer: to_nmcard() / nmcard_to_cpu() через memcpy
+    ✅ 41 операция в эмуляторе (20 unary, 13 binary, 4 reduce, 3 linalg)
+    ✅ Hardware auto-init: ensure_hardware_init()
+    ✅ Module.to(device) — рекурсивный перенос параметров
+
+  НЕ РАБОТАЕТ:
+    ❌ Autograd НЕ подключён к NMCard ops → градиенты не текут
+    ❌ Shape ops (view, reshape, transpose) → принудительно CPU
+    ❌ CrossEntropyLoss не диспатчится
+    ❌ clone(), contiguous() не реализованы для NMCard
+    ❌ ensure_hardware_init() — хрупкие относительные пути
+    ❌ Multi-device не поддерживается (только 1 ядро)
+
+  PLAN ДЛЯ ПОЛНОЙ ИНТЕГРАЦИИ:
+    Фаза A: Autograd — MmBackward, ReluBackward, SoftmaxBackward  [4 часа]
+    Фаза B: Shape ops — view, reshape, transpose, contiguous      [3 часа]
+    Фаза C: Loss — CrossEntropyLoss dispatch                      [2 часа]
+    Фаза D: Hardware paths — env var NMCARD_DISPATCHER_PATH        [1 час]
+    Фаза E: End-to-end test — MNIST model.to("nmcard")            [2 часа]
+    ИТОГО: ~12 часов
+
+================================================================================
+ВЫВОДЫ И ПЛАН ДЕЙСТВИЙ
+================================================================================
+
+ДЛЯ ВСТРЕЧИ С ДМИТРИЕМ (НТЦ МОДУЛЬ):
+
+  1. ПОКАЗАТЬ: Рабочий matmul на реальной карте (точность = bit-exact vs numpy)
+  2. ПОКАЗАТЬ: 16/16 ядер живых (dispatcher_mc_float.abs)
+  3. ПОКАЗАТЬ: TUDA архитектуру (5 backend: AVX2, NEON×2, E2K, Scalar + NMC4)
+  4. ПОКАЗАТЬ: Кодовую базу (48K строк, 180+ файлов, полный PyTorch API)
+  5. ПРИЗНАТЬ: 0.85% утилизации = скалярный RISC (подтверждает слова Дмитрия)
+
+  ЗАПРОСИТЬ У ДМИТРИЯ:
+  - ISA документацию NMC4 (instruction set reference manual)
+  - Исходники nmpp (для понимания vector intrinsics)
+  - Доступ к profiler (nmc_gprof или аналог)
+  - Примеры ассемблера с vector pipeline
+
+  ПЛАН ДЕЙСТВИЙ (приоритет):
+  ┌─────────────────────────────────────────────────────────┐
+  │ Неделя 1: Линковка с nmpp                              │
+  │   - dispatcher_float.abs + libnmpps-nmc4.a             │
+  │   - Заменить скалярный matmul на nmppmMul_mm_32f       │
+  │   - Ожидаемый результат: 10-30× ускорение matmul       │
+  ├─────────────────────────────────────────────────────────┤
+  │ Неделя 2: TUDA NMC4 backend                            │
+  │   - TudaConfig + TudaVec + MicroKernel_NMC4            │
+  │   - Скалярный fallback (работает сразу)                │
+  │   - nmpp path для больших матриц                       │
+  ├─────────────────────────────────────────────────────────┤
+  │ Неделя 3: Бенчмарки для НТЦ Модуль                    │
+  │   - 5 benchmark файлов (matmul, PCIe, inference,       │
+  │     training, vectorized)                              │
+  │   - Сравнительная таблица scalar vs nmpp vs RTX 3080   │
+  ├─────────────────────────────────────────────────────────┤
+  │ Неделя 4: model.to("nmcard") + crash handling          │
+  │   - Autograd integration                               │
+  │   - Watchdog monitoring + restart                       │
+  │   - End-to-end MNIST test                              │
+  └─────────────────────────────────────────────────────────┘
+
+================================================================================
+КРИТИЧЕСКАЯ НАХОДКА: nmpp — КЛЮЧ К УСКОРЕНИЮ
+================================================================================
+
+nmppmMul_mm_32f СУЩЕСТВУЕТ в SDK и работает с IEEE 754 float.
+dispatcher_nmpp.cpp УЖЕ содержит код вызова.
+Нужно ТОЛЬКО:
+  1. Слинковать dispatcher_float.cpp с libnmpps-nmc4.a
+  2. Заменить скалярные циклы на вызовы nmppmMul_mm_32f
+  3. Пересобрать dispatcher.abs
+
+Это даст 10-100× ускорение matmul БЕЗ написания ассемблера.
+Все остальные ops (relu, softmax, etc.) останутся скалярными —
+но matmul это 90% времени в transformer.
+
+================================================================================
+Файлы отчётов агентов:
+  Агент 1: TUDA kernels — ac51104dfdaadb0ff.output
+  Агент 2: Hardware backend — a1d5adf6d02cc5232.output
+  Агент 3: nmpp library — ab47fe2861bffcdc3.output
+  Агент 4: Benchmarks — ac2bd231b459e6566.output
+  Агент 5: model.to() — acde6afcce5756861.output
+================================================================================
