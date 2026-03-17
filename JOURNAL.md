@@ -22,6 +22,10 @@
 - Forward (2 tokens): **45.9s** (253 matmuls × 170ms avg)
 - Logits: (1, 2, 151936) — корректный vocab, осмысленный top-5
 
+**Токенизатор:** `airllm_nmcard/tokenizer.py` — парсит `tokenizer.json` напрямую, byte-level BPE
+- 151K merges, encode/decode без transformers dependency
+- Верифицирован: "Hello world" → [151643, 9707, 1879] → "Hello world"
+
 **Поддерживаемые архитектуры:** Qwen2, Qwen3, Llama, Mistral
 **Quantization:** NF4 (4-bit), INT8 blockwise — встроено в splitter + loader
 
