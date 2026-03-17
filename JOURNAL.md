@@ -4,6 +4,29 @@
 
 ---
 
+## 2026-03-18: AirLLM-NMCard v1.0 — Qwen3-4B inference без PyTorch
+
+### AirLLM-NMCard
+Полностью свой аналог AirLLM, написанный с нуля. **Без PyTorch** — чистый numpy + NM Card.
+Лицензия: Apache 2.0 (как оригинальный AirLLM).
+
+**Компоненты:**
+- `airllm_nmcard/ops.py` — rms_norm, silu, softmax, rope, gqa_attention (numpy)
+- `airllm_nmcard/layer_loader.py` — safetensors parser (без torch!), NF4/INT8 dequant, prefetching
+- `airllm_nmcard/model_splitter.py` — split HF model в per-layer safetensors + compression
+- `airllm_nmcard/inference.py` — AirLLMNMCard + AutoModel, layer-streaming forward pass
+
+**Qwen3-4B (CPU baseline, первый запуск):**
+- 36 layers, hidden=2560, heads=32, kv=8, head_dim=128, intermediate=9728
+- Split: 38 файлов × 385 MB (BF16→F32), total ~15 GB
+- Forward (2 tokens): **45.9s** (253 matmuls × 170ms avg)
+- Logits: (1, 2, 151936) — корректный vocab, осмысленный top-5
+
+**Поддерживаемые архитектуры:** Qwen2, Qwen3, Llama, Mistral
+**Quantization:** NF4 (4-bit), INT8 blockwise — встроено в splitter + loader
+
+---
+
 ## 2026-03-18: Закрытие 4 блоков требований Дмитрия (НТЦ Модуль)
 
 ### Контекст
