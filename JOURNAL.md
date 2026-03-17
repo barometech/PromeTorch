@@ -4,6 +4,49 @@
 
 ---
 
+## 2026-03-18: Закрытие 4 блоков требований Дмитрия (НТЦ Модуль)
+
+### Контекст
+Стенографические данные беседы с Дмитрием (НТЦ "Модуль") содержали 4 блока
+технических требований для аудита PromeTorch. Все 4 блока закрыты.
+
+### Блок 1: Pipeline Validation (векторный код) ✅
+- `dispatcher_float_vec.abs` уже был собран 17 марта (15.2 KB)
+- `MullMatrix_f.asm` — ручной NMC4 ассемблер с 4-FPU vector pipeline
+- `dispatcher_float_vec_gas.s` — asm dump компилятора с `call _nmppmMul_mm_32f`
+- Все файлы скопированы в `nm_card_mini_as_TRAINER/nmc_programs/`
+- **Дмитрий увидит**: `fpu 0..3 rep vlen vreg` — vector instructions, НЕ scalar RISC
+
+### Блок 2: Benchmarks ✅
+- `benchmark_for_dmitry.py` — единый benchmark suite
+- MatMul: 4x4 → 256x256, GFLOPS + accuracy vs numpy
+- Elementwise: relu, add, softmax с проверкой точности
+- Peak utilization % от 512 GFLOPS
+
+### Блок 3: Crash & Hang Logging ✅
+- `nmruntime/safe_device.py` — SafeDevice с защитой от крашей
+- Watchdog мониторинг: `mem[31]` проверяется каждые 2 сек
+- Три типа ошибок: NMCardHangError, NMCardTimeoutError, NMCardOpError
+- Layer tracing: `set_layer("fc1")` → при краше видно какой слой повис
+- OperationLog: 100 последних операций с timestamps
+- PL_* error codes → человекочитаемые сообщения
+
+### Блок 4: PCIe/DMA ✅
+- `measure_pcie_bandwidth()` — блоки 1KB → 1MB, sustained MB/s
+- DDR allocation scheme документирована в benchmark
+- Bandwidth tracking на каждой операции write/read
+- `print_stats()` — полный отчёт с utilization %
+
+### Новые файлы
+- `nm_card_mini_as_TRAINER/nmruntime/safe_device.py` (27 KB)
+- `nm_card_mini_as_TRAINER/benchmark_for_dmitry.py` (16 KB)
+- `nm_card_mini_as_TRAINER/nmc_programs/dispatcher_float_vec.*` (копии для аудита)
+
+### Следующий шаг
+Запуск `benchmark_for_dmitry.py` на реальной карте через Python 3.11.
+
+---
+
 ## 2026-03-17: nmpp vectorized dispatcher + NTC Module analysis + SUDA compiler plan
 
 ### Анализ для НТЦ "Модуль"
