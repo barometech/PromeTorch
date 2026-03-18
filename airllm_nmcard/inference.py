@@ -429,13 +429,23 @@ class AirLLMNMCard:
         self.cos_table, self.sin_table = precompute_freqs_cis(
             self.config.head_dim, max_seq_len, self.config.rope_theta)
 
-        # KV cache: stored on host (CPU), loaded per-layer as needed
-        # Shape per layer: (batch=1, num_kv_heads, seq_len, head_dim)
+        # KV cache: pre-allocated ring buffers on host (CPU)
+        # Shape per layer: (batch=1, num_kv_heads, max_seq_len, head_dim)
         self.kv_cache: Optional[List[Tuple[np.ndarray, np.ndarray]]] = None
+        self.cache_len = 0  # current filled length in KV cache
 
     def _reset_kv_cache(self):
-        """Reset KV cache for new generation."""
-        self.kv_cache = [None] * self.config.num_hidden_layers
+        """Reset KV cache for new generation — pre-allocate ring buffers."""
+        num_layers = self.config.num_hidden_layers
+        num_kv_heads = self.config.num_key_value_heads
+        head_dim = self.config.head_dim
+        # Pre-allocate: (1, num_kv_heads, max_seq_len, head_dim) per layer
+        self.kv_cache = [
+            (np.zeros((1, num_kv_heads, self.max_seq_len, head_dim), dtype=np.float32),
+             np.zeros((1, num_kv_heads, self.max_seq_len, head_dim), dtype=np.float32))
+            for _ in range(num_layers)
+        ]
+        self.cache_len = 0
 
     def _do_linear(self, x: np.ndarray, weights: Dict[str, np.ndarray],
                     name: str) -> np.ndarray:
@@ -508,41 +518,39 @@ class AirLLMNMCard:
         k = k.reshape(batch, seq_len, num_kv_heads, head_dim).transpose(0, 2, 1, 3)
         v = v.reshape(batch, seq_len, num_kv_heads, head_dim).transpose(0, 2, 1, 3)
 
-        # 3. QK normalization (Qwen3 specific)
+        # 3. QK normalization (Qwen3 specific) — vectorized across all heads
         if "self_attn.q_norm.weight" in weights:
-            # Per-head RMSNorm on q and k
-            q_normed = np.zeros_like(q)
-            k_normed = np.zeros_like(k)
             q_norm_w = weights["self_attn.q_norm.weight"]  # (head_dim,)
             k_norm_w = weights["self_attn.k_norm.weight"]  # (head_dim,)
-            for h in range(num_heads):
-                q_normed[:, h] = rmsnorm(q[:, h], q_norm_w, self.config.rms_norm_eps)
-            for h in range(num_kv_heads):
-                k_normed[:, h] = rmsnorm(k[:, h], k_norm_w, self.config.rms_norm_eps)
-            q = q_normed
-            k = k_normed
+            eps = self.config.rms_norm_eps
+            # q: (batch, num_heads, seq_len, head_dim) — RMSNorm along last axis
+            q_var = np.mean(q.astype(np.float32) ** 2, axis=-1, keepdims=True)
+            q = (q * (1.0 / np.sqrt(q_var + eps)) * q_norm_w).astype(q.dtype)
+            k_var = np.mean(k.astype(np.float32) ** 2, axis=-1, keepdims=True)
+            k = (k * (1.0 / np.sqrt(k_var + eps)) * k_norm_w).astype(k.dtype)
 
         # 4. RoPE
         q = apply_rope(q, self.cos_table, self.sin_table, position_offset)
         k = apply_rope(k, self.cos_table, self.sin_table, position_offset)
 
-        # 5. GQA Attention (with KV cache)
-        cache_k = None
-        cache_v = None
-        if self.kv_cache[layer_idx] is not None:
-            cache_k, cache_v = self.kv_cache[layer_idx]
+        # 5. GQA Attention (with pre-allocated KV cache ring buffer)
+        cache_k_buf, cache_v_buf = self.kv_cache[layer_idx]
+        # Write new k,v into the pre-allocated buffer at current position
+        cache_k_buf[:, :, self.cache_len:self.cache_len + seq_len, :] = k
+        cache_v_buf[:, :, self.cache_len:self.cache_len + seq_len, :] = v
+        # Slice the valid portion of the cache for attention
+        total_len = self.cache_len + seq_len
+        valid_k = cache_k_buf[:, :, :total_len, :]
+        valid_v = cache_v_buf[:, :, :total_len, :]
 
-        attn_out, new_k, new_v = gqa_attention(
-            q, k, v,
+        attn_out, _, _ = gqa_attention(
+            q, valid_k, valid_v,
             num_heads=num_heads,
             num_kv_heads=num_kv_heads,
             causal=True,
-            kv_cache_k=cache_k,
-            kv_cache_v=cache_v
+            kv_cache_k=None,  # cache already merged
+            kv_cache_v=None
         )
-
-        # Update KV cache
-        self.kv_cache[layer_idx] = (new_k, new_v)
 
         # 6. Output projection
         # attn_out: (batch, num_heads, seq_len, head_dim) -> (batch, seq_len, hidden)
@@ -618,8 +626,10 @@ class AirLLMNMCard:
                 tile_logits = self.card.matmul(hidden_flat, W_tile.T)
 
             logits_parts.append(tile_logits)
-            self.card.ddr_reset()  # free DDR between tiles
+            # NOTE: ddr_reset removed here — avoid expensive DDR reset between
+            # tiles. The bump allocator resets once after all tiles complete.
 
+        # Single ddr_reset after all tiles (caller does ddr_reset after lm_head)
         logits = np.concatenate(logits_parts, axis=-1)
         return logits.reshape(hidden.shape[:-1] + (vocab_size,))
 
@@ -667,6 +677,10 @@ class AirLLMNMCard:
             self.loader.unload_layer(weights)
             self.card.ddr_reset()
             gc.collect()
+
+        # Advance KV cache position after all layers processed these tokens
+        if self.kv_cache is not None:
+            self.cache_len += input_ids.shape[1]
 
         if self.verbose:
             total = time.monotonic() - t_total
@@ -719,6 +733,10 @@ class AirLLMNMCard:
                 self.loader.unload_layer(weights)
                 self.card.ddr_reset()
                 gc.collect()
+
+        # Advance KV cache position after all layers processed these tokens
+        if self.kv_cache is not None:
+            self.cache_len += input_ids.shape[1]
 
         return hidden
 

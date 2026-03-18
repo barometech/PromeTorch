@@ -233,6 +233,170 @@ ATEN_CUDA_API void launch_q4km_gemv(
 }
 
 // ============================================================================
+// Persistent GEMV launcher — one block per SM, grid-stride over rows
+// ============================================================================
+
+ATEN_CUDA_API void launch_q4km_persistent_gemv(
+    const void* weights,
+    const float* x,
+    float* y,
+    int K, int N,
+    int64_t row_stride_bytes,
+    cudaStream_t stream)
+{
+    // Query SM count for optimal grid size
+    int device = 0;
+    cudaGetDevice(&device);
+    int sm_count = 0;
+    cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, device);
+
+    const int WARPS = 8;
+    const int BLOCK_SIZE = WARPS * 32;  // 256 threads per block
+    // Launch 2 blocks per SM for latency hiding
+    int grid = sm_count * 2;
+    int smem_bytes = K * sizeof(float);
+
+    if (smem_bytes > 48 * 1024) {
+        cudaFuncSetAttribute(q4km_persistent_gemv_kernel,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
+    }
+
+    q4km_persistent_gemv_kernel<<<grid, BLOCK_SIZE, smem_bytes, stream>>>(
+        static_cast<const uint8_t*>(weights), x, y,
+        K, N, row_stride_bytes);
+}
+
+// ============================================================================
+// Fused gate+up GEMV — two GEMVs in a single kernel launch
+// ============================================================================
+// Eliminates one kernel launch per layer. Both projections share the same
+// input vector x, which is loaded into shared memory once.
+
+__global__ void q4km_fused_gate_up_kernel(
+    const uint8_t* __restrict__ w_gate,
+    const uint8_t* __restrict__ w_up,
+    const float* __restrict__ x,
+    float* __restrict__ y_gate,
+    float* __restrict__ y_up,
+    int K, int N_gate, int N_up,
+    int64_t row_stride_bytes)
+{
+    extern __shared__ float x_shared[];
+
+    const int tid = threadIdx.x;
+    const int block_size = blockDim.x;
+    const int warps_per_block = block_size / 32;
+    const int warp_id = tid / 32;
+    const int lane = tid & 31;
+
+    // Load x into shared memory ONCE
+    for (int k = tid; k < K; k += block_size) {
+        x_shared[k] = x[k];
+    }
+    __syncthreads();
+
+    const int group = lane / 8;
+    const int pos = (lane & 7) * 4;
+    const int num_blocks_per_row = K / 256;
+    const int N_total = N_gate + N_up;
+
+    // Grid-stride loop over both gate and up rows
+    for (int base_n = blockIdx.x * warps_per_block; base_n < N_total;
+         base_n += gridDim.x * warps_per_block)
+    {
+        int n = base_n + warp_id;
+        if (n >= N_total) continue;
+
+        // Determine which weight matrix and output buffer
+        const uint8_t* weights;
+        float* y_out;
+        int row_idx;
+        if (n < N_gate) {
+            weights = w_gate;
+            y_out = y_gate;
+            row_idx = n;
+        } else {
+            weights = w_up;
+            y_out = y_up;
+            row_idx = n - N_gate;
+        }
+
+        const uint8_t* row_data = weights + (int64_t)row_idx * row_stride_bytes;
+        float sum = 0.0f;
+
+        for (int blk = 0; blk < num_blocks_per_row; ++blk) {
+            const uint8_t* bp = row_data + blk * 144;
+
+            uint16_t d_bits, dmin_bits;
+            memcpy(&d_bits, bp, 2);
+            memcpy(&dmin_bits, bp + 2, 2);
+            const float d = fp16_to_fp32_device(d_bits);
+            const float dm = fp16_to_fp32_device(dmin_bits);
+
+            uint8_t sc_lo, m_lo, sc_hi, m_hi;
+            get_scale_min_k4_device(group * 2, bp + 4, &sc_lo, &m_lo);
+            get_scale_min_k4_device(group * 2 + 1, bp + 4, &sc_hi, &m_hi);
+
+            uint32_t qs4;
+            memcpy(&qs4, bp + 16 + lane * 4, 4);
+
+            float dl = d * sc_lo, ml = dm * m_lo;
+            float dh = d * sc_hi, mh = dm * m_hi;
+
+            const int k_base = blk * 256 + group * 64 + pos;
+            const float4 x_lo = *reinterpret_cast<const float4*>(&x_shared[k_base]);
+            const float4 x_hi = *reinterpret_cast<const float4*>(&x_shared[k_base + 32]);
+
+            sum += (dl * (float)( qs4        & 0xF) - ml) * x_lo.x;
+            sum += (dl * (float)((qs4 >>  8) & 0xF) - ml) * x_lo.y;
+            sum += (dl * (float)((qs4 >> 16) & 0xF) - ml) * x_lo.z;
+            sum += (dl * (float)((qs4 >> 24) & 0xF) - ml) * x_lo.w;
+            sum += (dh * (float)((qs4 >>  4) & 0xF) - mh) * x_hi.x;
+            sum += (dh * (float)((qs4 >> 12) & 0xF) - mh) * x_hi.y;
+            sum += (dh * (float)((qs4 >> 20) & 0xF) - mh) * x_hi.z;
+            sum += (dh * (float)((qs4 >> 28) & 0xF) - mh) * x_hi.w;
+        }
+
+        // Warp shuffle reduction
+        #pragma unroll
+        for (int offset = 16; offset > 0; offset >>= 1) {
+            sum += __shfl_down_sync(0xffffffff, sum, offset);
+        }
+        if (lane == 0) y_out[row_idx] = sum;
+    }
+}
+
+ATEN_CUDA_API void launch_q4km_fused_gate_up_gemv(
+    const void* w_gate, const void* w_up,
+    const float* x, float* y_gate, float* y_up,
+    int K, int N_gate, int N_up,
+    int64_t row_stride_bytes,
+    cudaStream_t stream)
+{
+    int device = 0;
+    cudaGetDevice(&device);
+    int sm_count = 0;
+    cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, device);
+
+    const int WARPS = 8;
+    const int BLOCK_SIZE = WARPS * 32;
+    int grid = sm_count * 2;
+    int smem_bytes = K * sizeof(float);
+
+    if (smem_bytes > 48 * 1024) {
+        cudaFuncSetAttribute(q4km_fused_gate_up_kernel,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
+    }
+
+    q4km_fused_gate_up_kernel<<<grid, BLOCK_SIZE, smem_bytes, stream>>>(
+        static_cast<const uint8_t*>(w_gate),
+        static_cast<const uint8_t*>(w_up),
+        x, y_gate, y_up,
+        K, N_gate, N_up,
+        row_stride_bytes);
+}
+
+// ============================================================================
 // Q8_1 Quantization Kernel — Quantize float32 x to int8 for dp4a
 // ============================================================================
 // Each warp (32 threads) quantizes one Q8_1 block of 32 values.

@@ -170,7 +170,7 @@ def softmax(x: np.ndarray, axis: int = -1) -> np.ndarray:
 
 
 class KVCache:
-    """Key-Value cache for efficient inference."""
+    """Key-Value cache for efficient inference with pre-allocated ring buffer."""
 
     def __init__(self, num_layers: int, max_seq_len: int,
                  num_kv_heads: int, head_dim: int):
@@ -179,29 +179,33 @@ class KVCache:
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
 
-        # Initialize empty cache
-        self.k_cache = [None] * num_layers
-        self.v_cache = [None] * num_layers
+        # Pre-allocate cache buffers: [batch=1, max_seq_len, num_kv_heads, head_dim]
+        self.k_cache = [np.zeros((1, max_seq_len, num_kv_heads, head_dim), dtype=np.float32)
+                        for _ in range(num_layers)]
+        self.v_cache = [np.zeros((1, max_seq_len, num_kv_heads, head_dim), dtype=np.float32)
+                        for _ in range(num_layers)]
         self.seq_len = 0
 
     def update(self, layer_idx: int, k: np.ndarray, v: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """Update cache and return full K, V."""
-        if self.k_cache[layer_idx] is None:
-            self.k_cache[layer_idx] = k
-            self.v_cache[layer_idx] = v
-        else:
-            self.k_cache[layer_idx] = np.concatenate([self.k_cache[layer_idx], k], axis=1)
-            self.v_cache[layer_idx] = np.concatenate([self.v_cache[layer_idx], v], axis=1)
-
+        """Update cache in-place and return valid slice of K, V."""
+        new_seq_len = k.shape[1]
+        # Layer 0 is always called first -- snapshot write position for all layers
         if layer_idx == 0:
-            self.seq_len = self.k_cache[0].shape[1]
+            self._write_pos = self.seq_len
+            self.seq_len += new_seq_len
 
-        return self.k_cache[layer_idx], self.v_cache[layer_idx]
+        pos = self._write_pos
+        # Write new tokens into pre-allocated buffer (no concatenation)
+        self.k_cache[layer_idx][:, pos:pos + new_seq_len] = k
+        self.v_cache[layer_idx][:, pos:pos + new_seq_len] = v
+
+        return self.k_cache[layer_idx][:, :self.seq_len], self.v_cache[layer_idx][:, :self.seq_len]
 
     def clear(self):
-        """Clear the cache."""
-        self.k_cache = [None] * self.num_layers
-        self.v_cache = [None] * self.num_layers
+        """Clear the cache (zero out buffers)."""
+        for i in range(self.num_layers):
+            self.k_cache[i][:] = 0
+            self.v_cache[i][:] = 0
         self.seq_len = 0
 
 
@@ -385,13 +389,9 @@ class TinyLlamaModel:
             sorted_logits = logits[sorted_indices]
             cumulative_probs = np.cumsum(softmax(sorted_logits))
 
-            # Remove tokens with cumulative probability above threshold
-            sorted_indices_to_remove = cumulative_probs > top_p
-            sorted_indices_to_remove[1:] = sorted_indices_to_remove[:-1].copy()
-            sorted_indices_to_remove[0] = False
-
-            indices_to_remove = sorted_indices[sorted_indices_to_remove]
-            logits[indices_to_remove] = -np.inf
+            # Use searchsorted to find cutoff index efficiently
+            cutoff_idx = np.searchsorted(cumulative_probs, top_p) + 1
+            logits[sorted_indices[cutoff_idx:]] = -np.inf
 
         # Sample
         probs = softmax(logits)
