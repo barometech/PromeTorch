@@ -5,6 +5,14 @@
 
 ---
 
+## 2026-03-18: Gap Analysis vs PyTorch
+
+Полный анализ: `GAP_ANALYSIS_VS_PYTORCH.md`
+
+**Главная находка:** autograd не подключён к Conv/BN/Pool/большинству активаций. CNN тренировать нельзя — только MLP/LSTM. При этом cuDNN backward уже реализован, нужно только wiring (~700 строк). cuBLAS handle создан но не используется для mm/bmm (5-10x perf gap, ~20 строк фикс).
+
+---
+
 ## 2026-03-18: ИНЦИДЕНТ — 16-core NMCard crash + ПОЛНЫЙ АУДИТ
 
 ### Инцидент
