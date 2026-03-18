@@ -800,6 +800,7 @@ if(PT_USE_NMCARD)
     add_subdirectory(examples/nmcard)
 endif()
 add_subdirectory(benchmarks)
+add_subdirectory(promeserve)
 
 # ============================================================================
 # Installation

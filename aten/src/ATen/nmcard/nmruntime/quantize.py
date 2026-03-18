@@ -117,14 +117,8 @@ def unpack_uint32_to_int8(packed: np.ndarray, count: int) -> np.ndarray:
     Returns:
         data: INT8 array of length count
     """
-    # Extract bytes
-    b0 = (packed & 0xFF).astype(np.uint8)
-    b1 = ((packed >> 8) & 0xFF).astype(np.uint8)
-    b2 = ((packed >> 16) & 0xFF).astype(np.uint8)
-    b3 = ((packed >> 24) & 0xFF).astype(np.uint8)
-
-    # Interleave
-    unpacked = np.column_stack([b0, b1, b2, b3]).flatten()
+    # Zero-copy reinterpret: uint32 → uint8 (little-endian, same byte order as column_stack)
+    unpacked = packed.view(np.uint8)
 
     return unpacked[:count].view(np.int8)
 

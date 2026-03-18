@@ -412,6 +412,24 @@ ATEN_CUDA_API void launch_q4km_gemv(
     int K, int N, int64_t row_stride_bytes,
     cudaStream_t stream = nullptr);
 
+// Persistent Q4_K_M GEMV: one block per SM, grid-stride over rows.
+// Loads x into shared memory ONCE, then processes all rows.
+// Reduces kernel launch overhead by ~4x for large N.
+ATEN_CUDA_API void launch_q4km_persistent_gemv(
+    const void* weights, const float* x, float* y,
+    int K, int N, int64_t row_stride_bytes,
+    cudaStream_t stream = nullptr);
+
+// Fused multi-GEMV: runs gate+up projections in a single kernel launch.
+// Writes gate output to y_gate[0..N_gate-1] and up output to y_up[0..N_up-1].
+// Both weight matrices must be Q4_K with the same K (input dim).
+ATEN_CUDA_API void launch_q4km_fused_gate_up_gemv(
+    const void* w_gate, const void* w_up,
+    const float* x, float* y_gate, float* y_up,
+    int K, int N_gate, int N_up,
+    int64_t row_stride_bytes,
+    cudaStream_t stream = nullptr);
+
 // Quantize float32 x vector to Q8_1 (int8) for dp4a GEMV
 // y_q8 must point to (K/32) * 36 bytes of GPU memory
 ATEN_CUDA_API void launch_quantize_q8_1(

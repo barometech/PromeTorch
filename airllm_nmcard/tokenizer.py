@@ -13,6 +13,7 @@ Supports:
 import json
 import os
 import re
+import heapq
 from typing import Dict, List, Optional, Tuple
 
 
@@ -158,40 +159,85 @@ class BPETokenizer:
         return {b: chr(c) for b, c in zip(bs, cs)}
 
     def _bpe(self, word: List[str]) -> List[str]:
-        """Apply BPE merges to a list of characters/tokens."""
+        """Apply BPE merges to a list of characters/tokens.
+
+        Uses a doubly-linked list + priority queue for O(N log N) instead of O(N^2 M).
+        """
         if len(word) <= 1:
             return word
 
-        while True:
-            # Find the highest-priority merge pair
-            best_pair = None
-            best_rank = float("inf")
-            for i in range(len(word) - 1):
-                pair = (word[i], word[i + 1])
-                rank = self.bpe_ranks.get(pair, float("inf"))
-                if rank < best_rank:
-                    best_rank = rank
-                    best_pair = pair
+        # Build doubly-linked list: each node is [prev, next, token, alive]
+        nodes = []
+        for i, tok in enumerate(word):
+            nodes.append([i - 1, i + 1, tok, True])  # prev, next, token, alive
+        nodes[-1][1] = -1  # last node has no next
 
-            if best_pair is None or best_rank == float("inf"):
+        # Build priority queue of (rank, unique_id, left_idx, right_idx)
+        # unique_id breaks ties and ensures stale entries are detectable
+        heap = []
+        seq_id = 0
+
+        # Track which (left, right) pair was last pushed for each left node
+        node_seq = {}
+
+        def _push_pair(left_idx, right_idx):
+            nonlocal seq_id
+            pair = (nodes[left_idx][2], nodes[right_idx][2])
+            rank = self.bpe_ranks.get(pair, -1)
+            if rank >= 0:
+                heapq.heappush(heap, (rank, seq_id, left_idx, right_idx))
+                node_seq[left_idx] = seq_id
+                seq_id += 1
+
+        # Initialize heap with all adjacent pairs
+        for i in range(len(word) - 1):
+            _push_pair(i, i + 1)
+
+        while heap:
+            rank, sid, left_idx, right_idx = heapq.heappop(heap)
+
+            # Check if this entry is stale
+            if not nodes[left_idx][3] or not nodes[right_idx][3]:
+                continue
+            if node_seq.get(left_idx, -1) != sid:
+                continue
+            # Verify the pair still matches (nodes haven't changed)
+            if nodes[left_idx][1] != right_idx:
+                continue
+
+            # Merge: combine right token into left, remove right node
+            merged = nodes[left_idx][2] + nodes[right_idx][2]
+            nodes[left_idx][2] = merged
+            nodes[right_idx][3] = False  # mark right as dead
+
+            # Update linked list: left.next = right.next
+            right_next = nodes[right_idx][1]
+            nodes[left_idx][1] = right_next
+            if right_next >= 0:
+                nodes[right_next][0] = left_idx
+
+            # Push new pairs involving the merged node
+            left_prev = nodes[left_idx][0]
+            if left_prev >= 0:
+                _push_pair(left_prev, left_idx)
+            if right_next >= 0:
+                _push_pair(left_idx, right_next)
+
+        # Collect result by walking the linked list
+        result = []
+        # Find the head (first alive node)
+        idx = 0
+        while idx < len(nodes) and not nodes[idx][3]:
+            idx += 1
+        while idx >= 0 and idx < len(nodes):
+            if nodes[idx][3]:
+                result.append(nodes[idx][2])
+            nxt = nodes[idx][1]
+            if nxt < 0:
                 break
+            idx = nxt
 
-            # Apply the merge
-            new_word = []
-            i = 0
-            while i < len(word):
-                if i < len(word) - 1 and word[i] == best_pair[0] and word[i + 1] == best_pair[1]:
-                    new_word.append(best_pair[0] + best_pair[1])
-                    i += 2
-                else:
-                    new_word.append(word[i])
-                    i += 1
-            word = new_word
-
-            if len(word) == 1:
-                break
-
-        return word
+        return result
 
     def encode(self, text: str, add_special_tokens: bool = False) -> List[int]:
         """Encode text to token IDs.

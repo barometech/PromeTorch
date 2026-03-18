@@ -151,14 +151,16 @@ def gqa_attention(
     if causal:
         q_len = q.shape[2]
         kv_len = k_expanded.shape[2]
-        # Create causal mask: position i can attend to positions 0..i+(kv_len-q_len)
-        row_idx = np.arange(q_len)[:, np.newaxis]
-        col_idx = np.arange(kv_len)[np.newaxis, :]
-        # For generation with cache: q_len=1, kv_len=prev+1, all visible
-        # For prefill: mask future positions
-        offset = kv_len - q_len
-        mask = col_idx > (row_idx + offset)
-        scores = np.where(mask[np.newaxis, np.newaxis, :, :], -1e9, scores)
+        if q_len == 1:
+            # Single token decode: no future tokens to mask, skip mask creation entirely
+            pass  # scores are already correct
+        else:
+            # Full causal mask for prefill
+            row_idx = np.arange(q_len)[:, np.newaxis]
+            col_idx = np.arange(kv_len)[np.newaxis, :]
+            offset = kv_len - q_len
+            mask = col_idx > (row_idx + offset)
+            scores[mask[np.newaxis, np.newaxis, :, :]] = -1e9  # In-place, no copy
 
     attn_weights = softmax(scores, axis=-1)
     output = np.matmul(attn_weights, v_expanded)

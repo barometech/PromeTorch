@@ -237,13 +237,13 @@ while best > 1.6 and step < 10000:
         for i, l in enumerate(layers):
             for wn in ['Wq','Wk','Wv','Wo','W1','W2']:
                 addr = weight_addrs[f'l{i}_{wn}'][0]
-                wu = f2u(l[wn].flatten())
-                wbuf = (ctypes.c_uint * len(wu))(*wu)
-                nm.PL_WriteMemBlock(access, wbuf, addr, len(wu))
+                weight_bytes = l[wn].astype(np.float32).tobytes()
+                wbuf = (ctypes.c_uint * (len(weight_bytes)//4)).from_buffer_copy(weight_bytes)
+                nm.PL_WriteMemBlock(access, wbuf, addr, len(wbuf))
         wa = weight_addrs['Wh'][0]
-        wu = f2u(Wh.flatten())
-        wbuf = (ctypes.c_uint * len(wu))(*wu)
-        nm.PL_WriteMemBlock(access, wbuf, wa, len(wu))
+        weight_bytes = Wh.astype(np.float32).tobytes()
+        wbuf = (ctypes.c_uint * (len(weight_bytes)//4)).from_buffer_copy(weight_bytes)
+        nm.PL_WriteMemBlock(access, wbuf, wa, len(wbuf))
 
     if step==2000: lr=0.001
     if step==5000: lr=0.0003
