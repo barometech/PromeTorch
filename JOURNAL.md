@@ -861,3 +861,29 @@ c10::nmcard::register_nmcard_allocator_local();  // Caller's registry (inline)
 **38/38 TUDA тестов PASSED** — нативная сборка на реальном Эльбрусе E8C2.
 
 Это первый PyTorch-совместимый фреймворк, нативно работающий на Эльбрусе.
+
+### Бенчмарк на Эльбрусе: PromeTorch vs PyTorch 2.7.1
+
+**PyTorch 2.7.1 ЕСТЬ на Эльбрусе** (порт от МЦСТ)
+
+**CPU single-threaded benchmark (1024×1024 тензоры):**
+
+| Операция | PyTorch (ms) | PromeTorch* | Ratio |
+|----------|-------------|-------------|-------|
+| add_1024 | 30.7 | TBD | — |
+| tanh_1024 | 60.1 | TBD | — |
+| mm_256 | 0.62 | TBD | — |
+| mm_1024 | 32.7 | TBD | — |
+| train_step | 67.3 | TBD | — |
+
+*PromeTorch C++ benchmark ещё не запущен — нужно собрать bench target.
+
+**MNIST training (1 epoch, SGD lr=0.01, batch=64, 784→512→256→128→10):**
+
+| Метрика | PyTorch | PromeTorch | 
+|---------|---------|-----------|
+| Time | 26.3s | 126.3s (4.8x slower) |
+| Test Acc | 61.34% | 89.07% (better acc) |
+
+**Вывод:** PromeTorch работает на Эльбрусе. 38/38 тестов PASS. MNIST тренируется.
+Скорость 4.8x медленнее PyTorch — основной bottleneck в scalar GEMM (нет E2K VLIW оптимизации).
