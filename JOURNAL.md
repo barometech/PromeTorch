@@ -44,6 +44,15 @@
 - Детальный per-op profiler (transpose, upload, compute, download, attention, RoPE, QK norm, FFN)
 - Все матмулы строго на NM Card (убран CPU fallback)
 
+**9-агентный анализ оптимизаций (2026-03-18):**
+- Агент 1: Pre-transpose weights → 370s→0s ✅ СДЕЛАНО
+- Агент 2: 16-core matmul → 10-14x compute (MultiCoreDevice готов)
+- Агент 3: Weight caching DDR → 7x PCIe (508MB DDR, INT8 96MB/layer fits)
+- Агент 4+7+8: Tiling bug найден и исправлен (reset_memory в цикле) ✅
+- Агент 5: AirLLM comparison → async prefetch, gc.collect, pin_memory
+- Агент 6: INT8 path → CPU dequant + FP32 upload (уже написано, нужен re-split)
+- Агент 9: Low-rank SVD → FFN r=256, 8x weight reduction, <0.5% accuracy loss
+
 **Нюансы от Дмитрия учтённые:**
 - PCIe x4 = 1.2 GB/s measured → каждый MB weights = 0.8ms transfer
 - DDR 5 GB → можно хранить INT4 weights целиком (~1.6 GB)
