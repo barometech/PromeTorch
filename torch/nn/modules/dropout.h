@@ -109,34 +109,44 @@ public:
             return input;
         }
 
-        // Treat 2D input as 3D with L=1
+        if (p_ == 1.0) {
+            Tensor output = at::zeros(input.sizes());
+#ifdef PT_USE_CUDA
+            if (input.is_cuda()) return at::to_cuda(output);
+#endif
+            return output;
+        }
+
+        // Create channel-wise mask: drop entire channels
         int64_t batch_size = input.size(0);
         int64_t channels = input.size(1);
         int64_t length = input.dim() == 3 ? input.size(2) : 1;
 
-        Tensor output = inplace_ ? input : at::empty(input.sizes());
-        const float* in_data = input.data_ptr<float>();
-        float* out_data = output.mutable_data_ptr<float>();
+        // Build mask tensor with same shape as input
+        Tensor mask = at::empty(input.sizes());
+        float* mask_data = mask.mutable_data_ptr<float>();
 
         std::bernoulli_distribution dist(1.0 - p_);
         float scale = static_cast<float>(1.0 / (1.0 - p_));
 
         for (int64_t b = 0; b < batch_size; ++b) {
             for (int64_t c = 0; c < channels; ++c) {
-                bool keep = dist(gen_);
+                float val = dist(gen_) ? scale : 0.0f;
                 int64_t channel_offset = (b * channels + c) * length;
-
                 for (int64_t l = 0; l < length; ++l) {
-                    if (keep) {
-                        out_data[channel_offset + l] = in_data[channel_offset + l] * scale;
-                    } else {
-                        out_data[channel_offset + l] = 0.0f;
-                    }
+                    mask_data[channel_offset + l] = val;
                 }
             }
         }
 
-        return output;
+#ifdef PT_USE_CUDA
+        if (input.is_cuda()) {
+            mask = at::to_cuda(mask);
+        }
+#endif
+
+        // Use mul_autograd so gradients flow through dropout
+        return torch::autograd::mul_autograd(input, mask);
     }
 
     std::string name() const override { return "Dropout1d"; }
@@ -181,36 +191,46 @@ public:
             return input;
         }
 
-        // For 3D input: NCH, treat as NCHW with W=1
+        if (p_ == 1.0) {
+            Tensor output = at::zeros(input.sizes());
+#ifdef PT_USE_CUDA
+            if (input.is_cuda()) return at::to_cuda(output);
+#endif
+            return output;
+        }
+
+        // Create channel-wise mask: drop entire channels
         int64_t batch_size = input.size(0);
         int64_t channels = input.size(1);
         int64_t height = input.size(2);
         int64_t width = input.dim() == 4 ? input.size(3) : 1;
         int64_t spatial_size = height * width;
 
-        Tensor output = inplace_ ? input : at::empty(input.sizes());
-        const float* in_data = input.data_ptr<float>();
-        float* out_data = output.mutable_data_ptr<float>();
+        // Build mask tensor with same shape as input
+        Tensor mask = at::empty(input.sizes());
+        float* mask_data = mask.mutable_data_ptr<float>();
 
         std::bernoulli_distribution dist(1.0 - p_);
         float scale = static_cast<float>(1.0 / (1.0 - p_));
 
         for (int64_t b = 0; b < batch_size; ++b) {
             for (int64_t c = 0; c < channels; ++c) {
-                bool keep = dist(gen_);
+                float val = dist(gen_) ? scale : 0.0f;
                 int64_t channel_offset = (b * channels + c) * spatial_size;
-
                 for (int64_t s = 0; s < spatial_size; ++s) {
-                    if (keep) {
-                        out_data[channel_offset + s] = in_data[channel_offset + s] * scale;
-                    } else {
-                        out_data[channel_offset + s] = 0.0f;
-                    }
+                    mask_data[channel_offset + s] = val;
                 }
             }
         }
 
-        return output;
+#ifdef PT_USE_CUDA
+        if (input.is_cuda()) {
+            mask = at::to_cuda(mask);
+        }
+#endif
+
+        // Use mul_autograd so gradients flow through dropout
+        return torch::autograd::mul_autograd(input, mask);
     }
 
     std::string name() const override { return "Dropout2d"; }
@@ -255,7 +275,15 @@ public:
             return input;
         }
 
-        // For 4D input: NCDH, treat as NCDHW with W=1
+        if (p_ == 1.0) {
+            Tensor output = at::zeros(input.sizes());
+#ifdef PT_USE_CUDA
+            if (input.is_cuda()) return at::to_cuda(output);
+#endif
+            return output;
+        }
+
+        // Create channel-wise mask: drop entire channels
         int64_t batch_size = input.size(0);
         int64_t channels = input.size(1);
         int64_t depth = input.size(2);
@@ -263,29 +291,31 @@ public:
         int64_t width = input.dim() == 5 ? input.size(4) : 1;
         int64_t spatial_size = depth * height * width;
 
-        Tensor output = inplace_ ? input : at::empty(input.sizes());
-        const float* in_data = input.data_ptr<float>();
-        float* out_data = output.mutable_data_ptr<float>();
+        // Build mask tensor with same shape as input
+        Tensor mask = at::empty(input.sizes());
+        float* mask_data = mask.mutable_data_ptr<float>();
 
         std::bernoulli_distribution dist(1.0 - p_);
         float scale = static_cast<float>(1.0 / (1.0 - p_));
 
         for (int64_t b = 0; b < batch_size; ++b) {
             for (int64_t c = 0; c < channels; ++c) {
-                bool keep = dist(gen_);
+                float val = dist(gen_) ? scale : 0.0f;
                 int64_t channel_offset = (b * channels + c) * spatial_size;
-
                 for (int64_t s = 0; s < spatial_size; ++s) {
-                    if (keep) {
-                        out_data[channel_offset + s] = in_data[channel_offset + s] * scale;
-                    } else {
-                        out_data[channel_offset + s] = 0.0f;
-                    }
+                    mask_data[channel_offset + s] = val;
                 }
             }
         }
 
-        return output;
+#ifdef PT_USE_CUDA
+        if (input.is_cuda()) {
+            mask = at::to_cuda(mask);
+        }
+#endif
+
+        // Use mul_autograd so gradients flow through dropout
+        return torch::autograd::mul_autograd(input, mask);
     }
 
     std::string name() const override { return "Dropout3d"; }

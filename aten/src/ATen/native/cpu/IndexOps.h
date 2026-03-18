@@ -217,10 +217,14 @@ inline Tensor masked_select(const Tensor& self, const Tensor& mask) {
     PT_CHECK_MSG(mask.dtype() == c10::ScalarType::Bool,
         "masked_select: mask must be BoolTensor");
 
+    // Ensure contiguous for sequential data[i] access
+    Tensor self_c = self.is_contiguous() ? self : self.contiguous();
+    Tensor mask_c = mask.is_contiguous() ? mask : mask.contiguous();
+
     // First count true elements
     int64_t count = 0;
-    const bool* mask_data = mask.data_ptr<bool>();
-    int64_t n = mask.numel();
+    const bool* mask_data = mask_c.data_ptr<bool>();
+    int64_t n = mask_c.numel();
 
     for (int64_t i = 0; i < n; ++i) {
         if (mask_data[i]) ++count;
@@ -232,8 +236,8 @@ inline Tensor masked_select(const Tensor& self, const Tensor& mask) {
         return result;
     }
 
-    PT_DISPATCH_ALL_TYPES(self.dtype(), "masked_select", [&] {
-        const scalar_t* src = self.data_ptr<scalar_t>();
+    PT_DISPATCH_ALL_TYPES(self_c.dtype(), "masked_select", [&] {
+        const scalar_t* src = self_c.data_ptr<scalar_t>();
         scalar_t* dst = result.mutable_data_ptr<scalar_t>();
 
         int64_t dst_idx = 0;
@@ -257,12 +261,15 @@ inline Tensor& masked_fill_(Tensor& self, const Tensor& mask, Scalar value) {
     PT_CHECK_MSG(self.sizes() == mask.sizes(),
         "masked_fill_: mask and tensor must have same shape");
 
-    const bool* mask_data = mask.data_ptr<bool>();
+    // Ensure contiguous for sequential data[i] access
+    Tensor mask_c = mask.is_contiguous() ? mask : mask.contiguous();
+    Tensor self_c = self.is_contiguous() ? self : self.contiguous();
+    const bool* mask_data = mask_c.data_ptr<bool>();
 
-    PT_DISPATCH_ALL_TYPES(self.dtype(), "masked_fill_", [&] {
-        scalar_t* data = self.mutable_data_ptr<scalar_t>();
+    PT_DISPATCH_ALL_TYPES(self_c.dtype(), "masked_fill_", [&] {
+        scalar_t* data = self_c.mutable_data_ptr<scalar_t>();
         scalar_t fill_val = value.to<scalar_t>();
-        int64_t n = self.numel();
+        int64_t n = self_c.numel();
 
         for (int64_t i = 0; i < n; ++i) {
             if (mask_data[i]) {
@@ -270,6 +277,10 @@ inline Tensor& masked_fill_(Tensor& self, const Tensor& mask, Scalar value) {
             }
         }
     });
+
+    if (!self.is_contiguous()) {
+        self.copy_(self_c);
+    }
 
     return self;
 }
@@ -331,12 +342,15 @@ inline Tensor where(const Tensor& condition, const Tensor& self, const Tensor& o
 // ============================================================================
 
 inline Tensor nonzero(const Tensor& self) {
+    // Ensure contiguous for sequential data[i] access
+    Tensor self_c = self.is_contiguous() ? self : self.contiguous();
+
     // First count nonzero elements
     int64_t count = 0;
 
-    PT_DISPATCH_ALL_TYPES(self.dtype(), "nonzero_count", [&] {
-        const scalar_t* data = self.data_ptr<scalar_t>();
-        int64_t n = self.numel();
+    PT_DISPATCH_ALL_TYPES(self_c.dtype(), "nonzero_count", [&] {
+        const scalar_t* data = self_c.data_ptr<scalar_t>();
+        int64_t n = self_c.numel();
 
         for (int64_t i = 0; i < n; ++i) {
             if (data[i] != static_cast<scalar_t>(0)) {
@@ -354,9 +368,9 @@ inline Tensor nonzero(const Tensor& self) {
 
     int64_t* out = result.mutable_data_ptr<int64_t>();
 
-    PT_DISPATCH_ALL_TYPES(self.dtype(), "nonzero", [&] {
-        const scalar_t* data = self.data_ptr<scalar_t>();
-        int64_t n = self.numel();
+    PT_DISPATCH_ALL_TYPES(self_c.dtype(), "nonzero", [&] {
+        const scalar_t* data = self_c.data_ptr<scalar_t>();
+        int64_t n = self_c.numel();
         int64_t out_idx = 0;
 
         for (int64_t i = 0; i < n; ++i) {
@@ -364,8 +378,8 @@ inline Tensor nonzero(const Tensor& self) {
                 // Convert linear index to multi-dimensional
                 int64_t remaining = i;
                 for (int64_t d = ndim - 1; d >= 0; --d) {
-                    out[out_idx * ndim + d] = remaining % self.size(d);
-                    remaining /= self.size(d);
+                    out[out_idx * ndim + d] = remaining % self_c.size(d);
+                    remaining /= self_c.size(d);
                 }
                 ++out_idx;
             }

@@ -344,8 +344,7 @@ private:
 
     void reset_parameters() override {
         double fan_in = static_cast<double>(in_features_);
-        double std = 1.0 / std::sqrt(fan_in);
-        double bound = std::sqrt(3.0) * std;
+        double bound = 1.0 / std::sqrt(fan_in);
 
         auto* weight = get_parameter("weight");
         if (weight && weight->defined()) {

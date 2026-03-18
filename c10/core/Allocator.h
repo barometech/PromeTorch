@@ -5,6 +5,7 @@
 #include <memory>
 #include <functional>
 #include <atomic>
+#include <mutex>
 #include "c10/macros/Macros.h"
 #include "c10/core/Device.h"
 #include "c10/util/Exception.h"
@@ -255,6 +256,7 @@ private:
 
     void* buckets_[kNumBuckets][kMaxPerBucket];
     int bucket_count_[kNumBuckets];
+    std::mutex cache_mutex_;
 
     // Round up to next power of 2 (for bucket matching)
     static size_t round_to_bucket(size_t n) {
@@ -279,6 +281,7 @@ private:
 
     // Pop a cached block of given size
     void* cache_pop(size_t alloc_size) {
+        std::lock_guard<std::mutex> lock(cache_mutex_);
         int idx = bucket_index(alloc_size);
         if (idx < 0 || idx >= kNumBuckets) return nullptr;
         if (bucket_count_[idx] > 0) {
@@ -292,6 +295,7 @@ private:
 
     // Push a block to cache
     bool cache_push(void* ptr, size_t alloc_size) {
+        std::lock_guard<std::mutex> lock(cache_mutex_);
         int idx = bucket_index(alloc_size);
         if (idx < 0 || idx >= kNumBuckets) return false;
         if (bucket_count_[idx] < kMaxPerBucket) {

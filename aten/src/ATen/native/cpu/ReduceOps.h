@@ -29,10 +29,11 @@ inline Tensor sum(const Tensor& self) {
         return result;
     }
 
-    PT_DISPATCH_ALL_TYPES(self.dtype(), "sum", [&] {
-        const scalar_t* data = self.data_ptr<scalar_t>();
+    Tensor contiguous_self = self.contiguous();
+    PT_DISPATCH_ALL_TYPES(contiguous_self.dtype(), "sum", [&] {
+        const scalar_t* data = contiguous_self.data_ptr<scalar_t>();
         scalar_t total = 0;
-        int64_t n = self.numel();
+        int64_t n = contiguous_self.numel();
         for (int64_t i = 0; i < n; ++i) total += data[i];
         result.mutable_data_ptr<scalar_t>()[0] = total;
     });
@@ -153,10 +154,11 @@ inline Tensor mean(const Tensor& self, int64_t dim, bool keepdim = false) {
 inline Tensor prod(const Tensor& self) {
     Tensor result = ones({}, TensorOptions().dtype(self.dtype()).device(self.device()));
 
-    PT_DISPATCH_ALL_TYPES(self.dtype(), "prod", [&] {
-        const scalar_t* data = self.data_ptr<scalar_t>();
+    Tensor contiguous_self = self.contiguous();
+    PT_DISPATCH_ALL_TYPES(contiguous_self.dtype(), "prod", [&] {
+        const scalar_t* data = contiguous_self.data_ptr<scalar_t>();
         scalar_t total = 1;
-        int64_t n = self.numel();
+        int64_t n = contiguous_self.numel();
 
         for (int64_t i = 0; i < n; ++i) {
             total *= data[i];
@@ -180,10 +182,11 @@ inline Tensor max(const Tensor& self) {
         return result;
     }
 
-    PT_DISPATCH_ALL_TYPES(self.dtype(), "max", [&] {
-        const scalar_t* data = self.data_ptr<scalar_t>();
+    Tensor contiguous_self = self.contiguous();
+    PT_DISPATCH_ALL_TYPES(contiguous_self.dtype(), "max", [&] {
+        const scalar_t* data = contiguous_self.data_ptr<scalar_t>();
         scalar_t max_val = data[0];
-        int64_t n = self.numel();
+        int64_t n = contiguous_self.numel();
         for (int64_t i = 1; i < n; ++i)
             if (data[i] > max_val) max_val = data[i];
         result.mutable_data_ptr<scalar_t>()[0] = max_val;
@@ -263,10 +266,11 @@ inline Tensor min(const Tensor& self) {
         return result;
     }
 
-    PT_DISPATCH_ALL_TYPES(self.dtype(), "min", [&] {
-        const scalar_t* data = self.data_ptr<scalar_t>();
+    Tensor contiguous_self = self.contiguous();
+    PT_DISPATCH_ALL_TYPES(contiguous_self.dtype(), "min", [&] {
+        const scalar_t* data = contiguous_self.data_ptr<scalar_t>();
         scalar_t min_val = data[0];
-        int64_t n = self.numel();
+        int64_t n = contiguous_self.numel();
         for (int64_t i = 1; i < n; ++i)
             if (data[i] < min_val) min_val = data[i];
         result.mutable_data_ptr<scalar_t>()[0] = min_val;
@@ -340,11 +344,12 @@ inline Tensor argmax(const Tensor& self) {
 
     Tensor result = empty({}, TensorOptions().dtype(c10::ScalarType::Long).device(self.device()));
 
-    PT_DISPATCH_ALL_TYPES(self.dtype(), "argmax", [&] {
-        const scalar_t* data = self.data_ptr<scalar_t>();
+    Tensor contiguous_self = self.contiguous();
+    PT_DISPATCH_ALL_TYPES(contiguous_self.dtype(), "argmax", [&] {
+        const scalar_t* data = contiguous_self.data_ptr<scalar_t>();
         scalar_t max_val = data[0];
         int64_t max_idx = 0;
-        int64_t n = self.numel();
+        int64_t n = contiguous_self.numel();
 
         for (int64_t i = 1; i < n; ++i) {
             if (data[i] > max_val) {
@@ -365,11 +370,12 @@ inline Tensor argmin(const Tensor& self) {
 
     Tensor result = empty({}, TensorOptions().dtype(c10::ScalarType::Long).device(self.device()));
 
-    PT_DISPATCH_ALL_TYPES(self.dtype(), "argmin", [&] {
-        const scalar_t* data = self.data_ptr<scalar_t>();
+    Tensor contiguous_self = self.contiguous();
+    PT_DISPATCH_ALL_TYPES(contiguous_self.dtype(), "argmin", [&] {
+        const scalar_t* data = contiguous_self.data_ptr<scalar_t>();
         scalar_t min_val = data[0];
         int64_t min_idx = 0;
-        int64_t n = self.numel();
+        int64_t n = contiguous_self.numel();
 
         for (int64_t i = 1; i < n; ++i) {
             if (data[i] < min_val) {
@@ -707,9 +713,10 @@ inline Tensor prod(const Tensor& self, int64_t dim, bool keepdim = false) {
 inline bool all(const Tensor& self) {
     bool result = true;
 
-    PT_DISPATCH_ALL_TYPES(self.dtype(), "all", [&] {
-        const scalar_t* data = self.data_ptr<scalar_t>();
-        int64_t n = self.numel();
+    Tensor contiguous_self = self.contiguous();
+    PT_DISPATCH_ALL_TYPES(contiguous_self.dtype(), "all", [&] {
+        const scalar_t* data = contiguous_self.data_ptr<scalar_t>();
+        int64_t n = contiguous_self.numel();
 
         for (int64_t i = 0; i < n && result; ++i) {
             if (data[i] == static_cast<scalar_t>(0)) {
@@ -725,9 +732,10 @@ inline bool all(const Tensor& self) {
 inline bool any(const Tensor& self) {
     bool result = false;
 
-    PT_DISPATCH_ALL_TYPES(self.dtype(), "any", [&] {
-        const scalar_t* data = self.data_ptr<scalar_t>();
-        int64_t n = self.numel();
+    Tensor contiguous_self = self.contiguous();
+    PT_DISPATCH_ALL_TYPES(contiguous_self.dtype(), "any", [&] {
+        const scalar_t* data = contiguous_self.data_ptr<scalar_t>();
+        int64_t n = contiguous_self.numel();
 
         for (int64_t i = 0; i < n && !result; ++i) {
             if (data[i] != static_cast<scalar_t>(0)) {

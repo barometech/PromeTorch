@@ -211,6 +211,8 @@ public:
         return x;
     }
 
+    friend class TransformerEncoder;
+
 private:
     Tensor feedforward(const Tensor& x) {
         Tensor out = linear1_->forward(x);
@@ -250,12 +252,21 @@ public:
         : Module("TransformerEncoder")
         , num_layers_(num_layers)
     {
-        // Create copies of encoder layer
+        // Create separate layers with the same config as encoder_layer
+        // (pushing the same shared_ptr would share weights across all layers!)
         for (int64_t i = 0; i < num_layers; ++i) {
-            // Clone the layer (create new layer with same config)
-            // For simplicity, we store the original and rely on shared config
-            layers_.push_back(encoder_layer);
-            register_module("layers." + std::to_string(i), encoder_layer);
+            auto layer = std::make_shared<TransformerEncoderLayer>(
+                encoder_layer->d_model_,
+                encoder_layer->nhead_,
+                encoder_layer->dim_feedforward_,
+                encoder_layer->dropout_prob_,
+                "relu",  // default activation
+                1e-5,    // default layer_norm_eps
+                encoder_layer->batch_first_,
+                encoder_layer->norm_first_
+            );
+            layers_.push_back(layer);
+            register_module("layers." + std::to_string(i), layer);
         }
     }
 

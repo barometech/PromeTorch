@@ -111,7 +111,8 @@ public:
         found_inf_overall_ = false;
         double inv_scale = 1.0 / scale_;
 
-        for (auto& param_ptr : optimizer.param_groups()[0].params) {
+        for (auto& group : optimizer.param_groups()) {
+        for (auto& param_ptr : group.params) {
             if (!param_ptr->grad().defined()) {
                 continue;
             }
@@ -127,6 +128,7 @@ public:
             at::Tensor inv_scale_tensor = at::full({}, inv_scale,
                 at::TensorOptions().dtype(grad.dtype()).device(grad.device()));
             grad = grad * inv_scale_tensor;
+        }
         }
 
         unscaled_optimizers_.insert(opt_id);
@@ -235,18 +237,19 @@ private:
         // In production, this should be a CUDA kernel
         at::Tensor contiguous = tensor.contiguous();
         int64_t numel = contiguous.numel();
+        bool found = false;
 
         PT_DISPATCH_FLOATING_TYPES(contiguous.dtype(), "has_inf_or_nan", [&] {
             const scalar_t* data = contiguous.data_ptr<scalar_t>();
             for (int64_t i = 0; i < numel; ++i) {
                 if (std::isinf(data[i]) || std::isnan(data[i])) {
-                    return true;
+                    found = true;
+                    return;
                 }
             }
-            return false;
         });
 
-        return false;
+        return found;
     }
 
     double scale_;
