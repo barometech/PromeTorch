@@ -843,3 +843,21 @@ c10::nmcard::register_nmcard_allocator_local();  // Caller's registry (inline)
 | NN Modules | 9,858 |
 | Optimizers | 1,246 |
 | Data Loading | 1,176 |
+
+## 2026-03-18: ЭЛЬБРУС — НАТИВНАЯ СБОРКА И ТЕСТЫ
+
+### Подключение
+- **Сервер**: &lt;private MCST server&gt; (4×E8C2, 32 ядра, 125GB RAM)
+- **Доступ**: от партнёра МЦСТ (МЦСТ), на 6 месяцев
+- **Подключение**: plink через PPK ключ
+
+### Сборка на Эльбрусе
+- CMake 3.28 + Ninja + LCC 1.29 (Elbrus C Compiler)
+- Flags: `-DPT_USE_AVX=OFF -DPT_USE_AVX2=OFF` (VLIW, нет SSE/AVX)
+- Исправлено: structured bindings → struct fields (LCC не поддерживает auto[a,b,c])
+- Исправлено: guard optional CMake targets (benchmarks, promeserve, train_mlp_char)
+
+### Результат
+**38/38 TUDA тестов PASSED** — нативная сборка на реальном Эльбрусе E8C2.
+
+Это первый PyTorch-совместимый фреймворк, нативно работающий на Эльбрусе.
