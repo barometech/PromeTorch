@@ -1,5 +1,7 @@
 ## GPU СВОБОДЕН — можно тестировать на CPU и CUDA
 
+**ПОЛНЫЙ АУДИТ ИНФРАСТРУКТУРЫ:** `INFRASTRUCTURE_AUDIT.md` (43 бага, 93K строк, все детали)
+
 ---
 
 ## Правила работы
@@ -15,7 +17,7 @@
 
 ## Статус проекта
 
-**15 основных фаз + 7 критических фич ЗАВЕРШЕНЫ.** ~48,000+ строк C++/CUDA, 108+ файлов.
+**15 основных фаз + 7 критических фич ЗАВЕРШЕНЫ.** ~93,000+ строк C++/CUDA/Python, 481 файл (277 source).
 
 | Фаза | Компонент | Статус |
 |------|-----------|--------|
@@ -24,7 +26,7 @@
 | 3 | Autograd (engine, 50+ backward functions) | DONE |
 | 4 | NN Modules (50+ слоёв: Linear, Conv, BN, Transformer, PIR) | DONE |
 | 5 | Optimizers (SGD, Adam, AdamW, RMSprop) | DONE |
-| 6 | LR Schedulers (13 видов) | DONE |
+| 6 | LR Schedulers (9 видов) | DONE |
 | 7 | Data Loading (Dataset, DataLoader, Sampler) | DONE |
 | 8 | Transformer (Encoder, Decoder, MultiheadAttention) | DONE |
 | 9 | PIR Architecture (RMSNorm, RoPE, PIR270M) | DONE |
@@ -149,6 +151,15 @@ examples/
 
 ---
 
+## Известные проблемы (из аудита 2026-03-18)
+
+- FlashAttention полностью нерабочий (6 критических багов) — не использовать
+- Conv3d forward — stub (возвращает нули)
+- dispatcher_suda_mc.abs — НЕ запускать на реальной карте (race condition + DDR saturation)
+- Python bindings: no_grad() не подключён к C++ engine (BUG-C9)
+
+---
+
 ## Будущие фазы (опционально)
 
 - Фаза 16: Distributed Training (DDP, NCCL)
@@ -160,4 +171,4 @@ examples/
 
 ---
 
-Полная история: `JOURNAL.md` | ТЗ: `TECHNICAL_SPECIFICATION.md` | Anti-loop: `AVOIDRECURSION.md`
+Полная история: `JOURNAL.md` | ТЗ: `TECHNICAL_SPECIFICATION.md` | Anti-loop: `AVOIDRECURSION.md` | **Аудит инфраструктуры: `INFRASTRUCTURE_AUDIT.md`**

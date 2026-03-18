@@ -8,63 +8,52 @@
 
 #include "aten/src/ATen/ATen.h"
 #include "torch/csrc/autograd/autograd.h"
+#include "torch/csrc/autograd/grad_mode.h"
 
 namespace py = pybind11;
 
 // ============================================================================
-// Simple GradMode implementation (global state)
+// Python-friendly wrappers around real C++ GradMode guards
 // ============================================================================
+// We need thin wrappers because the C++ guards are non-copyable RAII objects.
+// These wrappers delegate to torch::autograd::GradMode directly.
 
-namespace {
-    thread_local bool grad_enabled_ = true;
-}
-
-class GradMode {
+class PyNoGradGuard {
 public:
-    static bool is_enabled() { return grad_enabled_; }
-    static void set_enabled(bool enabled) { grad_enabled_ = enabled; }
-};
-
-// ============================================================================
-// NoGrad Context Manager
-// ============================================================================
-
-class NoGradGuard {
-public:
-    NoGradGuard() : prev_enabled_(GradMode::is_enabled()) {
-        GradMode::set_enabled(false);
+    PyNoGradGuard() : prev_enabled_(torch::autograd::GradMode::is_enabled()) {
+        torch::autograd::GradMode::set_enabled(false);
     }
 
-    ~NoGradGuard() {
-        GradMode::set_enabled(prev_enabled_);
+    ~PyNoGradGuard() {
+        torch::autograd::GradMode::set_enabled(prev_enabled_);
     }
 
-    void enter() {}
+    // __enter__ must return self for Python context manager protocol
+    PyNoGradGuard& enter() { return *this; }
+
     void exit(py::object, py::object, py::object) {
-        GradMode::set_enabled(prev_enabled_);
+        torch::autograd::GradMode::set_enabled(prev_enabled_);
     }
 
 private:
     bool prev_enabled_;
 };
 
-// ============================================================================
-// EnableGrad Context Manager
-// ============================================================================
-
-class EnableGradGuard {
+class PyEnableGradGuard {
 public:
-    EnableGradGuard() : prev_enabled_(GradMode::is_enabled()) {
-        GradMode::set_enabled(true);
+    PyEnableGradGuard() : prev_enabled_(torch::autograd::GradMode::is_enabled()) {
+        torch::autograd::GradMode::set_enabled(true);
     }
 
-    ~EnableGradGuard() {
-        GradMode::set_enabled(prev_enabled_);
+    ~PyEnableGradGuard() {
+        torch::autograd::GradMode::set_enabled(prev_enabled_);
     }
 
-    void enter() {}
+    // __enter__ must return self for Python context manager protocol
+    PyEnableGradGuard& enter() { return *this; }
+
     void exit(py::object, py::object, py::object) {
-        GradMode::set_enabled(prev_enabled_);
+        torch::autograd::GradMode::set_enabled(prev_enabled_);
     }
 
 private:
@@ -77,26 +66,26 @@ private:
 
 void init_autograd_bindings(py::module& m) {
 
-    // GradMode
-    py::class_<GradMode>(m, "GradMode")
-        .def_static("is_enabled", &GradMode::is_enabled)
-        .def_static("set_enabled", &GradMode::set_enabled);
+    // GradMode - delegates to the REAL C++ torch::autograd::GradMode
+    py::class_<torch::autograd::GradMode>(m, "GradMode")
+        .def_static("is_enabled", &torch::autograd::GradMode::is_enabled)
+        .def_static("set_enabled", &torch::autograd::GradMode::set_enabled);
 
     // no_grad context manager
-    py::class_<NoGradGuard>(m, "no_grad")
+    py::class_<PyNoGradGuard>(m, "no_grad")
         .def(py::init<>())
-        .def("__enter__", &NoGradGuard::enter)
-        .def("__exit__", &NoGradGuard::exit);
+        .def("__enter__", &PyNoGradGuard::enter, py::return_value_policy::reference)
+        .def("__exit__", &PyNoGradGuard::exit);
 
     // enable_grad context manager
-    py::class_<EnableGradGuard>(m, "enable_grad")
+    py::class_<PyEnableGradGuard>(m, "enable_grad")
         .def(py::init<>())
-        .def("__enter__", &EnableGradGuard::enter)
-        .def("__exit__", &EnableGradGuard::exit);
+        .def("__enter__", &PyEnableGradGuard::enter, py::return_value_policy::reference)
+        .def("__exit__", &PyEnableGradGuard::exit);
 
-    // is_grad_enabled
-    m.def("is_grad_enabled", &GradMode::is_enabled);
-    m.def("set_grad_enabled", &GradMode::set_enabled);
+    // is_grad_enabled - delegates to real GradMode
+    m.def("is_grad_enabled", &torch::autograd::GradMode::is_enabled);
+    m.def("set_grad_enabled", &torch::autograd::GradMode::set_enabled);
 
     // backward function - uses tensor_backward from autograd.h
     m.def("backward", [](const at::Tensor& tensor, py::object grad_tensor,

@@ -318,9 +318,21 @@ struct ProdBackward : public Node {
         auto& grad = grads[0];
         if (!grad.defined()) return {Tensor()};
 
-        // grad * prod / x_i
-        Tensor prod_val = result_.expand(self_.sizes());
-        Tensor grad_input = prod_val.div(self_).mul(Scalar(grad.item()));
+        // Safe approach: for each element, compute product of all OTHER elements
+        // Avoids div-by-zero when input has zeros
+        Tensor grad_input = at::zeros(self_.sizes());
+        const float* self_data = self_.data_ptr<float>();
+        float* grad_data = grad_input.mutable_data_ptr<float>();
+        float grad_scalar = grad.item();
+        int64_t n = self_.numel();
+
+        for (int64_t i = 0; i < n; ++i) {
+            float prod_others = 1.0f;
+            for (int64_t j = 0; j < n; ++j) {
+                if (j != i) prod_others *= self_data[j];
+            }
+            grad_data[i] = grad_scalar * prod_others;
+        }
 
         // Release saved tensors
         self_ = Tensor();

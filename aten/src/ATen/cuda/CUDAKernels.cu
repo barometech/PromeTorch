@@ -31,40 +31,35 @@ inline int get_num_blocks(int64_t n) {
 
 template<typename T>
 __global__ void neg_kernel(const T* input, T* output, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
         output[idx] = -input[idx];
     }
 }
 
 template<typename T>
 __global__ void abs_kernel(const T* input, T* output, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
         output[idx] = input[idx] >= 0 ? input[idx] : -input[idx];
     }
 }
 
 template<typename T>
 __global__ void sqrt_kernel(const T* input, T* output, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
         output[idx] = sqrtf(input[idx]);
     }
 }
 
 template<typename T>
 __global__ void rsqrt_kernel(const T* input, T* output, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
         output[idx] = rsqrtf(input[idx]);
     }
 }
 
 template<typename T>
 __global__ void square_kernel(const T* input, T* output, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
         T val = input[idx];
         output[idx] = val * val;
     }
@@ -72,64 +67,56 @@ __global__ void square_kernel(const T* input, T* output, int64_t n) {
 
 template<typename T>
 __global__ void exp_kernel(const T* input, T* output, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
         output[idx] = expf(input[idx]);
     }
 }
 
 template<typename T>
 __global__ void log_kernel(const T* input, T* output, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
         output[idx] = logf(input[idx]);
     }
 }
 
 template<typename T>
 __global__ void sin_kernel(const T* input, T* output, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
         output[idx] = sinf(input[idx]);
     }
 }
 
 template<typename T>
 __global__ void cos_kernel(const T* input, T* output, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
         output[idx] = cosf(input[idx]);
     }
 }
 
 template<typename T>
 __global__ void tanh_kernel(const T* input, T* output, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
         output[idx] = tanhf(input[idx]);
     }
 }
 
 template<typename T>
 __global__ void sigmoid_kernel(const T* input, T* output, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
         output[idx] = 1.0f / (1.0f + expf(-input[idx]));
     }
 }
 
 template<typename T>
 __global__ void relu_kernel(const T* input, T* output, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
         output[idx] = input[idx] > 0 ? input[idx] : 0;
     }
 }
 
 template<typename T>
 __global__ void leaky_relu_kernel(const T* input, T* output, T alpha, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
         T val = input[idx];
         output[idx] = val > 0 ? val : alpha * val;
     }
@@ -137,8 +124,7 @@ __global__ void leaky_relu_kernel(const T* input, T* output, T alpha, int64_t n)
 
 template<typename T>
 __global__ void silu_kernel(const T* input, T* output, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
         T val = input[idx];
         output[idx] = val / (1.0f + expf(-val));
     }
@@ -146,8 +132,7 @@ __global__ void silu_kernel(const T* input, T* output, int64_t n) {
 
 template<typename T>
 __global__ void gelu_kernel(const T* input, T* output, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
         T x = input[idx];
         // Approximation: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
         constexpr T kSqrt2OverPi = 0.7978845608f;
@@ -163,50 +148,58 @@ __global__ void gelu_kernel(const T* input, T* output, int64_t n) {
 
 template<typename T>
 __global__ void log2_kernel(const T* input, T* output, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) { output[idx] = log2f(input[idx]); }
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
+        output[idx] = log2f(input[idx]);
+    }
 }
 
 template<typename T>
 __global__ void log10_kernel(const T* input, T* output, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) { output[idx] = log10f(input[idx]); }
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
+        output[idx] = log10f(input[idx]);
+    }
 }
 
 template<typename T>
 __global__ void tan_kernel(const T* input, T* output, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) { output[idx] = tanf(input[idx]); }
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
+        output[idx] = tanf(input[idx]);
+    }
 }
 
 template<typename T>
 __global__ void ceil_kernel(const T* input, T* output, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) { output[idx] = ceilf(input[idx]); }
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
+        output[idx] = ceilf(input[idx]);
+    }
 }
 
 template<typename T>
 __global__ void floor_kernel(const T* input, T* output, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) { output[idx] = floorf(input[idx]); }
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
+        output[idx] = floorf(input[idx]);
+    }
 }
 
 template<typename T>
 __global__ void round_kernel(const T* input, T* output, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) { output[idx] = roundf(input[idx]); }
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
+        output[idx] = roundf(input[idx]);
+    }
 }
 
 template<typename T>
 __global__ void sign_kernel(const T* input, T* output, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) { output[idx] = (input[idx] > T(0)) - (input[idx] < T(0)); }
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
+        output[idx] = (input[idx] > T(0)) - (input[idx] < T(0));
+    }
 }
 
 template<typename T>
 __global__ void reciprocal_kernel(const T* input, T* output, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) { output[idx] = T(1) / input[idx]; }
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
+        output[idx] = T(1) / input[idx];
+    }
 }
 
 // ============================================================================
@@ -215,88 +208,77 @@ __global__ void reciprocal_kernel(const T* input, T* output, int64_t n) {
 
 template<typename T>
 __global__ void add_kernel(const T* a, const T* b, T* out, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
         out[idx] = a[idx] + b[idx];
     }
 }
 
 template<typename T>
 __global__ void add_scalar_kernel(const T* a, T scalar, T* out, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
         out[idx] = a[idx] + scalar;
     }
 }
 
 template<typename T>
 __global__ void sub_kernel(const T* a, const T* b, T* out, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
         out[idx] = a[idx] - b[idx];
     }
 }
 
 template<typename T>
 __global__ void mul_kernel(const T* a, const T* b, T* out, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
         out[idx] = a[idx] * b[idx];
     }
 }
 
 template<typename T>
 __global__ void mul_scalar_kernel(const T* a, T scalar, T* out, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
         out[idx] = a[idx] * scalar;
     }
 }
 
 template<typename T>
 __global__ void div_kernel(const T* a, const T* b, T* out, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
         out[idx] = a[idx] / b[idx];
     }
 }
 
 template<typename T>
 __global__ void div_scalar_kernel(const T* a, T scalar, T* out, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
         out[idx] = a[idx] / scalar;
     }
 }
 
 template<typename T>
 __global__ void pow_kernel(const T* a, const T* b, T* out, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
         out[idx] = powf(a[idx], b[idx]);
     }
 }
 
 template<typename T>
 __global__ void pow_scalar_kernel(const T* a, T exp, T* out, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
         out[idx] = powf(a[idx], exp);
     }
 }
 
 template<typename T>
 __global__ void maximum_kernel(const T* a, const T* b, T* out, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
         out[idx] = a[idx] > b[idx] ? a[idx] : b[idx];
     }
 }
 
 template<typename T>
 __global__ void minimum_kernel(const T* a, const T* b, T* out, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
         out[idx] = a[idx] < b[idx] ? a[idx] : b[idx];
     }
 }
@@ -307,16 +289,14 @@ __global__ void minimum_kernel(const T* a, const T* b, T* out, int64_t n) {
 
 template<typename T>
 __global__ void fill_kernel(T* data, T value, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
         data[idx] = value;
     }
 }
 
 template<typename T>
 __global__ void copy_kernel(const T* src, T* dst, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
         dst[idx] = src[idx];
     }
 }
@@ -327,48 +307,42 @@ __global__ void copy_kernel(const T* src, T* dst, int64_t n) {
 
 template<typename T>
 __global__ void eq_kernel(const T* a, const T* b, bool* out, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
         out[idx] = a[idx] == b[idx];
     }
 }
 
 template<typename T>
 __global__ void ne_kernel(const T* a, const T* b, bool* out, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
         out[idx] = a[idx] != b[idx];
     }
 }
 
 template<typename T>
 __global__ void lt_kernel(const T* a, const T* b, bool* out, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
         out[idx] = a[idx] < b[idx];
     }
 }
 
 template<typename T>
 __global__ void le_kernel(const T* a, const T* b, bool* out, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
         out[idx] = a[idx] <= b[idx];
     }
 }
 
 template<typename T>
 __global__ void gt_kernel(const T* a, const T* b, bool* out, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
         out[idx] = a[idx] > b[idx];
     }
 }
 
 template<typename T>
 __global__ void ge_kernel(const T* a, const T* b, bool* out, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
         out[idx] = a[idx] >= b[idx];
     }
 }
@@ -378,64 +352,76 @@ __global__ void ge_kernel(const T* a, const T* b, bool* out, int64_t n) {
 // ============================================================================
 
 __global__ void eq_float_kernel(const float* a, const float* b, float* out, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) { out[idx] = (a[idx] == b[idx]) ? 1.0f : 0.0f; }
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
+        out[idx] = (a[idx] == b[idx]) ? 1.0f : 0.0f;
+    }
 }
 
 __global__ void ne_float_kernel(const float* a, const float* b, float* out, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) { out[idx] = (a[idx] != b[idx]) ? 1.0f : 0.0f; }
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
+        out[idx] = (a[idx] != b[idx]) ? 1.0f : 0.0f;
+    }
 }
 
 __global__ void lt_float_kernel(const float* a, const float* b, float* out, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) { out[idx] = (a[idx] < b[idx]) ? 1.0f : 0.0f; }
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
+        out[idx] = (a[idx] < b[idx]) ? 1.0f : 0.0f;
+    }
 }
 
 __global__ void le_float_kernel(const float* a, const float* b, float* out, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) { out[idx] = (a[idx] <= b[idx]) ? 1.0f : 0.0f; }
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
+        out[idx] = (a[idx] <= b[idx]) ? 1.0f : 0.0f;
+    }
 }
 
 __global__ void gt_float_kernel(const float* a, const float* b, float* out, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) { out[idx] = (a[idx] > b[idx]) ? 1.0f : 0.0f; }
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
+        out[idx] = (a[idx] > b[idx]) ? 1.0f : 0.0f;
+    }
 }
 
 __global__ void ge_float_kernel(const float* a, const float* b, float* out, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) { out[idx] = (a[idx] >= b[idx]) ? 1.0f : 0.0f; }
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
+        out[idx] = (a[idx] >= b[idx]) ? 1.0f : 0.0f;
+    }
 }
 
 // Scalar comparison kernels
 __global__ void eq_scalar_kernel(const float* a, float val, float* out, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) { out[idx] = (a[idx] == val) ? 1.0f : 0.0f; }
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
+        out[idx] = (a[idx] == val) ? 1.0f : 0.0f;
+    }
 }
 
 __global__ void ne_scalar_kernel(const float* a, float val, float* out, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) { out[idx] = (a[idx] != val) ? 1.0f : 0.0f; }
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
+        out[idx] = (a[idx] != val) ? 1.0f : 0.0f;
+    }
 }
 
 __global__ void lt_scalar_kernel(const float* a, float val, float* out, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) { out[idx] = (a[idx] < val) ? 1.0f : 0.0f; }
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
+        out[idx] = (a[idx] < val) ? 1.0f : 0.0f;
+    }
 }
 
 __global__ void le_scalar_kernel(const float* a, float val, float* out, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) { out[idx] = (a[idx] <= val) ? 1.0f : 0.0f; }
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
+        out[idx] = (a[idx] <= val) ? 1.0f : 0.0f;
+    }
 }
 
 __global__ void gt_scalar_kernel(const float* a, float val, float* out, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) { out[idx] = (a[idx] > val) ? 1.0f : 0.0f; }
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
+        out[idx] = (a[idx] > val) ? 1.0f : 0.0f;
+    }
 }
 
 __global__ void ge_scalar_kernel(const float* a, float val, float* out, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) { out[idx] = (a[idx] >= val) ? 1.0f : 0.0f; }
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
+        out[idx] = (a[idx] >= val) ? 1.0f : 0.0f;
+    }
 }
 
 // ============================================================================
@@ -444,14 +430,16 @@ __global__ void ge_scalar_kernel(const float* a, float val, float* out, int64_t 
 
 // addcmul: out = self + value * t1 * t2
 __global__ void addcmul_kernel(const float* self, const float* t1, const float* t2, float value, float* out, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) { out[idx] = self[idx] + value * t1[idx] * t2[idx]; }
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
+        out[idx] = self[idx] + value * t1[idx] * t2[idx];
+    }
 }
 
 // addcdiv: out = self + value * t1 / t2
 __global__ void addcdiv_kernel(const float* self, const float* t1, const float* t2, float value, float* out, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) { out[idx] = self[idx] + value * t1[idx] / t2[idx]; }
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
+        out[idx] = self[idx] + value * t1[idx] / t2[idx];
+    }
 }
 
 // ============================================================================
@@ -460,8 +448,7 @@ __global__ void addcdiv_kernel(const float* self, const float* t1, const float* 
 
 template<typename T>
 __global__ void clamp_kernel(const T* input, T* output, T min_val, T max_val, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
         T val = input[idx];
         val = val < min_val ? min_val : val;
         val = val > max_val ? max_val : val;
@@ -475,8 +462,7 @@ __global__ void clamp_kernel(const T* input, T* output, T min_val, T max_val, in
 
 template<typename T>
 __global__ void where_kernel(const bool* cond, const T* a, const T* b, T* out, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
         out[idx] = cond[idx] ? a[idx] : b[idx];
     }
 }
@@ -487,8 +473,7 @@ __global__ void where_kernel(const bool* cond, const T* a, const T* b, T* out, i
 
 template<typename T>
 __global__ void masked_fill_kernel(T* data, const bool* mask, T value, int64_t n) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < n) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += (int64_t)blockDim.x * gridDim.x) {
         if (mask[idx]) {
             data[idx] = value;
         }
@@ -502,9 +487,8 @@ __global__ void masked_fill_kernel(T* data, const bool* mask, T value, int64_t n
 // [outer, inner] * [outer, 1] -> broadcast second operand across inner dimension
 template<typename T>
 __global__ void mul_broadcast_row_kernel(const T* a, const T* b, T* out, int64_t outer_size, int64_t inner_size) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t total = outer_size * inner_size;
-    if (idx < total) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < total; idx += (int64_t)blockDim.x * gridDim.x) {
         int64_t outer_idx = idx / inner_size;
         out[idx] = a[idx] * b[outer_idx];
     }
@@ -513,9 +497,8 @@ __global__ void mul_broadcast_row_kernel(const T* a, const T* b, T* out, int64_t
 // [outer, inner] * [inner] -> broadcast second operand across outer dimension
 template<typename T>
 __global__ void mul_broadcast_col_kernel(const T* a, const T* b, T* out, int64_t outer_size, int64_t inner_size) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t total = outer_size * inner_size;
-    if (idx < total) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < total; idx += (int64_t)blockDim.x * gridDim.x) {
         int64_t inner_idx = idx % inner_size;
         out[idx] = a[idx] * b[inner_idx];
     }
@@ -524,44 +507,45 @@ __global__ void mul_broadcast_col_kernel(const T* a, const T* b, T* out, int64_t
 // [outer, inner] + [inner] -> broadcast second operand across outer dimension (for bias)
 template<typename T>
 __global__ void add_broadcast_col_kernel(const T* a, const T* b, T* out, int64_t outer_size, int64_t inner_size) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t total = outer_size * inner_size;
-    if (idx < total) {
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < total; idx += (int64_t)blockDim.x * gridDim.x) {
         int64_t inner_idx = idx % inner_size;
         out[idx] = a[idx] + b[inner_idx];
     }
 }
 
 // ============================================================================
-// Softmax Kernel
+// Softmax Kernel (handles inner_size > 1024 via loop)
 // ============================================================================
 
 template<typename T>
 __global__ void softmax_kernel(const T* input, T* output, int64_t outer_size, int64_t dim_size, int64_t inner_size) {
     int64_t outer_idx = blockIdx.x;
-    int64_t inner_idx = threadIdx.x;
 
-    if (outer_idx < outer_size && inner_idx < inner_size) {
-        // Find max for numerical stability
-        T max_val = -FLT_MAX;
-        for (int64_t i = 0; i < dim_size; ++i) {
-            int64_t idx = outer_idx * dim_size * inner_size + i * inner_size + inner_idx;
-            max_val = max(max_val, input[idx]);
-        }
+    if (outer_idx < outer_size) {
+        // Each thread handles multiple inner indices if inner_size > blockDim.x
+        for (int64_t inner_idx = threadIdx.x; inner_idx < inner_size; inner_idx += blockDim.x) {
+            // Find max for numerical stability
+            T max_val = -FLT_MAX;
+            for (int64_t i = 0; i < dim_size; ++i) {
+                int64_t idx = outer_idx * dim_size * inner_size + i * inner_size + inner_idx;
+                max_val = max(max_val, input[idx]);
+            }
 
-        // Compute exp and sum
-        T sum = 0;
-        for (int64_t i = 0; i < dim_size; ++i) {
-            int64_t idx = outer_idx * dim_size * inner_size + i * inner_size + inner_idx;
-            T exp_val = expf(input[idx] - max_val);
-            output[idx] = exp_val;
-            sum += exp_val;
-        }
+            // Compute exp and sum
+            T sum = 0;
+            for (int64_t i = 0; i < dim_size; ++i) {
+                int64_t idx = outer_idx * dim_size * inner_size + i * inner_size + inner_idx;
+                T exp_val = expf(input[idx] - max_val);
+                output[idx] = exp_val;
+                sum += exp_val;
+            }
 
-        // Normalize
-        for (int64_t i = 0; i < dim_size; ++i) {
-            int64_t idx = outer_idx * dim_size * inner_size + i * inner_size + inner_idx;
-            output[idx] /= sum;
+            // Normalize
+            for (int64_t i = 0; i < dim_size; ++i) {
+                int64_t idx = outer_idx * dim_size * inner_size + i * inner_size + inner_idx;
+                output[idx] /= sum;
+            }
         }
     }
 }
@@ -845,10 +829,11 @@ void launch_masked_fill(float* data, const bool* mask, float value, int64_t n, c
     masked_fill_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(data, mask, value, n);
 }
 
-// Softmax
+// Softmax - cap threads to 1024, kernel loops over inner_size internally
 void launch_softmax(const float* input, float* output, int64_t outer_size, int64_t dim_size, int64_t inner_size, cudaStream_t stream) {
+    int threads_per_block = std::min((int)inner_size, 1024);
     dim3 blocks(outer_size);
-    dim3 threads(inner_size);
+    dim3 threads(threads_per_block);
     softmax_kernel<<<blocks, threads, 0, stream>>>(input, output, outer_size, dim_size, inner_size);
 }
 
@@ -889,32 +874,31 @@ __global__ void parallel_scan_kernel(
     T* __restrict__ gates,             // [B, T, D] computed gates (for backward)
     int64_t B, int64_t T_len, int64_t D
 ) {
-    // Each thread handles one (batch, dim) pair
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    // Each thread handles one (batch, dim) pair, with grid-stride loop
     int64_t total_bd = B * D;
 
-    if (idx >= total_bd) return;
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < total_bd; idx += (int64_t)blockDim.x * gridDim.x) {
+        int64_t b = idx / D;  // batch index
+        int64_t d = idx % D;  // dim index
 
-    int64_t b = idx / D;  // batch index
-    int64_t d = idx % D;  // dim index
+        T base = base_decay[d];
+        T h = 0;  // hidden state
 
-    T base = base_decay[d];
-    T h = 0;  // hidden state
+        // Sequential scan over time dimension
+        for (int64_t t = 0; t < T_len; ++t) {
+            int64_t offset = (b * T_len + t) * D + d;
 
-    // Sequential scan over time dimension
-    for (int64_t t = 0; t < T_len; ++t) {
-        int64_t offset = (b * T_len + t) * D + d;
+            T gate_logit = gate_logits[offset];
+            T modulation = tanhf(gate_logit) * 0.1f;
+            T gate = base * (1.0f + modulation);
 
-        T gate_logit = gate_logits[offset];
-        T modulation = tanhf(gate_logit) * 0.1f;
-        T gate = base * (1.0f + modulation);
+            // Clamp gate to [0.5, 0.999]
+            gate = gate < 0.5f ? 0.5f : (gate > 0.999f ? 0.999f : gate);
 
-        // Clamp gate to [0.5, 0.999]
-        gate = gate < 0.5f ? 0.5f : (gate > 0.999f ? 0.999f : gate);
-
-        gates[offset] = gate;
-        h = gate * h + x[offset];
-        output[offset] = h;
+            gates[offset] = gate;
+            h = gate * h + x[offset];
+            output[offset] = h;
+        }
     }
 }
 
@@ -927,28 +911,27 @@ __global__ void rotary_embedding_kernel(
     T* __restrict__ output,          // [B, T, D] output
     int64_t B, int64_t T_len, int64_t D, int64_t cache_dim
 ) {
-    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t total = B * T_len * (D / 2);
 
-    if (idx >= total) return;
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < total; idx += (int64_t)blockDim.x * gridDim.x) {
+        int64_t half_d = D / 2;
+        int64_t bt_idx = idx / half_d;
+        int64_t i = idx % half_d;  // dimension pair index
 
-    int64_t half_d = D / 2;
-    int64_t bt_idx = idx / half_d;
-    int64_t i = idx % half_d;  // dimension pair index
+        int64_t b = bt_idx / T_len;
+        int64_t t = bt_idx % T_len;
 
-    int64_t b = bt_idx / T_len;
-    int64_t t = bt_idx % T_len;
+        int64_t base_offset = (b * T_len + t) * D;
+        int64_t cache_offset = t * cache_dim;
 
-    int64_t base_offset = (b * T_len + t) * D;
-    int64_t cache_offset = t * cache_dim;
+        T x1 = x[base_offset + i];
+        T x2 = x[base_offset + half_d + i];
+        T cos_val = cos_cache[cache_offset + i];
+        T sin_val = sin_cache[cache_offset + i];
 
-    T x1 = x[base_offset + i];
-    T x2 = x[base_offset + half_d + i];
-    T cos_val = cos_cache[cache_offset + i];
-    T sin_val = sin_cache[cache_offset + i];
-
-    output[base_offset + i] = x1 * cos_val - x2 * sin_val;
-    output[base_offset + half_d + i] = x1 * sin_val + x2 * cos_val;
+        output[base_offset + i] = x1 * cos_val - x2 * sin_val;
+        output[base_offset + half_d + i] = x1 * sin_val + x2 * cos_val;
+    }
 }
 
 // Launch wrapper for parallel scan

@@ -798,13 +798,19 @@ inline Tensor& add_(Tensor& self, const Tensor& other, Scalar alpha = 1) {
         return self;
     }
 
-    PT_DISPATCH_ALL_TYPES(self.dtype(), "add_", [&] {
-        scalar_t* data = self.mutable_data_ptr<scalar_t>();
-        const scalar_t* other_data = other.data_ptr<scalar_t>();
+    // Generic path: ensure contiguous for sequential data[i] access
+    Tensor self_c = self.is_contiguous() ? self : self.contiguous();
+    Tensor other_c = other.is_contiguous() ? other : other.contiguous();
+    PT_DISPATCH_ALL_TYPES(self_c.dtype(), "add_", [&] {
+        scalar_t* data = self_c.mutable_data_ptr<scalar_t>();
+        const scalar_t* other_data = other_c.data_ptr<scalar_t>();
         scalar_t alpha_val = alpha.to<scalar_t>();
-        int64_t n = self.numel();
+        int64_t n = self_c.numel();
         for (int64_t i = 0; i < n; ++i) data[i] += alpha_val * other_data[i];
     });
+    if (!self.is_contiguous()) {
+        self.copy_(self_c);
+    }
 
     return self;
 }
@@ -827,12 +833,18 @@ inline Tensor& mul_(Tensor& self, const Tensor& other) {
         return self;
     }
 
-    PT_DISPATCH_ALL_TYPES(self.dtype(), "mul_", [&] {
-        scalar_t* data = self.mutable_data_ptr<scalar_t>();
-        const scalar_t* other_data = other.data_ptr<scalar_t>();
-        int64_t n = self.numel();
+    // Generic path: ensure contiguous for sequential data[i] access
+    Tensor self_c = self.is_contiguous() ? self : self.contiguous();
+    Tensor other_c = other.is_contiguous() ? other : other.contiguous();
+    PT_DISPATCH_ALL_TYPES(self_c.dtype(), "mul_", [&] {
+        scalar_t* data = self_c.mutable_data_ptr<scalar_t>();
+        const scalar_t* other_data = other_c.data_ptr<scalar_t>();
+        int64_t n = self_c.numel();
         for (int64_t i = 0; i < n; ++i) data[i] *= other_data[i];
     });
+    if (!self.is_contiguous()) {
+        self.copy_(self_c);
+    }
 
     return self;
 }
@@ -840,15 +852,21 @@ inline Tensor& mul_(Tensor& self, const Tensor& other) {
 inline Tensor& div_(Tensor& self, const Tensor& other) {
     PT_CHECK_MSG(self.sizes() == other.sizes(), "In-place operation requires same shapes");
 
-    PT_DISPATCH_FLOATING_TYPES(self.dtype(), "div_", [&] {
-        scalar_t* data = self.mutable_data_ptr<scalar_t>();
-        const scalar_t* other_data = other.data_ptr<scalar_t>();
-        int64_t n = self.numel();
+    // Generic path: ensure contiguous for sequential data[i] access
+    Tensor self_c = self.is_contiguous() ? self : self.contiguous();
+    Tensor other_c = other.is_contiguous() ? other : other.contiguous();
+    PT_DISPATCH_FLOATING_TYPES(self_c.dtype(), "div_", [&] {
+        scalar_t* data = self_c.mutable_data_ptr<scalar_t>();
+        const scalar_t* other_data = other_c.data_ptr<scalar_t>();
+        int64_t n = self_c.numel();
 
         for (int64_t i = 0; i < n; ++i) {
             data[i] /= other_data[i];
         }
     });
+    if (!self.is_contiguous()) {
+        self.copy_(self_c);
+    }
 
     return self;
 }
@@ -1036,20 +1054,23 @@ inline Tensor name(const Tensor& self, const Tensor& other) { \
     auto result_shape = detail::broadcast_shapes(self.sizes(), other.sizes()); \
     Tensor result = empty(result_shape, TensorOptions().dtype(c10::ScalarType::Bool).device(self.device())); \
     \
-    PT_DISPATCH_ALL_TYPES(self.dtype(), #name, [&] { \
+    /* Ensure contiguous for sequential data[i] access */ \
+    Tensor self_c = self.is_contiguous() ? self : self.contiguous(); \
+    Tensor other_c = other.is_contiguous() ? other : other.contiguous(); \
+    PT_DISPATCH_ALL_TYPES(self_c.dtype(), #name, [&] { \
         bool* out = result.mutable_data_ptr<bool>(); \
-        const scalar_t* a = self.data_ptr<scalar_t>(); \
-        const scalar_t* b = other.data_ptr<scalar_t>(); \
+        const scalar_t* a = self_c.data_ptr<scalar_t>(); \
+        const scalar_t* b = other_c.data_ptr<scalar_t>(); \
         int64_t n = result.numel(); \
         \
-        if (self.sizes() == other.sizes()) { \
+        if (self_c.sizes() == other_c.sizes()) { \
             for (int64_t i = 0; i < n; ++i) { \
                 out[i] = a[i] op b[i]; \
             } \
         } else { \
             for (int64_t i = 0; i < n; ++i) { \
-                int64_t idx_a = detail::broadcast_index(i, result.sizes(), self.sizes(), self.strides()); \
-                int64_t idx_b = detail::broadcast_index(i, result.sizes(), other.sizes(), other.strides()); \
+                int64_t idx_a = detail::broadcast_index(i, result.sizes(), self_c.sizes(), self_c.strides()); \
+                int64_t idx_b = detail::broadcast_index(i, result.sizes(), other_c.sizes(), other_c.strides()); \
                 out[i] = a[idx_a] op b[idx_b]; \
             } \
         } \
@@ -1058,14 +1079,15 @@ inline Tensor name(const Tensor& self, const Tensor& other) { \
 } \
 \
 inline Tensor name(const Tensor& self, Scalar other) { \
-    Tensor result = empty_like(self); \
-    result = empty(self.sizes(), TensorOptions().dtype(c10::ScalarType::Bool).device(self.device())); \
+    Tensor result = empty(self.sizes(), TensorOptions().dtype(c10::ScalarType::Bool).device(self.device())); \
     \
-    PT_DISPATCH_ALL_TYPES(self.dtype(), #name "_scalar", [&] { \
+    /* Ensure contiguous for sequential data[i] access */ \
+    Tensor self_c = self.is_contiguous() ? self : self.contiguous(); \
+    PT_DISPATCH_ALL_TYPES(self_c.dtype(), #name "_scalar", [&] { \
         bool* out = result.mutable_data_ptr<bool>(); \
-        const scalar_t* a = self.data_ptr<scalar_t>(); \
+        const scalar_t* a = self_c.data_ptr<scalar_t>(); \
         scalar_t val = other.to<scalar_t>(); \
-        int64_t n = self.numel(); \
+        int64_t n = self_c.numel(); \
         \
         for (int64_t i = 0; i < n; ++i) { \
             out[i] = a[i] op val; \

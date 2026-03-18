@@ -666,8 +666,27 @@ public:
     void make_contiguous() {
         if (is_contiguous_) return;
 
-        // Need to copy data in contiguous order
-        // This is a simplified version - real implementation would be more complex
+        size_t new_nbytes = numel_ * itemsize();
+        Storage new_storage = Storage::create(new_nbytes, device());
+
+        // Copy with stride-based indexing
+        char* dst = static_cast<char*>(new_storage.mutable_data());
+        const char* src = static_cast<const char*>(data());
+        size_t elem_size = itemsize();
+
+        for (int64_t i = 0; i < numel_; ++i) {
+            int64_t src_offset = 0;
+            int64_t remaining = i;
+            for (int64_t d = sizes_.size() - 1; d >= 0; --d) {
+                int64_t idx = remaining % sizes_[d];
+                remaining /= sizes_[d];
+                src_offset += idx * strides_[d];
+            }
+            std::memcpy(dst + i * elem_size, src + src_offset * elem_size, elem_size);
+        }
+
+        storage_ = std::move(new_storage);
+        storage_offset_ = 0;
         compute_contiguous_strides();
         is_contiguous_ = true;
     }
@@ -689,8 +708,21 @@ public:
         if (is_contiguous_) {
             std::memcpy(impl->mutable_data(), data(), nbytes());
         } else {
-            // Need strided copy - simplified version
-            std::memcpy(impl->mutable_data(), data(), nbytes());
+            // Stride-based copy for non-contiguous source
+            char* dst = static_cast<char*>(impl->mutable_data());
+            const char* src = static_cast<const char*>(data());
+            size_t elem_size = itemsize();
+
+            for (int64_t i = 0; i < numel_; ++i) {
+                int64_t src_offset = 0;
+                int64_t remaining = i;
+                for (int64_t d = sizes_.size() - 1; d >= 0; --d) {
+                    int64_t idx = remaining % sizes_[d];
+                    remaining /= sizes_[d];
+                    src_offset += idx * strides_[d];
+                }
+                std::memcpy(dst + i * elem_size, src + src_offset * elem_size, elem_size);
+            }
         }
 
         return impl;

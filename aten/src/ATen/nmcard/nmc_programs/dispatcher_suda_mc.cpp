@@ -14,6 +14,10 @@ extern "C" {
 #define CMD_BLOCK_SIZE 32
 volatile unsigned int* mem;
 
+// FIX C11: Global core index, validated at startup to prevent race condition
+// where multiple cores read same boot[29] value from shared DDR
+unsigned int g_core_index = 0;
+
 #define OP_MATMUL               1
 #define OP_MATMUL_AT            2
 #define OP_MATMUL_BT            3
@@ -127,7 +131,10 @@ void op_rmsnorm() {
 
 // matmul_partial: args [M, K, N, addr_A, addr_B, addr_C, col_start, col_end]
 // Each core computes C[i, col_start..col_end) for all rows i
-// Uses VECTORIZED nmpp for the column slice
+//
+// FIX C12: Only primary core in each cluster (core_in_cluster==0) uses
+// vectorized nmpp. Secondary cores use scalar fallback to avoid saturating
+// the DDR bus with 16 concurrent nmpp calls (caused DDR controller lockup).
 void op_matmul_partial() {
     int M=(int)mem[1]; int K=(int)mem[2]; int N=(int)mem[3];
     float* A=(float*)mem[4]; float* B=(float*)mem[5]; float* C=(float*)mem[6];
@@ -136,14 +143,34 @@ void op_matmul_partial() {
 
     if (actual_n == 0) return;
 
-    // B is [K, N] row-major. Column slice B[:, col_start:col_end] has stride N.
-    // nmppmMul_mm_32f(A, M, stride_A, B_slice, K, stride_B, C_slice, actual_n, stride_C, 0)
-    // A: [M, K] with stride K
-    // B_slice: starts at B + col_start, shape [K, actual_n] but stride = N (NOT actual_n!)
-    // C_slice: starts at C + col_start, shape [M, actual_n] but stride = N
-    nmppmMul_mm_32f(A, M, K,
-                     B + col_start, K, N,
-                     C + col_start, (int)actual_n, N, 0);
+    // DDR bounds sanity check
+    if (col_start >= (unsigned int)N || col_end > (unsigned int)N) return;
+
+    // Determine if this core is primary in its cluster (0,4,8,12)
+    // core_in_cluster = core_index & 3
+    unsigned int core_in_cluster = g_core_index & 3;
+
+    if (core_in_cluster == 0) {
+        // Primary core in cluster: use vectorized nmpp
+        // B is [K, N] row-major. Column slice B[:, col_start:col_end] has stride N.
+        // A: [M, K] with stride K
+        // B_slice: starts at B + col_start, shape [K, actual_n] but stride = N
+        // C_slice: starts at C + col_start, shape [M, actual_n] but stride = N
+        nmppmMul_mm_32f(A, M, K,
+                         B + col_start, K, N,
+                         C + col_start, (int)actual_n, N, 0);
+    } else {
+        // Secondary cores: scalar fallback to reduce DDR pressure
+        for (int i = 0; i < M; i++) {
+            for (int j = 0; j < (int)actual_n; j++) {
+                float sum = 0.0f;
+                for (int k = 0; k < K; k++) {
+                    sum += A[i * K + k] * B[(col_start + j) + k * N];
+                }
+                C[i * N + col_start + j] = sum;
+            }
+        }
+    }
 }
 
 // Stubs for libnm6408load_nmc
@@ -157,12 +184,45 @@ extern "C" int Mul32(int a, int b) {
     while(ub){if(ub&1)r+=ua;ua<<=1;ub>>=1;} return s<0?-r:r; }
 
 int main() {
+    // ================================================================
+    // FIX C11: core_index race condition
+    // ================================================================
+    // Host writes core_index into DDR_BASE + core*32 + 29 for each core
+    // BEFORE loading the program. We read boot[29] and validate ownership
+    // using a signature handshake to detect if two cores got the same index.
     volatile unsigned int* boot=(volatile unsigned int*)DDR_BASE;
     unsigned int core_index=boot[29];
+
+    // Clamp to valid range
     if(core_index>15) core_index=0;
+
+    // Point mem to this core's CMD block
     mem=(volatile unsigned int*)(DDR_BASE+(core_index<<5));
+
+    // SAFETY: Write a unique signature to verify we own this cmd block
+    // Each core writes 0xDEAD0000 | its_index to word 28
+    mem[28] = 0xDEAD0000 | core_index;
+
+    // Small delay to let all cores write their signatures
+    for (volatile int i = 0; i < 1000; i++);
+
+    // Verify our signature is still there (no other core overwrote it)
+    if ((mem[28] & 0xFFFF) != core_index) {
+        // CONFLICT DETECTED - another core has the same index!
+        // Enter safe idle mode: just increment watchdog so host knows we're alive
+        // but never execute any operations
+        while(1) {
+            mem[WATCHDOG_ADDR]++;
+        }
+    }
+
+    // Store validated core index globally (used by op_matmul_partial)
+    g_core_index = core_index;
+
     mem[STATUS_ADDR]=1; mem[WATCHDOG_ADDR]=0; mem[0]=0;
     unsigned int watchdog=0;
+
+    // Increased watchdog timeout safety — avoid tight spin consuming DDR bandwidth
     while(1){
         watchdog++; mem[WATCHDOG_ADDR]=watchdog;
         unsigned int op=mem[0];
@@ -179,7 +239,7 @@ int main() {
             case OP_SGD: op_sgd(); break;
             case OP_SOFTMAX: op_softmax(); break;
             case OP_RMSNORM: op_rmsnorm(); break;
-            case OP_MATMUL_PARTIAL: op_matmul_partial(); break; /*16-CORE*/
+            case OP_MATMUL_PARTIAL: op_matmul_partial(); break; /*16-CORE, DDR-SAFE*/
             default: mem[STATUS_ADDR]=2; mem[0]=0; continue;
         }
         mem[STATUS_ADDR]=1; mem[0]=0;

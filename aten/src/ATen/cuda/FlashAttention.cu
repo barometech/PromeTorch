@@ -5,11 +5,6 @@
 // This file contains the CUDA kernels for FlashAttention algorithm.
 // The key optimization is tiling to keep data in shared memory (SRAM).
 //
-// Memory Layout:
-// - Shared memory: ~48KB per SM
-// - Each tile: block_size × head_dim elements
-// - Need space for Q_tile, K_tile, V_tile, S_tile (attention scores)
-//
 // ============================================================================
 
 #ifdef PT_USE_CUDA
@@ -55,24 +50,27 @@ __device__ __forceinline__ float warp_reduce_sum(float val) {
 
 // Safe exponential (prevent overflow)
 __device__ __forceinline__ float safe_exp(float x) {
-    return expf(fminf(x, 88.0f));  // exp(88) ≈ 1.6e38 < FLT_MAX
+    return expf(fminf(x, 88.0f));  // exp(88) ~ 1.6e38 < FLT_MAX
 }
 
 // ============================================================================
 // FlashAttention Forward Kernel
 // ============================================================================
 //
-// Grid: (batch_size * num_heads, ceil(seq_len_q / BLOCK_Q))
-// Block: (BLOCK_KV, BLOCK_Q) threads
+// Grid:  (batch_size * num_heads, ceil(seq_len_q / BLOCK_Q))
+// Block: (BLOCK_KV, BLOCK_Q) threads   [BLOCK_Q * BLOCK_KV <= 1024]
+//
+// tx in [0, BLOCK_KV): used for K/V columns in dot products, and loops over HEAD_DIM
+// ty in [0, BLOCK_Q):  one per Q row in the tile
 //
 // Shared memory layout:
-// - Q_shared:   [BLOCK_Q, head_dim]
-// - K_shared:   [BLOCK_KV, head_dim]
-// - V_shared:   [BLOCK_KV, head_dim]
-// - S_shared:   [BLOCK_Q, BLOCK_KV]  (attention scores)
-// - O_shared:   [BLOCK_Q, head_dim]  (output accumulator)
-// - m_shared:   [BLOCK_Q]            (row max for softmax)
-// - l_shared:   [BLOCK_Q]            (row sum for softmax)
+//   Q_shared:  [BLOCK_Q][HEAD_DIM]
+//   K_shared:  [BLOCK_KV][HEAD_DIM]
+//   V_shared:  [BLOCK_KV][HEAD_DIM]
+//   S_shared:  [BLOCK_Q][BLOCK_KV]   (attention scores / probabilities)
+//   O_shared:  [BLOCK_Q][HEAD_DIM]   (output accumulator)
+//   m_shared:  [BLOCK_Q]             (row max for online softmax)
+//   l_shared:  [BLOCK_Q]             (row sum for online softmax)
 
 template<int BLOCK_Q, int BLOCK_KV, int HEAD_DIM>
 __global__ void flash_attention_forward_kernel(
@@ -88,194 +86,162 @@ __global__ void flash_attention_forward_kernel(
     const float softmax_scale,
     const bool is_causal
 ) {
-    // Shared memory
     extern __shared__ float smem[];
-    float* Q_shared = smem;                                    // [BLOCK_Q, HEAD_DIM]
-    float* K_shared = Q_shared + BLOCK_Q * HEAD_DIM;          // [BLOCK_KV, HEAD_DIM]
-    float* V_shared = K_shared + BLOCK_KV * HEAD_DIM;         // [BLOCK_KV, HEAD_DIM]
-    float* S_shared = V_shared + BLOCK_KV * HEAD_DIM;         // [BLOCK_Q, BLOCK_KV]
-    float* O_shared = S_shared + BLOCK_Q * BLOCK_KV;          // [BLOCK_Q, HEAD_DIM]
-    float* m_shared = O_shared + BLOCK_Q * HEAD_DIM;          // [BLOCK_Q]
-    float* l_shared = m_shared + BLOCK_Q;                      // [BLOCK_Q]
+    float* Q_shared = smem;
+    float* K_shared = Q_shared + BLOCK_Q * HEAD_DIM;
+    float* V_shared = K_shared + BLOCK_KV * HEAD_DIM;
+    float* S_shared = V_shared + BLOCK_KV * HEAD_DIM;
+    float* O_shared = S_shared + BLOCK_Q * BLOCK_KV;
+    float* m_shared = O_shared + BLOCK_Q * HEAD_DIM;
+    float* l_shared = m_shared + BLOCK_Q;
 
-    // Block indices
     const int batch_head_idx = blockIdx.x;
     const int batch_idx = batch_head_idx / num_heads;
     const int head_idx = batch_head_idx % num_heads;
     const int q_block_idx = blockIdx.y;
 
-    // Thread indices
-    const int tx = threadIdx.x;  // Within K/V block (0 to BLOCK_KV-1)
-    const int ty = threadIdx.y;  // Within Q block (0 to BLOCK_Q-1)
-    const int tid = ty * BLOCK_KV + tx;
+    const int tx = threadIdx.x;  // 0..BLOCK_KV-1
+    const int ty = threadIdx.y;  // 0..BLOCK_Q-1
 
-    // Global Q row index
     const int q_row = q_block_idx * BLOCK_Q + ty;
-    if (q_row >= seq_len_q) return;
+    const bool valid_q = (q_row < seq_len_q);
 
-    // Pointer offsets for this batch and head
-    const int qkv_offset = batch_idx * seq_len_q * num_heads * HEAD_DIM +
-                           head_idx * HEAD_DIM;
-    const int kv_seq_offset = batch_idx * seq_len_k * num_heads * HEAD_DIM +
-                              head_idx * HEAD_DIM;
+    const int q_batch_offset = batch_idx * seq_len_q * num_heads * HEAD_DIM;
+    const int kv_batch_offset = batch_idx * seq_len_k * num_heads * HEAD_DIM;
 
-    // Load Q tile into shared memory
-    if (ty < BLOCK_Q && tx < HEAD_DIM) {
-        int q_idx = (q_block_idx * BLOCK_Q + ty) * num_heads * HEAD_DIM +
-                    head_idx * HEAD_DIM + tx;
-        if (q_block_idx * BLOCK_Q + ty < seq_len_q) {
-            Q_shared[ty * HEAD_DIM + tx] = Q[batch_idx * seq_len_q * num_heads * HEAD_DIM + q_idx];
+    // Load Q tile: use loop since HEAD_DIM may exceed BLOCK_KV
+    for (int d = tx; d < HEAD_DIM; d += BLOCK_KV) {
+        if (valid_q) {
+            Q_shared[ty * HEAD_DIM + d] = Q[q_batch_offset +
+                q_row * num_heads * HEAD_DIM + head_idx * HEAD_DIM + d];
         } else {
-            Q_shared[ty * HEAD_DIM + tx] = 0.0f;
+            Q_shared[ty * HEAD_DIM + d] = 0.0f;
         }
     }
 
-    // Initialize output accumulator and softmax statistics
-    if (tx < HEAD_DIM) {
-        O_shared[ty * HEAD_DIM + tx] = 0.0f;
+    // Initialize output accumulator
+    for (int d = tx; d < HEAD_DIM; d += BLOCK_KV) {
+        O_shared[ty * HEAD_DIM + d] = 0.0f;
     }
+
     if (tx == 0) {
-        m_shared[ty] = -INFINITY;  // Running max
-        l_shared[ty] = 0.0f;       // Running sum
+        m_shared[ty] = -INFINITY;
+        l_shared[ty] = 0.0f;
     }
     __syncthreads();
 
-    // Number of K/V blocks
     int num_kv_blocks = (seq_len_k + BLOCK_KV - 1) / BLOCK_KV;
-
-    // For causal masking, only process K blocks up to the current Q position
-    if (is_causal) {
+    if (is_causal && valid_q) {
         int max_k_block = (q_row + BLOCK_KV) / BLOCK_KV;
         num_kv_blocks = min(num_kv_blocks, max_k_block);
     }
 
-    // Iterate over K/V tiles
     for (int kv_block = 0; kv_block < num_kv_blocks; ++kv_block) {
-        int k_col_base = kv_block * BLOCK_KV;
+        const int k_col_base = kv_block * BLOCK_KV;
 
-        // Load K tile into shared memory
-        if (ty < BLOCK_KV && tx < HEAD_DIM) {
-            int k_row = kv_block * BLOCK_KV + ty;
-            if (k_row < seq_len_k) {
-                int k_idx = k_row * num_heads * HEAD_DIM + head_idx * HEAD_DIM + tx;
-                K_shared[ty * HEAD_DIM + tx] = K[batch_idx * seq_len_k * num_heads * HEAD_DIM + k_idx];
-            } else {
-                K_shared[ty * HEAD_DIM + tx] = 0.0f;
-            }
-        }
-
-        // Load V tile into shared memory
-        if (ty < BLOCK_KV && tx < HEAD_DIM) {
-            int v_row = kv_block * BLOCK_KV + ty;
-            if (v_row < seq_len_k) {
-                int v_idx = v_row * num_heads * HEAD_DIM + head_idx * HEAD_DIM + tx;
-                V_shared[ty * HEAD_DIM + tx] = V[batch_idx * seq_len_k * num_heads * HEAD_DIM + v_idx];
-            } else {
-                V_shared[ty * HEAD_DIM + tx] = 0.0f;
+        // Cooperative load of K and V tiles
+        {
+            const int total_threads = BLOCK_Q * BLOCK_KV;
+            const int total_elems = BLOCK_KV * HEAD_DIM;
+            const int tid = ty * BLOCK_KV + tx;
+            for (int idx = tid; idx < total_elems; idx += total_threads) {
+                int kr = idx / HEAD_DIM;
+                int kd = idx % HEAD_DIM;
+                int global_kr = k_col_base + kr;
+                if (global_kr < seq_len_k) {
+                    int g_idx = kv_batch_offset + global_kr * num_heads * HEAD_DIM +
+                                head_idx * HEAD_DIM + kd;
+                    K_shared[kr * HEAD_DIM + kd] = K[g_idx];
+                    V_shared[kr * HEAD_DIM + kd] = V[g_idx];
+                } else {
+                    K_shared[kr * HEAD_DIM + kd] = 0.0f;
+                    V_shared[kr * HEAD_DIM + kd] = 0.0f;
+                }
             }
         }
         __syncthreads();
 
-        // Compute S = Q @ K^T (attention scores for this tile)
-        // Each thread computes one element S[ty, tx]
-        float score = 0.0f;
-        if (tx < BLOCK_KV) {
-            #pragma unroll
+        // Compute S[ty][tx] = dot(Q_shared[ty], K_shared[tx]) * scale
+        {
+            float score = 0.0f;
             for (int d = 0; d < HEAD_DIM; ++d) {
                 score += Q_shared[ty * HEAD_DIM + d] * K_shared[tx * HEAD_DIM + d];
             }
             score *= softmax_scale;
 
-            // Apply causal mask
             int k_col = k_col_base + tx;
-            if (is_causal && k_col > q_row) {
+            if ((is_causal && k_col > q_row) || k_col >= seq_len_k || !valid_q) {
                 score = -INFINITY;
             }
-
-            // Check bounds
-            if (k_col >= seq_len_k) {
-                score = -INFINITY;
-            }
-
             S_shared[ty * BLOCK_KV + tx] = score;
         }
         __syncthreads();
 
-        // Online softmax: update running max and sum
-        // Step 1: Find max of current tile
-        float m_new = -INFINITY;
-        if (tx < BLOCK_KV) {
-            m_new = S_shared[ty * BLOCK_KV + tx];
-        }
-        // Warp reduction for max
-        m_new = warp_reduce_max(m_new);
+        // Online softmax update (thread tx==0 handles the full row for ty)
+        // This is serial over BLOCK_KV but BLOCK_KV is small (32).
         if (tx == 0) {
+            // Save old max BEFORE computing new max
             float m_old = m_shared[ty];
-            m_shared[ty] = fmaxf(m_old, m_new);
-        }
-        __syncthreads();
 
-        float m_cur = m_shared[ty];
+            // Find max of current tile
+            float m_tile = -INFINITY;
+            for (int i = 0; i < BLOCK_KV; ++i) {
+                m_tile = fmaxf(m_tile, S_shared[ty * BLOCK_KV + i]);
+            }
 
-        // Step 2: Compute exp(score - max) and accumulate sum
-        float exp_score = 0.0f;
-        if (tx < BLOCK_KV && k_col_base + tx < seq_len_k) {
-            exp_score = safe_exp(S_shared[ty * BLOCK_KV + tx] - m_cur);
-            S_shared[ty * BLOCK_KV + tx] = exp_score;  // Store normalized score
-        }
-        float sum_new = warp_reduce_sum(exp_score);
-        __syncthreads();
+            // New global max
+            float m_new = fmaxf(m_old, m_tile);
+            m_shared[ty] = m_new;
 
-        // Step 3: Update output with rescaling
-        // O_new = exp(m_old - m_new) * O_old + P @ V
-        if (tx == 0) {
-            float m_old = (kv_block == 0) ? m_cur : (m_shared[ty] - 0.0001f);  // Previous max approximation
-            float l_old = l_shared[ty];
-            float scale_factor = safe_exp(m_old - m_cur);
+            // Rescale factor for previous accumulator
+            float scale_old = safe_exp(m_old - m_new);
+
+            // Compute exp(score - m_new) for this tile, store back in S_shared
+            float sum_tile = 0.0f;
+            for (int i = 0; i < BLOCK_KV; ++i) {
+                float e = safe_exp(S_shared[ty * BLOCK_KV + i] - m_new);
+                S_shared[ty * BLOCK_KV + i] = e;
+                sum_tile += e;
+            }
 
             // Rescale previous output
             for (int d = 0; d < HEAD_DIM; ++d) {
-                O_shared[ty * HEAD_DIM + d] *= scale_factor;
+                O_shared[ty * HEAD_DIM + d] *= scale_old;
             }
 
-            l_shared[ty] = scale_factor * l_old + sum_new;
+            // Update running sum
+            l_shared[ty] = scale_old * l_shared[ty] + sum_tile;
         }
         __syncthreads();
 
-        // Step 4: Accumulate P @ V
-        // Each thread handles one dimension of output
-        if (tx < HEAD_DIM) {
+        // Accumulate P @ V into O_shared
+        // Each thread handles a subset of HEAD_DIM
+        for (int d = tx; d < HEAD_DIM; d += BLOCK_KV) {
             float o_acc = 0.0f;
-            #pragma unroll
             for (int k = 0; k < BLOCK_KV; ++k) {
-                if (k_col_base + k < seq_len_k) {
-                    o_acc += S_shared[ty * BLOCK_KV + k] * V_shared[k * HEAD_DIM + tx];
-                }
+                o_acc += S_shared[ty * BLOCK_KV + k] * V_shared[k * HEAD_DIM + d];
             }
-            O_shared[ty * HEAD_DIM + tx] += o_acc;
+            O_shared[ty * HEAD_DIM + d] += o_acc;
         }
         __syncthreads();
     }
 
     // Final normalization: O = O / l
-    if (tx < HEAD_DIM && q_row < seq_len_q) {
+    if (valid_q) {
         float l_final = l_shared[ty];
-        float o_val = O_shared[ty * HEAD_DIM + tx] / (l_final + 1e-6f);
+        float inv_l = 1.0f / (l_final + 1e-6f);
 
-        // Write to global memory
-        int o_idx = batch_idx * seq_len_q * num_heads * HEAD_DIM +
-                    q_row * num_heads * HEAD_DIM +
-                    head_idx * HEAD_DIM + tx;
-        O[o_idx] = o_val;
-    }
+        for (int d = tx; d < HEAD_DIM; d += BLOCK_KV) {
+            int o_idx = q_batch_offset + q_row * num_heads * HEAD_DIM +
+                        head_idx * HEAD_DIM + d;
+            O[o_idx] = O_shared[ty * HEAD_DIM + d] * inv_l;
+        }
 
-    // Store logsumexp for backward
-    if (tx == 0 && q_row < seq_len_q) {
-        float m_final = m_shared[ty];
-        float l_final = l_shared[ty];
-        int l_idx = batch_idx * num_heads * seq_len_q +
-                    head_idx * seq_len_q + q_row;
-        L[l_idx] = m_final + logf(l_final + 1e-6f);
+        if (tx == 0) {
+            int l_idx = batch_idx * num_heads * seq_len_q +
+                        head_idx * seq_len_q + q_row;
+            L[l_idx] = m_shared[ty] + logf(l_final + 1e-6f);
+        }
     }
 }
 
@@ -289,7 +255,6 @@ std::tuple<Tensor, Tensor, Tensor> flash_attention_forward(
     const Tensor& value,
     const FlashAttentionConfig& config
 ) {
-    // Validate inputs
     PT_CHECK(query.dim() == 4, "Query must be 4D [B, N_q, H, D]");
     PT_CHECK(key.dim() == 4, "Key must be 4D [B, N_k, H, D]");
     PT_CHECK(value.dim() == 4, "Value must be 4D [B, N_k, H, D]");
@@ -306,59 +271,57 @@ std::tuple<Tensor, Tensor, Tensor> flash_attention_forward(
     PT_CHECK(key.size(3) == head_dim && value.size(3) == head_dim, "Head dim mismatch");
     PT_CHECK(key.size(1) == value.size(1), "K and V sequence length mismatch");
 
-    // Softmax scale
     float softmax_scale = config.softmax_scale;
     if (softmax_scale < 0) {
         softmax_scale = 1.0f / sqrtf(static_cast<float>(head_dim));
     }
 
-    // Allocate outputs
     Tensor output = empty({batch_size, seq_len_q, num_heads, head_dim},
                           TensorOptions().dtype(query.dtype()).device(query.device()));
     Tensor logsumexp = empty({batch_size, num_heads, seq_len_q},
                              TensorOptions().dtype(c10::ScalarType::Float).device(query.device()));
-    Tensor attention_weights;  // Empty unless return_attention_weights
+    Tensor attention_weights;
 
-    // Block sizes
-    const int BLOCK_Q = config.block_size_q;
-    const int BLOCK_KV = config.block_size_kv;
+    // Block sizes: BLOCK_Q * BLOCK_KV <= 1024
+    // head_dim=64:  BQ=32, BKV=32 -> 1024 threads
+    // head_dim=128: BQ=16, BKV=32 -> 512 threads
 
-    // Calculate shared memory size
-    size_t smem_size = (BLOCK_Q * head_dim +      // Q_shared
-                        BLOCK_KV * head_dim +     // K_shared
-                        BLOCK_KV * head_dim +     // V_shared
-                        BLOCK_Q * BLOCK_KV +      // S_shared
-                        BLOCK_Q * head_dim +      // O_shared
-                        BLOCK_Q +                 // m_shared
-                        BLOCK_Q) * sizeof(float); // l_shared
+    auto launch = [&](auto bq_tag, auto bkv_tag, auto hd_tag) {
+        constexpr int BQ = decltype(bq_tag)::value;
+        constexpr int BKV = decltype(bkv_tag)::value;
+        constexpr int HD = decltype(hd_tag)::value;
 
-    // Launch configuration
-    dim3 grid(batch_size * num_heads, (seq_len_q + BLOCK_Q - 1) / BLOCK_Q);
-    dim3 block(BLOCK_KV, BLOCK_Q);
+        size_t smem_size = (BQ * HD +       // Q_shared
+                            BKV * HD +      // K_shared
+                            BKV * HD +      // V_shared
+                            BQ * BKV +      // S_shared
+                            BQ * HD +       // O_shared
+                            BQ +            // m_shared
+                            BQ) * sizeof(float);
 
-    // Launch kernel based on head dimension
+        dim3 grid(batch_size * num_heads, (seq_len_q + BQ - 1) / BQ);
+        dim3 block(BKV, BQ);
+
+        flash_attention_forward_kernel<BQ, BKV, HD><<<grid, block, smem_size>>>(
+            query.data_ptr<float>(),
+            key.data_ptr<float>(),
+            value.data_ptr<float>(),
+            output.mutable_data_ptr<float>(),
+            logsumexp.mutable_data_ptr<float>(),
+            batch_size, num_heads, seq_len_q, seq_len_k,
+            softmax_scale, config.is_causal
+        );
+    };
+
     if (head_dim == 64) {
-        flash_attention_forward_kernel<64, 64, 64><<<grid, block, smem_size>>>(
-            query.data_ptr<float>(),
-            key.data_ptr<float>(),
-            value.data_ptr<float>(),
-            output.mutable_data_ptr<float>(),
-            logsumexp.mutable_data_ptr<float>(),
-            batch_size, num_heads, seq_len_q, seq_len_k,
-            softmax_scale, config.is_causal
-        );
+        launch(std::integral_constant<int, 32>{},
+               std::integral_constant<int, 32>{},
+               std::integral_constant<int, 64>{});
     } else if (head_dim == 128) {
-        flash_attention_forward_kernel<32, 32, 128><<<grid, block, smem_size>>>(
-            query.data_ptr<float>(),
-            key.data_ptr<float>(),
-            value.data_ptr<float>(),
-            output.mutable_data_ptr<float>(),
-            logsumexp.mutable_data_ptr<float>(),
-            batch_size, num_heads, seq_len_q, seq_len_k,
-            softmax_scale, config.is_causal
-        );
+        launch(std::integral_constant<int, 16>{},
+               std::integral_constant<int, 32>{},
+               std::integral_constant<int, 128>{});
     } else {
-        // Fallback for other head dimensions
         PT_ERROR("FlashAttention: head_dim must be 64 or 128, got ", head_dim);
     }
 
@@ -369,8 +332,18 @@ std::tuple<Tensor, Tensor, Tensor> flash_attention_forward(
 // FlashAttention Backward Kernel
 // ============================================================================
 //
-// Backward pass uses recomputation strategy to avoid storing the attention matrix.
-// This trades compute for memory.
+// Backward pass: recompute attention scores from Q, K, V and logsumexp.
+//
+// Grid:  (batch_size * num_heads, ceil(seq_len_k / BLOCK_KV))
+// Block: (BLOCK_KV) -- 1D block, one thread per K/V row
+//
+// Each thread owns one K/V row and accumulates grad_K[k_row] and grad_V[k_row].
+// It loops over all Q rows (in BLOCK_Q-sized chunks), recomputing P and
+// applying the correct softmax backward formula:
+//   ds_ij = P_ij * (dP_ij - D_i)
+// where dP_ij = dO_i . V_j  and  D_i = dO_i . O_i
+//
+// grad_Q is accumulated via atomicAdd (multiple K threads write to same Q row).
 
 template<int BLOCK_Q, int BLOCK_KV, int HEAD_DIM>
 __global__ void flash_attention_backward_kernel(
@@ -390,114 +363,109 @@ __global__ void flash_attention_backward_kernel(
     const float softmax_scale,
     const bool is_causal
 ) {
-    // Shared memory
-    extern __shared__ float smem[];
-
     const int batch_head_idx = blockIdx.x;
     const int batch_idx = batch_head_idx / num_heads;
     const int head_idx = batch_head_idx % num_heads;
     const int kv_block_idx = blockIdx.y;
 
-    const int tx = threadIdx.x;
-    const int ty = threadIdx.y;
+    const int tx = threadIdx.x;  // 0..BLOCK_KV-1
 
-    // K/V row for this thread
-    const int k_row = kv_block_idx * BLOCK_KV + ty;
-    if (k_row >= seq_len_k) return;
+    const int k_row = kv_block_idx * BLOCK_KV + tx;
+    const bool valid_k = (k_row < seq_len_k);
 
-    // Pointers
-    float* Q_shared = smem;
-    float* K_shared = Q_shared + BLOCK_Q * HEAD_DIM;
-    float* V_shared = K_shared + BLOCK_KV * HEAD_DIM;
-    float* dO_shared = V_shared + BLOCK_KV * HEAD_DIM;
+    const int q_batch_offset = batch_idx * seq_len_q * num_heads * HEAD_DIM;
+    const int kv_batch_offset = batch_idx * seq_len_k * num_heads * HEAD_DIM;
+    const int l_batch_offset = batch_idx * num_heads * seq_len_q + head_idx * seq_len_q;
 
-    // Load K tile
-    if (ty < BLOCK_KV && tx < HEAD_DIM) {
-        int idx = batch_idx * seq_len_k * num_heads * HEAD_DIM +
-                  k_row * num_heads * HEAD_DIM + head_idx * HEAD_DIM + tx;
-        K_shared[ty * HEAD_DIM + tx] = (k_row < seq_len_k) ? K[idx] : 0.0f;
+    // Load K and V vectors for this thread's row into registers
+    float k_vec[HEAD_DIM];
+    float v_vec[HEAD_DIM];
+    if (valid_k) {
+        int base = kv_batch_offset + k_row * num_heads * HEAD_DIM + head_idx * HEAD_DIM;
+        for (int d = 0; d < HEAD_DIM; ++d) {
+            k_vec[d] = K[base + d];
+            v_vec[d] = V[base + d];
+        }
+    } else {
+        for (int d = 0; d < HEAD_DIM; ++d) {
+            k_vec[d] = 0.0f;
+            v_vec[d] = 0.0f;
+        }
     }
 
-    // Load V tile
-    if (ty < BLOCK_KV && tx < HEAD_DIM) {
-        int idx = batch_idx * seq_len_k * num_heads * HEAD_DIM +
-                  k_row * num_heads * HEAD_DIM + head_idx * HEAD_DIM + tx;
-        V_shared[ty * HEAD_DIM + tx] = (k_row < seq_len_k) ? V[idx] : 0.0f;
+    // Gradient accumulators
+    float grad_k_acc[HEAD_DIM];
+    float grad_v_acc[HEAD_DIM];
+    for (int d = 0; d < HEAD_DIM; ++d) {
+        grad_k_acc[d] = 0.0f;
+        grad_v_acc[d] = 0.0f;
     }
-    __syncthreads();
 
-    // Accumulate gradients
-    float grad_k_acc[HEAD_DIM] = {0.0f};
-    float grad_v_acc[HEAD_DIM] = {0.0f};
-
-    int num_q_blocks = (seq_len_q + BLOCK_Q - 1) / BLOCK_Q;
+    const int num_q_blocks = (seq_len_q + BLOCK_Q - 1) / BLOCK_Q;
 
     for (int q_block = 0; q_block < num_q_blocks; ++q_block) {
-        int q_row = q_block * BLOCK_Q + ty;
-
-        // Causal: skip if all Q positions are after this K position
-        if (is_causal && q_block * BLOCK_Q > k_row) {
+        // Causal skip: if last Q in block < k_row, all positions are masked
+        if (is_causal && (q_block + 1) * BLOCK_Q - 1 < k_row) {
             continue;
         }
 
-        // Load Q tile and grad_output tile
-        if (ty < BLOCK_Q && tx < HEAD_DIM) {
-            int q_idx = batch_idx * seq_len_q * num_heads * HEAD_DIM +
-                        q_row * num_heads * HEAD_DIM + head_idx * HEAD_DIM + tx;
-            Q_shared[ty * HEAD_DIM + tx] = (q_row < seq_len_q) ? Q[q_idx] : 0.0f;
-            dO_shared[ty * HEAD_DIM + tx] = (q_row < seq_len_q) ? grad_output[q_idx] : 0.0f;
-        }
-        __syncthreads();
-
-        // Recompute attention scores and gradients
         for (int qi = 0; qi < BLOCK_Q; ++qi) {
             int q_pos = q_block * BLOCK_Q + qi;
             if (q_pos >= seq_len_q) continue;
             if (is_causal && k_row > q_pos) continue;
+            if (!valid_k) continue;
 
-            // Compute attention score s = q @ k * scale
+            int q_base = q_batch_offset + q_pos * num_heads * HEAD_DIM + head_idx * HEAD_DIM;
+
+            // Recompute attention score: s = Q[q_pos] . K[k_row] * scale
             float score = 0.0f;
             for (int d = 0; d < HEAD_DIM; ++d) {
-                score += Q_shared[qi * HEAD_DIM + d] * K_shared[ty * HEAD_DIM + d];
+                score += Q[q_base + d] * k_vec[d];
             }
             score *= softmax_scale;
 
-            // Get logsumexp for normalization
-            int l_idx = batch_idx * num_heads * seq_len_q + head_idx * seq_len_q + q_pos;
-            float logsumexp_val = L[l_idx];
-
-            // Compute attention probability p = exp(score - logsumexp)
+            // Recompute attention probability: p = exp(s - logsumexp[q_pos])
+            float logsumexp_val = L[l_batch_offset + q_pos];
             float p = safe_exp(score - logsumexp_val);
 
-            // Compute dV += p * dO
-            for (int d = 0; d < HEAD_DIM; ++d) {
-                grad_v_acc[d] += p * dO_shared[qi * HEAD_DIM + d];
-            }
-
-            // Compute dp = dO @ V
+            // dP = dO[q_pos] . V[k_row]
             float dp = 0.0f;
             for (int d = 0; d < HEAD_DIM; ++d) {
-                dp += dO_shared[qi * HEAD_DIM + d] * V_shared[ty * HEAD_DIM + d];
+                dp += grad_output[q_base + d] * v_vec[d];
             }
 
-            // Compute ds = p * (dp - sum(p * dp)) ≈ p * dp (simplified)
-            float ds = p * dp * softmax_scale;
-
-            // Compute dK += ds * Q
+            // D_i = dO[q_pos] . O[q_pos]  (needed for softmax backward)
+            float Di = 0.0f;
             for (int d = 0; d < HEAD_DIM; ++d) {
-                grad_k_acc[d] += ds * Q_shared[qi * HEAD_DIM + d];
+                Di += grad_output[q_base + d] * O[q_base + d];
+            }
+
+            // Correct softmax backward: ds = P * (dP - D_i)
+            float ds = p * (dp - Di);
+
+            // grad_V[k_row] += P * dO[q_pos]
+            for (int d = 0; d < HEAD_DIM; ++d) {
+                grad_v_acc[d] += p * grad_output[q_base + d];
+            }
+
+            // grad_K[k_row] += ds * scale * Q[q_pos]
+            for (int d = 0; d < HEAD_DIM; ++d) {
+                grad_k_acc[d] += ds * softmax_scale * Q[q_base + d];
+            }
+
+            // grad_Q[q_pos] += ds * scale * K[k_row]  (atomicAdd: multiple K threads write)
+            for (int d = 0; d < HEAD_DIM; ++d) {
+                atomicAdd(&grad_Q[q_base + d], ds * softmax_scale * k_vec[d]);
             }
         }
-        __syncthreads();
     }
 
-    // Write gradients
-    if (k_row < seq_len_k) {
+    // Write accumulated grad_K and grad_V
+    if (valid_k) {
+        int base = kv_batch_offset + k_row * num_heads * HEAD_DIM + head_idx * HEAD_DIM;
         for (int d = 0; d < HEAD_DIM; ++d) {
-            int idx = batch_idx * seq_len_k * num_heads * HEAD_DIM +
-                      k_row * num_heads * HEAD_DIM + head_idx * HEAD_DIM + d;
-            atomicAdd(&grad_K[idx], grad_k_acc[d]);
-            atomicAdd(&grad_V[idx], grad_v_acc[d]);
+            atomicAdd(&grad_K[base + d], grad_k_acc[d]);
+            atomicAdd(&grad_V[base + d], grad_v_acc[d]);
         }
     }
 }
@@ -526,7 +494,7 @@ std::tuple<Tensor, Tensor, Tensor> flash_attention_backward(
         softmax_scale = 1.0f / sqrtf(static_cast<float>(head_dim));
     }
 
-    // Allocate gradient tensors (initialized to zero)
+    // Zero-initialized for atomicAdd
     Tensor grad_query = zeros({batch_size, seq_len_q, num_heads, head_dim},
                               TensorOptions().dtype(query.dtype()).device(query.device()));
     Tensor grad_key = zeros({batch_size, seq_len_k, num_heads, head_dim},
@@ -534,29 +502,51 @@ std::tuple<Tensor, Tensor, Tensor> flash_attention_backward(
     Tensor grad_value = zeros({batch_size, seq_len_k, num_heads, head_dim},
                               TensorOptions().dtype(value.dtype()).device(value.device()));
 
-    const int BLOCK_Q = config.block_size_q;
-    const int BLOCK_KV = config.block_size_kv;
+    constexpr int BKV = 32;  // 1D block, 32 threads -- well under 1024
 
-    size_t smem_size = (BLOCK_Q * head_dim * 2 +   // Q_shared, dO_shared
-                        BLOCK_KV * head_dim * 2)    // K_shared, V_shared
-                       * sizeof(float);
+    if (head_dim == 64) {
+        constexpr int BQ = 32;
+        constexpr int HD = 64;
 
-    dim3 grid(batch_size * num_heads, (seq_len_k + BLOCK_KV - 1) / BLOCK_KV);
-    dim3 block(head_dim, BLOCK_KV);
+        dim3 grid(batch_size * num_heads, (seq_len_k + BKV - 1) / BKV);
+        dim3 block(BKV);
 
-    flash_attention_backward_kernel<64, 64, 64><<<grid, block, smem_size>>>(
-        grad_output.data_ptr<float>(),
-        query.data_ptr<float>(),
-        key.data_ptr<float>(),
-        value.data_ptr<float>(),
-        output.data_ptr<float>(),
-        logsumexp.data_ptr<float>(),
-        grad_query.mutable_data_ptr<float>(),
-        grad_key.mutable_data_ptr<float>(),
-        grad_value.mutable_data_ptr<float>(),
-        batch_size, num_heads, seq_len_q, seq_len_k,
-        softmax_scale, config.is_causal
-    );
+        flash_attention_backward_kernel<BQ, BKV, HD><<<grid, block, 0>>>(
+            grad_output.data_ptr<float>(),
+            query.data_ptr<float>(),
+            key.data_ptr<float>(),
+            value.data_ptr<float>(),
+            output.data_ptr<float>(),
+            logsumexp.data_ptr<float>(),
+            grad_query.mutable_data_ptr<float>(),
+            grad_key.mutable_data_ptr<float>(),
+            grad_value.mutable_data_ptr<float>(),
+            batch_size, num_heads, seq_len_q, seq_len_k,
+            softmax_scale, config.is_causal
+        );
+    } else if (head_dim == 128) {
+        constexpr int BQ = 16;
+        constexpr int HD = 128;
+
+        dim3 grid(batch_size * num_heads, (seq_len_k + BKV - 1) / BKV);
+        dim3 block(BKV);
+
+        flash_attention_backward_kernel<BQ, BKV, HD><<<grid, block, 0>>>(
+            grad_output.data_ptr<float>(),
+            query.data_ptr<float>(),
+            key.data_ptr<float>(),
+            value.data_ptr<float>(),
+            output.data_ptr<float>(),
+            logsumexp.data_ptr<float>(),
+            grad_query.mutable_data_ptr<float>(),
+            grad_key.mutable_data_ptr<float>(),
+            grad_value.mutable_data_ptr<float>(),
+            batch_size, num_heads, seq_len_q, seq_len_k,
+            softmax_scale, config.is_causal
+        );
+    } else {
+        PT_ERROR("FlashAttention backward: head_dim must be 64 or 128, got ", head_dim);
+    }
 
     return std::make_tuple(grad_query, grad_key, grad_value);
 }
@@ -574,7 +564,6 @@ Tensor scaled_dot_product_attention(
     bool is_causal,
     float scale
 ) {
-    // Check if we can use FlashAttention
     if (can_use_flash_attention(query, key, value)) {
         FlashAttentionConfig config;
         config.is_causal = is_causal;
@@ -585,7 +574,6 @@ Tensor scaled_dot_product_attention(
         return output;
     }
 
-    // Fallback to standard attention
     PT_ERROR("Standard attention fallback not implemented");
 }
 
@@ -598,29 +586,20 @@ bool can_use_flash_attention(
     const Tensor& key,
     const Tensor& value
 ) {
-    // Requirements for FlashAttention:
-    // 1. CUDA device
     if (query.device().type() != c10::DeviceType::CUDA) {
         return false;
     }
-
-    // 2. 4D tensors
     if (query.dim() != 4 || key.dim() != 4 || value.dim() != 4) {
         return false;
     }
-
-    // 3. Head dimension is 64 or 128
     int head_dim = query.size(3);
     if (head_dim != 64 && head_dim != 128) {
         return false;
     }
-
-    // 4. Floating point type (FP32 or FP16)
     auto dtype = query.dtype();
     if (dtype != c10::ScalarType::Float && dtype != c10::ScalarType::Half) {
         return false;
     }
-
     return true;
 }
 
@@ -629,11 +608,10 @@ std::pair<int, int> get_flash_attention_block_sizes(
     int seq_len,
     c10::ScalarType dtype
 ) {
-    // Heuristics for block sizes based on head dimension and shared memory
     if (head_dim <= 64) {
-        return {64, 64};
-    } else if (head_dim <= 128) {
         return {32, 32};
+    } else if (head_dim <= 128) {
+        return {16, 32};
     } else {
         return {16, 16};
     }
