@@ -887,3 +887,22 @@ c10::nmcard::register_nmcard_allocator_local();  // Caller's registry (inline)
 
 **Вывод:** PromeTorch работает на Эльбрусе. 38/38 тестов PASS. MNIST тренируется.
 Скорость 4.8x медленнее PyTorch — основной bottleneck в scalar GEMM (нет E2K VLIW оптимизации).
+
+### EML BLAS Integration (Elbrus Math Library)
+
+**EML установлен на сервере:** libeml.so, libeml_algebra_mt.so (multi-threaded BLAS), cblas.h
+**EML benchmark:** sgemm 1024×1024 = 230 GFLOPS (32 threads) vs 63 GFLOPS (1 thread)
+
+**Интеграция:** TudaBLAS.h → cblas_sgemm для E2K, guard: `#if defined(TUDA_E2K) && __has_include(<eml/cblas.h>)`
+
+**MNIST с EML:** 120.6s (было 126.3s без EML) — минимальный эффект на маленьких матрицах.
+
+**Полное сравнение MNIST на Эльбрусе E8C2:**
+| Конфигурация | Время | Accuracy |
+|---|---|---|
+| PyTorch 2.7.1 (32 threads) | 17.0s | 65.9% |
+| PyTorch 2.7.1 (1 thread) | 26.3s | 61.3% |
+| PromeTorch + EML | 120.6s | 88.8% |
+| PromeTorch scalar | 126.3s | 89.1% |
+
+**Вывод:** Bottleneck не в GEMM, а в autograd overhead + tensor allocation. Нужна оптимизация memory pool и autograd dispatch для E2K.
