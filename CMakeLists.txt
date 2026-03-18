@@ -799,8 +799,12 @@ add_subdirectory(examples/gguf)
 if(PT_USE_NMCARD)
     add_subdirectory(examples/nmcard)
 endif()
-add_subdirectory(benchmarks)
-add_subdirectory(promeserve)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/CMakeLists.txt")
+    add_subdirectory(benchmarks)
+endif()
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/promeserve/CMakeLists.txt")
+    add_subdirectory(promeserve)
+endif()
 
 # ============================================================================
 # Installation
