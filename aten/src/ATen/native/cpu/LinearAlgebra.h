@@ -817,7 +817,8 @@ inline Tensor inverse(const Tensor& self) {
     PT_CHECK_MSG(self.size(0) == self.size(1), "inverse requires square matrix");
 
     int64_t n = self.size(0);
-    auto [L, U, P] = lu(self);
+    auto lu_result_ = lu(self);
+    Tensor L = std::get<0>(lu_result_); Tensor U = std::get<1>(lu_result_); Tensor P = std::get<2>(lu_result_);
 
     Tensor result = zeros({n, n}, TensorOptions().dtype(self.dtype()));
 
@@ -882,7 +883,8 @@ inline Tensor solve(const Tensor& A, const Tensor& b) {
     PT_CHECK_MSG(B.size(0) == n, "solve: dimensions mismatch");
 
     int64_t nrhs = B.size(1);
-    auto [L, U, P] = lu(A);
+    auto lu_result_a = lu(A);
+    Tensor L = std::get<0>(lu_result_a); Tensor U = std::get<1>(lu_result_a); Tensor P = std::get<2>(lu_result_a);
 
     Tensor result = zeros({n, nrhs}, TensorOptions().dtype(A.dtype()));
 
@@ -937,7 +939,8 @@ inline Tensor det(const Tensor& self) {
     PT_CHECK_MSG(self.dim() == 2, "det requires 2D tensor");
     PT_CHECK_MSG(self.size(0) == self.size(1), "det requires square matrix");
 
-    auto [L, U, P] = lu(self);
+    auto lu_result_ = lu(self);
+    Tensor L = std::get<0>(lu_result_); Tensor U = std::get<1>(lu_result_); Tensor P = std::get<2>(lu_result_);
     int64_t n = self.size(0);
 
     Tensor result = zeros({}, TensorOptions().dtype(self.dtype()));
@@ -1191,7 +1194,8 @@ inline Tensor lstsq(const Tensor& A, const Tensor& b) {
     int64_t nrhs = b2.size(1);
 
     // QR decomposition: A = Q @ R
-    auto [Q, R] = qr(A);
+    auto qr_result_ = qr(A);
+    Tensor Q = std::get<0>(qr_result_); Tensor R = std::get<1>(qr_result_);
 
     // Q^T @ b
     Tensor Qt_b = mm(Q.t(), b2); // [m, m]^T @ [m, nrhs] = [m, nrhs]
@@ -1376,7 +1380,8 @@ inline SVDResult svd(const Tensor& self, bool full_matrices = true) {
 inline Tensor pinverse(const Tensor& self, double rcond = 1e-15) {
     PT_CHECK_MSG(self.dim() == 2, "pinverse requires 2D tensor");
 
-    auto [U, S, Vh] = svd(self, false);
+    auto svd_result_ = svd(self, false);
+    Tensor U = std::get<0>(svd_result_); Tensor S = std::get<1>(svd_result_); Tensor Vh = std::get<2>(svd_result_);
 
     // Invert S with threshold
     int64_t k = S.size(0);
