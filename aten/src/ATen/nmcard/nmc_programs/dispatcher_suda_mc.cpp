@@ -23,6 +23,7 @@ volatile unsigned int* mem;
 #define OP_SGD                  20
 #define OP_SOFTMAX              7
 #define OP_RMSNORM              6
+#define OP_MATMUL_PARTIAL       22
 #define OP_NOP                  0
 #define OP_EXIT                 255
 #define STATUS_ADDR     30
@@ -124,6 +125,27 @@ void op_rmsnorm() {
     }
 }
 
+// matmul_partial: args [M, K, N, addr_A, addr_B, addr_C, col_start, col_end]
+// Each core computes C[i, col_start..col_end) for all rows i
+// Uses VECTORIZED nmpp for the column slice
+void op_matmul_partial() {
+    int M=(int)mem[1]; int K=(int)mem[2]; int N=(int)mem[3];
+    float* A=(float*)mem[4]; float* B=(float*)mem[5]; float* C=(float*)mem[6];
+    unsigned int col_start=mem[7]; unsigned int col_end=mem[8];
+    unsigned int actual_n = col_end - col_start;
+
+    if (actual_n == 0) return;
+
+    // B is [K, N] row-major. Column slice B[:, col_start:col_end] has stride N.
+    // nmppmMul_mm_32f(A, M, stride_A, B_slice, K, stride_B, C_slice, actual_n, stride_C, 0)
+    // A: [M, K] with stride K
+    // B_slice: starts at B + col_start, shape [K, actual_n] but stride = N (NOT actual_n!)
+    // C_slice: starts at C + col_start, shape [M, actual_n] but stride = N
+    nmppmMul_mm_32f(A, M, K,
+                     B + col_start, K, N,
+                     C + col_start, (int)actual_n, N, 0);
+}
+
 // Stubs for libnm6408load_nmc
 extern "C" unsigned int LShift32(unsigned int a, unsigned int b) {
     unsigned int r=a; for(unsigned int i=0;i<b;i++) r<<=1; return r; }
@@ -157,6 +179,7 @@ int main() {
             case OP_SGD: op_sgd(); break;
             case OP_SOFTMAX: op_softmax(); break;
             case OP_RMSNORM: op_rmsnorm(); break;
+            case OP_MATMUL_PARTIAL: op_matmul_partial(); break; /*16-CORE*/
             default: mem[STATUS_ADDR]=2; mem[0]=0; continue;
         }
         mem[STATUS_ADDR]=1; mem[0]=0;
