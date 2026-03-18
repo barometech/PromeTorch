@@ -670,7 +670,7 @@ public:
         Storage new_storage = Storage::create(new_nbytes, device());
 
         // Copy with stride-based indexing
-        char* dst = static_cast<char*>(new_storage.mutable_data());
+        char* dst = static_cast<char*>(new_storage.data());
         const char* src = static_cast<const char*>(data());
         size_t elem_size = itemsize();
 
