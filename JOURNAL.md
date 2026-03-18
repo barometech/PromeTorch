@@ -39,10 +39,16 @@
 - Без этого attention полностью ломается → мусорный вывод
 - После фикса: "The capital of France is" → **"Paris"** (score 18.9) ✓
 
-**Оставшиеся проблемы:**
-1. lm_head (151936×2560) не влезает в DDR → нужен tiling
-2. 71s/forward CPU, ~89s Card → нужна оптимизация data flow
-3. Нужен diff с реальным AirLLM + унификация
+**Добавлено:**
+- Tiled matmul для lm_head (151936×2560 → разбивка по output columns)
+- Детальный per-op profiler (transpose, upload, compute, download, attention, RoPE, QK norm, FFN)
+- Все матмулы строго на NM Card (убран CPU fallback)
+
+**Нюансы от Дмитрия учтённые:**
+- PCIe x4 = 1.2 GB/s measured → каждый MB weights = 0.8ms transfer
+- DDR 5 GB → можно хранить INT4 weights целиком (~1.6 GB)
+- 16 ядер → multicore matmul даст 10-16x (следующий приоритет)
+- nmppmMul_mm_32f = 4 FPU vector pipeline (не скалярный RISC)
 
 ---
 
