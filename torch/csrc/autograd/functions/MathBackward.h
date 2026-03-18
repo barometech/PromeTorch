@@ -592,7 +592,7 @@ struct HardtanhBackward : public Node {
         float max_v = static_cast<float>(max_val_);
 
         for (int64_t i = 0; i < result.numel(); ++i) {
-            result_data[i] = (self_data[i] > min_v && self_data[i] < max_v)
+            result_data[i] = (self_data[i] >= min_v && self_data[i] <= max_v)
                 ? grad_data[i] : 0.0f;
         }
 

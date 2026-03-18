@@ -1,6 +1,39 @@
 # PromeTorch - Журнал разработки
 
 Полная история разработки проекта. Актуальные инструкции — в `CLAUDE.md`.
+Полный аудит инфраструктуры — в `INFRASTRUCTURE_AUDIT.md`.
+
+---
+
+## 2026-03-18: ИНЦИДЕНТ — 16-core NMCard crash + ПОЛНЫЙ АУДИТ
+
+### Инцидент
+16-ядерный `OP_MATMUL_PARTIAL` в `dispatcher_suda_mc.abs` повесил NM Card Mini → полная перезагрузка ПК → потеря несохранённых данных.
+
+**Root cause**: `dispatcher_suda_mc.cpp:161` — `core_index = boot[29]` читает из общего DDR (race condition между 16 ядрами). Рабочий `dispatcher_mc.cpp` использует `ncl_getCoreID()` (hardware register).
+
+### Полный аудит (11 агентов Opus 4.6)
+10 агентов + 1 ручная верификация. Результат: `INFRASTRUCTURE_AUDIT.md`
+
+**Статистика**: 93,315 строк кода, 481 файл, 64+ NN модулей, 68 CUDA ядер, 55 backward функций, 9 оптимизаторов.
+
+**Найдено багов**: 12 критических (верифицировано лично), 12 средних (верифицировано), 19 низких (из отчётов агентов).
+
+**Критические находки:**
+- FlashAttention полностью нерабочий (6 багов: нет grad_Q, block 4096 threads, broken softmax)
+- GradScaler `has_inf_or_nan()` всегда `false` — mixed precision без защиты
+- CUDA element-wise ядра теряют данные >16.7M элементов (нет grid-stride loop)
+- Python `no_grad()` отключён от C++ autograd engine
+- NMCard dispatcher_suda_mc: race condition на core_index + DDR bus saturation
+
+**Что работает отлично:**
+- Autograd: все 55 backward формул математически верны
+- CPU SIMD: AVX2 GEMM, vectorized ops — production quality
+- CUDA quantized GEMV (Q4_K/Q5_K/Q6_K) — production quality
+- GGUF инференс: 49.9 tok/s, 5 архитектур
+- NN modules: 64+ модулей с dual fast-path
+
+**9 коммитов НЕ запушены на remote** — нужен push для безопасности данных.
 
 ---
 

@@ -797,18 +797,23 @@ inline Tensor cat(const std::vector<Tensor>& tensors, int64_t dim = 0) {
         Tensor dst = result.narrow(dim, offset, t.size(dim));
 
         PT_DISPATCH_ALL_TYPES(result.dtype(), "cat_copy", [&] {
-            const scalar_t* src_data = t.data_ptr<scalar_t>();
-            scalar_t* dst_data = dst.mutable_data_ptr<scalar_t>();
-
             // Simple copy for contiguous case
             if (t.is_contiguous() && dst.is_contiguous()) {
+                const scalar_t* src_data = t.data_ptr<scalar_t>();
+                scalar_t* dst_data = dst.mutable_data_ptr<scalar_t>();
                 std::memcpy(dst_data, src_data, t.nbytes());
             } else {
-                // Strided copy
-                int64_t n = t.numel();
+                // Non-contiguous: make source contiguous, then copy
+                Tensor t_c = t.contiguous();
+                Tensor dst_c = dst.contiguous();
+                const scalar_t* src_data = t_c.data_ptr<scalar_t>();
+                scalar_t* dst_data = dst_c.mutable_data_ptr<scalar_t>();
+                int64_t n = t_c.numel();
                 for (int64_t i = 0; i < n; ++i) {
                     dst_data[i] = src_data[i];
                 }
+                // Copy back to the (possibly non-contiguous) dst view
+                dst.copy_(dst_c);
             }
         });
 

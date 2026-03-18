@@ -12,19 +12,52 @@
 
 namespace py = pybind11;
 
-// Helper to convert Python list of tensors to vector of Parameter pointers
-// Note: This creates Parameter wrappers around tensors with managed lifetime
-static std::vector<std::unique_ptr<torch::nn::Parameter>> g_param_storage;
+// ============================================================================
+// Per-optimizer parameter storage
+// ============================================================================
+// Instead of a global static vector that leaks forever, each optimizer gets
+// its own shared container of Parameters. The container is co-owned by the
+// shared_ptr<Optimizer> returned to Python, so it is destroyed when the
+// optimizer is garbage-collected.
 
-std::vector<torch::nn::Parameter*> params_from_tensors(py::list tensors) {
-    std::vector<torch::nn::Parameter*> result;
+using ParamStorage = std::vector<std::unique_ptr<torch::nn::Parameter>>;
+
+struct ParamsAndPtrs {
+    std::shared_ptr<ParamStorage> storage;
+    std::vector<torch::nn::Parameter*> ptrs;
+};
+
+ParamsAndPtrs params_from_tensors(py::list tensors) {
+    ParamsAndPtrs result;
+    result.storage = std::make_shared<ParamStorage>();
+    result.storage->reserve(tensors.size());
     for (auto& t : tensors) {
         auto tensor = t.cast<at::Tensor>();
         auto param = std::make_unique<torch::nn::Parameter>(tensor, true);
-        result.push_back(param.get());
-        g_param_storage.push_back(std::move(param));
+        result.ptrs.push_back(param.get());
+        result.storage->push_back(std::move(param));
     }
     return result;
+}
+
+// Helper: wrap an optimizer shared_ptr so that it co-owns the param storage.
+// When Python releases the optimizer, both the optimizer and param storage
+// are freed (in that order, since the custom deleter releases optimizer first).
+template<typename OptimizerT>
+std::shared_ptr<OptimizerT> make_optimizer_with_params(
+    std::shared_ptr<OptimizerT> optimizer,
+    std::shared_ptr<ParamStorage> param_storage)
+{
+    // Create an aliasing shared_ptr: points to the same optimizer object,
+    // but the control block now also prevents param_storage from being freed.
+    // We capture param_storage in the deleter.
+    auto* raw = optimizer.get();
+    return std::shared_ptr<OptimizerT>(raw,
+        [opt = std::move(optimizer), params = std::move(param_storage)](OptimizerT*) mutable {
+            // Destroy optimizer first (it references params), then params
+            opt.reset();
+            params.reset();
+        });
 }
 
 // ============================================================================
@@ -51,13 +84,14 @@ void init_optim_bindings(py::module& m) {
     py::class_<torch::optim::SGD, torch::optim::Optimizer, std::shared_ptr<torch::optim::SGD>>(m, "SGD")
         .def(py::init([](py::list params, double lr, double momentum, double dampening,
                         double weight_decay, bool nesterov) {
-            auto param_ptrs = params_from_tensors(params);
+            auto pp = params_from_tensors(params);
             torch::optim::SGDOptions opts(lr);
             opts.momentum = momentum;
             opts.dampening = dampening;
             opts.weight_decay = weight_decay;
             opts.nesterov = nesterov;
-            return std::make_shared<torch::optim::SGD>(param_ptrs, opts);
+            auto opt = std::make_shared<torch::optim::SGD>(pp.ptrs, opts);
+            return make_optimizer_with_params(std::move(opt), std::move(pp.storage));
         }), py::arg("params"), py::arg("lr") = 0.01, py::arg("momentum") = 0.0,
            py::arg("dampening") = 0.0, py::arg("weight_decay") = 0.0, py::arg("nesterov") = false)
         .def("step", &torch::optim::SGD::step)
@@ -79,14 +113,15 @@ void init_optim_bindings(py::module& m) {
                         double eps, double weight_decay, bool amsgrad) {
             double beta1 = betas[0].cast<double>();
             double beta2 = betas[1].cast<double>();
-            auto param_ptrs = params_from_tensors(params);
+            auto pp = params_from_tensors(params);
             torch::optim::AdamOptions opts(lr);
             opts.beta1 = beta1;
             opts.beta2 = beta2;
             opts.eps = eps;
             opts.weight_decay = weight_decay;
             opts.amsgrad = amsgrad;
-            return std::make_shared<torch::optim::Adam>(param_ptrs, opts);
+            auto opt = std::make_shared<torch::optim::Adam>(pp.ptrs, opts);
+            return make_optimizer_with_params(std::move(opt), std::move(pp.storage));
         }), py::arg("params"), py::arg("lr") = 0.001, py::arg("betas") = py::make_tuple(0.9, 0.999),
            py::arg("eps") = 1e-8, py::arg("weight_decay") = 0.0, py::arg("amsgrad") = false)
         .def("step", &torch::optim::Adam::step)
@@ -108,14 +143,15 @@ void init_optim_bindings(py::module& m) {
                         double eps, double weight_decay, bool amsgrad) {
             double beta1 = betas[0].cast<double>();
             double beta2 = betas[1].cast<double>();
-            auto param_ptrs = params_from_tensors(params);
+            auto pp = params_from_tensors(params);
             torch::optim::AdamWOptions opts(lr);
             opts.beta1 = beta1;
             opts.beta2 = beta2;
             opts.eps = eps;
             opts.weight_decay = weight_decay;
             opts.amsgrad = amsgrad;
-            return std::make_shared<torch::optim::AdamW>(param_ptrs, opts);
+            auto opt = std::make_shared<torch::optim::AdamW>(pp.ptrs, opts);
+            return make_optimizer_with_params(std::move(opt), std::move(pp.storage));
         }), py::arg("params"), py::arg("lr") = 0.001, py::arg("betas") = py::make_tuple(0.9, 0.999),
            py::arg("eps") = 1e-8, py::arg("weight_decay") = 0.01, py::arg("amsgrad") = false)
         .def("step", &torch::optim::AdamW::step)
@@ -135,14 +171,15 @@ void init_optim_bindings(py::module& m) {
     py::class_<torch::optim::RMSprop, torch::optim::Optimizer, std::shared_ptr<torch::optim::RMSprop>>(m, "RMSprop")
         .def(py::init([](py::list params, double lr, double alpha, double eps,
                         double weight_decay, double momentum, bool centered) {
-            auto param_ptrs = params_from_tensors(params);
+            auto pp = params_from_tensors(params);
             torch::optim::RMSpropOptions opts(lr);
             opts.alpha = alpha;
             opts.eps = eps;
             opts.weight_decay = weight_decay;
             opts.momentum = momentum;
             opts.centered = centered;
-            return std::make_shared<torch::optim::RMSprop>(param_ptrs, opts);
+            auto opt = std::make_shared<torch::optim::RMSprop>(pp.ptrs, opts);
+            return make_optimizer_with_params(std::move(opt), std::move(pp.storage));
         }), py::arg("params"), py::arg("lr") = 0.01, py::arg("alpha") = 0.99,
            py::arg("eps") = 1e-8, py::arg("weight_decay") = 0.0,
            py::arg("momentum") = 0.0, py::arg("centered") = false)

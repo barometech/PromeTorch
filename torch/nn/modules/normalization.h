@@ -96,7 +96,9 @@ public:
 
                 for (int64_t c = 0; c < channels; ++c) {
                     rm[c] = (1.0f - mom) * rm[c] + mom * mean[c];
-                    rv[c] = (1.0f - mom) * rv[c] + mom * var[c];
+                    // PyTorch stores UNbiased variance in running_var
+                    float var_unbiased = var[c] * static_cast<float>(count) / static_cast<float>(count - 1);
+                    rv[c] = (1.0f - mom) * rv[c] + mom * var_unbiased;
                 }
             }
         } else {
@@ -252,7 +254,9 @@ public:
 
                 for (int64_t c = 0; c < channels; ++c) {
                     rm[c] = (1.0f - mom) * rm[c] + mom * mean[c];
-                    rv[c] = (1.0f - mom) * rv[c] + mom * var[c];
+                    // PyTorch stores UNbiased variance in running_var
+                    float var_unbiased = var[c] * static_cast<float>(count) / static_cast<float>(count - 1);
+                    rv[c] = (1.0f - mom) * rv[c] + mom * var_unbiased;
                 }
             }
         } else {
