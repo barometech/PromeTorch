@@ -817,8 +817,8 @@ inline Tensor inverse(const Tensor& self) {
     PT_CHECK_MSG(self.size(0) == self.size(1), "inverse requires square matrix");
 
     int64_t n = self.size(0);
-    auto lu_result_ = lu(self);
-    Tensor L = std::get<0>(lu_result_); Tensor U = std::get<1>(lu_result_); Tensor P = std::get<2>(lu_result_);
+    auto lu_r_ = lu(self);
+    Tensor L = lu_r_.L; Tensor U = lu_r_.U; Tensor P = lu_r_.P;
 
     Tensor result = zeros({n, n}, TensorOptions().dtype(self.dtype()));
 
@@ -883,8 +883,8 @@ inline Tensor solve(const Tensor& A, const Tensor& b) {
     PT_CHECK_MSG(B.size(0) == n, "solve: dimensions mismatch");
 
     int64_t nrhs = B.size(1);
-    auto lu_result_a = lu(A);
-    Tensor L = std::get<0>(lu_result_a); Tensor U = std::get<1>(lu_result_a); Tensor P = std::get<2>(lu_result_a);
+    auto lu_ra_ = lu(A);
+    Tensor L = lu_ra_.L; Tensor U = lu_ra_.U; Tensor P = lu_ra_.P;
 
     Tensor result = zeros({n, nrhs}, TensorOptions().dtype(A.dtype()));
 
@@ -939,8 +939,8 @@ inline Tensor det(const Tensor& self) {
     PT_CHECK_MSG(self.dim() == 2, "det requires 2D tensor");
     PT_CHECK_MSG(self.size(0) == self.size(1), "det requires square matrix");
 
-    auto lu_result_ = lu(self);
-    Tensor L = std::get<0>(lu_result_); Tensor U = std::get<1>(lu_result_); Tensor P = std::get<2>(lu_result_);
+    auto lu_r_ = lu(self);
+    Tensor L = lu_r_.L; Tensor U = lu_r_.U; Tensor P = lu_r_.P;
     int64_t n = self.size(0);
 
     Tensor result = zeros({}, TensorOptions().dtype(self.dtype()));
@@ -1194,8 +1194,8 @@ inline Tensor lstsq(const Tensor& A, const Tensor& b) {
     int64_t nrhs = b2.size(1);
 
     // QR decomposition: A = Q @ R
-    auto qr_result_ = qr(A);
-    Tensor Q = std::get<0>(qr_result_); Tensor R = std::get<1>(qr_result_);
+    auto qr_r_ = qr(A);
+    Tensor Q = qr_r_.Q; Tensor R = qr_r_.R;
 
     // Q^T @ b
     Tensor Qt_b = mm(Q.t(), b2); // [m, m]^T @ [m, nrhs] = [m, nrhs]
@@ -1380,8 +1380,8 @@ inline SVDResult svd(const Tensor& self, bool full_matrices = true) {
 inline Tensor pinverse(const Tensor& self, double rcond = 1e-15) {
     PT_CHECK_MSG(self.dim() == 2, "pinverse requires 2D tensor");
 
-    auto svd_result_ = svd(self, false);
-    Tensor U = std::get<0>(svd_result_); Tensor S = std::get<1>(svd_result_); Tensor Vh = std::get<2>(svd_result_);
+    auto svd_r_ = svd(self, false);
+    Tensor U = svd_r_.U; Tensor S = svd_r_.S; Tensor Vh = svd_r_.Vh;
 
     // Invert S with threshold
     int64_t k = S.size(0);
