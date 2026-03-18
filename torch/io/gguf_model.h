@@ -903,11 +903,11 @@ public:
             normed_ptr = sp.buf_normed.data_ptr<float>();
 
             // -- Gate/Up projections: buf_normed → buf_gate, buf_up --
+            // Fused: single kernel launch for both gate and up (saves 1 launch/layer)
             PROF_BEGIN(profiler, "ffn_gate_up");
-            gemv_scratch(layer.q_ffn_gate, layer.ffn_gate, normed_ptr,
-                        sp.buf_gate.mutable_data_ptr<float>(), inter);
-            gemv_scratch(layer.q_ffn_up, layer.ffn_up, normed_ptr,
-                        sp.buf_up.mutable_data_ptr<float>(), inter);
+            fused_gate_up_gemv(layer, normed_ptr,
+                              sp.buf_gate.mutable_data_ptr<float>(),
+                              sp.buf_up.mutable_data_ptr<float>(), inter);
             PROF_END(profiler, "ffn_gate_up");
 
             // -- SiLU-Mul: silu(gate) * up → buf_silu --
@@ -961,14 +961,15 @@ public:
         return sp.buf_logits;
     }
 
-    // GEMV helper for scratch pool: dispatch cuBLAS FP16 > quant > float32
+    // GEMV helper for scratch pool: dispatch persistent > quant > float32
+    // Uses persistent kernel for Q4_K to reduce launch overhead (grid-stride over rows).
     void gemv_scratch(const QuantizedWeight& qw, const Tensor& float_w,
                       const float* x, float* y, int64_t N) {
         if (use_quant_gemv_ && qw.valid) {
             int K = static_cast<int>(qw.cols);
             int Nr = static_cast<int>(qw.rows);
             if (qw.is_q4k() && qw.gpu_data) {
-                at::cuda::launch_q4km_gemv(qw.gpu_data, x, y, K, Nr, qw.row_stride_bytes, nullptr);
+                at::cuda::launch_q4km_persistent_gemv(qw.gpu_data, x, y, K, Nr, qw.row_stride_bytes, nullptr);
             } else if (qw.is_q6k() && qw.gpu_data) {
                 at::cuda::launch_q6k_gemv(qw.gpu_data, x, y, K, Nr, qw.row_stride_bytes, nullptr);
             } else if (qw.is_q5k() && qw.gpu_data) {
@@ -978,6 +979,30 @@ public:
             int K = static_cast<int>(float_w.size(0));
             int Ni = static_cast<int>(float_w.size(1));
             at::cuda::launch_inference_gemv(x, float_w.data_ptr<float>(), y, K, Ni, nullptr);
+        }
+    }
+
+    // Fused gate+up GEMV: single kernel launch for both gate and up projections.
+    // Saves one kernel launch per layer (~28 launches saved for 28-layer model).
+    void fused_gate_up_gemv(const TransformerLayer& layer,
+                            const float* x, float* y_gate, float* y_up,
+                            int64_t inter) {
+        const auto& qg = layer.q_ffn_gate;
+        const auto& qu = layer.q_ffn_up;
+        // Both must be Q4_K with same K and row_stride for fused kernel
+        if (use_quant_gemv_ && qg.valid && qu.valid &&
+            qg.is_q4k() && qu.is_q4k() && qg.gpu_data && qu.gpu_data &&
+            qg.cols == qu.cols && qg.row_stride_bytes == qu.row_stride_bytes) {
+            int K = static_cast<int>(qg.cols);
+            int N_gate = static_cast<int>(qg.rows);
+            int N_up = static_cast<int>(qu.rows);
+            at::cuda::launch_q4km_fused_gate_up_gemv(
+                qg.gpu_data, qu.gpu_data, x, y_gate, y_up,
+                K, N_gate, N_up, qg.row_stride_bytes, nullptr);
+        } else {
+            // Fallback: two separate GEMVs
+            gemv_scratch(qg, layer.ffn_gate, x, y_gate, inter);
+            gemv_scratch(qu, layer.ffn_up, x, y_up, inter);
         }
     }
 #endif
@@ -1383,9 +1408,10 @@ private:
             int N = static_cast<int>(qw.rows);
 
             // Select launch function based on quant type
+            // Use persistent kernel for Q4_K single-token decode
             auto launch_gemv = [&](const float* x_ptr, float* y_ptr) {
                 if (qw.is_q4k()) {
-                    at::cuda::launch_q4km_gemv(qw.gpu_data, x_ptr, y_ptr,
+                    at::cuda::launch_q4km_persistent_gemv(qw.gpu_data, x_ptr, y_ptr,
                         K, N, qw.row_stride_bytes, nullptr);
                 } else if (qw.is_q6k()) {
                     at::cuda::launch_q6k_gemv(qw.gpu_data, x_ptr, y_ptr,
