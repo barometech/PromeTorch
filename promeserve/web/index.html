@@ -1,0 +1,572 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PromeServe</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg-primary:#0f0f1a;--bg-secondary:#1a1a2e;--bg-tertiary:#16213e;
+  --bg-input:#252545;--bg-hover:#2a2a4a;--bg-msg-user:#4f46e5;
+  --bg-msg-assistant:#1e1e3a;--accent:#6366f1;--accent-hover:#818cf8;
+  --text-primary:#e2e8f0;--text-secondary:#94a3b8;--text-muted:#64748b;
+  --border:#2d2d5a;--danger:#ef4444;--success:#22c55e;
+  --radius:12px;--radius-sm:8px;
+  --font:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+  --sidebar-w:280px;
+}
+html,body{height:100%;font-family:var(--font);background:var(--bg-primary);color:var(--text-primary)}
+button{font-family:inherit;cursor:pointer;border:none;background:none;color:inherit}
+input,textarea,select{font-family:inherit;color:var(--text-primary);background:var(--bg-input);border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px 12px;outline:none}
+input:focus,textarea:focus,select:focus{border-color:var(--accent)}
+textarea{resize:vertical}
+
+/* Layout */
+.app{display:flex;height:100vh;overflow:hidden}
+
+/* Sidebar */
+.sidebar{width:var(--sidebar-w);background:var(--bg-secondary);border-right:1px solid var(--border);display:flex;flex-direction:column;flex-shrink:0;transition:transform .25s ease}
+.sidebar-header{padding:16px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px}
+.sidebar-header h1{font-size:18px;font-weight:700;background:linear-gradient(135deg,var(--accent),#a78bfa);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.sidebar-header .logo{width:28px;height:28px;background:linear-gradient(135deg,var(--accent),#a78bfa);border-radius:8px;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:14px;flex-shrink:0}
+.btn-new-chat{margin:12px 16px;padding:10px;background:var(--accent);color:#fff;border-radius:var(--radius-sm);font-weight:600;font-size:14px;display:flex;align-items:center;justify-content:center;gap:6px;transition:background .2s}
+.btn-new-chat:hover{background:var(--accent-hover)}
+.chat-list{flex:1;overflow-y:auto;padding:4px 8px}
+.chat-list::-webkit-scrollbar{width:4px}
+.chat-list::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
+.chat-item{padding:10px 12px;border-radius:var(--radius-sm);cursor:pointer;display:flex;align-items:center;justify-content:space-between;margin-bottom:2px;font-size:14px;transition:background .15s}
+.chat-item:hover,.chat-item.active{background:var(--bg-hover)}
+.chat-item.active{border-left:3px solid var(--accent)}
+.chat-item-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.chat-item-actions{display:none;gap:4px}
+.chat-item:hover .chat-item-actions{display:flex}
+.chat-item-actions button{padding:4px;font-size:12px;border-radius:4px;opacity:.6}
+.chat-item-actions button:hover{opacity:1;background:var(--bg-input)}
+.sidebar-footer{padding:12px 16px;border-top:1px solid var(--border);font-size:12px;color:var(--text-muted);text-align:center}
+.btn-toggle-sidebar{display:none;position:fixed;top:12px;left:12px;z-index:100;padding:8px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);font-size:18px}
+
+/* Main */
+.main{flex:1;display:flex;flex-direction:column;min-width:0}
+
+/* Top bar */
+.topbar{padding:12px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px;background:var(--bg-secondary)}
+.model-select{min-width:180px;padding:8px 12px;font-size:14px;border-radius:var(--radius-sm)}
+.btn-settings{padding:8px 12px;border-radius:var(--radius-sm);border:1px solid var(--border);font-size:14px;transition:background .15s}
+.btn-settings:hover{background:var(--bg-hover)}
+
+/* Messages */
+.messages{flex:1;overflow-y:auto;padding:20px;display:flex;flex-direction:column;gap:16px}
+.messages::-webkit-scrollbar{width:6px}
+.messages::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
+.msg{display:flex;gap:12px;max-width:85%;animation:msgIn .3s ease}
+.msg.user{align-self:flex-end;flex-direction:row-reverse}
+.msg.assistant{align-self:flex-start}
+@keyframes msgIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+.msg-avatar{width:34px;height:34px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px;flex-shrink:0}
+.msg.user .msg-avatar{background:var(--bg-msg-user);color:#fff}
+.msg.assistant .msg-avatar{background:linear-gradient(135deg,var(--accent),#a78bfa);color:#fff}
+.msg-content{padding:12px 16px;border-radius:var(--radius);font-size:14px;line-height:1.65;word-break:break-word}
+.msg.user .msg-content{background:var(--bg-msg-user);color:#fff;border-bottom-right-radius:4px}
+.msg.assistant .msg-content{background:var(--bg-msg-assistant);border:1px solid var(--border);border-bottom-left-radius:4px}
+.msg-content p{margin-bottom:8px}.msg-content p:last-child{margin-bottom:0}
+.msg-content ul,.msg-content ol{margin:8px 0 8px 20px}
+.msg-content li{margin-bottom:4px}
+.msg-content strong{font-weight:600}
+.msg-content em{font-style:italic;color:var(--accent-hover)}
+.msg-content code{background:rgba(99,102,241,.15);padding:2px 6px;border-radius:4px;font-size:13px;font-family:'Cascadia Code',Consolas,monospace}
+.msg-content pre{position:relative;margin:10px 0;border-radius:var(--radius-sm);overflow:hidden;background:#0d0d1a;border:1px solid var(--border)}
+.msg-content pre .code-header{display:flex;justify-content:space-between;align-items:center;padding:6px 12px;background:rgba(255,255,255,.04);font-size:12px;color:var(--text-muted)}
+.msg-content pre .btn-copy{padding:3px 10px;border-radius:4px;font-size:11px;background:var(--bg-input);border:1px solid var(--border);transition:background .15s}
+.msg-content pre .btn-copy:hover{background:var(--accent)}
+.msg-content pre code{display:block;padding:12px 16px;overflow-x:auto;background:transparent;border-radius:0;font-size:13px;line-height:1.5}
+
+/* Syntax highlighting */
+.tok-kw{color:#c084fc}.tok-str{color:#86efac}.tok-cm{color:#64748b;font-style:italic}
+.tok-fn{color:#67e8f9}.tok-num{color:#fbbf24}.tok-op{color:#f472b6}.tok-type{color:#38bdf8}
+
+/* Loading dots */
+.loading-dots span{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--accent);margin:0 3px;animation:dot 1.2s ease infinite}
+.loading-dots span:nth-child(2){animation-delay:.2s}
+.loading-dots span:nth-child(3){animation-delay:.4s}
+@keyframes dot{0%,80%,100%{opacity:.3;transform:scale(.8)}40%{opacity:1;transform:scale(1.1)}}
+
+/* Action bar below messages */
+.msg-actions{display:flex;gap:6px;margin-top:6px}
+.msg-actions button{padding:4px 10px;font-size:12px;border-radius:4px;border:1px solid var(--border);color:var(--text-muted);transition:all .15s}
+.msg-actions button:hover{color:var(--text-primary);background:var(--bg-hover)}
+
+/* Input area */
+.input-area{padding:16px 20px;border-top:1px solid var(--border);background:var(--bg-secondary)}
+.input-wrapper{display:flex;gap:10px;align-items:flex-end;max-width:900px;margin:0 auto}
+.input-wrapper textarea{flex:1;padding:12px 16px;border-radius:var(--radius);min-height:48px;max-height:180px;font-size:14px;line-height:1.5;border:1px solid var(--border);transition:border-color .2s}
+.btn-send{width:44px;height:44px;border-radius:var(--radius);background:var(--accent);color:#fff;font-size:18px;display:flex;align-items:center;justify-content:center;transition:background .2s}
+.btn-send:hover{background:var(--accent-hover)}
+.btn-send:disabled{opacity:.4;cursor:not-allowed}
+.btn-stop{width:44px;height:44px;border-radius:var(--radius);background:var(--danger);color:#fff;font-size:16px;display:flex;align-items:center;justify-content:center}
+
+/* Settings panel */
+.settings-panel{display:none;position:fixed;top:0;right:0;width:360px;height:100vh;background:var(--bg-secondary);border-left:1px solid var(--border);z-index:200;flex-direction:column;animation:slideIn .25s ease}
+.settings-panel.open{display:flex}
+@keyframes slideIn{from{transform:translateX(100%)}to{transform:translateX(0)}}
+.settings-header{padding:16px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;font-weight:600;font-size:16px}
+.settings-body{flex:1;overflow-y:auto;padding:20px}
+.settings-body::-webkit-scrollbar{width:4px}
+.settings-body::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
+.setting-group{margin-bottom:20px}
+.setting-group label{display:block;font-size:13px;font-weight:600;margin-bottom:6px;color:var(--text-secondary)}
+.setting-group .hint{font-size:11px;color:var(--text-muted);margin-top:4px}
+.setting-group input[type=range]{width:100%;accent-color:var(--accent)}
+.setting-group .range-val{float:right;font-size:13px;color:var(--accent)}
+.setting-group textarea{width:100%;min-height:100px}
+.setting-group input[type=number]{width:100%}
+.setting-group select{width:100%}
+
+/* Welcome screen */
+.welcome{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;color:var(--text-muted);padding:40px}
+.welcome .logo-big{width:64px;height:64px;background:linear-gradient(135deg,var(--accent),#a78bfa);border-radius:18px;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:28px}
+.welcome h2{font-size:22px;color:var(--text-primary)}
+.welcome p{max-width:400px;text-align:center;line-height:1.6;font-size:14px}
+
+/* Responsive */
+@media(max-width:768px){
+  .sidebar{position:fixed;left:0;top:0;bottom:0;z-index:150;transform:translateX(-100%)}
+  .sidebar.open{transform:translateX(0)}
+  .btn-toggle-sidebar{display:block}
+  .msg{max-width:95%}
+  .settings-panel{width:100%}
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <button class="btn-toggle-sidebar" onclick="toggleSidebar()">&#9776;</button>
+
+  <!-- Sidebar -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-header">
+      <div class="logo">P</div>
+      <h1>PromeServe</h1>
+    </div>
+    <button class="btn-new-chat" onclick="newChat()">&#43; New Chat</button>
+    <div class="chat-list" id="chatList"></div>
+    <div class="sidebar-footer">PromeServe &middot; Ollama-compatible</div>
+  </aside>
+
+  <!-- Main -->
+  <div class="main">
+    <div class="topbar">
+      <select class="model-select" id="modelSelect" title="Select model">
+        <option value="">Loading models...</option>
+      </select>
+      <button class="btn-settings" onclick="toggleSettings()">&#9881; Settings</button>
+    </div>
+
+    <div class="messages" id="messages">
+      <div class="welcome" id="welcome">
+        <div class="logo-big">P</div>
+        <h2>PromeServe</h2>
+        <p>Select a model and start chatting. Your conversations are stored locally in your browser.</p>
+      </div>
+    </div>
+
+    <div class="input-area">
+      <div class="input-wrapper">
+        <textarea id="userInput" placeholder="Type a message..." rows="1"
+          onkeydown="handleInputKey(event)" oninput="autoResize(this)"></textarea>
+        <button class="btn-send" id="btnSend" onclick="sendMessage()" title="Send">&#9654;</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings panel -->
+  <div class="settings-panel" id="settingsPanel">
+    <div class="settings-header">
+      Settings
+      <button onclick="toggleSettings()" style="font-size:20px">&times;</button>
+    </div>
+    <div class="settings-body">
+      <div class="setting-group">
+        <label>Model</label>
+        <select id="settingsModel" onchange="document.getElementById('modelSelect').value=this.value"></select>
+      </div>
+      <div class="setting-group">
+        <label>System Prompt</label>
+        <textarea id="systemPrompt" placeholder="You are a helpful assistant..."></textarea>
+      </div>
+      <div class="setting-group">
+        <label>Temperature <span class="range-val" id="tempVal">0.7</span></label>
+        <input type="range" id="temperature" min="0" max="2" step="0.05" value="0.7"
+          oninput="document.getElementById('tempVal').textContent=this.value">
+        <div class="hint">Higher = more creative, lower = more focused</div>
+      </div>
+      <div class="setting-group">
+        <label>Top-p <span class="range-val" id="toppVal">0.9</span></label>
+        <input type="range" id="topp" min="0" max="1" step="0.05" value="0.9"
+          oninput="document.getElementById('toppVal').textContent=this.value">
+      </div>
+      <div class="setting-group">
+        <label>Top-k</label>
+        <input type="number" id="topk" min="1" max="100" value="40">
+      </div>
+      <div class="setting-group">
+        <label>Max Tokens</label>
+        <input type="number" id="maxTokens" min="1" max="32768" value="2048">
+        <div class="hint">Maximum number of tokens to generate</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = 'http://localhost:11434';
+let chats = JSON.parse(localStorage.getItem('promeserve_chats') || '{}');
+let activeChatId = null;
+let abortCtrl = null;
+let isGenerating = false;
+
+// ---- Init ----
+fetchModels();
+renderChatList();
+const lastId = localStorage.getItem('promeserve_active');
+if (lastId && chats[lastId]) loadChat(lastId);
+
+async function fetchModels() {
+  try {
+    const r = await fetch(API + '/api/tags');
+    const d = await r.json();
+    const models = d.models || [];
+    const sel = document.getElementById('modelSelect');
+    const sel2 = document.getElementById('settingsModel');
+    sel.innerHTML = '';
+    sel2.innerHTML = '';
+    if (!models.length) {
+      sel.innerHTML = '<option value="">No models found</option>';
+      sel2.innerHTML = sel.innerHTML;
+      return;
+    }
+    models.forEach(m => {
+      const o = new Option(m.name, m.name);
+      const o2 = new Option(m.name, m.name);
+      sel.add(o); sel2.add(o2);
+    });
+  } catch(e) {
+    document.getElementById('modelSelect').innerHTML = '<option value="">Cannot connect</option>';
+  }
+}
+
+// ---- Chat management ----
+function genId() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
+
+function saveChats() {
+  localStorage.setItem('promeserve_chats', JSON.stringify(chats));
+  if (activeChatId) localStorage.setItem('promeserve_active', activeChatId);
+}
+
+function newChat() {
+  const id = genId();
+  chats[id] = { title: 'New Chat', messages: [], created: Date.now() };
+  activeChatId = id;
+  saveChats();
+  renderChatList();
+  renderMessages();
+  document.getElementById('sidebar').classList.remove('open');
+}
+
+function loadChat(id) {
+  activeChatId = id;
+  saveChats();
+  renderChatList();
+  renderMessages();
+}
+
+function deleteChat(id, ev) {
+  ev.stopPropagation();
+  if (!confirm('Delete this chat?')) return;
+  delete chats[id];
+  if (activeChatId === id) { activeChatId = null; renderMessages(); }
+  saveChats();
+  renderChatList();
+}
+
+function renameChat(id, ev) {
+  ev.stopPropagation();
+  const name = prompt('Rename chat:', chats[id].title);
+  if (name && name.trim()) { chats[id].title = name.trim(); saveChats(); renderChatList(); }
+}
+
+function renderChatList() {
+  const el = document.getElementById('chatList');
+  const sorted = Object.entries(chats).sort((a,b) => b[1].created - a[1].created);
+  el.innerHTML = sorted.map(([id, c]) => `
+    <div class="chat-item ${id === activeChatId ? 'active' : ''}" onclick="loadChat('${id}')">
+      <span class="chat-item-title">${esc(c.title)}</span>
+      <span class="chat-item-actions">
+        <button onclick="renameChat('${id}',event)" title="Rename">&#9998;</button>
+        <button onclick="deleteChat('${id}',event)" title="Delete">&#128465;</button>
+      </span>
+    </div>`).join('');
+}
+
+// ---- Messages ----
+function renderMessages() {
+  const el = document.getElementById('messages');
+  if (!activeChatId || !chats[activeChatId]) {
+    el.innerHTML = `<div class="welcome" id="welcome">
+      <div class="logo-big">P</div><h2>PromeServe</h2>
+      <p>Select a model and start chatting. Your conversations are stored locally in your browser.</p></div>`;
+    return;
+  }
+  const msgs = chats[activeChatId].messages;
+  el.innerHTML = msgs.map((m, i) => {
+    const isLast = m.role === 'assistant' && i === msgs.length - 1;
+    const actions = isLast && !isGenerating ? `<div class="msg-actions">
+      <button onclick="regenerate()">&#8635; Regenerate</button></div>` : '';
+    return `<div class="msg ${m.role}">
+      <div class="msg-avatar">${m.role === 'user' ? 'U' : 'P'}</div>
+      <div><div class="msg-content">${m.role === 'user' ? esc(m.content) : renderMd(m.content)}</div>${actions}</div>
+    </div>`;
+  }).join('');
+  el.scrollTop = el.scrollHeight;
+}
+
+function scrollBottom() {
+  const el = document.getElementById('messages');
+  el.scrollTop = el.scrollHeight;
+}
+
+// ---- Markdown rendering ----
+function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+function renderMd(text) {
+  // Code blocks
+  let html = text.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
+    const l = lang || 'text';
+    const highlighted = highlightSyntax(esc(code.trimEnd()), l);
+    const id = 'cb_' + Math.random().toString(36).slice(2,8);
+    return `<pre><div class="code-header"><span>${esc(l)}</span><button class="btn-copy" onclick="copyCode('${id}')">Copy</button></div><code id="${id}">${highlighted}</code></pre>`;
+  });
+  // Inline code
+  html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+  // Bold
+  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  // Italic
+  html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
+  // Unordered lists
+  html = html.replace(/^[\-\*] (.+)$/gm, '<li>$1</li>');
+  html = html.replace(/((?:<li>.*<\/li>\n?)+)/g, '<ul>$1</ul>');
+  // Ordered lists
+  html = html.replace(/^\d+\. (.+)$/gm, '<li>$1</li>');
+  // Headings
+  html = html.replace(/^### (.+)$/gm, '<h4>$1</h4>');
+  html = html.replace(/^## (.+)$/gm, '<h3>$1</h3>');
+  html = html.replace(/^# (.+)$/gm, '<h2>$1</h2>');
+  // Paragraphs
+  html = html.replace(/\n{2,}/g, '</p><p>');
+  html = '<p>' + html + '</p>';
+  html = html.replace(/<p>\s*(<pre|<ul|<ol|<h[234])/g, '$1');
+  html = html.replace(/(<\/pre>|<\/ul>|<\/ol>|<\/h[234]>)\s*<\/p>/g, '$1');
+  return html;
+}
+
+function highlightSyntax(code, lang) {
+  const keywords = {
+    python: /\b(def|class|import|from|return|if|elif|else|for|while|try|except|with|as|in|not|and|or|True|False|None|yield|async|await|lambda|pass|break|continue|raise|finally|global|nonlocal|assert|del|print)\b/g,
+    javascript: /\b(function|const|let|var|return|if|else|for|while|class|import|export|from|async|await|try|catch|new|this|typeof|instanceof|null|undefined|true|false|throw|switch|case|break|continue|default|yield)\b/g,
+    bash: /\b(if|then|else|fi|for|do|done|while|case|esac|function|return|echo|exit|export|source|cd|ls|rm|cp|mv|mkdir|grep|sed|awk|cat|chmod|sudo|apt|pip|npm|git)\b/g,
+    cpp: /\b(int|float|double|char|void|bool|long|short|unsigned|signed|const|static|class|struct|enum|union|template|typename|namespace|using|return|if|else|for|while|do|switch|case|break|continue|new|delete|nullptr|true|false|auto|virtual|override|public|private|protected|include|define|typedef|sizeof|throw|try|catch|std)\b/g
+  };
+  const kw = keywords[lang] || keywords.cpp;
+  code = code
+    .replace(/(\/\/.*$|#.*$)/gm, '<span class="tok-cm">$1</span>')
+    .replace(/(["'])(?:(?=(\\?))\2.)*?\1/g, '<span class="tok-str">$&</span>')
+    .replace(/\b(\d+\.?\d*)\b/g, '<span class="tok-num">$1</span>');
+  code = code.replace(kw, '<span class="tok-kw">$1</span>');
+  return code;
+}
+
+function copyCode(id) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  const text = el.textContent;
+  navigator.clipboard.writeText(text).then(() => {
+    const btn = el.parentElement.querySelector('.btn-copy');
+    btn.textContent = 'Copied!';
+    setTimeout(() => btn.textContent = 'Copy', 1500);
+  });
+}
+
+// ---- Send / Stream ----
+async function sendMessage() {
+  const input = document.getElementById('userInput');
+  const text = input.value.trim();
+  if (!text || isGenerating) return;
+  const model = document.getElementById('modelSelect').value;
+  if (!model) { alert('Please select a model first.'); return; }
+
+  if (!activeChatId) newChat();
+  const chat = chats[activeChatId];
+  chat.messages.push({ role: 'user', content: text });
+
+  // Auto-title from first message
+  if (chat.messages.length === 1) {
+    chat.title = text.slice(0, 50) + (text.length > 50 ? '...' : '');
+    renderChatList();
+  }
+
+  input.value = '';
+  autoResize(input);
+  renderMessages();
+
+  // Add assistant placeholder
+  chat.messages.push({ role: 'assistant', content: '' });
+  isGenerating = true;
+  updateSendButton();
+
+  // Build messages array for API
+  const apiMsgs = [];
+  const sys = document.getElementById('systemPrompt').value.trim();
+  if (sys) apiMsgs.push({ role: 'system', content: sys });
+  chat.messages.forEach(m => { if (m.content) apiMsgs.push({ role: m.role, content: m.content }); });
+
+  const body = {
+    model,
+    messages: apiMsgs,
+    stream: true,
+    options: {
+      temperature: parseFloat(document.getElementById('temperature').value),
+      top_p: parseFloat(document.getElementById('topp').value),
+      top_k: parseInt(document.getElementById('topk').value),
+      num_predict: parseInt(document.getElementById('maxTokens').value)
+    }
+  };
+
+  abortCtrl = new AbortController();
+  try {
+    const resp = await fetch(API + '/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: abortCtrl.signal
+    });
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    const lastIdx = chat.messages.length - 1;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const obj = JSON.parse(line);
+          if (obj.message && obj.message.content) {
+            chat.messages[lastIdx].content += obj.message.content;
+            updateLastMessage(chat.messages[lastIdx].content);
+          }
+        } catch(e) {}
+      }
+    }
+    // Process remaining buffer
+    if (buffer.trim()) {
+      try {
+        const obj = JSON.parse(buffer);
+        if (obj.message && obj.message.content) {
+          chat.messages[lastIdx].content += obj.message.content;
+        }
+      } catch(e) {}
+    }
+  } catch(e) {
+    if (e.name !== 'AbortError') {
+      const lastIdx = chat.messages.length - 1;
+      chat.messages[lastIdx].content += '\n\n*[Error: ' + esc(e.message) + ']*';
+    }
+  }
+
+  isGenerating = false;
+  abortCtrl = null;
+  updateSendButton();
+  saveChats();
+  renderMessages();
+}
+
+function updateLastMessage(content) {
+  const el = document.getElementById('messages');
+  const msgs = el.querySelectorAll('.msg.assistant');
+  const last = msgs[msgs.length - 1];
+  if (last) {
+    last.querySelector('.msg-content').innerHTML = renderMd(content) +
+      '<div class="loading-dots"><span></span><span></span><span></span></div>';
+    scrollBottom();
+  }
+}
+
+function stopGeneration() {
+  if (abortCtrl) abortCtrl.abort();
+  isGenerating = false;
+  updateSendButton();
+  saveChats();
+  renderMessages();
+}
+
+function regenerate() {
+  if (isGenerating || !activeChatId) return;
+  const chat = chats[activeChatId];
+  if (chat.messages.length < 2) return;
+  // Remove last assistant message
+  if (chat.messages[chat.messages.length - 1].role === 'assistant') chat.messages.pop();
+  // Re-extract user text
+  const lastUser = chat.messages[chat.messages.length - 1];
+  if (lastUser.role !== 'user') return;
+  // Trick: set input, remove last user msg, and send
+  document.getElementById('userInput').value = lastUser.content;
+  chat.messages.pop();
+  saveChats();
+  sendMessage();
+}
+
+function updateSendButton() {
+  const btn = document.getElementById('btnSend');
+  if (isGenerating) {
+    btn.className = 'btn-stop';
+    btn.innerHTML = '&#9632;';
+    btn.onclick = stopGeneration;
+    btn.title = 'Stop generation';
+  } else {
+    btn.className = 'btn-send';
+    btn.innerHTML = '&#9654;';
+    btn.onclick = sendMessage;
+    btn.title = 'Send';
+  }
+}
+
+// ---- Input handling ----
+function handleInputKey(e) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    if (isGenerating) return;
+    sendMessage();
+  }
+}
+
+function autoResize(el) {
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 180) + 'px';
+}
+
+// ---- UI toggles ----
+function toggleSidebar() {
+  document.getElementById('sidebar').classList.toggle('open');
+}
+
+function toggleSettings() {
+  document.getElementById('settingsPanel').classList.toggle('open');
+}
+</script>
+</body>
+</html>
