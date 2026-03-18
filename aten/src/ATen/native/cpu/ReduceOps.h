@@ -809,8 +809,8 @@ inline std::tuple<Tensor, Tensor> sort(const Tensor& self, int64_t dim = -1, boo
 
 // Argsort
 inline Tensor argsort(const Tensor& self, int64_t dim = -1, bool descending = false) {
-    auto [values, indices] = sort(self, dim, descending);
-    return indices;
+    auto sort_result_ = sort(self, dim, descending);
+    return std::get<1>(sort_result_);
 }
 
 // Topk
