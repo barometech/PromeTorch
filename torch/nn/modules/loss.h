@@ -665,7 +665,7 @@ public:
                 int64_t num_classes = input.size(1);
                 int64_t num_valid = batch_size;  // Simplified: assume all samples valid
 
-                auto grad_fn = std::make_shared<torch::autograd::CrossEntropyBackward>(
+                auto grad_fn = torch::autograd::NodePool<torch::autograd::CrossEntropyBackward>::make_shared(
                     softmax_cuda, target_cuda, ignore_index_, num_classes, num_valid, /*output_cuda=*/true);
                 grad_fn->add_input_metadata(input);
                 torch::autograd::set_grad_fn(loss, grad_fn);
@@ -898,7 +898,7 @@ public:
 
             int64_t num_valid = count > 0 ? count : 1;
 
-            auto grad_fn = std::make_shared<torch::autograd::CrossEntropyBackward>(
+            auto grad_fn = torch::autograd::NodePool<torch::autograd::CrossEntropyBackward>::make_shared(
                 softmax_cpu, target_cpu, ignore_index_, num_classes, num_valid, /*output_cuda=*/false);
             grad_fn->add_input_metadata(input);
             torch::autograd::set_grad_fn(output, grad_fn);

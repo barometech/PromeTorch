@@ -1529,5 +1529,413 @@ inline EigResult eig(const Tensor& self) {
     return {eigenvalues, V};
 }
 
+// ============================================================================
+// Randomized SVD (Halko-Martinsson-Tropp 2011)
+// Computes top-k singular values/vectors in O(mn*k) instead of O(mn^2).
+// Reference: "Finding Structure with Randomness" (2011)
+// ============================================================================
+
+inline SVDResult randomized_svd(const Tensor& self, int64_t k,
+                                int64_t oversampling = 10, int64_t n_iter = 2) {
+    PT_CHECK_MSG(self.dim() == 2, "randomized_svd requires 2D tensor");
+
+    int64_t m = self.size(0);
+    int64_t n = self.size(1);
+    int64_t min_mn = std::min(m, n);
+    PT_CHECK_MSG(k > 0 && k <= min_mn,
+        "randomized_svd: k must be in [1, min(m,n)], got k=", k,
+        " for matrix [", m, ", ", n, "]");
+
+    // Clamp oversampling so total sketch size does not exceed n
+    int64_t p = std::min(oversampling, min_mn - k);
+    if (p < 0) p = 0;
+    int64_t l = k + p;  // sketch size
+
+    Tensor A = self.contiguous();
+
+    // Step 1: Generate random Gaussian matrix Omega [n, l]
+    Tensor Omega = at::randn({n, l}, TensorOptions().dtype(self.dtype()));
+
+    // Step 2: Form Y = A @ Omega  [m, l]
+    Tensor Y = mm(A, Omega);
+
+    // Step 3: Power iteration to improve accuracy for slowly decaying spectra
+    // Each iteration: Y = A @ (A^T @ Y)
+    Tensor At = A.t();  // [n, m]
+    for (int64_t iter = 0; iter < n_iter; ++iter) {
+        // Orthogonalize Y for numerical stability before each power step
+        auto qr_y = qr(Y);
+        Y = qr_y.Q.narrow(1, 0, l);  // [m, l] — thin Q
+
+        Tensor Z = mm(At, Y);    // [n, l]
+        // Orthogonalize Z too
+        auto qr_z = qr(Z);
+        Z = qr_z.Q.narrow(1, 0, l);  // [n, l]
+
+        Y = mm(A, Z);             // [m, l]
+    }
+
+    // Step 4: QR decomposition of Y to get orthonormal basis Q
+    auto qr_result = qr(Y);
+    Tensor Q = qr_result.Q.narrow(1, 0, l);  // [m, l]
+
+    // Step 5: Form small matrix B = Q^T @ A  [l, n]
+    Tensor B = mm(Q.t(), A);
+
+    // Step 6: Full SVD of small B (l x n, where l << m typically)
+    auto svd_b = svd(B, false);
+    Tensor Ub = svd_b.U;   // [l, min(l,n)]
+    Tensor S  = svd_b.S;   // [min(l,n)]
+    Tensor Vt = svd_b.Vh;  // [min(l,n), n]
+
+    // Step 7: Recover U = Q @ Ub  [m, min(l,n)]
+    Tensor U = mm(Q, Ub);
+
+    // Truncate to top-k
+    Tensor U_k  = U.narrow(1, 0, k).contiguous();   // [m, k]
+    Tensor S_k  = S.narrow(0, 0, k).contiguous();    // [k]
+    Tensor Vt_k = Vt.narrow(0, 0, k).contiguous();   // [k, n]
+
+    return {U_k, S_k, Vt_k};
+}
+
+// ============================================================================
+// Truncated SVD via Lanczos bidiagonalization
+// Computes top-k singular values/vectors in O(mn*k*iterations).
+// Uses Lanczos iteration on A^T A to find dominant eigenvalues.
+// ============================================================================
+
+inline SVDResult lanczos_svd(const Tensor& self, int64_t k,
+                             int64_t max_iter = 100, double tol = 1e-6) {
+    PT_CHECK_MSG(self.dim() == 2, "lanczos_svd requires 2D tensor");
+
+    int64_t m = self.size(0);
+    int64_t n = self.size(1);
+    int64_t min_mn = std::min(m, n);
+    PT_CHECK_MSG(k > 0 && k <= min_mn,
+        "lanczos_svd: k must be in [1, min(m,n)], got k=", k,
+        " for matrix [", m, ", ", n, "]");
+
+    Tensor A = self.contiguous();
+
+    // Use Lanczos bidiagonalization
+    // Build a tridiagonal matrix T such that eigenvalues of T
+    // approximate eigenvalues of A^T A (= squared singular values of A).
+    //
+    // We keep Lanczos vectors for later recovery of singular vectors.
+
+    // Number of Lanczos steps: at least k, but run more for accuracy
+    int64_t lanczos_steps = std::min(static_cast<int64_t>(max_iter),
+                                     std::min(n, std::max(k + 20, 2 * k)));
+
+    // Storage for Lanczos vectors V [lanczos_steps, n] (rows are v_j)
+    // and tridiagonal coefficients alpha[j], beta[j]
+    Tensor V_storage = at::zeros({lanczos_steps, n}, TensorOptions().dtype(self.dtype()));
+    std::vector<double> alpha_vec(lanczos_steps, 0.0);
+    std::vector<double> beta_vec(lanczos_steps, 0.0);
+
+    PT_DISPATCH_FLOATING_TYPES(self.dtype(), "lanczos_svd", [&] {
+        scalar_t* V_data = V_storage.mutable_data_ptr<scalar_t>();
+
+        // Step 1: Start with random unit vector v0
+        Tensor v = at::randn({n}, TensorOptions().dtype(self.dtype()));
+        {
+            // Normalize
+            scalar_t* v_ptr = v.mutable_data_ptr<scalar_t>();
+            scalar_t nrm = 0;
+            for (int64_t i = 0; i < n; ++i) nrm += v_ptr[i] * v_ptr[i];
+            nrm = std::sqrt(nrm);
+            if (nrm > 1e-15) {
+                for (int64_t i = 0; i < n; ++i) v_ptr[i] /= nrm;
+            }
+        }
+
+        // Store v0
+        {
+            const scalar_t* v_ptr = v.data_ptr<scalar_t>();
+            for (int64_t i = 0; i < n; ++i) V_data[0 * n + i] = v_ptr[i];
+        }
+
+        Tensor v_prev = at::zeros({n}, TensorOptions().dtype(self.dtype()));
+        scalar_t beta_prev = 0;
+
+        int64_t actual_steps = lanczos_steps;
+
+        for (int64_t j = 0; j < lanczos_steps; ++j) {
+            // w = A^T @ (A @ v) - beta_{j-1} * v_{j-1}
+            // This computes (A^T A) v without forming A^T A explicitly
+            Tensor Av = mm(A, v.unsqueeze(1));  // [m, 1]
+            Tensor AtAv = mm(A.t(), Av);         // [n, 1]
+            Tensor w = AtAv.squeeze(1);           // [n]
+
+            if (j > 0) {
+                // w = w - beta_{j-1} * v_{j-1}
+                scalar_t* w_ptr = w.mutable_data_ptr<scalar_t>();
+                const scalar_t* vp_ptr = v_prev.data_ptr<scalar_t>();
+                for (int64_t i = 0; i < n; ++i) {
+                    w_ptr[i] -= beta_prev * vp_ptr[i];
+                }
+            }
+
+            // alpha_j = dot(w, v)
+            scalar_t alpha_j = 0;
+            {
+                const scalar_t* w_ptr = w.data_ptr<scalar_t>();
+                const scalar_t* v_ptr = v.data_ptr<scalar_t>();
+                for (int64_t i = 0; i < n; ++i) alpha_j += w_ptr[i] * v_ptr[i];
+            }
+            alpha_vec[j] = static_cast<double>(alpha_j);
+
+            // w = w - alpha_j * v
+            {
+                scalar_t* w_ptr = w.mutable_data_ptr<scalar_t>();
+                const scalar_t* v_ptr = v.data_ptr<scalar_t>();
+                for (int64_t i = 0; i < n; ++i) w_ptr[i] -= alpha_j * v_ptr[i];
+            }
+
+            // Full re-orthogonalization against all previous Lanczos vectors
+            // (critical for numerical stability)
+            for (int64_t prev = 0; prev <= j; ++prev) {
+                scalar_t dot_val = 0;
+                scalar_t* w_ptr = w.mutable_data_ptr<scalar_t>();
+                for (int64_t i = 0; i < n; ++i) {
+                    dot_val += w_ptr[i] * V_data[prev * n + i];
+                }
+                for (int64_t i = 0; i < n; ++i) {
+                    w_ptr[i] -= dot_val * V_data[prev * n + i];
+                }
+            }
+
+            // beta_j = ||w||
+            scalar_t beta_j = 0;
+            {
+                const scalar_t* w_ptr = w.data_ptr<scalar_t>();
+                for (int64_t i = 0; i < n; ++i) beta_j += w_ptr[i] * w_ptr[i];
+            }
+            beta_j = std::sqrt(beta_j);
+            beta_vec[j] = static_cast<double>(beta_j);
+
+            // Convergence check: if beta is tiny, invariant subspace found
+            if (beta_j < static_cast<scalar_t>(tol)) {
+                actual_steps = j + 1;
+                break;
+            }
+
+            // v_prev = v, v = w / beta_j
+            v_prev = v.clone();
+            beta_prev = beta_j;
+            v = w.div(at::full({}, beta_j, TensorOptions().dtype(self.dtype())));
+
+            // Store v_{j+1}
+            if (j + 1 < lanczos_steps) {
+                const scalar_t* v_ptr = v.data_ptr<scalar_t>();
+                for (int64_t i = 0; i < n; ++i) V_data[(j + 1) * n + i] = v_ptr[i];
+            }
+        }
+
+        lanczos_steps = actual_steps;
+    });
+
+    // Step 2: Build tridiagonal matrix T [lanczos_steps, lanczos_steps]
+    Tensor T = at::zeros({lanczos_steps, lanczos_steps}, TensorOptions().dtype(self.dtype()));
+    PT_DISPATCH_FLOATING_TYPES(self.dtype(), "lanczos_tridiag", [&] {
+        scalar_t* T_data = T.mutable_data_ptr<scalar_t>();
+        for (int64_t j = 0; j < lanczos_steps; ++j) {
+            T_data[j * lanczos_steps + j] = static_cast<scalar_t>(alpha_vec[j]);
+            if (j + 1 < lanczos_steps) {
+                T_data[j * lanczos_steps + (j + 1)] = static_cast<scalar_t>(beta_vec[j]);
+                T_data[(j + 1) * lanczos_steps + j] = static_cast<scalar_t>(beta_vec[j]);
+            }
+        }
+    });
+
+    // Step 3: Eigendecompose T (small matrix — Jacobi is fine here)
+    auto eig_result = eig(T);
+    Tensor eigenvalues = eig_result.eigenvalues;   // [lanczos_steps], sorted desc by |val|
+    Tensor eigenvectors = eig_result.eigenvectors;  // [lanczos_steps, lanczos_steps]
+
+    // Eigenvalues of T approximate eigenvalues of A^T A = sigma^2
+    // They are already sorted by descending absolute value from eig()
+
+    // Step 4: Extract top-k singular values
+    int64_t k_actual = std::min(k, lanczos_steps);
+    Tensor S = at::zeros({k_actual}, TensorOptions().dtype(self.dtype()));
+
+    PT_DISPATCH_FLOATING_TYPES(self.dtype(), "lanczos_sigma", [&] {
+        const scalar_t* ev_data = eigenvalues.data_ptr<scalar_t>();
+        scalar_t* s_data = S.mutable_data_ptr<scalar_t>();
+        for (int64_t i = 0; i < k_actual; ++i) {
+            scalar_t val = ev_data[i];
+            s_data[i] = (val >= 0) ? std::sqrt(val) : 0;
+        }
+    });
+
+    // Step 5: Recover right singular vectors V = V_lanczos^T @ eigvecs_of_T
+    // V_lanczos is [lanczos_steps, n], eigvecs is [lanczos_steps, lanczos_steps]
+    // Right singular vectors: V_svd = V_lanczos^T @ eigvecs[:, :k]  → [n, k]
+    Tensor V_lanczos = V_storage.narrow(0, 0, lanczos_steps);  // [lanczos_steps, n]
+    Tensor eig_k = eigenvectors.narrow(1, 0, k_actual);        // [lanczos_steps, k]
+
+    // V_svd = V_lanczos^T @ eig_k = [n, lanczos_steps] @ [lanczos_steps, k] = [n, k]
+    Tensor V_svd = mm(V_lanczos.t(), eig_k);  // [n, k]
+
+    // Vh = V_svd^T  [k, n]
+    Tensor Vh = V_svd.t().contiguous();
+
+    // Step 6: Recover left singular vectors U = A @ V_svd @ diag(1/S)
+    Tensor U = mm(self, V_svd);  // [m, k]
+
+    PT_DISPATCH_FLOATING_TYPES(self.dtype(), "lanczos_U", [&] {
+        scalar_t* U_data = U.mutable_data_ptr<scalar_t>();
+        const scalar_t* s_data = S.data_ptr<scalar_t>();
+        for (int64_t j = 0; j < k_actual; ++j) {
+            scalar_t sv = s_data[j];
+            if (sv > static_cast<scalar_t>(1e-15)) {
+                for (int64_t i = 0; i < m; ++i) {
+                    U_data[i * k_actual + j] /= sv;
+                }
+            }
+        }
+    });
+
+    return {U.contiguous(), S, Vh};
+}
+
+// ============================================================================
+// Fast SVD dispatch — automatically selects the best algorithm
+//   method="auto"       : randomized if k < min(m,n)/4, else full Jacobi
+//   method="randomized" : Halko-Martinsson-Tropp randomized SVD
+//   method="lanczos"    : Lanczos bidiagonalization
+//   method="full"       : existing Jacobi rotation (O(n^3))
+// ============================================================================
+
+inline SVDResult svd_fast(const Tensor& self, int64_t k = -1,
+                          const std::string& method = "auto") {
+    PT_CHECK_MSG(self.dim() == 2, "svd_fast requires 2D tensor");
+
+    int64_t m = self.size(0);
+    int64_t n = self.size(1);
+    int64_t min_mn = std::min(m, n);
+
+    if (k < 0) k = min_mn;  // full SVD
+    PT_CHECK_MSG(k <= min_mn,
+        "svd_fast: k=", k, " exceeds min(m,n)=", min_mn);
+
+    if (method == "randomized" || (method == "auto" && k < min_mn / 4)) {
+        return randomized_svd(self, k);
+    } else if (method == "lanczos") {
+        return lanczos_svd(self, k);
+    } else {
+        // Full Jacobi SVD, then truncate to k if needed
+        auto result = svd(self, false);
+        if (k < min_mn) {
+            return {
+                result.U.narrow(1, 0, k).contiguous(),
+                result.S.narrow(0, 0, k).contiguous(),
+                result.Vh.narrow(0, 0, k).contiguous()
+            };
+        }
+        return result;
+    }
+}
+
+// ============================================================================
+// Low-rank approximation: A ≈ U @ diag(S) @ Vt  (best rank-k approx)
+// Uses randomized SVD for O(mn*k) complexity.
+// ============================================================================
+
+inline Tensor low_rank_approx(const Tensor& self, int64_t k) {
+    PT_CHECK_MSG(self.dim() == 2, "low_rank_approx requires 2D tensor");
+    PT_CHECK_MSG(k > 0, "low_rank_approx: k must be positive, got ", k);
+    PT_CHECK_MSG(k <= std::min(self.size(0), self.size(1)),
+        "low_rank_approx: k=", k, " exceeds min(m,n)=",
+        std::min(self.size(0), self.size(1)));
+
+    auto result = randomized_svd(self, k);
+
+    // Reconstruct: U * diag(S) * Vt
+    // Scale columns of U by corresponding singular values
+    Tensor US = result.U.contiguous().clone();
+    int64_t m_rows = US.size(0);
+
+    PT_DISPATCH_FLOATING_TYPES(self.dtype(), "low_rank_approx", [&] {
+        scalar_t* us_data = US.mutable_data_ptr<scalar_t>();
+        const scalar_t* s_data = result.S.data_ptr<scalar_t>();
+        for (int64_t j = 0; j < k; ++j) {
+            scalar_t s = s_data[j];
+            for (int64_t i = 0; i < m_rows; ++i) {
+                us_data[i * k + j] *= s;
+            }
+        }
+    });
+
+    return mm(US, result.Vh);  // [m, k] @ [k, n] = [m, n]
+}
+
+// ============================================================================
+// Weight compression via SVD — replace W[m,n] with {A[m,r], B[r,n]}
+// Forward: input[batch, n] @ B^T @ A^T — two smaller matmuls
+// When rank << min(m,n), inference is significantly faster.
+// ============================================================================
+
+struct CompressedWeight {
+    Tensor A;  // [m, rank]
+    Tensor B;  // [rank, n]
+
+    // Apply compressed weight: input[batch, n] -> output[batch, m]
+    // Equivalent to input @ W^T where W ≈ A @ B
+    Tensor forward(const Tensor& input) const {
+        PT_CHECK_MSG(input.dim() == 2, "CompressedWeight::forward requires 2D input");
+        // input @ B^T @ A^T = input @ (A @ B)^T
+        Tensor tmp = mm(input, B.t());  // [batch, rank]
+        return mm(tmp, A.t());          // [batch, m]
+    }
+
+    // Reconstruct the approximate weight matrix W ≈ A @ B
+    Tensor reconstruct() const {
+        return mm(A, B);  // [m, n]
+    }
+};
+
+inline CompressedWeight compress_weight(const Tensor& W, int64_t rank) {
+    PT_CHECK_MSG(W.dim() == 2, "compress_weight requires 2D weight tensor");
+    PT_CHECK_MSG(rank > 0, "compress_weight: rank must be positive, got ", rank);
+    PT_CHECK_MSG(rank <= std::min(W.size(0), W.size(1)),
+        "compress_weight: rank=", rank, " exceeds min(m,n)=",
+        std::min(W.size(0), W.size(1)));
+
+    auto svd_r = randomized_svd(W, rank);
+    // W ≈ U @ diag(S) @ Vt
+    // Split as: A = U @ diag(sqrt(S)),  B = diag(sqrt(S)) @ Vt
+    // So A @ B = U @ diag(S) @ Vt ≈ W
+
+    int64_t m = W.size(0);
+    int64_t n = W.size(1);
+
+    Tensor A_out = svd_r.U.contiguous().clone();   // [m, rank]
+    Tensor B_out = svd_r.Vh.contiguous().clone();  // [rank, n]
+
+    PT_DISPATCH_FLOATING_TYPES(W.dtype(), "compress_weight", [&] {
+        const scalar_t* s_data = svd_r.S.data_ptr<scalar_t>();
+        scalar_t* a_data = A_out.mutable_data_ptr<scalar_t>();
+        scalar_t* b_data = B_out.mutable_data_ptr<scalar_t>();
+
+        for (int64_t r = 0; r < rank; ++r) {
+            scalar_t sqrt_s = std::sqrt(s_data[r]);
+
+            // Scale column r of A by sqrt(S[r])
+            for (int64_t i = 0; i < m; ++i) {
+                a_data[i * rank + r] *= sqrt_s;
+            }
+            // Scale row r of B by sqrt(S[r])
+            for (int64_t j = 0; j < n; ++j) {
+                b_data[r * n + j] *= sqrt_s;
+            }
+        }
+    });
+
+    return {A_out, B_out};
+}
+
 } // namespace native
 } // namespace at

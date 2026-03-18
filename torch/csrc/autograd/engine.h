@@ -12,6 +12,7 @@
 #include <memory>
 #include <functional>
 #include <stdexcept>
+#include <utility>
 
 namespace torch {
 namespace autograd {
@@ -43,6 +44,17 @@ struct GraphTask {
 
     // Accumulated gradients for each node
     std::unordered_map<Node*, variable_list> accumulated_grads;
+
+    // Reset for reuse (avoids re-creating hash maps = fewer mallocs)
+    void reset() {
+        output_edges.clear();
+        output_grads.clear();
+        retain_graph = false;
+        create_graph = false;
+        visited.clear();
+        dependencies.clear();
+        accumulated_grads.clear();
+    }
 };
 
 // ============================================================================
@@ -117,6 +129,11 @@ public:
 
 private:
     Engine() = default;
+
+    // Cached GraphTask — reused across backward() calls to avoid
+    // re-allocating hash map buckets on every backward pass.
+    // On Elbrus E2K, unordered_map construction = multiple mallocs for bucket array.
+    GraphTask cached_task_;
 
     // Count dependencies for all nodes
     void compute_dependencies(
@@ -221,10 +238,12 @@ inline void Engine::accumulate_grad(
     }
 
     if (!grads[input_nr].defined()) {
-        grads[input_nr] = grad;
+        // First gradient — just move, no copy
+        grads[input_nr] = std::move(grad);
     } else {
-        // Accumulate gradients
-        grads[input_nr] = grads[input_nr].add(grad);
+        // In-place accumulate: avoids allocating a new tensor.
+        // On Elbrus E2K, each tensor allocation = malloc syscall.
+        grads[input_nr].add_(grad);
     }
 }
 
@@ -286,7 +305,11 @@ inline variable_list Engine::execute(
 ) {
     validate_inputs(roots, grad_outputs);
 
-    GraphTask task;
+    // Reuse cached GraphTask to avoid re-allocating hash map buckets.
+    // On Elbrus E2K, unordered_map/set construction allocates bucket arrays
+    // via malloc. By reusing (clear + reuse), we keep the allocated buckets.
+    GraphTask& task = cached_task_;
+    task.reset();
     task.retain_graph = retain_graph;
     task.create_graph = create_graph;
 
@@ -336,11 +359,8 @@ inline variable_list Engine::execute(
     // that were accumulated but never consumed (e.g., for unused inputs)
     task.accumulated_grads.clear();
 
-    // Also clear visited set (contains raw pointers, safe to clear)
-    task.visited.clear();
-
-    // Clear dependencies map
-    task.dependencies.clear();
+    // Note: visited and dependencies are cleared in task.reset() on next call.
+    // We don't clear here to preserve allocated bucket arrays for reuse.
 
     return result;
 }

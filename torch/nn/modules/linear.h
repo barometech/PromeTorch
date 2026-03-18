@@ -34,11 +34,13 @@ public:
 
 class Linear : public Module {
 public:
-    Linear(int64_t in_features, int64_t out_features, bool bias = true)
+    Linear(int64_t in_features, int64_t out_features, bool bias = true,
+           bool fused_relu = false)
         : Module("Linear")
         , in_features_(in_features)
         , out_features_(out_features)
         , has_bias_(bias)
+        , fused_relu_(fused_relu)
     {
         // Initialize weight: [out_features, in_features]
         Tensor weight = at::empty({out_features, in_features});
@@ -123,6 +125,14 @@ public:
                 }
             }
 
+            // Fused relu in inference fast path
+            if (fused_relu_) {
+                int64_t total = M * N;
+                for (int64_t i = 0; i < total; ++i) {
+                    out[i] = out[i] > 0.0f ? out[i] : 0.0f;
+                }
+            }
+
             // Reshape back if input was >2D
             if (input.dim() > 2) {
                 std::vector<int64_t> out_shape(input.sizes().begin(), input.sizes().end() - 1);
@@ -135,13 +145,31 @@ public:
         // ================================================================
         // Autograd path: full gradient tracking
         // ================================================================
+
+        // Fast fused path for 2D inputs (most common: MLP training)
+        // Fuses mm + bias_add (+ optional relu) into a single op and backward node
+        if (input.dim() == 2 && W.dtype() == c10::ScalarType::Float) {
+            Tensor bias_data;
+            if (has_bias_) {
+                auto* bias_param = get_parameter("bias");
+                bias_data = bias_param->data();
+            }
+
+            if (fused_relu_) {
+                return torch::autograd::fused_linear_relu_autograd(
+                    input, W, bias_data, has_bias_);
+            } else {
+                return torch::autograd::fused_linear_autograd(
+                    input, W, bias_data, has_bias_);
+            }
+        }
+
+        // Fallback path for 1D and >2D inputs (unchanged)
         Tensor weight_t = torch::autograd::t_autograd(W);
         Tensor output;
 
         if (input.dim() == 1) {
             output = torch::autograd::mv_autograd(W, input);
-        } else if (input.dim() == 2) {
-            output = torch::autograd::mm_autograd(input, weight_t);
         } else {
             auto input_shape = input.sizes().vec();
             int64_t batch = 1;
@@ -168,16 +196,20 @@ public:
         ss << "in_features=" << in_features_
            << ", out_features=" << out_features_
            << ", bias=" << (has_bias_ ? "True" : "False");
+        if (fused_relu_) ss << ", fused_relu=True";
         return ss.str();
     }
 
     int64_t in_features() const { return in_features_; }
     int64_t out_features() const { return out_features_; }
+    bool fused_relu() const { return fused_relu_; }
+    void set_fused_relu(bool v) { fused_relu_ = v; }
 
 private:
     int64_t in_features_;
     int64_t out_features_;
     bool has_bias_;
+    bool fused_relu_;
 };
 
 // ============================================================================
