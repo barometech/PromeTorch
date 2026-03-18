@@ -29,6 +29,17 @@
 **Поддерживаемые архитектуры:** Qwen2, Qwen3, Llama, Mistral
 **Quantization:** NF4 (4-bit), INT8 blockwise — встроено в splitter + loader
 
+**Первый запуск на NM Card Mini:**
+- Prefill 6 tokens: 89s (работает, но медленно)
+- Генерация: мусорный текст — ошибка в matmul dispatch или weight transpose
+- lm_head (151936×2560 = 1.5 GB) не влезает в DDR одним куском → нужен tiling
+
+**Проблемы найденные:**
+1. CPU fallback для lm_head сломал pipeline — нужен тайлинг на карте
+2. Мусорный вывод → вероятно weight.T неправильно или attention bugs
+3. 89s prefill → нужен полный профайлинг: disk I/O vs PCIe vs compute
+4. Реализация надуманная — нужно глубже изучить AirLLM data flow
+
 ---
 
 ## 2026-03-18: Закрытие 4 блоков требований партнёра (partner)
