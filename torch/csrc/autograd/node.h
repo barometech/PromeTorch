@@ -11,6 +11,9 @@
 #include <functional>
 #include <mutex>
 #include <iostream>
+#include <algorithm>
+#include <cassert>
+#include <cstdint>
 
 namespace torch {
 namespace autograd {
@@ -18,6 +21,177 @@ namespace autograd {
 using at::Tensor;
 using variable_list = std::vector<Tensor>;
 using edge_list = std::vector<Edge>;
+
+// ============================================================================
+// SmallEdgeList - Inline storage for edges (avoids heap allocation)
+// ============================================================================
+// Most autograd nodes have 1-3 input edges (unary ops: 1, binary ops: 2,
+// ternary: 3). This stores up to N edges inline without malloc.
+// Falls back to heap vector only for rare cases with > N edges.
+// On Elbrus E2K, each avoided malloc saves a syscall + VLIW pipeline stall.
+
+template<size_t InlineCapacity = 4>
+class SmallEdgeList {
+    Edge inline_storage_[InlineCapacity];
+    uint8_t size_ = 0;
+    uint8_t using_heap_ = 0;  // 0 = inline, 1 = heap
+    std::vector<Edge>* heap_ = nullptr;
+
+public:
+    SmallEdgeList() = default;
+
+    ~SmallEdgeList() {
+        if (using_heap_ && heap_) {
+            delete heap_;
+        }
+    }
+
+    // Move constructor
+    SmallEdgeList(SmallEdgeList&& other) noexcept
+        : size_(other.size_), using_heap_(other.using_heap_) {
+        if (using_heap_) {
+            heap_ = other.heap_;
+            other.heap_ = nullptr;
+            other.using_heap_ = 0;
+            other.size_ = 0;
+        } else {
+            for (uint8_t i = 0; i < size_; ++i) {
+                inline_storage_[i] = std::move(other.inline_storage_[i]);
+            }
+            other.size_ = 0;
+        }
+    }
+
+    // Move assignment
+    SmallEdgeList& operator=(SmallEdgeList&& other) noexcept {
+        if (this != &other) {
+            clear();
+            size_ = other.size_;
+            using_heap_ = other.using_heap_;
+            if (using_heap_) {
+                heap_ = other.heap_;
+                other.heap_ = nullptr;
+                other.using_heap_ = 0;
+                other.size_ = 0;
+            } else {
+                for (uint8_t i = 0; i < size_; ++i) {
+                    inline_storage_[i] = std::move(other.inline_storage_[i]);
+                }
+                other.size_ = 0;
+            }
+        }
+        return *this;
+    }
+
+    // No copy (edges contain shared_ptr, copying is expensive)
+    SmallEdgeList(const SmallEdgeList&) = delete;
+    SmallEdgeList& operator=(const SmallEdgeList&) = delete;
+
+    size_t size() const { return using_heap_ ? heap_->size() : size_; }
+    bool empty() const { return size() == 0; }
+
+    void push_back(Edge edge) {
+        if (using_heap_) {
+            heap_->push_back(std::move(edge));
+        } else if (size_ < InlineCapacity) {
+            inline_storage_[size_++] = std::move(edge);
+        } else {
+            // Spill to heap
+            heap_ = new std::vector<Edge>();
+            heap_->reserve(size_ + 4);
+            for (uint8_t i = 0; i < size_; ++i) {
+                heap_->push_back(std::move(inline_storage_[i]));
+            }
+            heap_->push_back(std::move(edge));
+            using_heap_ = 1;
+        }
+    }
+
+    template<typename... Args>
+    void emplace_back(Args&&... args) {
+        push_back(Edge(std::forward<Args>(args)...));
+    }
+
+    const Edge& operator[](size_t i) const {
+        return using_heap_ ? (*heap_)[i] : inline_storage_[i];
+    }
+
+    Edge& operator[](size_t i) {
+        return using_heap_ ? (*heap_)[i] : inline_storage_[i];
+    }
+
+    const Edge& at(size_t i) const {
+        if (i >= size()) throw std::out_of_range("SmallEdgeList::at");
+        return (*this)[i];
+    }
+
+    Edge& at(size_t i) {
+        if (i >= size()) throw std::out_of_range("SmallEdgeList::at");
+        return (*this)[i];
+    }
+
+    void resize(size_t n) {
+        if (using_heap_) {
+            heap_->resize(n);
+        } else if (n <= InlineCapacity) {
+            // Clear edges beyond new size
+            for (size_t i = n; i < size_; ++i) {
+                inline_storage_[i] = Edge();
+            }
+            size_ = static_cast<uint8_t>(n);
+        } else {
+            // Spill to heap
+            heap_ = new std::vector<Edge>(n);
+            for (uint8_t i = 0; i < size_; ++i) {
+                (*heap_)[i] = std::move(inline_storage_[i]);
+            }
+            using_heap_ = 1;
+        }
+    }
+
+    void clear() {
+        if (using_heap_) {
+            delete heap_;
+            heap_ = nullptr;
+            using_heap_ = 0;
+        } else {
+            for (uint8_t i = 0; i < size_; ++i) {
+                inline_storage_[i] = Edge();
+            }
+        }
+        size_ = 0;
+    }
+
+    void reserve(size_t n) {
+        if (n > InlineCapacity && !using_heap_) {
+            // Pre-spill to heap if we know we'll need it
+            heap_ = new std::vector<Edge>();
+            heap_->reserve(n);
+            for (uint8_t i = 0; i < size_; ++i) {
+                heap_->push_back(std::move(inline_storage_[i]));
+            }
+            using_heap_ = 1;
+        } else if (using_heap_) {
+            heap_->reserve(n);
+        }
+    }
+
+    // Iterator support (for range-based for loops)
+    const Edge* begin() const { return using_heap_ ? heap_->data() : inline_storage_; }
+    const Edge* end() const { return begin() + size(); }
+    Edge* begin() { return using_heap_ ? heap_->data() : inline_storage_; }
+    Edge* end() { return begin() + size(); }
+
+    // Convert to edge_list (for compatibility with existing code)
+    edge_list to_vector() const {
+        edge_list result;
+        result.reserve(size());
+        for (size_t i = 0; i < size(); ++i) {
+            result.push_back((*this)[i]);
+        }
+        return result;
+    }
+};
 
 // DEBUG: Global counters for tracking Node lifecycle
 inline std::atomic<int64_t> g_nodes_created{0};
@@ -51,8 +225,9 @@ inline void print_node_stats() {
 struct Node : std::enable_shared_from_this<Node> {
 protected:
     // Edges to the next functions in the backward graph
-    // These are the functions that will receive our computed gradients
-    edge_list next_edges_;
+    // Uses SmallEdgeList: stores up to 4 edges inline (no malloc).
+    // Most ops have 1-3 edges (unary=1, binary=2), so this covers 99%+ cases.
+    SmallEdgeList<4> next_edges_;
 
     // Unique sequence number for topological ordering
     uint64_t sequence_nr_;
@@ -108,12 +283,12 @@ public:
         return next_edges_.at(index);
     }
 
-    // Get all next edges
-    const edge_list& next_edges() const noexcept {
+    // Get all next edges (returns SmallEdgeList reference)
+    const SmallEdgeList<4>& next_edges() const noexcept {
         return next_edges_;
     }
 
-    edge_list& next_edges() noexcept {
+    SmallEdgeList<4>& next_edges() noexcept {
         return next_edges_;
     }
 
@@ -134,6 +309,11 @@ public:
     // Override this in subclasses to release saved tensors
     virtual void release_saved_tensors() {
         // Default implementation does nothing
+    }
+
+    // Clear edges for NodePool recycling (called by PooledDeleter)
+    void next_edges_clear_pooled() {
+        next_edges_.clear();
     }
 
     // Set next edge at index
