@@ -9,6 +9,12 @@
 #include "aten/src/ATen/native/cpu/tuda/TudaConfig.h"
 #include "aten/src/ATen/native/cpu/tuda/TudaVec.h"
 
+// EML (Elbrus Math Library) BLAS integration
+#if defined(TUDA_E2K) && __has_include(<eml/cblas.h>)
+#define PT_USE_EML_BLAS 1
+#include <eml/cblas.h>
+#endif
+
 // Architecture-specific micro-kernels (only compiled on matching platform)
 #if defined(TUDA_NEON_A75)
 #include "aten/src/ATen/native/cpu/tuda/kernels/neon/MicroKernel_8x12.h"
@@ -307,6 +313,15 @@ static void sgemm(
     float beta,
     float* __restrict C, int64_t ldc
 ) {
+#ifdef PT_USE_EML_BLAS
+    // Use EML (Elbrus Math Library) optimized BLAS — VLIW-tuned, multi-threaded
+    // EML cblas_sgemm on E8C2: 230-269 GFLOPS (vs ~10 GFLOPS our scalar)
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                (int)M, (int)N, (int)K,
+                alpha, A, (int)lda, B, (int)ldb,
+                beta, C, (int)ldc);
+    return;
+#endif
     // Small matrix fast path
     if (K < 64 || (M * K < MC * KC && M < MR * 2)) {
         // Simple accumulation with VecF
@@ -369,6 +384,14 @@ static void sgemm_nt(
     float beta,
     float* __restrict C, int64_t ldc
 ) {
+#ifdef PT_USE_EML_BLAS
+    // B is transposed: C = alpha * A @ B^T + beta * C
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                (int)M, (int)N, (int)K,
+                alpha, A, (int)lda, B, (int)ldb,
+                beta, C, (int)ldc);
+    return;
+#endif
     // Small matrix fast path
     if (M * N * K < 128 * 128 * 128 || K < 64 || M < MR) {
         constexpr int W = VecF::width;
