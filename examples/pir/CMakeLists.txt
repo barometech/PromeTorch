@@ -20,6 +20,7 @@ endif()
 add_executable(train_mlp train_mlp.cpp)
 
 # MLP Char Model for GPU utilization comparison
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/train_mlp_char.cpp")
 add_executable(train_mlp_char train_mlp_char.cpp)
 
 target_link_libraries(train_mlp_char
@@ -34,6 +35,7 @@ endif()
 if(PT_USE_OPENMP AND OpenMP_CXX_FOUND)
     target_link_libraries(train_mlp_char PRIVATE OpenMP::OpenMP_CXX)
 endif()
+endif() # EXISTS train_mlp_char.cpp
 
 target_link_libraries(train_mlp
     PRIVATE
