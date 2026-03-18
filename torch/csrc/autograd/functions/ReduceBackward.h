@@ -323,7 +323,7 @@ struct ProdBackward : public Node {
         Tensor grad_input = at::zeros(self_.sizes());
         const float* self_data = self_.data_ptr<float>();
         float* grad_data = grad_input.mutable_data_ptr<float>();
-        float grad_scalar = grad.item();
+        float grad_scalar = grad.item().toFloat();
         int64_t n = self_.numel();
 
         for (int64_t i = 0; i < n; ++i) {
