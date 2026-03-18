@@ -2,6 +2,7 @@
 
 #include "torch/io/gguf_loader.h"
 #include "torch/io/gguf_dequant.h"
+#include "torch/io/cpu_quant_gemv.h"
 #include "torch/io/ollama.h"
 #include "torch/io/tokenizer.h"
 #include "torch/io/inference_profiler.h"
@@ -138,6 +139,7 @@ struct QuantizedWeight {
     bool is_q4k() const { return quant_type == 12; }  // GGML_TYPE_Q4_K
     bool is_q6k() const { return quant_type == 14; }  // GGML_TYPE_Q6_K
     bool is_q5k() const { return quant_type == 13; }  // GGML_TYPE_Q5_K
+    bool is_q8_0() const { return quant_type == 8; }  // GGML_TYPE_Q8_0
 
     void free_gpu() {
         gpu_data = nullptr;
@@ -1437,9 +1439,30 @@ public:
             }
         }
 #endif
-        // CPU Q4_K_M dequant-GEMV
-        if (!use_cuda_ && use_quant_gemv_ && qw.valid && qw.cpu_data && a.size(0) == 1) {
-            return cpu_q4km_gemv(a, qw);
+        // CPU fused dequant-GEMV for all supported quant types (Q4_K, Q6_K, Q5_K, Q8_0)
+        if (!use_cuda_ && use_quant_gemv_ && qw.valid && qw.cpu_data &&
+            cpu_quant::cpu_quant_gemv_supported(qw.quant_type)) {
+            int64_t M = a.size(0);
+            int64_t K_dim = static_cast<int64_t>(qw.cols);
+            int64_t N_dim = static_cast<int64_t>(qw.rows);
+
+            Tensor output = at::zeros({M, N_dim});
+            const float* x_data = a.data_ptr<float>();
+            float* y_data = output.mutable_data_ptr<float>();
+
+            if (M == 1) {
+                // Single-token decode: direct GEMV
+                cpu_quant::cpu_quant_gemv(qw.quant_type, qw.cpu_data,
+                    x_data, y_data, K_dim, N_dim, qw.row_stride_bytes);
+            } else {
+                // Prefill (M>1): batch GEMV — one per input row
+                for (int64_t m = 0; m < M; ++m) {
+                    cpu_quant::cpu_quant_gemv(qw.quant_type, qw.cpu_data,
+                        x_data + m * K_dim, y_data + m * N_dim,
+                        K_dim, N_dim, qw.row_stride_bytes);
+                }
+            }
+            return output;
         }
         return matmul(a, b, transpose_b);
     }
