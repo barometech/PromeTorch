@@ -5,6 +5,31 @@
 
 ---
 
+## 2026-03-18: cuBLAS GEMM + Full Verification
+
+### cuBLAS Integration
+Заменил custom 32x32 tiled GEMM kernel на `cublasSgemm` + `cublasSgemmStridedBatched`.
+Файл: `aten/src/ATen/cuda/CUDABlas.cu` (~20 строк изменений).
+
+**Результат GPU inference (A100):**
+| Модель | До | После | Ollama | vs Ollama |
+|--------|-----|-------|--------|-----------|
+| qwen3:4b | 34.8 | **41.1 tok/s** | 161.9 | 25% |
+| gemma3:4b | 57.1 | **82.5 tok/s** | 136.3 | **60%** |
+| deepseek-r1:8b | 27.6 | **35.0 tok/s** | 128.6 | 27% |
+
+### Полная верификация
+- CPU Build: PASS
+- CUDA Build: PASS (cuBLAS integrated)
+- NMCard Emulator: 33/33 PASS
+- Docker Astra: 34/34 PASS
+- Docker Elbrus: 34/34 PASS
+- Docker RED OS: 34/34 PASS
+- MNIST 10 моделей: ALL PASS (97.65% top, LSTM 98.44%, GRU 95.31%)
+- CPU benchmark vs PyTorch 2.10: 1.47x overall (побеждаем на 15/50 тестов)
+
+---
+
 ## 2026-03-18: Gap Analysis vs PyTorch
 
 Полный анализ: `GAP_ANALYSIS_VS_PYTORCH.md`

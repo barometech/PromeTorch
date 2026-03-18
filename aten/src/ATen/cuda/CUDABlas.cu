@@ -4,10 +4,12 @@
 // Matrix multiplication and linear algebra operations
 
 #include <cuda_runtime.h>
+#include <cublas_v2.h>
 #include <cmath>
 
 // Include the header to get ATEN_CUDA_API macro for proper DLL export
 #include "aten/src/ATen/cuda/CUDAOps.h"
+#include "aten/src/ATen/cuda/CuBLASHandle.h"
 
 namespace at {
 namespace cuda {
@@ -451,18 +453,28 @@ void launch_gemm(
     bool trans_a, bool trans_b,
     cudaStream_t stream
 ) {
-    dim3 blocks((N + TILE_SIZE - 1) / TILE_SIZE, (M + TILE_SIZE - 1) / TILE_SIZE);
-    dim3 threads(TILE_SIZE, TILE_SIZE);
+    // Use cuBLAS for optimal performance (tensor cores, tuned kernels)
+    // cuBLAS uses column-major, so we compute C^T = B^T @ A^T
+    // which gives us row-major C = A @ B
+    cublasHandle_t handle = CuBLASHandle::get();
+    cublasSetStream(handle, stream);
 
-    if (!trans_a && !trans_b) {
-        gemm_nn_kernel<<<blocks, threads, 0, stream>>>(A, B, C, M, N, K, alpha, beta);
-    } else if (trans_a && !trans_b) {
-        gemm_tn_kernel<<<blocks, threads, 0, stream>>>(A, B, C, M, N, K, alpha, beta);
-    } else if (!trans_a && trans_b) {
-        gemm_nt_kernel<<<blocks, threads, 0, stream>>>(A, B, C, M, N, K, alpha, beta);
-    } else {
-        gemm_tt_kernel<<<blocks, threads, 0, stream>>>(A, B, C, M, N, K, alpha, beta);
-    }
+    cublasOperation_t op_a = trans_b ? CUBLAS_OP_T : CUBLAS_OP_N;
+    cublasOperation_t op_b = trans_a ? CUBLAS_OP_T : CUBLAS_OP_N;
+
+    // cuBLAS column-major: C(N,M) = B(N,K) @ A(K,M)
+    // lda = leading dim of first matrix in cuBLAS (B or B^T)
+    int lda = trans_b ? K : N;  // leading dim of B in col-major
+    int ldb = trans_a ? M : K;  // leading dim of A in col-major
+    int ldc = N;                // leading dim of C in col-major
+
+    cublasSgemm(handle, op_a, op_b,
+                N, M, K,
+                &alpha,
+                B, lda,
+                A, ldb,
+                &beta,
+                C, ldc);
 }
 
 void launch_batched_gemm(
@@ -471,9 +483,24 @@ void launch_batched_gemm(
     float alpha, float beta,
     cudaStream_t stream
 ) {
-    dim3 blocks((N + TILE_SIZE - 1) / TILE_SIZE, (M + TILE_SIZE - 1) / TILE_SIZE, batch);
-    dim3 threads(TILE_SIZE, TILE_SIZE);
-    batched_gemm_nn_kernel<<<blocks, threads, 0, stream>>>(A, B, C, batch, M, N, K, alpha, beta);
+    // Use cuBLAS strided batched GEMM
+    cublasHandle_t handle = CuBLASHandle::get();
+    cublasSetStream(handle, stream);
+
+    long long int strideA = (long long int)M * K;
+    long long int strideB = (long long int)K * N;
+    long long int strideC = (long long int)M * N;
+
+    // cuBLAS col-major: C^T = B^T @ A^T
+    cublasSgemmStridedBatched(handle,
+        CUBLAS_OP_N, CUBLAS_OP_N,
+        N, M, K,
+        &alpha,
+        B, N, strideB,
+        A, K, strideA,
+        &beta,
+        C, N, strideC,
+        batch);
 }
 
 void launch_gemv(
