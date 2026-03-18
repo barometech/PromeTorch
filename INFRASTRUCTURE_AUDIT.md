@@ -1014,6 +1014,24 @@ L1-L19 — см. таблицу выше
 
 ---
 
+---
+
+## ВЕРИФИКАЦИЯ ПОСЛЕ ФИКСОВ (2026-03-18)
+
+### Коммит: `d89ff24` + `203203b` (31 баг + 2 compilation fixes)
+
+| Тест | Результат |
+|------|-----------|
+| CPU Build (MSVC 2019, NMake) | **PASS** — 0 errors, только warnings |
+| MNIST Training (1 epoch, lr=0.001) | **PASS** — 31.03% test acc, нет крашей |
+| NMCard Emulator (33 тестов) | **33/33 PASSED** |
+| CUDA Build (nvcc + MSVC 2019) | **PASS** — 0 errors, только warnings |
+| Python Bindings Build (_C.pyd) | **PASS** — компиляция OK, runtime DLL deps preexisting issue |
+
+### Compilation issues found and fixed:
+1. `TensorImpl.h:673`: `Storage::mutable_data()` → `Storage::data()` (void* API, не template)
+2. `ReduceBackward.h:326`: `grad.item()` → `grad.item().toFloat()` (Scalar не implicit-convertible в float)
+
 *Этот документ — единый источник правды о состоянии инфраструктуры PromeTorch.*
 *Ссылки: CLAUDE.md, JOURNAL.md, MEMORY.md*
 *Обновлять после каждого значимого фикса.*
