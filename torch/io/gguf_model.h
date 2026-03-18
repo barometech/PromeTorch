@@ -1198,8 +1198,7 @@ public:
         return result;
     }
 
-private:
-    // Check if token is a stop/EOS token for the model
+    // Public access for PromeServe streaming API
     bool is_stop_token(int32_t token_id) const {
         if (token_id < 0 || token_id >= static_cast<int32_t>(tokenizer.vocab.size())) return false;
         const auto& tok = tokenizer.vocab[token_id];

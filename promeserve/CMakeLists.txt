@@ -1,7 +1,7 @@
 # PromeServe — HTTP inference server
 
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/promeserve.cpp")
-    add_executable(promeserve promeserve.cpp)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/main.cpp")
+    add_executable(promeserve main.cpp)
     target_include_directories(promeserve PRIVATE
         ${PROJECT_SOURCE_DIR}
         ${PROJECT_SOURCE_DIR}/aten/src
