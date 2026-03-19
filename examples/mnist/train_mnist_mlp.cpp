@@ -8,6 +8,7 @@
 #include "torch/optim/optim.h"
 #include "torch/optim/adamkiller.h"
 #include "torch/csrc/autograd/autograd.h"
+#include "c10/core/Allocator.h"
 #ifdef PT_USE_CUDA
 #include "aten/src/ATen/cuda/CUDADispatch.h"
 #include "c10/cuda/CUDAAllocator.h"
@@ -131,14 +132,12 @@ class MNISTMLP : public Module {
 public:
     MNISTMLP() : Module("MNISTMLP") {
         // Full 4-layer MLP: 784 -> 512 -> 256 -> 128 -> 10
-        fc1 = std::make_shared<Linear>(784, 512);
-        fc2 = std::make_shared<Linear>(512, 256);
-        fc3 = std::make_shared<Linear>(256, 128);
+        // Use fused_relu=true for first 3 layers (Linear+ReLU in one op)
+        // fc4 feeds into CrossEntropy which handles softmax — no fused relu
+        fc1 = std::make_shared<Linear>(784, 512, true, true);   // bias=true, fused_relu=true
+        fc2 = std::make_shared<Linear>(512, 256, true, true);   // bias=true, fused_relu=true
+        fc3 = std::make_shared<Linear>(256, 128, true, true);   // bias=true, fused_relu=true
         fc4 = std::make_shared<Linear>(128, 10);
-
-        relu1 = std::make_shared<ReLU>();
-        relu2 = std::make_shared<ReLU>();
-        relu3 = std::make_shared<ReLU>();
 
         register_module("fc1", fc1);
         register_module("fc2", fc2);
@@ -147,20 +146,17 @@ public:
     }
 
     Tensor forward(const Tensor& x) override {
-        // x: [B, 784] -> fc1 -> relu -> fc2 -> relu -> fc3 -> relu -> fc4 -> [B, 10]
+        // x: [B, 784] -> fc1(+relu) -> fc2(+relu) -> fc3(+relu) -> fc4 -> [B, 10]
+        // ReLU is fused inside fc1/fc2/fc3 forward — no separate relu calls needed
         Tensor h = fc1->forward(x);
-        h = relu1->forward(h);
         h = fc2->forward(h);
-        h = relu2->forward(h);
         h = fc3->forward(h);
-        h = relu3->forward(h);
         h = fc4->forward(h);
         return h;
     }
 
 private:
     std::shared_ptr<Linear> fc1, fc2, fc3, fc4;
-    std::shared_ptr<ReLU> relu1, relu2, relu3;
 };
 
 // ============================================================================
@@ -594,11 +590,14 @@ int main(int argc, char* argv[]) {
 
             // Forward
             optimizer.zero_grad();
+            auto t_fwd_start = std::chrono::high_resolution_clock::now();
             Tensor logits = model->forward(inputs);
             Tensor loss = criterion.forward(logits, targets);
+            auto t_fwd_end = std::chrono::high_resolution_clock::now();
 
             // Backward
             torch::autograd::backward({loss});
+            auto t_bwd_end = std::chrono::high_resolution_clock::now();
 
             // DEBUG: Check gradient and weight scale EVERY batch for first 10, then every 100
             if (batches_processed < 10 || batches_processed % 100 == 0) {
@@ -658,6 +657,16 @@ int main(int argc, char* argv[]) {
 
             // Optimizer step
             optimizer.step();
+            auto t_step_end = std::chrono::high_resolution_clock::now();
+
+            // Print per-phase timing every 100 batches
+            if (batches_processed % 100 == 0) {
+                double fwd_ms = std::chrono::duration<double, std::milli>(t_fwd_end - t_fwd_start).count();
+                double bwd_ms = std::chrono::duration<double, std::milli>(t_bwd_end - t_fwd_end).count();
+                double step_ms = std::chrono::duration<double, std::milli>(t_step_end - t_bwd_end).count();
+                printf("  [TIMING] batch=%lld  fwd=%.1fms bwd=%.1fms step=%.1fms\n",
+                       (long long)batches_processed, fwd_ms, bwd_ms, step_ms);
+            }
 
             // Stats
             Tensor loss_cpu = move_to_cpu(loss);
@@ -764,6 +773,9 @@ int main(int argc, char* argv[]) {
     }
 
     std::cout << "=== Training Complete ===" << std::endl;
+
+    // Print CPU allocator statistics
+    c10::CPUAllocator::get().print_stats();
 
 #ifdef PT_USE_CUDA
     // CRITICAL: Shutdown CUDA AFTER all tensors are destroyed

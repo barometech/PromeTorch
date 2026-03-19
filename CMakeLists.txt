@@ -94,11 +94,33 @@ if(PT_USE_TUDA)
         endif()
     elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "e2k|elbrus")
         message(STATUS "TUDA: Elbrus E2K detected — E2K path will be used")
+        add_compile_definitions(TUDA_E2K)
     elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|x86")
         message(STATUS "TUDA: x86_64 detected — AVX2 path will be used")
     else()
         message(STATUS "TUDA: Unknown arch '${CMAKE_SYSTEM_PROCESSOR}' — Scalar fallback")
     endif()
+endif()
+
+# ============================================================================
+# Elbrus E2K — LCC-specific optimization flags
+# ============================================================================
+
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "e2k|elbrus")
+    message(STATUS "Elbrus E2K: enabling -O3, -ffast-math, LTO, EML BLAS")
+
+    # Aggressive optimization: LCC VLIW scheduling benefits hugely from -O3
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -ffast-math")
+
+    # Link-Time Optimization: lets LCC optimize across TU boundaries
+    # Critical for PromeTorch since ops span multiple .cpp and header files
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
+
+    # EML (Elbrus Math Library) — VLIW-optimized BLAS, 230+ GFLOPS on E8C2
+    include_directories(/usr/include/eml)
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -leml_mt -lpthread")
+
+    add_compile_definitions(TUDA_E2K PT_USE_EML_BLAS)
 endif()
 
 # ============================================================================
@@ -291,7 +313,37 @@ if(PT_USE_CUDA)
     )
 endif()
 
-# ATen is header-only for now, create interface library
+# ATen CPU: compiled hot-path inner loops for LTO optimization on Elbrus.
+# Previously INTERFACE (header-only), now STATIC with hot_loops.cpp.
+# This lets LCC schedule VLIW bundles across mm/add/relu/reduce inner loops.
+set(ATEN_CPU_SOURCES
+    aten/src/ATen/native/cpu/hot_loops.cpp
+)
+
+add_library(aten_cpu STATIC ${ATEN_CPU_SOURCES})
+
+target_include_directories(aten_cpu PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}>
+    $<INSTALL_INTERFACE:include>
+)
+
+target_link_libraries(aten_cpu PUBLIC c10)
+
+# On Elbrus: link EML BLAS and pthreads for multi-threaded GEMM
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "e2k|elbrus")
+    target_compile_options(aten_cpu PRIVATE -O3 -ffast-math)
+    target_link_libraries(aten_cpu PUBLIC eml_mt pthread)
+endif()
+
+if(PT_USE_OPENMP AND OpenMP_CXX_FOUND)
+    target_link_libraries(aten_cpu PUBLIC OpenMP::OpenMP_CXX)
+endif()
+
+set_target_properties(aten_cpu PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+)
+
+# ATen umbrella library: headers + compiled CPU ops + optional backends
 add_library(aten INTERFACE)
 
 target_include_directories(aten INTERFACE
@@ -299,7 +351,7 @@ target_include_directories(aten INTERFACE
     $<INSTALL_INTERFACE:include>
 )
 
-target_link_libraries(aten INTERFACE c10)
+target_link_libraries(aten INTERFACE c10 aten_cpu)
 
 if(PT_USE_CUDA)
     target_link_libraries(aten INTERFACE aten_cuda)
@@ -810,7 +862,7 @@ endif()
 # Installation
 # ============================================================================
 
-set(INSTALL_TARGETS c10 aten torch_autograd torch_nn torch_optim torch_data)
+set(INSTALL_TARGETS c10 aten_cpu aten torch_autograd torch_nn torch_optim torch_data)
 if(PT_USE_CUDA)
     list(APPEND INSTALL_TARGETS aten_cuda)
 endif()
@@ -898,4 +950,8 @@ message(STATUS "  LinQ H1M: ${PT_USE_LINQ}")
 message(STATUS "  TUDA CPU Dispatch: ${PT_USE_TUDA}")
 message(STATUS "  AVX: ${PT_USE_AVX}")
 message(STATUS "  AVX2: ${PT_USE_AVX2}")
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "e2k|elbrus")
+    message(STATUS "  Elbrus LTO: ON")
+    message(STATUS "  EML BLAS: ON")
+endif()
 message(STATUS "")
