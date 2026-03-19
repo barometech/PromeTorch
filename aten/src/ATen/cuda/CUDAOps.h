@@ -494,5 +494,42 @@ ATEN_CUDA_API void launch_rotary_embedding(
     cudaStream_t stream = nullptr
 );
 
+// ============================================================================
+// Flash-Decoding (parallel decode attention across KV splits)
+// ============================================================================
+
+// Flash-decode: split KV cache across thread blocks for parallel attention.
+// Requires scratch buffers: partial_O [num_splits * n_heads * head_dim],
+//   partial_lse [num_splits * n_heads], partial_max [num_splits * n_heads].
+// Use flash_decode_num_splits() to compute num_splits for buffer allocation.
+ATEN_CUDA_API void launch_flash_decode(
+    const float* Q, const float* K_cache, const float* V_cache,
+    float* O,
+    float* partial_O, float* partial_lse, float* partial_max,
+    int n_heads, int n_kv_heads, int head_dim,
+    int total_seq, float scale,
+    cudaStream_t stream = nullptr);
+
+// Query helpers for scratch buffer sizing
+ATEN_CUDA_API int flash_decode_num_splits(int total_seq);
+ATEN_CUDA_API int flash_decode_kv_chunk_size();
+
+// ============================================================================
+// Fused Decode Kernels (reduce kernel launch count)
+// ============================================================================
+
+// Fused QK-norm + RoPE + KV cache write (replaces 6 separate launches)
+// Q and K are modified in-place (QK-norm + RoPE applied).
+// K and V are written to their respective caches at cache_offset_row.
+// q_norm_w/k_norm_w can be nullptr to skip QK-norm.
+ATEN_CUDA_API void launch_fused_qknorm_rope_kvwrite(
+    float* Q, float* K, const float* V,
+    const float* q_norm_w, const float* k_norm_w,
+    float* K_cache, float* V_cache,
+    int n_heads, int n_kv_heads, int head_dim,
+    int position, float rope_freq_base, float eps, bool add_one,
+    int64_t cache_offset_row,
+    cudaStream_t stream = nullptr);
+
 } // namespace cuda
 } // namespace at

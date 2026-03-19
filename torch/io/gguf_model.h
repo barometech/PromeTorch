@@ -277,6 +277,13 @@ struct InferenceScratchPool {
     void* q8_buf = nullptr;     // Q8_1 quantized x for dp4a GEMV (legacy)
     void* x_fp16_buf = nullptr; // FP16 scratch for cuBLAS GEMV input
     void* y_fp16_buf = nullptr; // FP16 scratch for cuBLAS GEMV output
+
+    // Flash-decode scratch buffers
+    float* fd_partial_O = nullptr;    // [max_splits * n_heads * head_dim]
+    float* fd_partial_lse = nullptr;  // [max_splits * n_heads]
+    float* fd_partial_max = nullptr;  // [max_splits * n_heads]
+    int fd_max_splits = 0;
+
     bool allocated = false;
 
     void allocate(const TransformerConfig& config) {
@@ -310,11 +317,24 @@ struct InferenceScratchPool {
         cudaMalloc(&x_fp16_buf, max_K * 2);  // sizeof(half) = 2
         cudaMalloc(&y_fp16_buf, max_N * 2);
 
+        // Flash-decode scratch buffers
+        // Max context = max_seq_len, splits = ceil(max_seq / 256)
+        int64_t max_seq = config.context_length > 0 ? config.context_length : 8192;
+        fd_max_splits = at::cuda::flash_decode_num_splits(static_cast<int>(max_seq));
+        int64_t n_heads = config.num_heads;
+        int64_t hdim = config.head_dim;
+        cudaMalloc(&fd_partial_O, fd_max_splits * n_heads * hdim * sizeof(float));
+        cudaMalloc(&fd_partial_lse, fd_max_splits * n_heads * sizeof(float));
+        cudaMalloc(&fd_partial_max, fd_max_splits * n_heads * sizeof(float));
+
         allocated = true;
 
         size_t total_bytes = (6*H + 2*q_dim + 2*kv_dim + 3*inter + V) * sizeof(float);
+        size_t fd_bytes = fd_max_splits * n_heads * (hdim + 2) * sizeof(float);
         std::cout << "[Scratch] Allocated decode buffers: "
-                  << (total_bytes / 1024) << " KB" << std::endl;
+                  << (total_bytes / 1024) << " KB"
+                  << " + flash-decode: " << (fd_bytes / 1024) << " KB"
+                  << " (" << fd_max_splits << " splits)" << std::endl;
 #endif
     }
 };
@@ -822,55 +842,37 @@ public:
                     sp.buf_v.mutable_data_ptr<float>(), kv_dim, nullptr);
             }
 
-            // -- QK-norm (in-place) --
-            if (layer.attn_q_norm.defined()) {
-                PROF_BEGIN(profiler, "qk_norm");
-                at::cuda::launch_per_head_rms_norm(
-                    sp.buf_q.mutable_data_ptr<float>(), layer.attn_q_norm.data_ptr<float>(),
-                    1, static_cast<int>(n_heads), static_cast<int>(head_dim),
-                    eps, add_one, nullptr);
-                at::cuda::launch_per_head_rms_norm(
-                    sp.buf_k.mutable_data_ptr<float>(), layer.attn_k_norm.data_ptr<float>(),
-                    1, static_cast<int>(n_kv_heads), static_cast<int>(head_dim),
-                    eps, add_one, nullptr);
-                PROF_END(profiler, "qk_norm");
-            }
-
-            // -- RoPE (in-place) --
-            PROF_BEGIN(profiler, "rope");
-            at::cuda::launch_rope(sp.buf_q.mutable_data_ptr<float>(),
-                1, static_cast<int>(n_heads), static_cast<int>(head_dim),
-                static_cast<int>(past_len), config.rope_freq_base, nullptr);
-            at::cuda::launch_rope(sp.buf_k.mutable_data_ptr<float>(),
-                1, static_cast<int>(n_kv_heads), static_cast<int>(head_dim),
-                static_cast<int>(past_len), config.rope_freq_base, nullptr);
-            PROF_END(profiler, "rope");
-
-            // -- KV cache append --
-            PROF_BEGIN(profiler, "kv_cache");
-            at::cuda::launch_kv_cache_write(
-                sp.buf_k.data_ptr<float>(), kv_cache.key_cache[i].mutable_data_ptr<float>(),
-                1, kv_dim, past_len, nullptr);
-            at::cuda::launch_kv_cache_write(
-                sp.buf_v.data_ptr<float>(), kv_cache.value_cache[i].mutable_data_ptr<float>(),
-                1, kv_dim, past_len, nullptr);
-            PROF_END(profiler, "kv_cache");
+            // -- Fused QK-norm + RoPE + KV cache write (1 launch instead of 6) --
+            PROF_BEGIN(profiler, "fused_qknorm_rope_kv");
+            at::cuda::launch_fused_qknorm_rope_kvwrite(
+                sp.buf_q.mutable_data_ptr<float>(),
+                sp.buf_k.mutable_data_ptr<float>(),
+                sp.buf_v.data_ptr<float>(),
+                layer.attn_q_norm.defined() ? layer.attn_q_norm.data_ptr<float>() : nullptr,
+                layer.attn_q_norm.defined() ? layer.attn_k_norm.data_ptr<float>() : nullptr,
+                kv_cache.key_cache[i].mutable_data_ptr<float>(),
+                kv_cache.value_cache[i].mutable_data_ptr<float>(),
+                static_cast<int>(n_heads), static_cast<int>(n_kv_heads),
+                static_cast<int>(head_dim),
+                static_cast<int>(past_len), config.rope_freq_base,
+                eps, add_one, past_len, nullptr);
+            PROF_END(profiler, "fused_qknorm_rope_kv");
 
             int64_t total_seq = past_len + 1;
             float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
 
-            // -- Attention: buf_q × K_cache × V_cache → buf_attn --
-            PROF_BEGIN(profiler, "attention");
-            at::cuda::launch_causal_attention(
+            // -- Flash-Decode attention (parallel across KV splits) --
+            PROF_BEGIN(profiler, "flash_decode");
+            at::cuda::launch_flash_decode(
                 sp.buf_q.data_ptr<float>(),
                 kv_cache.key_cache[i].data_ptr<float>(),
                 kv_cache.value_cache[i].data_ptr<float>(),
                 sp.buf_attn.mutable_data_ptr<float>(),
-                1, static_cast<int>(total_seq),
+                sp.fd_partial_O, sp.fd_partial_lse, sp.fd_partial_max,
                 static_cast<int>(n_heads), static_cast<int>(n_kv_heads),
                 static_cast<int>(head_dim),
-                static_cast<int>(past_len), scale, nullptr);
-            PROF_END(profiler, "attention");
+                static_cast<int>(total_seq), scale, nullptr);
+            PROF_END(profiler, "flash_decode");
 
             // -- Output projection: buf_attn → buf_attn_proj --
             PROF_BEGIN(profiler, "attn_output_proj");
