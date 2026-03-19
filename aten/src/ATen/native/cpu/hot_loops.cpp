@@ -17,6 +17,11 @@
 #include <vector>
 #include <atomic>
 
+#ifdef PT_USE_EML_BLAS
+#include <eml/cblas.h>
+#include <eml/eml_vector.h>
+#endif
+
 namespace at {
 namespace native {
 namespace hot {
@@ -34,6 +39,17 @@ float sdot(int64_t n, const float* a, const float* b) { return tuda::blas::sdot(
 // ============================================================================
 
 void add_loop(const float* a, const float* b, float* out, int64_t n, float alpha) {
+#ifdef PT_USE_EML_BLAS
+    if (alpha == 1.0f) {
+        eml_Vector_Add_32F(a, b, out, (int)n);
+        return;
+    } else {
+        // out = a + alpha*b: copy a to out, then saxpy
+        if (out != a) std::memcpy(out, a, n * sizeof(float));
+        cblas_saxpy((int)n, alpha, b, 1, out, 1);
+        return;
+    }
+#endif
     constexpr int W = VecF::width;
     if (alpha == 1.0f) {
         c10::parallel_for_1d(n, [&](int64_t start, int64_t end) {
@@ -408,41 +424,24 @@ void fused_adam_multi(AdamParamPack* params, int num_params,
                      float weight_decay, int step, bool amsgrad, float** max_exp_avg_sq) {
     float bc1 = 1.0f - powf(beta1, (float)step);
     float bc2 = 1.0f - powf(beta2, (float)step);
-    float step_size = lr / bc1;
+    // Delegate to SIMD-vectorized adam_step_loop for each parameter
     for (int p = 0; p < num_params; p++) {
-        float* param = params[p].param;
-        const float* grad = params[p].grad;
-        float* m = params[p].exp_avg;
-        float* v = params[p].exp_avg_sq;
-        int64_t n = params[p].numel;
-        for (int64_t i = 0; i < n; i++) {
-            float g = grad[i];
-            if (weight_decay != 0.0f) g += weight_decay * param[i];
-            m[i] = beta1 * m[i] + (1.0f - beta1) * g;
-            v[i] = beta2 * v[i] + (1.0f - beta2) * g * g;
-            float denom = sqrtf(v[i] / bc2) + eps;
-            param[i] -= step_size * m[i] / denom;
-        }
+        adam_step_loop(params[p].param, params[p].grad,
+                       params[p].exp_avg, params[p].exp_avg_sq,
+                       params[p].numel, lr, beta1, beta2, eps, weight_decay,
+                       bc1, bc2,
+                       amsgrad, amsgrad && max_exp_avg_sq ? max_exp_avg_sq[p] : nullptr);
     }
 }
 
 void fused_sgd_multi(SGDParamPack* params, int num_params,
                     float lr, float momentum, float dampening,
                     float weight_decay, bool nesterov) {
+    // Delegate to SIMD-vectorized sgd_step_loop for each parameter
     for (int p = 0; p < num_params; p++) {
-        float* param = params[p].param;
-        const float* grad = params[p].grad;
-        float* buf = params[p].momentum_buf;
-        int64_t n = params[p].numel;
-        for (int64_t i = 0; i < n; i++) {
-            float g = grad[i];
-            if (weight_decay != 0.0f) g += weight_decay * param[i];
-            if (buf && momentum != 0.0f) {
-                buf[i] = momentum * buf[i] + (1.0f - dampening) * g;
-                g = nesterov ? g + momentum * buf[i] : buf[i];
-            }
-            param[i] -= lr * g;
-        }
+        sgd_step_loop(params[p].param, params[p].grad, params[p].momentum_buf,
+                      params[p].numel, lr, momentum, dampening,
+                      weight_decay, nesterov);
     }
 }
 
