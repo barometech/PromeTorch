@@ -389,34 +389,86 @@ void sgd_step_loop(float* param, const float* grad, float* momentum_buf,
 // Missing implementations for linker
 void sgemm_tn(int64_t M, int64_t K, int64_t N, float alpha, const float* A, int64_t lda, const float* B, int64_t ldb, float beta, float* C, int64_t ldc) {
     // C[K,N] = alpha * A^T[K,M] @ B[M,N] + beta * C
-    // Transpose A: A is [M, K] in row-major, need A^T[K, M]
+    // A is [M, K] in row-major, A^T is [K, M]
 #ifdef PT_USE_EML_BLAS
     cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans, (int)K, (int)N, (int)M, alpha, A, (int)lda, B, (int)ldb, beta, C, (int)ldc);
 #else
-    if (beta == 0.0f) for (int64_t i = 0; i < K*N; i++) C[i] = 0;
-    else if (beta != 1.0f) for (int64_t i = 0; i < K*N; i++) C[i] *= beta;
-    for (int64_t k = 0; k < K; k++)
-        for (int64_t n = 0; n < N; n++) {
-            float s = 0;
-            for (int64_t m = 0; m < M; m++) s += A[m*lda+k] * B[m*ldb+n];
-            C[k*ldc+n] += alpha * s;
-        }
+    // Transpose A[M,K] -> At[K,M], then call optimized sgemm(K, M, N)
+    // Transpose is O(M*K), GEMM is O(M*K*N) — negligible overhead.
+    std::vector<float> At(K * M);
+    for (int64_t m = 0; m < M; ++m)
+        for (int64_t k = 0; k < K; ++k)
+            At[k * M + m] = A[m * lda + k];
+    tuda::blas::sgemm(K, M, N, alpha, At.data(), M, B, ldb, beta, C, ldc);
 #endif
 }
 
 void relu_mask_mul(const float* grad, const float* mask, float* out, int64_t n) {
-    for (int64_t i = 0; i < n; i++) out[i] = mask[i] > 0.0f ? grad[i] : 0.0f;
+    // ReLU backward: out = grad * (mask > 0)
+    // Use sign(mask) trick: relu(mask) > 0 means mask > 0.
+    // Compute: out = grad * min(1, relu(mask) * LARGE) — but that's convoluted.
+    // Platform-specific SIMD blendv is fastest:
+#if defined(TUDA_AVX2)
+    __m256 vzero = _mm256_setzero_ps();
+    int64_t i = 0;
+    for (; i + 32 <= n; i += 32) {
+        __m256 m0 = _mm256_loadu_ps(mask+i),    g0 = _mm256_loadu_ps(grad+i);
+        __m256 m1 = _mm256_loadu_ps(mask+i+8),  g1 = _mm256_loadu_ps(grad+i+8);
+        __m256 m2 = _mm256_loadu_ps(mask+i+16), g2 = _mm256_loadu_ps(grad+i+16);
+        __m256 m3 = _mm256_loadu_ps(mask+i+24), g3 = _mm256_loadu_ps(grad+i+24);
+        _mm256_storeu_ps(out+i,    _mm256_and_ps(g0, _mm256_cmp_ps(m0, vzero, _CMP_GT_OS)));
+        _mm256_storeu_ps(out+i+8,  _mm256_and_ps(g1, _mm256_cmp_ps(m1, vzero, _CMP_GT_OS)));
+        _mm256_storeu_ps(out+i+16, _mm256_and_ps(g2, _mm256_cmp_ps(m2, vzero, _CMP_GT_OS)));
+        _mm256_storeu_ps(out+i+24, _mm256_and_ps(g3, _mm256_cmp_ps(m3, vzero, _CMP_GT_OS)));
+    }
+    for (; i + 8 <= n; i += 8) {
+        __m256 m = _mm256_loadu_ps(mask+i), g = _mm256_loadu_ps(grad+i);
+        _mm256_storeu_ps(out+i, _mm256_and_ps(g, _mm256_cmp_ps(m, vzero, _CMP_GT_OS)));
+    }
+    for (; i < n; ++i) out[i] = mask[i] > 0.0f ? grad[i] : 0.0f;
+#else
+    c10::parallel_for_1d(n, [&](int64_t start, int64_t end) {
+        for (int64_t i = start; i < end; ++i)
+            out[i] = mask[i] > 0.0f ? grad[i] : 0.0f;
+    });
+#endif
 }
 
 void col_sum(const float* data, float* out, int64_t rows, int64_t cols) {
-    for (int64_t j = 0; j < cols; j++) out[j] = 0;
-    for (int64_t i = 0; i < rows; i++)
-        for (int64_t j = 0; j < cols; j++)
-            out[j] += data[i*cols+j];
+    // out[j] = sum over rows of data[i*cols + j]
+    constexpr int W = VecF::width;
+    // Zero output
+    int64_t j = 0;
+    for (; j + W <= cols; j += W) VecF::zero().store(out + j);
+    for (; j < cols; ++j) out[j] = 0;
+    // Accumulate rows
+    for (int64_t i = 0; i < rows; ++i) {
+        const float* row = data + i * cols;
+        j = 0;
+        for (; j + 4*W <= cols; j += 4*W) {
+            (VecF::load(out+j)     + VecF::load(row+j)).store(out+j);
+            (VecF::load(out+j+W)   + VecF::load(row+j+W)).store(out+j+W);
+            (VecF::load(out+j+2*W) + VecF::load(row+j+2*W)).store(out+j+2*W);
+            (VecF::load(out+j+3*W) + VecF::load(row+j+3*W)).store(out+j+3*W);
+        }
+        for (; j + W <= cols; j += W)
+            (VecF::load(out+j) + VecF::load(row+j)).store(out+j);
+        for (; j < cols; ++j) out[j] += row[j];
+    }
 }
 
 void add_inplace(float* dst, const float* src, int64_t n) {
-    for (int64_t i = 0; i < n; i++) dst[i] += src[i];
+    constexpr int W = VecF::width;
+    int64_t i = 0;
+    for (; i + 4*W <= n; i += 4*W) {
+        (VecF::load(dst+i)     + VecF::load(src+i)).store(dst+i);
+        (VecF::load(dst+i+W)   + VecF::load(src+i+W)).store(dst+i+W);
+        (VecF::load(dst+i+2*W) + VecF::load(src+i+2*W)).store(dst+i+2*W);
+        (VecF::load(dst+i+3*W) + VecF::load(src+i+3*W)).store(dst+i+3*W);
+    }
+    for (; i + W <= n; i += W)
+        (VecF::load(dst+i) + VecF::load(src+i)).store(dst+i);
+    for (; i < n; ++i) dst[i] += src[i];
 }
 
 void fused_adam_multi(AdamParamPack* params, int num_params,
