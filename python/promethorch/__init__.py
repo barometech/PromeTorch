@@ -56,6 +56,12 @@ from ._C import (
     backward,
     grad,
 
+    # Serialization
+    save,
+    load,
+    save_state_dict,
+    load_state_dict,
+
     # CUDA
     cuda_is_available,
     cuda_device_count,
@@ -67,6 +73,7 @@ from ._C import (
 # Import submodules
 from . import nn
 from . import optim
+from . import data
 
 # Convenience
 cuda = type('cuda', (), {
@@ -133,12 +140,19 @@ __all__ = [
     'backward',
     'grad',
 
+    # Serialization
+    'save',
+    'load',
+    'save_state_dict',
+    'load_state_dict',
+
     # CUDA
     'cuda',
 
     # Submodules
     'nn',
     'optim',
+    'data',
 
     # Utils
     'manual_seed',
