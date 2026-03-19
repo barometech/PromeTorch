@@ -1014,3 +1014,25 @@ PyTorch использует thread pool (без fork/join), мы использ
 - EML cblas_sgemm with CblasTrans (no transpose buffer)
 - Removed .contiguous() from all FusedBackward
 - Need: further fusion or EML multi-threaded backward
+
+### NUCLEAR — Elbrus E8C2 (2026-03-19) 🔥
+
+**22.0 СЕКУНД!!!** (было 126.3s = **5.7x ускорение**)
+
+| Компонент | scalar | NUCLEAR |
+|-----------|--------|---------|
+| Forward | 5ms | **4.0ms** |
+| Backward | 39ms | **10.3ms** |
+| Clip | (in step) | **7.7ms** |
+| Step | 89ms | **0.9ms** |
+| Total | 126.3s | **22.0s** |
+| **vs PyTorch** | **7.4x** | **1.3x** |
+| Allocations | 37,000 | **179** |
+| Accuracy | 89.1% | **89.2%** |
+
+**PyTorch 2.7.1 (32 threads): 17.0s**
+**PromeTorch NUCLEAR: 22.0s**
+**GAP: ВСЕГО 1.3x!!!**
+
+Bypass autograd: manual_forward + manual_backward = pure hot:: calls.
+Pre-allocated ALL buffers. 179 allocations за весь epoch (было 37,000).
