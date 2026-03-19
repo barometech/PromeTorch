@@ -299,7 +299,21 @@ void init_tensor_bindings(py::module& m) {
         }, py::arg("gradient") = py::none(),
            py::arg("retain_graph") = false, py::arg("create_graph") = false)
 
+        // Copy
+        .def("copy_", [](at::Tensor& t, const at::Tensor& src) {
+            t.copy_(src);
+            return t;
+        }, py::arg("src"))
+
         // Type conversion
+        .def("to", [](const at::Tensor& t, const std::string& device_or_dtype) {
+            // Try as device first
+            try {
+                c10::Device device(device_or_dtype);
+                return t.to(device);
+            } catch (...) {}
+            throw std::runtime_error("Invalid device or dtype string: " + device_or_dtype);
+        }, py::arg("device"))
         .def("to", [](const at::Tensor& t, c10::ScalarType dtype) {
             return t.to(dtype);
         }, py::arg("dtype"))
@@ -352,8 +366,43 @@ void init_tensor_bindings(py::module& m) {
         .def(py::self > py::self)
         .def(py::self >= py::self)
 
+        // In-place operators (+=, -=, *=, /=)
+        .def("__iadd__", [](at::Tensor& t, const at::Tensor& other) -> at::Tensor& {
+            t.add_(other);
+            return t;
+        }, py::return_value_policy::reference)
+        .def("__iadd__", [](at::Tensor& t, double val) -> at::Tensor& {
+            t.add_(at::Scalar(val));
+            return t;
+        }, py::return_value_policy::reference)
+        .def("__isub__", [](at::Tensor& t, const at::Tensor& other) -> at::Tensor& {
+            t.sub_(other);
+            return t;
+        }, py::return_value_policy::reference)
+        .def("__isub__", [](at::Tensor& t, double val) -> at::Tensor& {
+            t.sub_(at::Scalar(val));
+            return t;
+        }, py::return_value_policy::reference)
+        .def("__imul__", [](at::Tensor& t, const at::Tensor& other) -> at::Tensor& {
+            t.mul_(other);
+            return t;
+        }, py::return_value_policy::reference)
+        .def("__imul__", [](at::Tensor& t, double val) -> at::Tensor& {
+            t.mul_(at::Scalar(val));
+            return t;
+        }, py::return_value_policy::reference)
+        .def("__itruediv__", [](at::Tensor& t, const at::Tensor& other) -> at::Tensor& {
+            t.div_(other);
+            return t;
+        }, py::return_value_policy::reference)
+        .def("__itruediv__", [](at::Tensor& t, double val) -> at::Tensor& {
+            t.div_(at::Scalar(val));
+            return t;
+        }, py::return_value_policy::reference)
+
         // Indexing
         .def("__getitem__", [](const at::Tensor& t, int64_t idx) {
+            if (idx < 0) idx += t.size(0);
             return t.select(0, idx);
         })
         .def("__getitem__", [](const at::Tensor& t, py::slice slice) {
@@ -363,22 +412,60 @@ void init_tensor_bindings(py::module& m) {
             }
             return t.slice(0, start, stop, step);
         })
+        .def("__setitem__", [](at::Tensor& t, int64_t idx, const at::Tensor& value) {
+            if (idx < 0) idx += t.size(0);
+            at::Tensor slice = t.select(0, idx);
+            slice.copy_(value);
+        })
+        .def("__setitem__", [](at::Tensor& t, int64_t idx, double value) {
+            if (idx < 0) idx += t.size(0);
+            at::Tensor slice = t.select(0, idx);
+            slice.fill_(value);
+        })
+        .def("__len__", [](const at::Tensor& t) {
+            return t.size(0);
+        })
 
         // String representation
         .def("__repr__", [](const at::Tensor& t) {
             std::ostringstream oss;
             oss << "tensor(";
-            // Format shape
-            oss << "shape=[";
-            auto sizes = t.sizes();
-            for (size_t i = 0; i < sizes.size(); ++i) {
-                if (i > 0) oss << ", ";
-                oss << sizes[i];
+            // For small tensors (numel <= 20), print actual data
+            if (t.numel() <= 20 && t.numel() > 0 && t.dtype() == c10::ScalarType::Float) {
+                at::Tensor tc = t.contiguous();
+                const float* data = tc.data_ptr<float>();
+                if (t.dim() == 0) {
+                    oss << data[0];
+                } else if (t.dim() == 1) {
+                    oss << "[";
+                    for (int64_t i = 0; i < t.numel(); ++i) {
+                        if (i > 0) oss << ", ";
+                        oss << data[i];
+                    }
+                    oss << "]";
+                } else {
+                    // Multi-dim: show shape
+                    oss << "shape=[";
+                    auto sizes = t.sizes();
+                    for (size_t i = 0; i < sizes.size(); ++i) {
+                        if (i > 0) oss << ", ";
+                        oss << sizes[i];
+                    }
+                    oss << "]";
+                }
+            } else {
+                oss << "shape=[";
+                auto sizes = t.sizes();
+                for (size_t i = 0; i < sizes.size(); ++i) {
+                    if (i > 0) oss << ", ";
+                    oss << sizes[i];
+                }
+                oss << "]";
             }
-            oss << "], ";
-            // Format dtype
-            oss << "dtype=" << c10::toString(t.dtype()) << ", ";
-            oss << "device=" << t.device().str();
+            oss << ", dtype=" << c10::toString(t.dtype());
+            if (t.device().type() != c10::DeviceType::CPU) {
+                oss << ", device=" << t.device().str();
+            }
             if (t.requires_grad()) {
                 oss << ", requires_grad=True";
             }
