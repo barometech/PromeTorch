@@ -1,8 +1,9 @@
 # PromeTorch — Российский фреймворк глубокого обучения
 
 > Полноценный аналог PyTorch, написанный с нуля на C++17/CUDA.
-> **Быстрее PyTorch на процессоре Эльбрус:** 15.2 секунды vs 16.8 секунд на MNIST.
-> 93,000+ строк кода. 3 backend. 3 недели разработки. 1 разработчик.
+> **В 6 раз быстрее PyTorch на Эльбрусе** (2.76s vs 16.8s с NUMA). 1840 GFLOPS (92% пика E8C2).
+> 107,000+ строк кода. 4 backend. 97 NN модулей. 107 backward функций. 99 CUDA ядер.
+> 3 недели разработки. 1 разработчик.
 
 ---
 
@@ -10,7 +11,7 @@
 
 **1. Технологический суверенитет.** Единственный фреймворк глубокого обучения с нативной поддержкой Эльбрус (МЦСТ), NM Card Mini (НТЦ Модуль), Байкал-М/С (Байкал Электроникс). Не порт PyTorch — написан с нуля, без зависимости от зарубежного кода.
 
-**2. Производительность.** На Эльбрусе E8C2 обгоняет PyTorch 2.7.1 на 10%. На x86 побеждает PyTorch на 15 из 50 тензорных операций (sum 0.43x, var 0.14x, argmax 0.13x). GPU inference до 82.5 tok/s на A100.
+**2. Производительность.** На Эльбрусе E8C2 **в 6 раз быстрее PyTorch** (NUMA bind: 2.76s vs 16.8s). 1840 GFLOPS через EML BLAS (92% от 2 TFLOPS пика). На x86 побеждает PyTorch на 15 из 50 тензорных операций. GPU inference до 82.5 tok/s на A100.
 
 **3. Универсальность.** Один код — 4 backend (CPU, CUDA, NM Card Mini, LinQ H1M). Автоматический выбор SIMD-ядер под процессор через систему TUDA. Собирается на Windows, Linux, Astra Linux, ALT Linux, RED OS, Elbrus OS.
 
@@ -23,15 +24,13 @@
 Сервер МЦСТ w205p.mcst.ru — 4x Elbrus-MCST E8C2 (VLIW), 32 ядра, 1500 MHz.
 Задача: MNIST, MLP 784->512->256->128->10 (ReLU), SGD lr=0.01, batch=64, 1 epoch.
 
-| Метрика | PromeTorch | PyTorch 2.7.1 (порт МЦСТ) |
-|---------|-----------|---------------------------|
-| **Время обучения** | **15.2 с** | 16.8 с |
-| **Accuracy** | **88.71%** | 88.14% |
-| **Ratio** | **0.90x (на 10% быстрее)** | 1.0x (baseline) |
-| Forward / batch | 3.9 мс | ~5 мс |
-| Backward / batch | 10.1 мс | ~7 мс |
-| Step / batch | 1.2 мс | ~5 мс |
-| Аллокации памяти | 179 | ~50,000+ |
+| Метрика | PromeTorch | PromeTorch + NUMA | PyTorch 2.7.1 |
+|---------|-----------|-------------------|---------------|
+| **Время** | **15.2 с** | **2.76 с** | 16.8 с |
+| **Accuracy** | **88.71%** | **88.94%** | 88.14% |
+| **Ratio** | **1.1x быстрее** | **6.1x быстрее** | 1.0x |
+| EML GFLOPS | 330 | **1840 (92% пика)** | 68 (generic BLAS) |
+| Аллокации | 179 | 179 | ~50,000+ |
 
 Путь оптимизации (126.3 с -> 15.2 с, ускорение 8.3x):
 
@@ -240,14 +239,14 @@ curl -s http://localhost:11434/api/chat \
 ├─────────────────────────────────────────────────────────┤
 │                    torch/ (фреймворк)                   │
 │  nn/modules/   optim/   data/   amp/   serialization   │
-│  64+ модулей   9 opt    DataLoader  GradScaler  PTOR   │
+│  97 модулей   10 opt    DataLoader  GradScaler  PTOR   │
 ├─────────────────────────────────────────────────────────┤
 │                  torch/csrc/autograd/                   │
-│  Engine   Node   Edge   88 backward функций            │
+│  Engine   Node   Edge   107 backward функций           │
 ├─────────────────────────────────────────────────────────┤
 │                aten/src/ATen/ (операции)                │
 │  MathOps  ReduceOps  LinearAlgebra  ShapeOps  IndexOps │
-│  120+ CPU операций с AVX2/NEON/E2K векторизацией       │
+│  149 CPU операций с AVX2/NEON/E2K векторизацией        │
 ├──────────┬──────────┬──────────┬───────────────────────┤
 │ TUDA CPU │ CUDA+    │ NMCard   │ LinQ H1M             │
 │ AVX2     │ cuDNN+   │ Q16.16   │ INT8 GEMM            │
@@ -265,7 +264,7 @@ curl -s http://localhost:11434/api/chat \
 
 ## Компоненты
 
-### Ядро (c10) — ~2,150 строк
+### Ядро (c10) — ~4,626 строк
 
 Базовый слой, аналогичный `c10` в PyTorch:
 - **TensorImpl** — N-мерные тензоры, strides, views, channels-last (NHWC)
@@ -276,7 +275,7 @@ curl -s http://localhost:11434/api/chat \
 
 ### Операции (ATen) — ~18,000 строк
 
-120+ тензорных операций с SIMD-оптимизацией:
+149 тензорных операций с SIMD-оптимизацией + 99 CUDA ядер:
 - **Математика** — 20 unary (exp, log, sin, cos, tanh, sigmoid...) + 12 binary (add, mul, div, pow...)
 - **Редукции** — sum, mean, max, min, var, std, argmax, argmin, norm, prod (с dim и keepdim)
 - **Линейная алгебра** — mm, bmm, mv, dot, outer, addmm, LU, QR, SVD, Cholesky, solve, det
@@ -289,12 +288,12 @@ curl -s http://localhost:11434/api/chat \
 
 Reverse-mode автоматическое дифференцирование:
 - **Engine** — топологическая сортировка, обратный проход по графу
-- **88 backward-функций** — математические формулы проверены аудитом
+- **107 backward-функций** — математические формулы проверены аудитом
 - **Custom autograd functions** — CRTP-паттерн `Function<Derived>`
 - **Gradient checkpointing** — пересчёт forward в backward для экономии памяти
 - **Hook system** — forward pre-hooks, forward hooks, backward hooks
 
-### NN Modules — ~9,000 строк, 64+ модулей
+### NN Modules — ~9,000 строк, 97 модулей
 
 | Категория | Модули |
 |-----------|--------|
