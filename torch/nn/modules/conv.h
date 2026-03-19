@@ -5,6 +5,9 @@
 #include "aten/src/ATen/native/cpu/PromeBLAS.h"
 #include "aten/src/ATen/native/cpu/hot_loops.h"
 #include "aten/src/ATen/native/cpu/tuda/TudaVec.h"
+#include "torch/csrc/autograd/autograd_meta.h"
+#include "torch/csrc/autograd/node.h"
+#include "torch/csrc/autograd/functions/ConvBackward.h"
 #ifdef PT_USE_CUDA
 #include "aten/src/ATen/cuda/CUDADispatch.h"
 #endif
@@ -465,6 +468,23 @@ public:
                     }
                 }
             }
+        }
+
+        // Wire autograd backward
+        if (autograd::GradMode::is_enabled() &&
+            (input.requires_grad() || weight_param->data().requires_grad())) {
+            auto grad_fn = std::make_shared<autograd::Conv2dBackward>(
+                inp, weight, has_bias_,
+                in_channels_, out_channels_, groups_,
+                kernel_size_, stride_, padding_, dilation_
+            );
+            grad_fn->add_input_metadata(input);
+            grad_fn->add_input_metadata(weight_param->data());
+            if (has_bias_) {
+                grad_fn->add_input_metadata(get_parameter("bias")->data());
+            }
+            autograd::set_grad_fn(output, grad_fn);
+            output.set_requires_grad(true);
         }
 
         return output;

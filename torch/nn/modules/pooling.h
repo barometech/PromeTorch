@@ -1,6 +1,9 @@
 #pragma once
 
 #include "torch/nn/module.h"
+#include "torch/csrc/autograd/autograd_meta.h"
+#include "torch/csrc/autograd/node.h"
+#include "torch/csrc/autograd/functions/ConvBackward.h"
 #ifdef PT_USE_CUDA
 #include "aten/src/ATen/cuda/CUDADispatch.h"
 #endif
@@ -133,6 +136,15 @@ public:
         int64_t out_width = (in_width + 2 * padding_[1] - dilation_[1] * (kernel_size_[1] - 1) - 1) / stride_[1] + 1;
 
         Tensor output = at::empty({batch_size, channels, out_height, out_width});
+        // Save argmax indices for backward (stored as float for tensor compatibility)
+        bool needs_grad = autograd::GradMode::is_enabled() && input.requires_grad();
+        Tensor indices;
+        float* idx_data = nullptr;
+        if (needs_grad) {
+            indices = at::empty({batch_size, channels, out_height, out_width});
+            idx_data = indices.mutable_data_ptr<float>();
+        }
+
         const float* in_data = input.data_ptr<float>();
         float* out_data = output.mutable_data_ptr<float>();
 
@@ -142,6 +154,7 @@ public:
                 for (int64_t oh = 0; oh < out_height; ++oh) {
                     for (int64_t ow = 0; ow < out_width; ++ow) {
                         float max_val = -std::numeric_limits<float>::infinity();
+                        int64_t max_spatial_idx = 0;
 
                         for (int64_t kh = 0; kh < kernel_size_[0]; ++kh) {
                             for (int64_t kw = 0; kw < kernel_size_[1]; ++kw) {
@@ -152,7 +165,10 @@ public:
                                     int64_t in_idx = n * channels * in_height * in_width +
                                                     c * in_height * in_width +
                                                     ih * in_width + iw;
-                                    max_val = std::max(max_val, in_data[in_idx]);
+                                    if (in_data[in_idx] > max_val) {
+                                        max_val = in_data[in_idx];
+                                        max_spatial_idx = ih * in_width + iw;
+                                    }
                                 }
                             }
                         }
@@ -161,9 +177,22 @@ public:
                                          c * out_height * out_width +
                                          oh * out_width + ow;
                         out_data[out_idx] = max_val;
+                        if (idx_data) {
+                            idx_data[out_idx] = static_cast<float>(max_spatial_idx);
+                        }
                     }
                 }
             }
+        }
+
+        // Wire autograd backward
+        if (needs_grad) {
+            auto grad_fn = std::make_shared<autograd::MaxPool2dBackward>(
+                indices, batch_size, channels, in_height, in_width
+            );
+            grad_fn->add_input_metadata(input);
+            autograd::set_grad_fn(output, grad_fn);
+            output.set_requires_grad(true);
         }
 
         return output;
@@ -314,6 +343,17 @@ public:
                     }
                 }
             }
+        }
+
+        // Wire autograd backward
+        if (autograd::GradMode::is_enabled() && input.requires_grad()) {
+            auto grad_fn = std::make_shared<autograd::AvgPool2dBackward>(
+                batch_size, channels, in_height, in_width,
+                kernel_size_, stride_, padding_, count_include_pad_
+            );
+            grad_fn->add_input_metadata(input);
+            autograd::set_grad_fn(output, grad_fn);
+            output.set_requires_grad(true);
         }
 
         return output;
