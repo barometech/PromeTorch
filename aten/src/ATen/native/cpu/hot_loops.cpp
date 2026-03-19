@@ -368,6 +368,108 @@ void sgd_step_loop(float* param, const float* grad, float* momentum_buf,
     }
 }
 
+// Missing implementations added below
+
+// Missing implementations for linker
+void sgemm_tn(int64_t M, int64_t K, int64_t N, float alpha, const float* A, int64_t lda, const float* B, int64_t ldb, float beta, float* C, int64_t ldc) {
+    // C[K,N] = alpha * A^T[K,M] @ B[M,N] + beta * C
+    // Transpose A: A is [M, K] in row-major, need A^T[K, M]
+#ifdef PT_USE_EML_BLAS
+    cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans, (int)K, (int)N, (int)M, alpha, A, (int)lda, B, (int)ldb, beta, C, (int)ldc);
+#else
+    if (beta == 0.0f) for (int64_t i = 0; i < K*N; i++) C[i] = 0;
+    else if (beta != 1.0f) for (int64_t i = 0; i < K*N; i++) C[i] *= beta;
+    for (int64_t k = 0; k < K; k++)
+        for (int64_t n = 0; n < N; n++) {
+            float s = 0;
+            for (int64_t m = 0; m < M; m++) s += A[m*lda+k] * B[m*ldb+n];
+            C[k*ldc+n] += alpha * s;
+        }
+#endif
+}
+
+void relu_mask_mul(const float* grad, const float* mask, float* out, int64_t n) {
+    for (int64_t i = 0; i < n; i++) out[i] = mask[i] > 0.0f ? grad[i] : 0.0f;
+}
+
+void col_sum(const float* data, float* out, int64_t rows, int64_t cols) {
+    for (int64_t j = 0; j < cols; j++) out[j] = 0;
+    for (int64_t i = 0; i < rows; i++)
+        for (int64_t j = 0; j < cols; j++)
+            out[j] += data[i*cols+j];
+}
+
+void add_inplace(float* dst, const float* src, int64_t n) {
+    for (int64_t i = 0; i < n; i++) dst[i] += src[i];
+}
+
+void fused_adam_multi(AdamParamPack* params, int num_params,
+                     float lr, float beta1, float beta2, float eps,
+                     float weight_decay, int step, bool amsgrad, float** max_exp_avg_sq) {
+    float bc1 = 1.0f - powf(beta1, (float)step);
+    float bc2 = 1.0f - powf(beta2, (float)step);
+    float step_size = lr / bc1;
+    for (int p = 0; p < num_params; p++) {
+        float* param = params[p].param;
+        const float* grad = params[p].grad;
+        float* m = params[p].exp_avg;
+        float* v = params[p].exp_avg_sq;
+        int64_t n = params[p].numel;
+        for (int64_t i = 0; i < n; i++) {
+            float g = grad[i];
+            if (weight_decay != 0.0f) g += weight_decay * param[i];
+            m[i] = beta1 * m[i] + (1.0f - beta1) * g;
+            v[i] = beta2 * v[i] + (1.0f - beta2) * g * g;
+            float denom = sqrtf(v[i] / bc2) + eps;
+            param[i] -= step_size * m[i] / denom;
+        }
+    }
+}
+
+void fused_sgd_multi(SGDParamPack* params, int num_params,
+                    float lr, float momentum, float dampening,
+                    float weight_decay, bool nesterov) {
+    for (int p = 0; p < num_params; p++) {
+        float* param = params[p].param;
+        const float* grad = params[p].grad;
+        float* buf = params[p].momentum_buf;
+        int64_t n = params[p].numel;
+        for (int64_t i = 0; i < n; i++) {
+            float g = grad[i];
+            if (weight_decay != 0.0f) g += weight_decay * param[i];
+            if (buf && momentum != 0.0f) {
+                buf[i] = momentum * buf[i] + (1.0f - dampening) * g;
+                g = nesterov ? g + momentum * buf[i] : buf[i];
+            }
+            param[i] -= lr * g;
+        }
+    }
+}
+
+void cross_entropy_fused(const float* logits, const int64_t* targets,
+                         float* loss_out, float* grad_out,
+                         int64_t batch, int64_t classes) {
+    float total_loss = 0.0f;
+    for (int64_t b = 0; b < batch; b++) {
+        const float* row = logits + b * classes;
+        float* grow = grad_out + b * classes;
+        int64_t tgt = targets[b];
+        float mx = row[0];
+        for (int64_t c = 1; c < classes; c++) if (row[c] > mx) mx = row[c];
+        float sum_exp = 0;
+        for (int64_t c = 0; c < classes; c++) { grow[c] = expf(row[c] - mx); sum_exp += grow[c]; }
+        float inv = 1.0f / sum_exp;
+        float inv_batch = 1.0f / (float)batch;
+        for (int64_t c = 0; c < classes; c++) {
+            float sm = grow[c] * inv;
+            grow[c] = (sm - (c == tgt ? 1.0f : 0.0f)) * inv_batch;
+        }
+        total_loss += mx - row[tgt] + logf(sum_exp);
+    }
+    *loss_out = total_loss / (float)batch;
+}
+
+
 } // namespace hot
 } // namespace native
 } // namespace at
