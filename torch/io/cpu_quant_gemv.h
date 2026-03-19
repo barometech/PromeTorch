@@ -17,6 +17,7 @@
 #include <cstring>
 #include <cmath>
 #include "torch/io/gguf_dequant.h"
+#include "c10/util/ThreadPool.h"
 
 #ifdef __AVX2__
 #include <immintrin.h>
@@ -65,9 +66,8 @@ inline void q4k_gemv_avx2(const void* weight_data, const float* x,
     const uint8_t* raw = static_cast<const uint8_t*>(weight_data);
     const int64_t blocks_per_row = K / 256;
 
-    #pragma omp parallel for schedule(static) if(N > 64)
-    #pragma omp parallel for schedule(static) if(N > 64)
-    for (int64_t n = 0; n < N; ++n) {
+    c10::get_thread_pool().parallel_for(0, N, [&](int64_t start, int64_t end) {
+    for (int64_t n = start; n < end; ++n) {
         const __m256i mask_lo = _mm256_set1_epi32(0xF);
         const uint8_t* row_data = raw + n * row_stride_bytes;
         __m256 acc = _mm256_setzero_ps();
@@ -139,6 +139,7 @@ inline void q4k_gemv_avx2(const void* weight_data, const float* x,
         }
         y[n] = hsum_avx(acc);
     }
+    }, 1);  // min_grain=1: always parallelize GEMV rows
 }
 #endif
 
@@ -149,8 +150,8 @@ inline void q4k_gemv_scalar(const void* weight_data, const float* x,
     const uint8_t* raw = static_cast<const uint8_t*>(weight_data);
     const int64_t blocks_per_row = K / 256;
 
-    #pragma omp parallel for schedule(static) if(N > 64)
-    for (int64_t n = 0; n < N; ++n) {
+    c10::get_thread_pool().parallel_for(0, N, [&](int64_t start, int64_t end) {
+    for (int64_t n = start; n < end; ++n) {
         const uint8_t* row_data = raw + n * row_stride_bytes;
         float dot = 0.0f;
 
@@ -185,6 +186,7 @@ inline void q4k_gemv_scalar(const void* weight_data, const float* x,
         }
         y[n] = dot;
     }
+    }, 1);  // min_grain=1: always parallelize GEMV rows
 }
 
 // ============================================================================
@@ -208,8 +210,8 @@ inline void q8_0_gemv_avx2(const void* weight_data, const float* x,
     const uint8_t* raw = static_cast<const uint8_t*>(weight_data);
     const int64_t blocks_per_row = K / 32;  // QK8_0 = 32
 
-    #pragma omp parallel for schedule(static) if(N > 64)
-    for (int64_t n = 0; n < N; ++n) {
+    c10::get_thread_pool().parallel_for(0, N, [&](int64_t start, int64_t end) {
+    for (int64_t n = start; n < end; ++n) {
         const uint8_t* row_data = raw + n * row_stride_bytes;
         __m256 acc = _mm256_setzero_ps();
 
@@ -242,6 +244,7 @@ inline void q8_0_gemv_avx2(const void* weight_data, const float* x,
         }
         y[n] = hsum_avx(acc);
     }
+    }, 1);  // min_grain=1: always parallelize GEMV rows
 }
 #endif
 
@@ -252,8 +255,8 @@ inline void q8_0_gemv_scalar(const void* weight_data, const float* x,
     const uint8_t* raw = static_cast<const uint8_t*>(weight_data);
     const int64_t blocks_per_row = K / 32;
 
-    #pragma omp parallel for schedule(static) if(N > 64)
-    for (int64_t n = 0; n < N; ++n) {
+    c10::get_thread_pool().parallel_for(0, N, [&](int64_t start, int64_t end) {
+    for (int64_t n = start; n < end; ++n) {
         const uint8_t* row_data = raw + n * row_stride_bytes;
         float dot = 0.0f;
 
@@ -272,6 +275,7 @@ inline void q8_0_gemv_scalar(const void* weight_data, const float* x,
         }
         y[n] = dot;
     }
+    }, 1);  // min_grain=1: always parallelize GEMV rows
 }
 
 // ============================================================================
@@ -291,8 +295,8 @@ inline void q6k_gemv_avx2(const void* weight_data, const float* x,
     const uint8_t* raw = static_cast<const uint8_t*>(weight_data);
     const int64_t blocks_per_row = K / 256;
 
-    #pragma omp parallel for schedule(static) if(N > 64)
-    for (int64_t n = 0; n < N; ++n) {
+    c10::get_thread_pool().parallel_for(0, N, [&](int64_t start, int64_t end) {
+    for (int64_t n = start; n < end; ++n) {
         const uint8_t* row_data = raw + n * row_stride_bytes;
         __m256 acc = _mm256_setzero_ps();
 
@@ -409,6 +413,7 @@ inline void q6k_gemv_avx2(const void* weight_data, const float* x,
         }
         y[n] = hsum_avx(acc);
     }
+    }, 1);  // min_grain=1: always parallelize GEMV rows
 }
 #endif
 
@@ -419,8 +424,8 @@ inline void q6k_gemv_scalar(const void* weight_data, const float* x,
     const uint8_t* raw = static_cast<const uint8_t*>(weight_data);
     const int64_t blocks_per_row = K / 256;
 
-    #pragma omp parallel for schedule(static) if(N > 64)
-    for (int64_t n = 0; n < N; ++n) {
+    c10::get_thread_pool().parallel_for(0, N, [&](int64_t start, int64_t end) {
+    for (int64_t n = start; n < end; ++n) {
         const uint8_t* row_data = raw + n * row_stride_bytes;
         float dot = 0.0f;
 
@@ -455,6 +460,7 @@ inline void q6k_gemv_scalar(const void* weight_data, const float* x,
         }
         y[n] = dot;
     }
+    }, 1);  // min_grain=1: always parallelize GEMV rows
 }
 
 // ============================================================================
@@ -475,8 +481,8 @@ inline void q5k_gemv_avx2(const void* weight_data, const float* x,
     const int64_t blocks_per_row = K / 256;
     const __m256i mask_lo = _mm256_set1_epi32(0xF);
 
-    #pragma omp parallel for schedule(static) if(N > 64)
-    for (int64_t n = 0; n < N; ++n) {
+    c10::get_thread_pool().parallel_for(0, N, [&](int64_t start, int64_t end) {
+    for (int64_t n = start; n < end; ++n) {
         const uint8_t* row_data = raw + n * row_stride_bytes;
         __m256 acc = _mm256_setzero_ps();
 
@@ -561,6 +567,7 @@ inline void q5k_gemv_avx2(const void* weight_data, const float* x,
         }
         y[n] = hsum_avx(acc);
     }
+    }, 1);  // min_grain=1: always parallelize GEMV rows
 }
 #endif
 
@@ -571,8 +578,8 @@ inline void q5k_gemv_scalar(const void* weight_data, const float* x,
     const uint8_t* raw = static_cast<const uint8_t*>(weight_data);
     const int64_t blocks_per_row = K / 256;
 
-    #pragma omp parallel for schedule(static) if(N > 64)
-    for (int64_t n = 0; n < N; ++n) {
+    c10::get_thread_pool().parallel_for(0, N, [&](int64_t start, int64_t end) {
+    for (int64_t n = start; n < end; ++n) {
         const uint8_t* row_data = raw + n * row_stride_bytes;
         float dot = 0.0f;
 
@@ -613,6 +620,7 @@ inline void q5k_gemv_scalar(const void* weight_data, const float* x,
         }
         y[n] = dot;
     }
+    }, 1);  // min_grain=1: always parallelize GEMV rows
 }
 
 // ============================================================================
