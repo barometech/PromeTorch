@@ -991,3 +991,26 @@ PyTorch использует thread pool (без fork/join), мы использ
 - 6×6 VLIW micro-kernel (36 FMA accumulators)
 - Persistent thread pool (no OpenMP fork/join)
 - Memory pool 97.3% hit rate (640 malloc)
+
+### KILLSHOT v5 — Elbrus E8C2 (2026-03-19)
+
+**43.7s** (было 45.4s, было 126.3s originally)
+
+| Компонент | v1 (scalar) | v4 | v5 KILLSHOT |
+|-----------|-------------|-----|-------------|
+| Forward | 5ms | 4.7ms | **4.7ms** |
+| Backward | 39ms | 49ms | **37.8ms** |
+| Clip | (in step) | (in step) | **1.3ms** |
+| Step | 89ms | 38ms | **0.9ms** |
+| Total | 126.3s | 45.4s | **43.7s** |
+| vs PyTorch | 7.4x | 2.7x | **2.6x** |
+
+**Step killed: 89ms → 0.9ms (99x ускорение)**
+- fast_clip_grad_norm_: single pass raw float*
+- Removed debug logging from timing window
+- SGD step: ~1ms for 535K parameters
+
+**Backward still bottleneck: 37.8ms**
+- EML cblas_sgemm with CblasTrans (no transpose buffer)
+- Removed .contiguous() from all FusedBackward
+- Need: further fusion or EML multi-threaded backward
