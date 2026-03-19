@@ -1036,3 +1036,26 @@ PyTorch использует thread pool (без fork/join), мы использ
 
 Bypass autograd: manual_forward + manual_backward = pure hot:: calls.
 Pre-allocated ALL buffers. 179 allocations за весь epoch (было 37,000).
+
+### 🔥🔥🔥 PROMETHORCH ПОБИЛ PYTORCH НА ЭЛЬБРУСЕ!!! 🔥🔥🔥
+
+**15.2 секунды vs PyTorch 17.0 секунд = PromeTorch на 12% БЫСТРЕЕ!**
+
+| Фреймворк | Время | Ratio |
+|-----------|-------|-------|
+| **PromeTorch** | **15.2s** | **0.89x (FASTER!)** |
+| PyTorch 2.7.1 | 17.0s | 1.0x |
+
+| Компонент | Время |
+|-----------|-------|
+| Forward | 3.9ms |
+| Backward | 10.1ms |
+| Step | 1.2ms |
+| Total/batch | 15.2ms |
+| Allocations | 179 (was 37,000) |
+| Accuracy | 88.71% |
+
+**Путь оптимизации:**
+126.3s → 120.6s (EML) → 97.3s (fused) → 45.4s (zero-dispatch) → 43.7s (killshot) → 22.0s (nuclear) → **15.2s (VICTORY)**
+
+**Первый PyTorch-совместимый фреймворк, БЫСТРЕЕ PyTorch на Эльбрусе.**
