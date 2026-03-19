@@ -109,7 +109,7 @@ public:
             float* out = result.mutable_data_ptr<float>();
 
             // y = x @ W^T  (W is [N, K], we want x[M,K] @ W^T[K,N])
-            at::native::blas::sgemm_nt(M, K, N, 1.0f, x_data, K, w_data, K, 0.0f, out, N);
+            at::native::hot::sgemm_nt(M, K, N, 1.0f, x_data, K, w_data, K, 0.0f, out, N);
 
             // Fused bias add with AVX2
             if (has_bias_) {
