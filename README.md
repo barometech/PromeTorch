@@ -267,11 +267,13 @@ curl -s http://localhost:11434/api/chat \
 ### Ядро (c10) — ~4,626 строк
 
 Базовый слой, аналогичный `c10` в PyTorch:
-- **TensorImpl** — N-мерные тензоры, strides, views, channels-last (NHWC)
-- **Allocator** — caching-аллокаторы для каждого backend
-- **Device** — абстракция устройства (CPU, CUDA, NMCard, LinQ)
-- **ScalarType** — 16 типов данных (Float, Double, Half, BFloat16, Int, Long, Bool и др.)
-- **Storage** — управление памятью с ref-counting
+- **TensorImpl** — N-мерные тензоры, strides, views, channels-last (NHWC), `trusted_` flag для zero-overhead dispatch
+- **CPUAllocator** — 3-уровневый caching: 16MB arena (lock-free) + thread-local cache (64 слота, zero-mutex) + глобальный bucket cache (256 слотов × 32 bucket). **97.7% cache hit rate, 179 аллокаций за epoch** (было 37,000)
+- **Device** — 22 типа устройств (CPU, CUDA, NMCard, LinQ и др.)
+- **ScalarType** — 16 типов данных (Float, Double, Half, BFloat16, QInt8 и др.) + type promotion
+- **Storage** — ref-counted память с CUDA/NMCard/LinQ backend
+- **ThreadPool** — persistent worker threads для Эльбруса (замена OpenMP fork/join)
+- **SmallVector<5>** — SSO-оптимизация: тензоры до 5D не аллоцируют heap
 
 ### Операции (ATen) — ~18,000 строк
 
@@ -287,17 +289,19 @@ curl -s http://localhost:11434/api/chat \
 ### Autograd — ~6,400 строк
 
 Reverse-mode автоматическое дифференцирование:
-- **Engine** — топологическая сортировка, обратный проход по графу
-- **107 backward-функций** — математические формулы проверены аудитом
-- **Custom autograd functions** — CRTP-паттерн `Function<Derived>`
-- **Gradient checkpointing** — пересчёт forward в backward для экономии памяти
-- **Hook system** — forward pre-hooks, forward hooks, backward hooks
+- **Engine** — топологическая сортировка, cached GraphTask (reuse между backward)
+- **107 backward-функций** — Math(46) + LinAlg(13) + Shape(21) + Reduce(16) + Index(2) + Fused(4) + Conv(4) + AccumulateGrad
+- **Fused backward** — FusedLinearRelu (4 nodes → 1), FusedMLP (12 nodes → 1), PrecomputedGrad (zero-compute backward)
+- **NodePool** — thread-local object pool для backward nodes (zero malloc в hot path)
+- **SmallEdgeList<4>** — inline edges без heap allocation (99% ops)
+- **Conv2d/BatchNorm/Pool backward** — im2col-based, полная CNN тренировка
+- **Custom autograd functions** — CRTP `Function<Derived>` + gradient checkpointing
 
 ### NN Modules — ~9,000 строк, 97 модулей
 
 | Категория | Модули |
 |-----------|--------|
-| Слои | Linear, Bilinear, LazyLinear, Conv1d/2d/3d, ConvTranspose2d |
+| Слои | Linear (fused_relu), LowRankLinear (SVD-сжатие), Bilinear, LazyLinear, Conv1d/2d/3d, ConvTranspose2d |
 | Активации | ReLU, GELU, SiLU, Mish, Sigmoid, Tanh, ELU, SELU, LeakyReLU, Softmax, LogSoftmax, Hardtanh, Softplus, Softsign, PReLU, RReLU |
 | Нормализация | BatchNorm1d/2d, LayerNorm, GroupNorm, InstanceNorm2d, RMSNorm |
 | Pooling | MaxPool2d, AvgPool2d, AdaptiveAvgPool2d, GlobalAvgPool |
@@ -309,21 +313,24 @@ Reverse-mode автоматическое дифференцирование:
 | Embedding | Embedding, EmbeddingBag |
 | Upsampling | Upsample (nearest, bilinear) |
 
-### Оптимизаторы — 9 штук
+### Оптимизаторы — 10 штук
 
-SGD (с momentum, Nesterov, weight decay), Adam, AdamW, RMSprop, Adagrad, Adadelta, RAdam, NAdam, Adamax.
+SGD, Adam, AdamW, RMSprop, Adagrad, Adadelta, RAdam, NAdam, Adamax, AdamKiller (экспериментальный).
+**Fused multi-param**: `fused_adam_multi` / `fused_sgd_multi` — один вызов на все параметры, VecF SIMD.
 
 **LR Schedulers** (9 штук): StepLR, MultiStepLR, ExponentialLR, CosineAnnealingLR, LinearLR, ConstantLR, ReduceLROnPlateau, WarmupCosineAnnealingLR, OneCycleLR.
 
-### CUDA Backend — 68 ядер
+### CUDA Backend — 99 ядер
 
-- Собственные CUDA-ядра: element-wise, reduce, softmax, GEMM, GEMV, conv
-- **cuBLAS** — cublasSgemm / cublasSgemmStridedBatched для GEMM
-- **cuDNN** — convolution (forward + backward), pooling, batch normalization, activations
-- **FlashDecoding** — O(N) memory inference с causal masking
-- **Quantized GEMV** — Q4_K, Q5_K, Q6_K с warp-cooperative coalesced access
-- **Mixed Precision** — GradScaler + Autocast (FP32/FP16)
-- Архитектуры: sm_75 (Turing), sm_80 (Ampere), sm_86 (Ampere), sm_89 (Ada)
+- **65 element-wise** ядер (unary, binary, comparison, fused) с grid-stride loops
+- **18 reduction** ядер (sum, max, min, var, cross_entropy, nll_loss)
+- **9 BLAS** ядер (GEMM 4 варианта, batched, GEMV, dot, outer, transpose)
+- **cuBLAS** — cublasSgemm для всех GEMM (замена custom 32x32 kernel)
+- **cuDNN** — conv (fwd+bwd), pooling (fwd+bwd), batchnorm, activations (~12 ops)
+- **FlashAttention** — forward + backward с online softmax, O(N) memory
+- **FlashDecoding** — parallel KV cache chunks, fused QKnorm+RoPE+KVwrite
+- **Quantized GEMV** — Q4_K (persistent + fused gate+up), Q5_K, Q6_K, dp4a Q4_K×Q8_1
+- **Mixed Precision** — GradScaler + Autocast (FP32/FP16/BF16)
 
 ### TUDA — CPU dispatch
 
