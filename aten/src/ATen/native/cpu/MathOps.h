@@ -4,6 +4,7 @@
 #include "aten/src/ATen/core/TensorFactory.h"
 #include "aten/src/ATen/native/cpu/tuda/TudaVec.h"
 #include "aten/src/ATen/native/cpu/tuda/TudaMath.h"
+#include "aten/src/ATen/native/cpu/hot_loops.h"
 #include "c10/core/ScalarType.h"
 #include <cmath>
 #include <algorithm>
@@ -13,11 +14,6 @@
 // OpenMP conditional support
 #ifdef _OPENMP
 #include <omp.h>
-#define PT_OMP_PARALLEL_FOR _Pragma("omp parallel for")
-#define PT_OMP_PARALLEL_FOR_IF(cond) _Pragma("omp parallel for if(" #cond ")")
-#else
-#define PT_OMP_PARALLEL_FOR
-#define PT_OMP_PARALLEL_FOR_IF(cond)
 #endif
 
 namespace at {
@@ -122,36 +118,24 @@ namespace unary_ops {
     template<typename T> static inline T reciprocal_val(T x) { return T(1) / x; }
 } // namespace unary_ops
 
-// Unary op: TUDA VecF fast path for float32, generic dispatch for other types
-// vec_body: expression using tuda::VecF variable 'v', producing tuda::VecF
-// scalar_fn: templated function from unary_ops namespace
+// Unary op: delegates to hot::name_loop() (compiled in hot_loops.cpp) for float32.
+// On Elbrus, this allows LCC VLIW scheduling across the full loop body.
+// On x86, reduces binary size by eliminating per-TU inline copies.
+// vec_body / scalar_fn kept for non-float dispatch and in-place ops.
 #define DEFINE_UNARY_OP(name, vec_body, scalar_fn) \
 inline Tensor name(const Tensor& self) { \
     Tensor input = self.is_contiguous() ? self : self.contiguous(); \
     Tensor result = empty_like(input); \
     if (input.dtype() == c10::ScalarType::Float) { \
-        const float* in = input.data_ptr<float>(); \
-        float* out = result.mutable_data_ptr<float>(); \
-        int64_t n = input.numel(); \
-        constexpr int W = tuda::VecF::width; \
-        int64_t i = 0; \
-        for (; i + 4*W <= n; i += 4*W) { \
-            { tuda::VecF v = tuda::VecF::load(in + i);       (vec_body).store(out + i); } \
-            { tuda::VecF v = tuda::VecF::load(in + i + W);   (vec_body).store(out + i + W); } \
-            { tuda::VecF v = tuda::VecF::load(in + i + 2*W); (vec_body).store(out + i + 2*W); } \
-            { tuda::VecF v = tuda::VecF::load(in + i + 3*W); (vec_body).store(out + i + 3*W); } \
-        } \
-        for (; i + W <= n; i += W) { \
-            tuda::VecF v = tuda::VecF::load(in + i); \
-            (vec_body).store(out + i); \
-        } \
-        for (; i < n; ++i) out[i] = scalar_fn<float>(in[i]); \
+        hot::name##_loop(input.data_ptr<float>(), \
+                         result.mutable_data_ptr<float>(), input.numel()); \
         return result; \
     } \
     PT_DISPATCH_FLOATING_TYPES(input.dtype(), #name, [&] { \
         const scalar_t* in = input.data_ptr<scalar_t>(); \
         scalar_t* out = result.mutable_data_ptr<scalar_t>(); \
         int64_t n = input.numel(); \
+        _Pragma("omp parallel for schedule(static) if(n > 4096)") \
         for (int64_t i = 0; i < n; ++i) out[i] = scalar_fn<scalar_t>(in[i]); \
     }); \
     return result; \
@@ -168,17 +152,18 @@ inline Tensor& name##_(Tensor& self) { \
         float* data = self.mutable_data_ptr<float>(); \
         int64_t n = self.numel(); \
         constexpr int W = tuda::VecF::width; \
-        int64_t i = 0; \
-        for (; i + W <= n; i += W) { \
+        _Pragma("omp parallel for schedule(static) if(n > 4096)") \
+        for (int64_t i = 0; i < n - (n % W); i += W) { \
             tuda::VecF v = tuda::VecF::load(data + i); \
             (vec_body).store(data + i); \
         } \
-        for (; i < n; ++i) data[i] = scalar_fn<float>(data[i]); \
+        for (int64_t i = n - (n % W); i < n; ++i) data[i] = scalar_fn<float>(data[i]); \
         return self; \
     } \
     PT_DISPATCH_FLOATING_TYPES(self.dtype(), #name "_", [&] { \
         scalar_t* data = self.mutable_data_ptr<scalar_t>(); \
         int64_t n = self.numel(); \
+        _Pragma("omp parallel for schedule(static) if(n > 4096)") \
         for (int64_t i = 0; i < n; ++i) data[i] = scalar_fn<scalar_t>(data[i]); \
     }); \
     return self; \
@@ -227,7 +212,17 @@ DEFINE_UNARY_OP_INPLACE(round,   tuda::round_vec(v),      unary_ops::round_val)
 // Zero and fill
 inline Tensor& zero_(Tensor& self) {
     if (self.is_contiguous()) {
-        std::memset(self.data_ptr(), 0, self.nbytes());
+        // For large tensors, parallelize via typed zero-fill
+        int64_t n = self.numel();
+        if (n > 4096) {
+            PT_DISPATCH_ALL_TYPES(self.dtype(), "zero_omp", [&] {
+                scalar_t* data = self.mutable_data_ptr<scalar_t>();
+                _Pragma("omp parallel for schedule(static)")
+                for (int64_t i = 0; i < n; ++i) data[i] = 0;
+            });
+        } else {
+            std::memset(self.data_ptr(), 0, self.nbytes());
+        }
     } else {
         PT_DISPATCH_ALL_TYPES(self.dtype(), "zero_", [&] {
             scalar_t* base = self.mutable_data_ptr<scalar_t>();
@@ -253,8 +248,15 @@ inline Tensor& zero_(Tensor& self) {
 inline Tensor& fill_(Tensor& self, Scalar value) {
     // SIMD fast path for contiguous float
     if (self.dtype() == c10::ScalarType::Float && self.is_contiguous()) {
-        tuda::vec_fill(self.mutable_data_ptr<float>(),
-                       static_cast<float>(value.toDouble()), self.numel());
+        float* data = self.mutable_data_ptr<float>();
+        float fval = static_cast<float>(value.toDouble());
+        int64_t n = self.numel();
+        if (n > 4096) {
+            _Pragma("omp parallel for schedule(static)")
+            for (int64_t i = 0; i < n; ++i) data[i] = fval;
+        } else {
+            tuda::vec_fill(data, fval, n);
+        }
         return self;
     }
 
@@ -263,6 +265,7 @@ inline Tensor& fill_(Tensor& self, Scalar value) {
         if (self.is_contiguous()) {
             scalar_t* data = self.mutable_data_ptr<scalar_t>();
             int64_t numel = self.numel();
+            _Pragma("omp parallel for schedule(static) if(numel > 4096)")
             for (int64_t i = 0; i < numel; ++i) data[i] = val;
         } else {
             scalar_t* base = self.mutable_data_ptr<scalar_t>();
@@ -299,6 +302,7 @@ inline Tensor clamp(const Tensor& self, Scalar min_val, Scalar max_val) {
         scalar_t lo = min_val.to<scalar_t>();
         scalar_t hi = max_val.to<scalar_t>();
         int64_t n = input.numel();
+        _Pragma("omp parallel for schedule(static) if(n > 4096)")
         for (int64_t i = 0; i < n; ++i) {
             out[i] = std::min(std::max(in[i], lo), hi);
         }
@@ -445,38 +449,13 @@ inline Tensor diag(const Tensor& self, int64_t diagonal = 0) {
 
 // Tensor + Tensor with broadcasting
 inline Tensor add(const Tensor& self, const Tensor& other, Scalar alpha = 1) {
-    // Ultra-fast path: float, same shape, contiguous — skip all dispatch overhead
+    // Ultra-fast path: float, same shape, contiguous — delegate to hot_loops.cpp
     if (self.dtype() == c10::ScalarType::Float && other.dtype() == c10::ScalarType::Float &&
         self.sizes() == other.sizes() && self.is_contiguous() && other.is_contiguous()) {
         Tensor result = empty_like(self);
-        const float* a = self.data_ptr<float>();
-        const float* b = other.data_ptr<float>();
-        float* out = result.mutable_data_ptr<float>();
-        float alpha_val = static_cast<float>(alpha.toDouble());
-        int64_t n = result.numel();
-        constexpr int W = tuda::VecF::width;
-        int64_t i = 0;
-        if (alpha_val == 1.0f) {
-            for (; i + 4*W <= n; i += 4*W) {
-                (tuda::VecF::load(a+i)     + tuda::VecF::load(b+i)).store(out+i);
-                (tuda::VecF::load(a+i+W)   + tuda::VecF::load(b+i+W)).store(out+i+W);
-                (tuda::VecF::load(a+i+2*W) + tuda::VecF::load(b+i+2*W)).store(out+i+2*W);
-                (tuda::VecF::load(a+i+3*W) + tuda::VecF::load(b+i+3*W)).store(out+i+3*W);
-            }
-            for (; i + W <= n; i += W)
-                (tuda::VecF::load(a+i) + tuda::VecF::load(b+i)).store(out+i);
-        } else {
-            tuda::VecF valpha = tuda::VecF::broadcast(alpha_val);
-            for (; i + 4*W <= n; i += 4*W) {
-                tuda::VecF::fmadd(valpha, tuda::VecF::load(b+i),     tuda::VecF::load(a+i)).store(out+i);
-                tuda::VecF::fmadd(valpha, tuda::VecF::load(b+i+W),   tuda::VecF::load(a+i+W)).store(out+i+W);
-                tuda::VecF::fmadd(valpha, tuda::VecF::load(b+i+2*W), tuda::VecF::load(a+i+2*W)).store(out+i+2*W);
-                tuda::VecF::fmadd(valpha, tuda::VecF::load(b+i+3*W), tuda::VecF::load(a+i+3*W)).store(out+i+3*W);
-            }
-            for (; i + W <= n; i += W)
-                tuda::VecF::fmadd(valpha, tuda::VecF::load(b+i), tuda::VecF::load(a+i)).store(out+i);
-        }
-        for (; i < n; ++i) out[i] = a[i] + alpha_val * b[i];
+        hot::add_loop(self.data_ptr<float>(), other.data_ptr<float>(),
+                      result.mutable_data_ptr<float>(), result.numel(),
+                      static_cast<float>(alpha.toDouble()));
         return result;
     }
 
@@ -485,33 +464,11 @@ inline Tensor add(const Tensor& self, const Tensor& other, Scalar alpha = 1) {
         self.is_contiguous() && other.is_contiguous() && other.dim() == 1 &&
         self.dim() >= 2 && self.size(-1) == other.size(0)) {
         Tensor result = empty_like(self);
-        const float* a = self.data_ptr<float>();
-        const float* b = other.data_ptr<float>();
-        float* out = result.mutable_data_ptr<float>();
-        float alpha_val = static_cast<float>(alpha.toDouble());
         int64_t inner = other.size(0);
         int64_t outer = self.numel() / inner;
-        constexpr int W = tuda::VecF::width;
-        if (alpha_val == 1.0f) {
-            for (int64_t o = 0; o < outer; ++o) {
-                const float* row_a = a + o * inner;
-                float* row_out = out + o * inner;
-                int64_t j = 0;
-                for (; j + W <= inner; j += W)
-                    (tuda::VecF::load(row_a+j) + tuda::VecF::load(b+j)).store(row_out+j);
-                for (; j < inner; ++j) row_out[j] = row_a[j] + b[j];
-            }
-        } else {
-            tuda::VecF valpha = tuda::VecF::broadcast(alpha_val);
-            for (int64_t o = 0; o < outer; ++o) {
-                const float* row_a = a + o * inner;
-                float* row_out = out + o * inner;
-                int64_t j = 0;
-                for (; j + W <= inner; j += W)
-                    tuda::VecF::fmadd(valpha, tuda::VecF::load(b+j), tuda::VecF::load(row_a+j)).store(row_out+j);
-                for (; j < inner; ++j) row_out[j] = row_a[j] + alpha_val * b[j];
-            }
-        }
+        hot::add_broadcast_loop(self.data_ptr<float>(), other.data_ptr<float>(),
+                                result.mutable_data_ptr<float>(), outer, inner,
+                                static_cast<float>(alpha.toDouble()));
         return result;
     }
 
@@ -528,10 +485,12 @@ inline Tensor add(const Tensor& self, const Tensor& other, Scalar alpha = 1) {
         if (self.sizes() == other.sizes() && self.is_contiguous() && other.is_contiguous()) {
             const scalar_t* a = self.data_ptr<scalar_t>();
             const scalar_t* b = other.data_ptr<scalar_t>();
+            _Pragma("omp parallel for schedule(static) if(n > 4096)")
             for (int64_t i = 0; i < n; ++i) out[i] = a[i] + alpha_val * b[i];
         } else {
             const scalar_t* a = self.data_ptr<scalar_t>();
             const scalar_t* b = other.data_ptr<scalar_t>();
+            _Pragma("omp parallel for schedule(static) if(n > 4096)")
             for (int64_t i = 0; i < n; ++i) {
                 int64_t idx_a = detail::broadcast_index(i, result.sizes(), self.sizes(), self.strides());
                 int64_t idx_b = detail::broadcast_index(i, result.sizes(), other.sizes(), other.strides());
@@ -544,45 +503,25 @@ inline Tensor add(const Tensor& self, const Tensor& other, Scalar alpha = 1) {
 }
 
 inline Tensor sub(const Tensor& self, const Tensor& other, Scalar alpha = 1) {
-    // Direct SIMD fast path for sub (avoids alpha dispatch in add)
+    // Fast path: float, same shape, contiguous — delegate to hot_loops.cpp
     if (alpha.toDouble() == 1.0 &&
         self.dtype() == c10::ScalarType::Float && other.dtype() == c10::ScalarType::Float &&
         self.sizes() == other.sizes() && self.is_contiguous() && other.is_contiguous()) {
         Tensor result = empty_like(self);
-        const float* a = self.data_ptr<float>();
-        const float* b = other.data_ptr<float>();
-        float* out = result.mutable_data_ptr<float>();
-        int64_t n = result.numel();
-        constexpr int W = tuda::VecF::width;
-        int64_t i = 0;
-        for (; i + W <= n; i += W)
-            (tuda::VecF::load(a+i) - tuda::VecF::load(b+i)).store(out+i);
-        for (; i < n; ++i) out[i] = a[i] - b[i];
+        hot::sub_loop(self.data_ptr<float>(), other.data_ptr<float>(),
+                      result.mutable_data_ptr<float>(), result.numel());
         return result;
     }
     return add(self, other, Scalar(-alpha.toDouble()));
 }
 
 inline Tensor mul(const Tensor& self, const Tensor& other) {
-    // Ultra-fast path: float, same shape, contiguous
+    // Ultra-fast path: float, same shape, contiguous — delegate to hot_loops.cpp
     if (self.dtype() == c10::ScalarType::Float && other.dtype() == c10::ScalarType::Float &&
         self.sizes() == other.sizes() && self.is_contiguous() && other.is_contiguous()) {
         Tensor result = empty_like(self);
-        const float* a = self.data_ptr<float>();
-        const float* b = other.data_ptr<float>();
-        float* out = result.mutable_data_ptr<float>();
-        int64_t n = result.numel();
-        constexpr int W = tuda::VecF::width;
-        int64_t i = 0;
-        for (; i + 4*W <= n; i += 4*W) {
-            (tuda::VecF::load(a+i)     * tuda::VecF::load(b+i)).store(out+i);
-            (tuda::VecF::load(a+i+W)   * tuda::VecF::load(b+i+W)).store(out+i+W);
-            (tuda::VecF::load(a+i+2*W) * tuda::VecF::load(b+i+2*W)).store(out+i+2*W);
-            (tuda::VecF::load(a+i+3*W) * tuda::VecF::load(b+i+3*W)).store(out+i+3*W);
-        }
-        for (; i + W <= n; i += W)
-            (tuda::VecF::load(a+i) * tuda::VecF::load(b+i)).store(out+i);
-        for (; i < n; ++i) out[i] = a[i] * b[i];
+        hot::mul_loop(self.data_ptr<float>(), other.data_ptr<float>(),
+                      result.mutable_data_ptr<float>(), result.numel());
         return result;
     }
 
@@ -597,10 +536,12 @@ inline Tensor mul(const Tensor& self, const Tensor& other) {
         if (self.sizes() == other.sizes() && self.is_contiguous() && other.is_contiguous()) {
             const scalar_t* a = self.data_ptr<scalar_t>();
             const scalar_t* b = other.data_ptr<scalar_t>();
+            _Pragma("omp parallel for schedule(static) if(n > 4096)")
             for (int64_t i = 0; i < n; ++i) out[i] = a[i] * b[i];
         } else {
             const scalar_t* a = self.data_ptr<scalar_t>();
             const scalar_t* b = other.data_ptr<scalar_t>();
+            _Pragma("omp parallel for schedule(static) if(n > 4096)")
             for (int64_t i = 0; i < n; ++i) {
                 int64_t idx_a = detail::broadcast_index(i, result.sizes(), self.sizes(), self.strides());
                 int64_t idx_b = detail::broadcast_index(i, result.sizes(), other.sizes(), other.strides());
@@ -613,19 +554,12 @@ inline Tensor mul(const Tensor& self, const Tensor& other) {
 }
 
 inline Tensor div(const Tensor& self, const Tensor& other) {
-    // Ultra-fast path: float, same shape, contiguous
+    // Ultra-fast path: float, same shape, contiguous — delegate to hot_loops.cpp
     if (self.dtype() == c10::ScalarType::Float && other.dtype() == c10::ScalarType::Float &&
         self.sizes() == other.sizes() && self.is_contiguous() && other.is_contiguous()) {
         Tensor result = empty_like(self);
-        const float* a = self.data_ptr<float>();
-        const float* b = other.data_ptr<float>();
-        float* out = result.mutable_data_ptr<float>();
-        int64_t n = result.numel();
-        constexpr int W = tuda::VecF::width;
-        int64_t i = 0;
-        for (; i + W <= n; i += W)
-            (tuda::VecF::load(a+i) / tuda::VecF::load(b+i)).store(out+i);
-        for (; i < n; ++i) out[i] = a[i] / b[i];
+        hot::div_loop(self.data_ptr<float>(), other.data_ptr<float>(),
+                      result.mutable_data_ptr<float>(), result.numel());
         return result;
     }
 
@@ -645,10 +579,12 @@ inline Tensor div(const Tensor& self, const Tensor& other) {
         if (self.sizes() == other.sizes() && self.is_contiguous() && other.is_contiguous()) {
             const scalar_t* a = self.data_ptr<scalar_t>();
             const scalar_t* b = other.data_ptr<scalar_t>();
+            _Pragma("omp parallel for schedule(static) if(n > 4096)")
             for (int64_t i = 0; i < n; ++i) out[i] = a[i] / b[i];
         } else {
             const scalar_t* a = self.data_ptr<scalar_t>();
             const scalar_t* b = other.data_ptr<scalar_t>();
+            _Pragma("omp parallel for schedule(static) if(n > 4096)")
             for (int64_t i = 0; i < n; ++i) {
                 int64_t idx_a = detail::broadcast_index(i, result.sizes(), self.sizes(), self.strides());
                 int64_t idx_b = detail::broadcast_index(i, result.sizes(), other.sizes(), other.strides());
@@ -684,6 +620,7 @@ inline Tensor add(const Tensor& self, Scalar other, Scalar alpha = 1) {
         scalar_t* out = result.mutable_data_ptr<scalar_t>();
         scalar_t scalar_val = static_cast<scalar_t>(val);
         int64_t n = input.numel();
+        _Pragma("omp parallel for schedule(static) if(n > 4096)")
         for (int64_t i = 0; i < n; ++i) out[i] = in[i] + scalar_val;
     });
 
@@ -716,6 +653,7 @@ inline Tensor mul(const Tensor& self, Scalar other) {
         scalar_t* out = result.mutable_data_ptr<scalar_t>();
         scalar_t scalar_val = other.to<scalar_t>();
         int64_t n = input.numel();
+        _Pragma("omp parallel for schedule(static) if(n > 4096)")
         for (int64_t i = 0; i < n; ++i) out[i] = in[i] * scalar_val;
     });
 
@@ -806,6 +744,7 @@ inline Tensor& add_(Tensor& self, const Tensor& other, Scalar alpha = 1) {
         const scalar_t* other_data = other_c.data_ptr<scalar_t>();
         scalar_t alpha_val = alpha.to<scalar_t>();
         int64_t n = self_c.numel();
+        _Pragma("omp parallel for schedule(static) if(n > 4096)")
         for (int64_t i = 0; i < n; ++i) data[i] += alpha_val * other_data[i];
     });
     if (!self.is_contiguous()) {
@@ -840,6 +779,7 @@ inline Tensor& mul_(Tensor& self, const Tensor& other) {
         scalar_t* data = self_c.mutable_data_ptr<scalar_t>();
         const scalar_t* other_data = other_c.data_ptr<scalar_t>();
         int64_t n = self_c.numel();
+        _Pragma("omp parallel for schedule(static) if(n > 4096)")
         for (int64_t i = 0; i < n; ++i) data[i] *= other_data[i];
     });
     if (!self.is_contiguous()) {
@@ -859,7 +799,7 @@ inline Tensor& div_(Tensor& self, const Tensor& other) {
         scalar_t* data = self_c.mutable_data_ptr<scalar_t>();
         const scalar_t* other_data = other_c.data_ptr<scalar_t>();
         int64_t n = self_c.numel();
-
+        _Pragma("omp parallel for schedule(static) if(n > 4096)")
         for (int64_t i = 0; i < n; ++i) {
             data[i] /= other_data[i];
         }
@@ -888,6 +828,7 @@ inline Tensor& add_(Tensor& self, Scalar other, Scalar alpha = 1) {
         scalar_t* data = self.mutable_data_ptr<scalar_t>();
         scalar_t val = static_cast<scalar_t>(other.toDouble() * alpha.toDouble());
         int64_t n = self.numel();
+        _Pragma("omp parallel for schedule(static) if(n > 4096)")
         for (int64_t i = 0; i < n; ++i) data[i] += val;
     });
 
@@ -915,6 +856,7 @@ inline Tensor& mul_(Tensor& self, Scalar other) {
         scalar_t* data = self.mutable_data_ptr<scalar_t>();
         scalar_t val = other.to<scalar_t>();
         int64_t n = self.numel();
+        _Pragma("omp parallel for schedule(static) if(n > 4096)")
         for (int64_t i = 0; i < n; ++i) data[i] *= val;
     });
 
@@ -956,6 +898,7 @@ inline Tensor& addcmul_(Tensor& self, const Tensor& tensor1, const Tensor& tenso
         const scalar_t* t2 = tensor2.data_ptr<scalar_t>();
         scalar_t val = value.to<scalar_t>();
         int64_t n = self.numel();
+        _Pragma("omp parallel for schedule(static) if(n > 4096)")
         for (int64_t i = 0; i < n; ++i) data[i] += val * t1[i] * t2[i];
     });
 
@@ -995,6 +938,7 @@ inline Tensor& addcdiv_(Tensor& self, const Tensor& tensor1, const Tensor& tenso
         const scalar_t* t2 = tensor2.data_ptr<scalar_t>();
         scalar_t val = value.to<scalar_t>();
         int64_t n = self.numel();
+        _Pragma("omp parallel for schedule(static) if(n > 4096)")
         for (int64_t i = 0; i < n; ++i) data[i] += val * t1[i] / t2[i];
     });
 

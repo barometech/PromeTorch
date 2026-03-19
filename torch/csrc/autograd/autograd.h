@@ -16,6 +16,9 @@
 #include "torch/csrc/autograd/autograd_meta.h"
 #include "torch/csrc/autograd/engine.h"
 
+// Compiled inner loops for LTO on Elbrus
+#include "aten/src/ATen/native/cpu/hot_loops.h"
+
 // For graph cleanup
 #include <queue>
 #include <unordered_set>
@@ -862,7 +865,7 @@ inline Tensor fused_linear_autograd(const Tensor& input, const Tensor& weight,
     const float* w_data = weight.data_ptr<float>();
 
     // output = input @ weight^T  (weight is [N, K])
-    at::native::blas::sgemm_nt(M, K, N, 1.0f, x_data, K, w_data, K, 0.0f, out_data, N);
+    at::native::hot::sgemm_nt(M, K, N, 1.0f, x_data, K, w_data, K, 0.0f, out_data, N);
 
     // Fused bias add
     if (has_bias && bias.defined()) {
@@ -911,7 +914,7 @@ inline Tensor fused_linear_relu_autograd(const Tensor& input, const Tensor& weig
     const float* w_data = weight.data_ptr<float>();
 
     // output = input @ weight^T
-    at::native::blas::sgemm_nt(M, K, N, 1.0f, x_data, K, w_data, K, 0.0f, out_data, N);
+    at::native::hot::sgemm_nt(M, K, N, 1.0f, x_data, K, w_data, K, 0.0f, out_data, N);
 
     // Fused bias add + relu in single pass
     const int64_t total = M * N;

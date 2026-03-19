@@ -3,6 +3,7 @@
 #include "torch/nn/module.h"
 #include "torch/nn/init.h"
 #include "aten/src/ATen/native/cpu/PromeBLAS.h"
+#include "aten/src/ATen/native/cpu/hot_loops.h"
 #include "aten/src/ATen/native/cpu/tuda/TudaVec.h"
 #ifdef PT_USE_CUDA
 #include "aten/src/ATen/cuda/CUDADispatch.h"
@@ -176,7 +177,7 @@ public:
                     n * out_channels_ * out_length +
                     g * group_out_channels * out_length;
 
-                at::native::blas::sgemm(
+                at::native::hot::sgemm(
                     group_out_channels, col_height, out_length,
                     1.0f, w_ptr, col_height,
                     col_buf.data(), out_length,
@@ -432,7 +433,7 @@ public:
 
                 // GEMM: out[M,N] = W[M,K] × col[K,N]
                 // M = group_out_channels, K = col_height, N = col_width
-                at::native::blas::sgemm(
+                at::native::hot::sgemm(
                     group_out_channels,  // M
                     col_height,          // K
                     col_width,           // N
