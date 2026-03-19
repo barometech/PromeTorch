@@ -965,3 +965,29 @@ PyTorch использует thread pool (без fork/join), мы использ
 **Forward:** 4.9ms/batch
 **Gap vs PyTorch:** 7.4x → **5.7x**
 **Accuracy:** 89.11% (unchanged)
+
+### KILL PYTORCH v2 — Elbrus E8C2 (2026-03-19)
+
+**45.4 секунды!** (было 126.3s = **2.78x ускорение**)
+
+| Компонент | До | После |
+|-----------|-----|-------|
+| Forward | 5ms | **2.9ms** |
+| Backward | 39ms | **34ms** |
+| Step | 89ms | **35ms** |
+| Total/epoch | 126.3s | **45.4s** |
+| vs PyTorch | 7.4x | **2.7x** |
+| malloc/epoch | 37,000 | **640** |
+| Cache hit | 0% | **97.3%** |
+| Accuracy | 89.1% | **88.7%** |
+
+**Что дало результат:**
+- std::pow(x,2) → x*x в grad_norm (step 89→35ms)
+- Fused cross-entropy (NaN fixed, clamp ±88)
+- Fused SGD delegates to SIMD sgd_step_loop
+- Skip grad.contiguous() when already contiguous
+- EML Vector_Add_32F + cblas_saxpy for add_loop
+- Zero-overhead trusted tensor dispatch
+- 6×6 VLIW micro-kernel (36 FMA accumulators)
+- Persistent thread pool (no OpenMP fork/join)
+- Memory pool 97.3% hit rate (640 malloc)
