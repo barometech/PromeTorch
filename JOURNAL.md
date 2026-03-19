@@ -1059,3 +1059,17 @@ Pre-allocated ALL buffers. 179 allocations за весь epoch (было 37,000)
 126.3s → 120.6s (EML) → 97.3s (fused) → 45.4s (zero-dispatch) → 43.7s (killshot) → 22.0s (nuclear) → **15.2s (VICTORY)**
 
 **Первый PyTorch-совместимый фреймворк, БЫСТРЕЕ PyTorch на Эльбрусе.**
+
+### FAIR COMPARISON: PromeTorch vs PyTorch на Эльбрусе (2026-03-19)
+
+**ИДЕНТИЧНЫЕ условия:** SGD lr=0.01, batch=64, 784→512→256→128→10, ReLU, CrossEntropy, normalization (0.1307/0.3081), 1 epoch.
+
+| Фреймворк | Accuracy | Время | Ratio |
+|-----------|----------|-------|-------|
+| **PromeTorch** | **88.71%** | **15.2s** | **0.90x (FASTER)** |
+| PyTorch 2.7.1 | 88.14% | 16.8s | 1.0x |
+
+**PromeTorch на 10% быстрее И на 0.57pp точнее PyTorch на Эльбрусе!**
+
+Предыдущий PyTorch результат (65.9%/17s) был без нормализации данных.
+С нормализацией PyTorch тоже даёт ~88%, но медленнее.
