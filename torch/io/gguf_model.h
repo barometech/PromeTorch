@@ -619,16 +619,18 @@ public:
             const auto& info = reader.get_tensor_info(name);
             uint32_t type = info.type;
             int64_t block_bytes = 0;
+            int64_t group_size = 256;  // QK_K for K-quants
             if (type == gguf::GGML_TYPE_Q4_K) block_bytes = 144;
             else if (type == gguf::GGML_TYPE_Q6_K) block_bytes = 210;
             else if (type == gguf::GGML_TYPE_Q5_K) block_bytes = 176;
+            else if (type == gguf::GGML_TYPE_Q8_0) { block_bytes = 34; group_size = 32; }
             else return;
 
             auto raw = reader.load_raw_tensor(name);
             auto shape = raw.shape;
             qw.rows = shape[0];
             qw.cols = shape[1];
-            qw.row_stride_bytes = (qw.cols / 256) * block_bytes;
+            qw.row_stride_bytes = (qw.cols / group_size) * block_bytes;
             qw.total_bytes = static_cast<int64_t>(raw.data.size());
             qw.quant_type = type;
 
@@ -686,11 +688,17 @@ public:
 
         config.print();
 
-        // Load all weights (dequantized to float32)
-        load_weights(reader);
-
-        // Also load raw Q4_K_M for CPU dequant-GEMV (7x less bandwidth per token)
-        load_quantized_to_cpu();
+        if (!use_cuda_) {
+            // CPU-only fast path: skip FP32 dequant of large weight matrices.
+            // Load only small tensors (embeddings, norms, biases) as FP32,
+            // then load raw quantized blocks for GEMV — halves memory & load time.
+            load_weights_cpu_lite(reader);
+            load_quantized_to_cpu();
+        } else {
+            // GPU path: load all weights dequantized to FP32 (needed for CUDA upload)
+            load_weights(reader);
+            load_quantized_to_cpu();
+        }
 
         auto t_end = std::chrono::high_resolution_clock::now();
         double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
@@ -1213,6 +1221,81 @@ public:
             return true;
         }
         return false;
+    }
+
+    // ========================================================================
+    // CPU-lite loader: only small tensors (norms, embeddings, biases)
+    // Large weight matrices (attn_q/k/v/output, ffn_gate/up/down) are
+    // skipped — they will be loaded as raw quant blocks by load_quantized_to_cpu()
+    // ========================================================================
+
+    void load_weights_cpu_lite(const gguf::GGUFReader& reader) {
+        std::cout << "\n[Model] Loading weights (CPU-lite: norms+embeddings only)..." << std::endl;
+
+        // Token embeddings — always needed for embedding lookup
+        token_embedding = reader.load_tensor("token_embd.weight");
+        std::cout << "  token_embd: [" << token_embedding.size(0) << ", "
+                  << token_embedding.size(1) << "]" << std::endl;
+
+        // Output norm — always needed (small: [hidden])
+        output_norm = reader.load_tensor("output_norm.weight");
+
+        // Output weight: needed for tied embeddings, otherwise skip (use quant)
+        if (!reader.has_tensor("output.weight")) {
+            output_weight = token_embedding;
+            config.tie_word_embeddings = true;
+            std::cout << "  output: tied to token_embd" << std::endl;
+        } else {
+            // Check if quant type is supported — if not, load as FP32 fallback
+            const auto& info = reader.get_tensor_info("output.weight");
+            uint32_t type = info.type;
+            if (!cpu_quant::cpu_quant_gemv_supported(type)) {
+                output_weight = reader.load_tensor("output.weight");
+                std::cout << "  output: FP32 fallback (quant type " << type << ")" << std::endl;
+            } else {
+                std::cout << "  output: quant GEMV (skipping FP32 dequant)" << std::endl;
+            }
+        }
+
+        // Layers: only load small tensors (norms, biases, qk_norm)
+        layers.resize(config.num_layers);
+        for (int64_t i = 0; i < config.num_layers; ++i) {
+            std::string prefix = "blk." + std::to_string(i) + ".";
+            auto& layer = layers[i];
+
+            // Norms — small: [hidden] each
+            layer.attn_norm = reader.load_tensor(prefix + "attn_norm.weight");
+            layer.ffn_norm = reader.load_tensor(prefix + "ffn_norm.weight");
+
+            // QK-norm (Gemma3, Qwen3) — small: [head_dim]
+            if (reader.has_tensor(prefix + "attn_q_norm.weight")) {
+                layer.attn_q_norm = reader.load_tensor(prefix + "attn_q_norm.weight");
+                layer.attn_k_norm = reader.load_tensor(prefix + "attn_k_norm.weight");
+            }
+
+            // Post-norms (Gemma3) — small: [hidden]
+            if (reader.has_tensor(prefix + "post_attention_norm.weight")) {
+                layer.post_attention_norm = reader.load_tensor(prefix + "post_attention_norm.weight");
+            }
+            if (reader.has_tensor(prefix + "post_ffw_norm.weight")) {
+                layer.post_ffw_norm = reader.load_tensor(prefix + "post_ffw_norm.weight");
+            }
+
+            // Biases — small
+            if (reader.has_tensor(prefix + "attn_q.bias")) {
+                layer.attn_q_bias = reader.load_tensor(prefix + "attn_q.bias");
+                layer.attn_k_bias = reader.load_tensor(prefix + "attn_k.bias");
+                layer.attn_v_bias = reader.load_tensor(prefix + "attn_v.bias");
+            }
+
+            // SKIP: attn_q/k/v/output, ffn_gate/up/down weights
+            // These are loaded as raw quant blocks by load_quantized_to_cpu()
+
+            if ((i + 1) % 5 == 0 || i == config.num_layers - 1) {
+                std::cout << "  Layer " << (i + 1) << "/" << config.num_layers
+                          << " loaded (lite)" << std::endl;
+            }
+        }
     }
 
     // ========================================================================
