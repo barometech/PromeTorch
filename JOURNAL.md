@@ -947,3 +947,21 @@ c10::nmcard::register_nmcard_allocator_local();  // Caller's registry (inline)
 PyTorch использует thread pool (без fork/join), мы используем OpenMP (fork/join каждый batch).
 
 **Следующий шаг:** persistent thread pool вместо OpenMP, или увеличить OMP threshold.
+
+### GOD TIER Elbrus Result (2026-03-19)
+
+**8 agents, 25 files, +2342 lines:**
+1. Zero-overhead dispatch (trusted tensors)
+2. E2K 6×6 VLIW micro-kernel (36 FMA accumulators)
+3. Low-rank Linear + model compression
+4. Fused cross-entropy (disabled — NaN bug)
+5. Fused MLP backward (12 nodes → 1)
+6. Fused multi-param Adam/SGD
+7. Persistent thread pool (replaces OpenMP)
+8. FastOps + fused kernels
+
+**Result:** 126.3s → **97.3s = 23% speedup!**
+**Allocator:** 97.4% hit rate, 640 malloc (was 37,000)
+**Forward:** 4.9ms/batch
+**Gap vs PyTorch:** 7.4x → **5.7x**
+**Accuracy:** 89.11% (unchanged)
