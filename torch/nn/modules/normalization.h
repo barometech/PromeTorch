@@ -1,6 +1,9 @@
 #pragma once
 
 #include "torch/nn/module.h"
+#include "torch/csrc/autograd/autograd_meta.h"
+#include "torch/csrc/autograd/node.h"
+#include "torch/csrc/autograd/functions/ConvBackward.h"
 #include <cmath>
 
 #ifdef PT_USE_CUDA
@@ -287,6 +290,29 @@ public:
                         out_data[idx] = (in_data[idx] - mean[c]) * inv_std * g + b;
                     }
                 }
+            }
+        }
+
+        // Wire autograd backward
+        if (autograd::GradMode::is_enabled() && is_training()) {
+            bool needs_grad = input.requires_grad();
+            if (affine_) {
+                needs_grad = needs_grad ||
+                    get_parameter("weight")->data().requires_grad() ||
+                    get_parameter("bias")->data().requires_grad();
+            }
+            if (needs_grad) {
+                Tensor weight_tensor = affine_ ? get_parameter("weight")->data() : Tensor();
+                auto grad_fn = std::make_shared<autograd::BatchNorm2dBackward>(
+                    input, weight_tensor, mean, var, eps_, affine_
+                );
+                grad_fn->add_input_metadata(input);
+                if (affine_) {
+                    grad_fn->add_input_metadata(get_parameter("weight")->data());
+                    grad_fn->add_input_metadata(get_parameter("bias")->data());
+                }
+                autograd::set_grad_fn(output, grad_fn);
+                output.set_requires_grad(true);
             }
         }
 

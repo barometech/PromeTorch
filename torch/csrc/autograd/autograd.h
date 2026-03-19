@@ -33,6 +33,7 @@
 #include "torch/csrc/autograd/functions/ShapeBackward.h"
 #include "torch/csrc/autograd/functions/IndexBackward.h"
 #include "torch/csrc/autograd/functions/FusedBackward.h"
+#include "torch/csrc/autograd/functions/ConvBackward.h"
 
 namespace torch {
 namespace autograd {
