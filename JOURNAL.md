@@ -1118,3 +1118,15 @@ EML cblas_sgemm достигает 463 GFLOPS (23% пика) с NUMA bind на 8
 **EML Sparse:** eml_Algebra_SPMV_32F есть (sparse matrix-vector). Полного SpMM нет. Для attention c causal mask — не применимо напрямую.
 
 **Вывод:** PromeTorch быстрее PyTorch ТОЛЬКО на Эльбрусе благодаря EML. Для x86/CUDA — PyTorch быстрее из-за MKL, cuDNN, torch.compile.
+
+### Massive Feature Drop (2026-03-19)
+
+5 агентов параллельно закрыли главные пробелы:
+
+1. **Multi-format model loader** (+1341 строк): GGUF + SafeTensors + PyTorch + ONNX, auto-detect
+2. **Flash-decoding** (+531 строк): parallel KV cache, fused QKnorm+RoPE+KVwrite, 14 launches/layer (was 18)
+3. **CNN backward** (+623 строк): Conv2d + BatchNorm + MaxPool + AvgPool autograd — CNN тренировка разблокирована!
+4. **Full Python API** (+654 строк): Sequential, DataLoader, save/load, backward(), 13 activations, LSTM/GRU
+5. **CPU inference 10x** (+114 строк): thread pool GEMV (no OpenMP needed), skip FP32 dequant, half memory
+
+Итого: **+3263 строк**, 5 критических пробелов закрыты.
