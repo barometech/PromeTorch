@@ -930,3 +930,20 @@ c10::nmcard::register_nmcard_allocator_local();  // Caller's registry (inline)
 | PromeTorch + EML | 120.6s | 7.1x |
 | PromeTorch + EML + optimizations | 121.4s | 7.1x |
 | PyTorch 2.7.1 (32 threads) | 17.0s | 1x |
+
+### Final Elbrus Optimization (EML + OpenMP + hot_loops + memory pool + fused ops)
+
+**Build:** cmake -O3 -ffast-math + EML BLAS + OpenMP + aten_cpu static lib
+**Allocator:** 97.7% cache hit rate (641 malloc из 28136 = **58x reduction!**)
+
+| Version | Time | malloc/epoch | vs PyTorch |
+|---------|------|-------------|-----------|
+| PyTorch 2.7.1 (32t) | **17.0s** | ? | 1x |
+| PromeTorch scalar | 126.3s | ~37,000 | 7.4x |
+| PromeTorch + all opts | 128.6s | **641** | 7.6x |
+
+**Memory pool работает идеально** (97.7% hit), но скорость не улучшилась.
+**Root cause:** OpenMP fork/join overhead на маленьких матрицах (784×512 = 401K элементов).
+PyTorch использует thread pool (без fork/join), мы используем OpenMP (fork/join каждый batch).
+
+**Следующий шаг:** persistent thread pool вместо OpenMP, или увеличить OMP threshold.
