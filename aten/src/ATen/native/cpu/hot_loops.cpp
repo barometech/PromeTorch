@@ -28,11 +28,42 @@ namespace hot {
 
 using tuda::VecF;
 
-// BLAS wrappers
-void sgemm(int64_t M, int64_t K, int64_t N, float alpha, const float* A, int64_t lda, const float* B, int64_t ldb, float beta, float* C, int64_t ldc) { tuda::blas::sgemm(M, K, N, alpha, A, lda, B, ldb, beta, C, ldc); }
-void sgemm_nt(int64_t M, int64_t K, int64_t N, float alpha, const float* A, int64_t lda, const float* B, int64_t ldb, float beta, float* C, int64_t ldc) { tuda::blas::sgemm_nt(M, K, N, alpha, A, lda, B, ldb, beta, C, ldc); }
-void sgemv(int64_t M, int64_t N, float alpha, const float* A, int64_t lda, const float* x, float beta, float* y) { tuda::blas::sgemv(M, N, alpha, A, lda, x, beta, y); }
-float sdot(int64_t n, const float* a, const float* b) { return tuda::blas::sdot(n, a, b); }
+// BLAS wrappers — direct EML dispatch on Elbrus (avoid TudaBLAS indirection)
+void sgemm(int64_t M, int64_t K, int64_t N, float alpha, const float* A, int64_t lda, const float* B, int64_t ldb, float beta, float* C, int64_t ldc) {
+#ifdef PT_USE_EML_BLAS
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                (int)M, (int)N, (int)K,
+                alpha, A, (int)lda, B, (int)ldb,
+                beta, C, (int)ldc);
+#else
+    tuda::blas::sgemm(M, K, N, alpha, A, lda, B, ldb, beta, C, ldc);
+#endif
+}
+void sgemm_nt(int64_t M, int64_t K, int64_t N, float alpha, const float* A, int64_t lda, const float* B, int64_t ldb, float beta, float* C, int64_t ldc) {
+#ifdef PT_USE_EML_BLAS
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                (int)M, (int)N, (int)K,
+                alpha, A, (int)lda, B, (int)ldb,
+                beta, C, (int)ldc);
+#else
+    tuda::blas::sgemm_nt(M, K, N, alpha, A, lda, B, ldb, beta, C, ldc);
+#endif
+}
+void sgemv(int64_t M, int64_t N, float alpha, const float* A, int64_t lda, const float* x, float beta, float* y) {
+#ifdef PT_USE_EML_BLAS
+    cblas_sgemv(CblasRowMajor, CblasNoTrans, (int)M, (int)N,
+                alpha, A, (int)lda, x, 1, beta, y, 1);
+#else
+    tuda::blas::sgemv(M, N, alpha, A, lda, x, beta, y);
+#endif
+}
+float sdot(int64_t n, const float* a, const float* b) {
+#ifdef PT_USE_EML_BLAS
+    return cblas_sdot((int)n, a, 1, b, 1);
+#else
+    return tuda::blas::sdot(n, a, b);
+#endif
+}
 
 // ============================================================================
 // Element-wise binary loops
@@ -386,20 +417,26 @@ void sgd_step_loop(float* param, const float* grad, float* momentum_buf,
 
 // Missing implementations added below
 
-// Missing implementations for linker
+// sgemm_tn: C[K,N] = alpha * A^T[K,M] @ B[M,N] + beta * C
+// A is [M, K] in row-major, A^T is [K, M]
 void sgemm_tn(int64_t M, int64_t K, int64_t N, float alpha, const float* A, int64_t lda, const float* B, int64_t ldb, float beta, float* C, int64_t ldc) {
-    // C[K,N] = alpha * A^T[K,M] @ B[M,N] + beta * C
-    // A is [M, K] in row-major, A^T is [K, M]
 #ifdef PT_USE_EML_BLAS
-    cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans, (int)K, (int)N, (int)M, alpha, A, (int)lda, B, (int)ldb, beta, C, (int)ldc);
+    // Direct EML cblas with CblasTrans — no transpose buffer needed
+    cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
+                (int)K, (int)N, (int)M,
+                alpha, A, (int)lda, B, (int)ldb,
+                beta, C, (int)ldc);
 #else
-    // Transpose A[M,K] -> At[K,M], then call optimized sgemm(K, M, N)
-    // Transpose is O(M*K), GEMM is O(M*K*N) — negligible overhead.
-    std::vector<float> At(K * M);
+    // Fallback: use thread-local buffer to avoid heap alloc per call
+    // For MNIST sizes (M=64, K=512): 64*512*4 = 128KB — fits in stack/TLS
+    static thread_local std::vector<float> At_buf;
+    int64_t sz = K * M;
+    if ((int64_t)At_buf.size() < sz) At_buf.resize(sz);
+    float* At = At_buf.data();
     for (int64_t m = 0; m < M; ++m)
         for (int64_t k = 0; k < K; ++k)
             At[k * M + m] = A[m * lda + k];
-    tuda::blas::sgemm(K, M, N, alpha, At.data(), M, B, ldb, beta, C, ldc);
+    tuda::blas::sgemm(K, M, N, alpha, At, M, B, ldb, beta, C, ldc);
 #endif
 }
 

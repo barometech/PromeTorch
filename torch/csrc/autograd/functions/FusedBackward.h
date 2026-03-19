@@ -44,28 +44,26 @@ struct FusedLinearBackward : public Node {
             return {Tensor(), Tensor(), Tensor()};
         }
 
-        Tensor grad_contig = grad.is_contiguous() ? grad : grad.contiguous();
-        Tensor input_contig = input_.is_contiguous() ? input_ : input_.contiguous();
-        Tensor weight_contig = weight_.is_contiguous() ? weight_ : weight_.contiguous();
+        // Saved tensors from Linear forward are ALWAYS contiguous:
+        //   input_ comes from user (must be contiguous for mm)
+        //   weight_ comes from at::empty (always contiguous)
+        //   grad comes from upstream backward (contiguous by construction)
+        // Skip .contiguous() checks — each is a branch + potential malloc+memcpy.
+        const int64_t M = input_.size(0);
+        const int64_t K = input_.size(1);
+        const int64_t N = weight_.size(0);
 
-        const int64_t M = input_contig.size(0);
-        const int64_t K = input_contig.size(1);
-        const int64_t N = weight_contig.size(0);
-
-        const float* grad_data = grad_contig.data_ptr<float>();
-        const float* x_data = input_contig.data_ptr<float>();
-        const float* w_data = weight_contig.data_ptr<float>();
+        const float* grad_data = grad.data_ptr<float>();
+        const float* x_data = input_.data_ptr<float>();
+        const float* w_data = weight_.data_ptr<float>();
 
         // --- grad_input = grad_output @ weight  [M,N] @ [N,K] = [M,K] ---
-        // weight is [N,K], so this is grad @ W = sgemm(M, N, K)
         Tensor grad_input = at::empty({M, K});
         at::native::hot::sgemm(M, N, K, 1.0f,
                                grad_data, N, w_data, K,
                                0.0f, grad_input.mutable_data_ptr<float>(), K);
 
         // --- grad_weight = grad_output^T @ input = [N,M] @ [M,K] = [N,K] ---
-        // Use sgemm_tn: C[N,K] = grad^T[N,M] @ input[M,K]
-        // where grad is [M,N] stored row-major, so grad^T[n,m] = grad[m*N+n]
         Tensor grad_weight = at::empty({N, K});
         at::native::hot::sgemm_tn(M, N, K, 1.0f,
                                    grad_data, N, x_data, K,
@@ -126,19 +124,16 @@ struct FusedLinearReluBackward : public Node {
             return {Tensor(), Tensor(), Tensor()};
         }
 
-        Tensor grad_contig = grad.is_contiguous() ? grad : grad.contiguous();
-        Tensor input_contig = input_.is_contiguous() ? input_ : input_.contiguous();
-        Tensor weight_contig = weight_.is_contiguous() ? weight_ : weight_.contiguous();
-        Tensor output_contig = output_.is_contiguous() ? output_ : output_.contiguous();
+        // All saved tensors are contiguous by construction (from Linear forward).
+        // Skip .contiguous() — eliminates 4 branch + potential malloc+memcpy.
+        const int64_t M = input_.size(0);
+        const int64_t K = input_.size(1);
+        const int64_t N = weight_.size(0);
 
-        const int64_t M = input_contig.size(0);
-        const int64_t K = input_contig.size(1);
-        const int64_t N = weight_contig.size(0);
-
-        const float* grad_data = grad_contig.data_ptr<float>();
-        const float* output_data = output_contig.data_ptr<float>();
-        const float* w_data = weight_contig.data_ptr<float>();
-        const float* x_data = input_contig.data_ptr<float>();
+        const float* grad_data = grad.data_ptr<float>();
+        const float* output_data = output_.data_ptr<float>();
+        const float* w_data = weight_.data_ptr<float>();
+        const float* x_data = input_.data_ptr<float>();
 
         // --- Step 1: Apply relu backward mask ---
         // grad_relu = grad_output * (output > 0)
@@ -148,22 +143,18 @@ struct FusedLinearReluBackward : public Node {
         at::native::hot::relu_mask_mul(grad_data, output_data, gr_data, M * N);
 
         // --- Step 2: grad_input = grad_relu @ weight [M,N] @ [N,K] = [M,K] ---
-        // Direct hot::sgemm — NO mm() dispatch, NO .t() view, NO contiguous check
         Tensor grad_input = at::empty({M, K});
         at::native::hot::sgemm(M, N, K, 1.0f,
                                gr_data, N, w_data, K,
                                0.0f, grad_input.mutable_data_ptr<float>(), K);
 
         // --- Step 3: grad_weight = grad_relu^T @ input [N,M] @ [M,K] = [N,K] ---
-        // Direct hot::sgemm_tn — NO .t() view allocation, NO intermediate tensor
-        // sgemm_tn: C[N,K] = grad_relu^T[N,M] @ input[M,K]
         Tensor grad_weight = at::empty({N, K});
         at::native::hot::sgemm_tn(M, N, K, 1.0f,
                                    gr_data, N, x_data, K,
                                    0.0f, grad_weight.mutable_data_ptr<float>(), K);
 
         // --- Step 4: grad_bias = grad_relu.sum(dim=0) [N] ---
-        // Direct hot::col_sum — NO Tensor.sum() dispatch overhead
         Tensor grad_bias;
         if (has_bias_) {
             grad_bias = at::empty({N});
@@ -245,26 +236,24 @@ struct FusedMLPBackward : public Node {
         for (int64_t l = static_cast<int64_t>(layers_.size()) - 1; l >= 0; --l) {
             auto& layer = layers_[l];
 
-            Tensor input_c = layer.input.is_contiguous() ? layer.input : layer.input.contiguous();
-            Tensor weight_c = layer.weight.is_contiguous() ? layer.weight : layer.weight.contiguous();
+            // All saved tensors are contiguous by construction (from MLP forward).
+            // Skip .contiguous() — eliminates 2-3 branches + potential malloc+memcpy per layer.
+            const int64_t M = layer.input.size(0);
+            const int64_t K = layer.input.size(1);
+            const int64_t N = layer.weight.size(0);
 
-            const int64_t M = input_c.size(0);
-            const int64_t K = input_c.size(1);
-            const int64_t N = weight_c.size(0);
-
-            const float* w_data = weight_c.data_ptr<float>();
-            const float* x_data = input_c.data_ptr<float>();
+            const float* w_data = layer.weight.data_ptr<float>();
+            const float* x_data = layer.input.data_ptr<float>();
 
             // Apply relu mask if this layer has relu
             const float* gm_data;
             Tensor grad_masked;
             if (layer.has_relu && layer.output.defined()) {
-                Tensor output_c = layer.output.is_contiguous() ? layer.output : layer.output.contiguous();
                 grad_masked = at::empty({M, N});
                 gm_data = grad_masked.mutable_data_ptr<float>();
                 at::native::hot::relu_mask_mul(
                     current_grad.data_ptr<float>(),
-                    output_c.data_ptr<float>(),
+                    layer.output.data_ptr<float>(),
                     grad_masked.mutable_data_ptr<float>(),
                     M * N);
             } else {
@@ -363,22 +352,17 @@ struct LowRankLinearBackward : public Node {
             return {Tensor(), Tensor(), Tensor(), Tensor()};
         }
 
-        Tensor grad_contig = grad.is_contiguous() ? grad : grad.contiguous();
-        Tensor input_contig = input_.is_contiguous() ? input_ : input_.contiguous();
-        Tensor A_contig = A_.is_contiguous() ? A_ : A_.contiguous();
-        Tensor B_contig = B_.is_contiguous() ? B_ : B_.contiguous();
-        Tensor temp_contig = temp_.is_contiguous() ? temp_ : temp_.contiguous();
+        // All saved tensors are contiguous by construction.
+        const int64_t M = input_.size(0);
+        const int64_t K = input_.size(1);
+        const int64_t N = A_.size(0);
+        const int64_t rank = A_.size(1);
 
-        const int64_t M = input_contig.size(0);
-        const int64_t K = input_contig.size(1);
-        const int64_t N = A_contig.size(0);
-        const int64_t rank = A_contig.size(1);
-
-        const float* grad_data = grad_contig.data_ptr<float>();
-        const float* x_data = input_contig.data_ptr<float>();
-        const float* a_data = A_contig.data_ptr<float>();
-        const float* b_data = B_contig.data_ptr<float>();
-        const float* temp_data = temp_contig.data_ptr<float>();
+        const float* grad_data = grad.data_ptr<float>();
+        const float* x_data = input_.data_ptr<float>();
+        const float* a_data = A_.data_ptr<float>();
+        const float* b_data = B_.data_ptr<float>();
+        const float* temp_data = temp_.data_ptr<float>();
 
         // grad_input = grad @ A @ B  [M,N]@[N,rank]@[rank,K] = [M,K]
         Tensor grad_A_product = at::empty({M, rank});
