@@ -12,6 +12,8 @@
 #include "torch/csrc/autograd/autograd.h"
 #include "torch/nn/nn.h"
 #include "torch/optim/optim.h"
+#include "torch/serialization.h"
+#include "torch/data/data.h"
 
 namespace py = pybind11;
 
@@ -81,6 +83,90 @@ void init_dtype_bindings(py::module& m) {
 }
 
 // ============================================================================
+// Serialization Bindings
+// ============================================================================
+
+void init_serialization_bindings(py::module& m) {
+    m.def("save", [](const at::Tensor& tensor, const std::string& path) {
+        torch::save(tensor, path);
+    }, py::arg("tensor"), py::arg("path"),
+    "Save a tensor to a file in PTOR binary format");
+
+    m.def("load", [](const std::string& path) {
+        return torch::load(path);
+    }, py::arg("path"),
+    "Load a tensor from a PTOR binary file");
+
+    m.def("save_state_dict", [](const std::unordered_map<std::string, at::Tensor>& state_dict,
+                                 const std::string& path) {
+        torch::save_state_dict(state_dict, path);
+    }, py::arg("state_dict"), py::arg("path"),
+    "Save a state dict (name->tensor map) to a file");
+
+    m.def("load_state_dict", [](const std::string& path) {
+        return torch::load_state_dict(path);
+    }, py::arg("path"),
+    "Load a state dict from a file");
+}
+
+// ============================================================================
+// Data Loading Bindings
+// ============================================================================
+
+void init_data_bindings(py::module& m) {
+    using TDS = torch::data::TensorDataset;
+    using Batch = torch::data::Batch<at::Tensor, at::Tensor>;
+    using DL = torch::data::DataLoader<TDS>;
+
+    // Batch type
+    py::class_<Batch>(m, "Batch")
+        .def_readonly("data", &Batch::data)
+        .def_readonly("target", &Batch::target)
+        .def_readonly("size", &Batch::size);
+
+    // TensorDataset
+    py::class_<TDS, std::shared_ptr<TDS>>(m, "TensorDataset")
+        .def(py::init<at::Tensor, at::Tensor>(), py::arg("data"), py::arg("targets"))
+        .def(py::init<at::Tensor>(), py::arg("data"))
+        .def("__len__", &TDS::size)
+        .def("__getitem__", [](TDS& self, size_t index) {
+            auto ex = self.get(index);
+            return py::make_tuple(ex.data, ex.target);
+        });
+
+    // DataLoaderOptions
+    py::class_<torch::data::DataLoaderOptions>(m, "DataLoaderOptions")
+        .def(py::init<>())
+        .def_readwrite("batch_size", &torch::data::DataLoaderOptions::batch_size)
+        .def_readwrite("shuffle", &torch::data::DataLoaderOptions::shuffle)
+        .def_readwrite("drop_last", &torch::data::DataLoaderOptions::drop_last)
+        .def_readwrite("num_workers", &torch::data::DataLoaderOptions::num_workers);
+
+    // DataLoader for TensorDataset
+    py::class_<DL>(m, "DataLoader")
+        .def(py::init([](std::shared_ptr<TDS> dataset, size_t batch_size,
+                         bool shuffle, bool drop_last) {
+            torch::data::DataLoaderOptions opts;
+            opts.batch_size = batch_size;
+            opts.shuffle = shuffle;
+            opts.drop_last = drop_last;
+            return std::make_unique<DL>(*dataset, opts);
+        }), py::arg("dataset"), py::arg("batch_size") = 1,
+            py::arg("shuffle") = false, py::arg("drop_last") = false)
+        .def("__len__", &DL::size)
+        .def("__iter__", [](DL& self) {
+            // Collect all batches into a list for Python iteration
+            // This is simpler than exposing C++ iterators to Python
+            py::list batches;
+            for (auto it = self.begin(); it != self.end(); ++it) {
+                auto& batch = *it;
+                batches.append(py::make_tuple(batch.data, batch.target));
+            }
+            return batches.attr("__iter__")();
+        });
+}
+
+// ============================================================================
 // Main Module
 // ============================================================================
 
@@ -93,12 +179,19 @@ PYBIND11_MODULE(_C, m) {
     init_tensor_bindings(m);
     init_autograd_bindings(m);
 
+    // Serialization
+    init_serialization_bindings(m);
+
     // Create submodules
     py::module nn = m.def_submodule("nn", "Neural Network modules");
     init_nn_bindings(nn);
 
     py::module optim = m.def_submodule("optim", "Optimizers");
     init_optim_bindings(optim);
+
+    // Data loading submodule
+    py::module data = m.def_submodule("data", "Data loading utilities");
+    init_data_bindings(data);
 
     // CUDA availability
     m.def("cuda_is_available", []() {
@@ -120,5 +213,5 @@ PYBIND11_MODULE(_C, m) {
     }, "Get number of CUDA devices");
 
     // Version info
-    m.attr("__version__") = "0.1.0";
+    m.attr("__version__") = "0.2.0";
 }

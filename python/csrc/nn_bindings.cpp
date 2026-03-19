@@ -1,5 +1,5 @@
 // ============================================================================
-// PromeTorch Python Bindings - Neural Network (Simplified)
+// PromeTorch Python Bindings - Neural Network (Full)
 // ============================================================================
 
 #include <pybind11/pybind11.h>
@@ -10,11 +10,12 @@
 
 #include "aten/src/ATen/ATen.h"
 #include "torch/nn/nn.h"
+#include "torch/serialization.h"
 
 namespace py = pybind11;
 
 // ============================================================================
-// NN Module Bindings (Simplified)
+// NN Module Bindings (Full)
 // ============================================================================
 
 void init_nn_bindings(py::module& m) {
@@ -28,7 +29,7 @@ void init_nn_bindings(py::module& m) {
         .def("zero_grad", &torch::nn::Module::zero_grad)
         .def("parameters", [](torch::nn::Module& self) {
             std::vector<at::Tensor> params;
-            for (auto* p : self.parameters()) {  // p is a pointer
+            for (auto* p : self.parameters()) {
                 params.push_back(p->data());
             }
             return params;
@@ -36,20 +37,103 @@ void init_nn_bindings(py::module& m) {
         .def("named_parameters", [](torch::nn::Module& self) {
             std::vector<std::pair<std::string, at::Tensor>> params;
             for (auto& np : self.named_parameters()) {
-                // np.first is string, np.second is Parameter*
                 params.push_back(std::make_pair(np.first, np.second->data()));
             }
             return params;
         })
         .def("name", &torch::nn::Module::name)
-        .def("is_training", &torch::nn::Module::is_training);
+        .def("is_training", &torch::nn::Module::is_training)
+        .def("to", [](torch::nn::Module& self, const std::string& device_str) {
+            c10::Device device(device_str);
+            self.to(device);
+        }, py::arg("device"))
+        .def("to", [](torch::nn::Module& self, const c10::Device& device) {
+            self.to(device);
+        }, py::arg("device"))
+        .def("to", [](torch::nn::Module& self, c10::ScalarType dtype) {
+            self.to(dtype);
+        }, py::arg("dtype"))
+        .def("cuda", [](torch::nn::Module& self, int device_index) {
+            self.to(c10::Device(c10::DeviceType::CUDA, device_index));
+        }, py::arg("device") = 0)
+        .def("cpu", [](torch::nn::Module& self) {
+            self.to(c10::Device(c10::DeviceType::CPU));
+        })
+        .def("state_dict", [](torch::nn::Module& self) {
+            return self.state_dict();
+        })
+        .def("load_state_dict", [](torch::nn::Module& self,
+                const std::unordered_map<std::string, at::Tensor>& state_dict, bool strict) {
+            self.load_state_dict(state_dict, strict);
+        }, py::arg("state_dict"), py::arg("strict") = true)
+        .def("__repr__", [](torch::nn::Module& self) {
+            return torch::nn::module_repr(self);
+        })
+        .def("children", [](torch::nn::Module& self) {
+            std::vector<std::shared_ptr<torch::nn::Module>> result;
+            for (auto& nc : self.named_children()) {
+                result.push_back(nc.second);
+            }
+            return result;
+        })
+        .def("named_children", [](torch::nn::Module& self) {
+            return self.named_children();
+        });
 
+    // ========================================================================
+    // Sequential container
+    // ========================================================================
+    py::class_<torch::nn::Sequential, torch::nn::Module, std::shared_ptr<torch::nn::Sequential>>(m, "Sequential")
+        .def(py::init<>())
+        .def(py::init([](py::args modules) {
+            auto seq = std::make_shared<torch::nn::Sequential>();
+            for (auto& m : modules) {
+                auto mod = m.cast<std::shared_ptr<torch::nn::Module>>();
+                seq->add(mod);
+            }
+            return seq;
+        }))
+        .def("add", [](torch::nn::Sequential& self, std::shared_ptr<torch::nn::Module> module) {
+            self.add(module);
+        })
+        .def("forward", &torch::nn::Sequential::forward)
+        .def("__call__", &torch::nn::Sequential::forward)
+        .def("__len__", &torch::nn::Sequential::size)
+        .def("__getitem__", [](torch::nn::Sequential& self, size_t index) {
+            return self[index];
+        });
+
+    // ========================================================================
+    // ModuleList container
+    // ========================================================================
+    py::class_<torch::nn::ModuleList, torch::nn::Module, std::shared_ptr<torch::nn::ModuleList>>(m, "ModuleList")
+        .def(py::init<>())
+        .def(py::init([](py::list modules) {
+            auto ml = std::make_shared<torch::nn::ModuleList>();
+            for (auto& m : modules) {
+                auto mod = m.cast<std::shared_ptr<torch::nn::Module>>();
+                ml->append(mod);
+            }
+            return ml;
+        }))
+        .def("append", [](torch::nn::ModuleList& self, std::shared_ptr<torch::nn::Module> module) {
+            self.append(module);
+        })
+        .def("__len__", &torch::nn::ModuleList::size)
+        .def("__getitem__", [](torch::nn::ModuleList& self, size_t index) {
+            return self[index];
+        });
+
+    // ========================================================================
     // Linear layer
+    // ========================================================================
     py::class_<torch::nn::Linear, torch::nn::Module, std::shared_ptr<torch::nn::Linear>>(m, "Linear")
         .def(py::init<int64_t, int64_t, bool>(),
              py::arg("in_features"), py::arg("out_features"), py::arg("bias") = true)
         .def("forward", &torch::nn::Linear::forward)
         .def("__call__", &torch::nn::Linear::forward)
+        .def_property_readonly("in_features", &torch::nn::Linear::in_features)
+        .def_property_readonly("out_features", &torch::nn::Linear::out_features)
         .def_property_readonly("weight", [](torch::nn::Linear& self) {
             auto* p = self.get_parameter("weight");
             return p ? p->data() : at::Tensor();
@@ -62,11 +146,38 @@ void init_nn_bindings(py::module& m) {
             return py::none();
         });
 
+    // ========================================================================
     // Activation functions as modules
+    // ========================================================================
     py::class_<torch::nn::ReLU, torch::nn::Module, std::shared_ptr<torch::nn::ReLU>>(m, "ReLU")
         .def(py::init<bool>(), py::arg("inplace") = false)
         .def("forward", &torch::nn::ReLU::forward)
         .def("__call__", &torch::nn::ReLU::forward);
+
+    py::class_<torch::nn::ReLU6, torch::nn::Module, std::shared_ptr<torch::nn::ReLU6>>(m, "ReLU6")
+        .def(py::init<bool>(), py::arg("inplace") = false)
+        .def("forward", &torch::nn::ReLU6::forward)
+        .def("__call__", &torch::nn::ReLU6::forward);
+
+    py::class_<torch::nn::LeakyReLU, torch::nn::Module, std::shared_ptr<torch::nn::LeakyReLU>>(m, "LeakyReLU")
+        .def(py::init<double, bool>(), py::arg("negative_slope") = 0.01, py::arg("inplace") = false)
+        .def("forward", &torch::nn::LeakyReLU::forward)
+        .def("__call__", &torch::nn::LeakyReLU::forward);
+
+    py::class_<torch::nn::PReLU, torch::nn::Module, std::shared_ptr<torch::nn::PReLU>>(m, "PReLU")
+        .def(py::init<int64_t, double>(), py::arg("num_parameters") = 1, py::arg("init") = 0.25)
+        .def("forward", &torch::nn::PReLU::forward)
+        .def("__call__", &torch::nn::PReLU::forward);
+
+    py::class_<torch::nn::ELU, torch::nn::Module, std::shared_ptr<torch::nn::ELU>>(m, "ELU")
+        .def(py::init<double, bool>(), py::arg("alpha") = 1.0, py::arg("inplace") = false)
+        .def("forward", &torch::nn::ELU::forward)
+        .def("__call__", &torch::nn::ELU::forward);
+
+    py::class_<torch::nn::SELU, torch::nn::Module, std::shared_ptr<torch::nn::SELU>>(m, "SELU")
+        .def(py::init<bool>(), py::arg("inplace") = false)
+        .def("forward", &torch::nn::SELU::forward)
+        .def("__call__", &torch::nn::SELU::forward);
 
     py::class_<torch::nn::Sigmoid, torch::nn::Module, std::shared_ptr<torch::nn::Sigmoid>>(m, "Sigmoid")
         .def(py::init<>())
@@ -83,6 +194,11 @@ void init_nn_bindings(py::module& m) {
         .def("forward", &torch::nn::Softmax::forward)
         .def("__call__", &torch::nn::Softmax::forward);
 
+    py::class_<torch::nn::LogSoftmax, torch::nn::Module, std::shared_ptr<torch::nn::LogSoftmax>>(m, "LogSoftmax")
+        .def(py::init<int64_t>(), py::arg("dim") = -1)
+        .def("forward", &torch::nn::LogSoftmax::forward)
+        .def("__call__", &torch::nn::LogSoftmax::forward);
+
     py::class_<torch::nn::GELU, torch::nn::Module, std::shared_ptr<torch::nn::GELU>>(m, "GELU")
         .def(py::init<std::string>(), py::arg("approximate") = "none")
         .def("forward", &torch::nn::GELU::forward)
@@ -93,13 +209,48 @@ void init_nn_bindings(py::module& m) {
         .def("forward", &torch::nn::SiLU::forward)
         .def("__call__", &torch::nn::SiLU::forward);
 
+    py::class_<torch::nn::Mish, torch::nn::Module, std::shared_ptr<torch::nn::Mish>>(m, "Mish")
+        .def(py::init<bool>(), py::arg("inplace") = false)
+        .def("forward", &torch::nn::Mish::forward)
+        .def("__call__", &torch::nn::Mish::forward);
+
+    py::class_<torch::nn::Softplus, torch::nn::Module, std::shared_ptr<torch::nn::Softplus>>(m, "Softplus")
+        .def(py::init<double, double>(), py::arg("beta") = 1.0, py::arg("threshold") = 20.0)
+        .def("forward", &torch::nn::Softplus::forward)
+        .def("__call__", &torch::nn::Softplus::forward);
+
+    py::class_<torch::nn::Softsign, torch::nn::Module, std::shared_ptr<torch::nn::Softsign>>(m, "Softsign")
+        .def(py::init<>())
+        .def("forward", &torch::nn::Softsign::forward)
+        .def("__call__", &torch::nn::Softsign::forward);
+
+    py::class_<torch::nn::Hardtanh, torch::nn::Module, std::shared_ptr<torch::nn::Hardtanh>>(m, "Hardtanh")
+        .def(py::init<double, double, bool>(),
+             py::arg("min_val") = -1.0, py::arg("max_val") = 1.0, py::arg("inplace") = false)
+        .def("forward", &torch::nn::Hardtanh::forward)
+        .def("__call__", &torch::nn::Hardtanh::forward);
+
+    py::class_<torch::nn::Hardsigmoid, torch::nn::Module, std::shared_ptr<torch::nn::Hardsigmoid>>(m, "Hardsigmoid")
+        .def(py::init<bool>(), py::arg("inplace") = false)
+        .def("forward", &torch::nn::Hardsigmoid::forward)
+        .def("__call__", &torch::nn::Hardsigmoid::forward);
+
+    py::class_<torch::nn::Hardswish, torch::nn::Module, std::shared_ptr<torch::nn::Hardswish>>(m, "Hardswish")
+        .def(py::init<bool>(), py::arg("inplace") = false)
+        .def("forward", &torch::nn::Hardswish::forward)
+        .def("__call__", &torch::nn::Hardswish::forward);
+
+    // ========================================================================
     // Dropout
+    // ========================================================================
     py::class_<torch::nn::Dropout, torch::nn::Module, std::shared_ptr<torch::nn::Dropout>>(m, "Dropout")
         .def(py::init<double, bool>(), py::arg("p") = 0.5, py::arg("inplace") = false)
         .def("forward", &torch::nn::Dropout::forward)
         .def("__call__", &torch::nn::Dropout::forward);
 
-    // BatchNorm2d
+    // ========================================================================
+    // Normalization
+    // ========================================================================
     py::class_<torch::nn::BatchNorm2d, torch::nn::Module, std::shared_ptr<torch::nn::BatchNorm2d>>(m, "BatchNorm2d")
         .def(py::init<int64_t, double, double, bool, bool>(),
              py::arg("num_features"), py::arg("eps") = 1e-5, py::arg("momentum") = 0.1,
@@ -107,14 +258,15 @@ void init_nn_bindings(py::module& m) {
         .def("forward", &torch::nn::BatchNorm2d::forward)
         .def("__call__", &torch::nn::BatchNorm2d::forward);
 
-    // LayerNorm
     py::class_<torch::nn::LayerNorm, torch::nn::Module, std::shared_ptr<torch::nn::LayerNorm>>(m, "LayerNorm")
         .def(py::init<std::vector<int64_t>, double, bool>(),
              py::arg("normalized_shape"), py::arg("eps") = 1e-5, py::arg("elementwise_affine") = true)
         .def("forward", &torch::nn::LayerNorm::forward)
         .def("__call__", &torch::nn::LayerNorm::forward);
 
-    // Conv2d
+    // ========================================================================
+    // Convolution
+    // ========================================================================
     py::class_<torch::nn::Conv2d, torch::nn::Module, std::shared_ptr<torch::nn::Conv2d>>(m, "Conv2d")
         .def(py::init<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, bool>(),
              py::arg("in_channels"), py::arg("out_channels"), py::arg("kernel_size"),
@@ -127,7 +279,24 @@ void init_nn_bindings(py::module& m) {
             return p ? p->data() : at::Tensor();
         });
 
+    // ========================================================================
+    // Pooling
+    // ========================================================================
+    py::class_<torch::nn::MaxPool2d, torch::nn::Module, std::shared_ptr<torch::nn::MaxPool2d>>(m, "MaxPool2d")
+        .def(py::init<int64_t, int64_t, int64_t>(),
+             py::arg("kernel_size"), py::arg("stride") = 0, py::arg("padding") = 0)
+        .def("forward", &torch::nn::MaxPool2d::forward)
+        .def("__call__", &torch::nn::MaxPool2d::forward);
+
+    py::class_<torch::nn::AvgPool2d, torch::nn::Module, std::shared_ptr<torch::nn::AvgPool2d>>(m, "AvgPool2d")
+        .def(py::init<int64_t, int64_t, int64_t>(),
+             py::arg("kernel_size"), py::arg("stride") = 0, py::arg("padding") = 0)
+        .def("forward", &torch::nn::AvgPool2d::forward)
+        .def("__call__", &torch::nn::AvgPool2d::forward);
+
+    // ========================================================================
     // Embedding
+    // ========================================================================
     py::class_<torch::nn::Embedding, torch::nn::Module, std::shared_ptr<torch::nn::Embedding>>(m, "Embedding")
         .def(py::init<int64_t, int64_t, int64_t, double, bool>(),
              py::arg("num_embeddings"), py::arg("embedding_dim"),
@@ -139,30 +308,90 @@ void init_nn_bindings(py::module& m) {
             return p ? p->data() : at::Tensor();
         });
 
-    // MaxPool2d
-    py::class_<torch::nn::MaxPool2d, torch::nn::Module, std::shared_ptr<torch::nn::MaxPool2d>>(m, "MaxPool2d")
-        .def(py::init<int64_t, int64_t, int64_t>(),
-             py::arg("kernel_size"), py::arg("stride") = 0, py::arg("padding") = 0)
-        .def("forward", &torch::nn::MaxPool2d::forward)
-        .def("__call__", &torch::nn::MaxPool2d::forward);
+    // ========================================================================
+    // Recurrent modules
+    // ========================================================================
+    py::class_<torch::nn::RNN, torch::nn::Module, std::shared_ptr<torch::nn::RNN>>(m, "RNN")
+        .def(py::init<int64_t, int64_t, int64_t, bool, bool, double, bool>(),
+             py::arg("input_size"), py::arg("hidden_size"),
+             py::arg("num_layers") = 1, py::arg("bias") = true,
+             py::arg("batch_first") = false, py::arg("dropout") = 0.0,
+             py::arg("bidirectional") = false)
+        .def("forward", [](torch::nn::RNN& self, const at::Tensor& input, py::object h0) {
+            if (h0.is_none()) {
+                return self.forward_rnn(input);
+            }
+            return self.forward_rnn(input, h0.cast<at::Tensor>());
+        }, py::arg("input"), py::arg("h0") = py::none())
+        .def("__call__", [](torch::nn::RNN& self, const at::Tensor& input, py::object h0) {
+            if (h0.is_none()) {
+                return self.forward_rnn(input);
+            }
+            return self.forward_rnn(input, h0.cast<at::Tensor>());
+        }, py::arg("input"), py::arg("h0") = py::none());
 
-    // AvgPool2d
-    py::class_<torch::nn::AvgPool2d, torch::nn::Module, std::shared_ptr<torch::nn::AvgPool2d>>(m, "AvgPool2d")
-        .def(py::init<int64_t, int64_t, int64_t>(),
-             py::arg("kernel_size"), py::arg("stride") = 0, py::arg("padding") = 0)
-        .def("forward", &torch::nn::AvgPool2d::forward)
-        .def("__call__", &torch::nn::AvgPool2d::forward);
+    py::class_<torch::nn::LSTM::LSTMOutput>(m, "LSTMOutput")
+        .def_readonly("output", &torch::nn::LSTM::LSTMOutput::output)
+        .def_readonly("h_n", &torch::nn::LSTM::LSTMOutput::h_n)
+        .def_readonly("c_n", &torch::nn::LSTM::LSTMOutput::c_n);
 
-    // Reduction enum - must be defined before loss classes that use it
+    py::class_<torch::nn::LSTM, torch::nn::Module, std::shared_ptr<torch::nn::LSTM>>(m, "LSTM")
+        .def(py::init<int64_t, int64_t, int64_t, bool, bool, double, bool>(),
+             py::arg("input_size"), py::arg("hidden_size"),
+             py::arg("num_layers") = 1, py::arg("bias") = true,
+             py::arg("batch_first") = false, py::arg("dropout") = 0.0,
+             py::arg("bidirectional") = false)
+        .def("forward", [](torch::nn::LSTM& self, const at::Tensor& input,
+                           py::object h0, py::object c0) {
+            at::Tensor h = h0.is_none() ? at::Tensor() : h0.cast<at::Tensor>();
+            at::Tensor c = c0.is_none() ? at::Tensor() : c0.cast<at::Tensor>();
+            auto result = self.forward_lstm(input, h, c);
+            return py::make_tuple(result.output, result.h_n, result.c_n);
+        }, py::arg("input"), py::arg("h0") = py::none(), py::arg("c0") = py::none())
+        .def("__call__", [](torch::nn::LSTM& self, const at::Tensor& input,
+                            py::object h0, py::object c0) {
+            at::Tensor h = h0.is_none() ? at::Tensor() : h0.cast<at::Tensor>();
+            at::Tensor c = c0.is_none() ? at::Tensor() : c0.cast<at::Tensor>();
+            auto result = self.forward_lstm(input, h, c);
+            return py::make_tuple(result.output, result.h_n, result.c_n);
+        }, py::arg("input"), py::arg("h0") = py::none(), py::arg("c0") = py::none());
+
+    py::class_<torch::nn::GRU, torch::nn::Module, std::shared_ptr<torch::nn::GRU>>(m, "GRU")
+        .def(py::init<int64_t, int64_t, int64_t, bool, bool, double, bool>(),
+             py::arg("input_size"), py::arg("hidden_size"),
+             py::arg("num_layers") = 1, py::arg("bias") = true,
+             py::arg("batch_first") = false, py::arg("dropout") = 0.0,
+             py::arg("bidirectional") = false)
+        .def("forward", [](torch::nn::GRU& self, const at::Tensor& input, py::object h0) {
+            if (h0.is_none()) {
+                return self.forward_gru(input);
+            }
+            return self.forward_gru(input, h0.cast<at::Tensor>());
+        }, py::arg("input"), py::arg("h0") = py::none())
+        .def("__call__", [](torch::nn::GRU& self, const at::Tensor& input, py::object h0) {
+            if (h0.is_none()) {
+                return self.forward_gru(input);
+            }
+            return self.forward_gru(input, h0.cast<at::Tensor>());
+        }, py::arg("input"), py::arg("h0") = py::none());
+
+    // ========================================================================
+    // Reduction enum
+    // ========================================================================
     py::enum_<torch::nn::Reduction>(m, "Reduction")
         .value("None_", torch::nn::Reduction::None)
         .value("Mean", torch::nn::Reduction::Mean)
         .value("Sum", torch::nn::Reduction::Sum)
         .export_values();
 
-    // Loss functions - using __call__ with 2 arguments
+    // ========================================================================
+    // Loss functions
+    // ========================================================================
     py::class_<torch::nn::MSELoss, torch::nn::Module, std::shared_ptr<torch::nn::MSELoss>>(m, "MSELoss")
         .def(py::init<torch::nn::Reduction>(), py::arg("reduction") = torch::nn::Reduction::Mean)
+        .def("forward", [](torch::nn::MSELoss& self, const at::Tensor& input, const at::Tensor& target) {
+            return self.forward(input, target);
+        })
         .def("__call__", [](torch::nn::MSELoss& self, const at::Tensor& input, const at::Tensor& target) {
             return self.forward(input, target);
         });
@@ -171,6 +400,9 @@ void init_nn_bindings(py::module& m) {
         .def(py::init<torch::nn::Reduction, int64_t, double>(),
              py::arg("reduction") = torch::nn::Reduction::Mean,
              py::arg("ignore_index") = -100, py::arg("label_smoothing") = 0.0)
+        .def("forward", [](torch::nn::CrossEntropyLoss& self, const at::Tensor& input, const at::Tensor& target) {
+            return self.forward(input, target);
+        })
         .def("__call__", [](torch::nn::CrossEntropyLoss& self, const at::Tensor& input, const at::Tensor& target) {
             return self.forward(input, target);
         });
@@ -178,29 +410,79 @@ void init_nn_bindings(py::module& m) {
     py::class_<torch::nn::NLLLoss, torch::nn::Module, std::shared_ptr<torch::nn::NLLLoss>>(m, "NLLLoss")
         .def(py::init<torch::nn::Reduction, int64_t>(),
              py::arg("reduction") = torch::nn::Reduction::Mean, py::arg("ignore_index") = -100)
+        .def("forward", [](torch::nn::NLLLoss& self, const at::Tensor& input, const at::Tensor& target) {
+            return self.forward(input, target);
+        })
         .def("__call__", [](torch::nn::NLLLoss& self, const at::Tensor& input, const at::Tensor& target) {
             return self.forward(input, target);
         });
 
     py::class_<torch::nn::BCELoss, torch::nn::Module, std::shared_ptr<torch::nn::BCELoss>>(m, "BCELoss")
         .def(py::init<torch::nn::Reduction>(), py::arg("reduction") = torch::nn::Reduction::Mean)
+        .def("forward", [](torch::nn::BCELoss& self, const at::Tensor& input, const at::Tensor& target) {
+            return self.forward(input, target);
+        })
         .def("__call__", [](torch::nn::BCELoss& self, const at::Tensor& input, const at::Tensor& target) {
             return self.forward(input, target);
         });
 
     py::class_<torch::nn::L1Loss, torch::nn::Module, std::shared_ptr<torch::nn::L1Loss>>(m, "L1Loss")
         .def(py::init<torch::nn::Reduction>(), py::arg("reduction") = torch::nn::Reduction::Mean)
+        .def("forward", [](torch::nn::L1Loss& self, const at::Tensor& input, const at::Tensor& target) {
+            return self.forward(input, target);
+        })
         .def("__call__", [](torch::nn::L1Loss& self, const at::Tensor& input, const at::Tensor& target) {
             return self.forward(input, target);
         });
 
-    // Functional API - simplified with inline implementations
+    // ========================================================================
+    // Functional API
+    // ========================================================================
     py::module functional = m.def_submodule("functional", "Functional API");
 
     functional.def("relu", [](const at::Tensor& input, bool inplace) {
-        (void)inplace;  // In-place not implemented
+        (void)inplace;
         return input.relu();
     }, py::arg("input"), py::arg("inplace") = false);
+
+    functional.def("leaky_relu", [](const at::Tensor& input, double negative_slope, bool inplace) {
+        (void)inplace;
+        // leaky_relu: max(0, x) + negative_slope * min(0, x)
+        at::Tensor pos = input.relu();
+        at::Tensor neg = (input * negative_slope);
+        at::Tensor mask = input.gt(at::Scalar(0.0)).to(input.dtype());
+        return pos + neg * (at::Scalar(1.0) - mask);
+    }, py::arg("input"), py::arg("negative_slope") = 0.01, py::arg("inplace") = false);
+
+    functional.def("elu", [](const at::Tensor& input, double alpha, bool inplace) {
+        (void)inplace;
+        at::Tensor pos = input.relu();
+        at::Tensor neg_mask = input.le(at::Scalar(0.0)).to(input.dtype());
+        at::Tensor neg = (input.exp() - 1.0) * alpha * neg_mask;
+        return pos + neg;
+    }, py::arg("input"), py::arg("alpha") = 1.0, py::arg("inplace") = false);
+
+    functional.def("selu", [](const at::Tensor& input, bool inplace) {
+        (void)inplace;
+        constexpr double alpha = 1.6732632423543772;
+        constexpr double scale = 1.0507009873554805;
+        at::Tensor pos = input.relu();
+        at::Tensor neg_mask = input.le(at::Scalar(0.0)).to(input.dtype());
+        at::Tensor neg = (input.exp() - 1.0) * alpha * neg_mask;
+        return (pos + neg) * scale;
+    }, py::arg("input"), py::arg("inplace") = false);
+
+    functional.def("gelu", [](const at::Tensor& input) {
+        // GELU(x) = x * Phi(x) approx x * 0.5 * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+        double sqrt_2_over_pi = std::sqrt(2.0 / 3.14159265358979323846);
+        at::Tensor x3 = input * input * input;
+        at::Tensor inner = (input + x3 * 0.044715) * sqrt_2_over_pi;
+        return input * (inner.tanh() + 1.0) * 0.5;
+    }, py::arg("input"));
+
+    functional.def("silu", [](const at::Tensor& input) {
+        return input * input.sigmoid();
+    }, py::arg("input"));
 
     functional.def("sigmoid", [](const at::Tensor& input) {
         return input.sigmoid();
@@ -211,7 +493,6 @@ void init_nn_bindings(py::module& m) {
     });
 
     functional.def("softmax", [](const at::Tensor& input, int64_t dim) {
-        // CPU softmax implementation
         int64_t ndim = input.dim();
         if (dim < 0) dim += ndim;
         auto max_result = input.max(dim, true);
@@ -223,7 +504,6 @@ void init_nn_bindings(py::module& m) {
     }, py::arg("input"), py::arg("dim"));
 
     functional.def("log_softmax", [](const at::Tensor& input, int64_t dim) {
-        // log_softmax = input - log(sum(exp(input)))
         int64_t ndim = input.dim();
         if (dim < 0) dim += ndim;
         auto max_result = input.max(dim, true);
@@ -239,7 +519,6 @@ void init_nn_bindings(py::module& m) {
         if (!training || p == 0.0) {
             return input;
         }
-        // Simple dropout: mask and scale
         at::Tensor mask = torch::rand(input.sizes());
         mask = mask.gt(at::Scalar(p)).to(input.dtype());
         return input * mask / (1.0 - p);
@@ -258,6 +537,40 @@ void init_nn_bindings(py::module& m) {
         }
         return output;
     }, py::arg("input"), py::arg("weight"), py::arg("bias") = py::none());
+
+    functional.def("cross_entropy", [](const at::Tensor& input, const at::Tensor& target,
+                                        py::object weight, int64_t ignore_index,
+                                        const std::string& reduction, double label_smoothing) {
+        // Use CrossEntropyLoss module internally
+        torch::nn::Reduction red = torch::nn::Reduction::Mean;
+        if (reduction == "sum") red = torch::nn::Reduction::Sum;
+        else if (reduction == "none") red = torch::nn::Reduction::None;
+        torch::nn::CrossEntropyLoss loss_fn(red, ignore_index, label_smoothing);
+        return loss_fn.forward(input, target);
+    }, py::arg("input"), py::arg("target"), py::arg("weight") = py::none(),
+       py::arg("ignore_index") = -100, py::arg("reduction") = "mean",
+       py::arg("label_smoothing") = 0.0);
+
+    functional.def("nll_loss", [](const at::Tensor& input, const at::Tensor& target,
+                                   py::object weight, int64_t ignore_index,
+                                   const std::string& reduction) {
+        torch::nn::Reduction red = torch::nn::Reduction::Mean;
+        if (reduction == "sum") red = torch::nn::Reduction::Sum;
+        else if (reduction == "none") red = torch::nn::Reduction::None;
+        torch::nn::NLLLoss loss_fn(red, ignore_index);
+        return loss_fn.forward(input, target);
+    }, py::arg("input"), py::arg("target"), py::arg("weight") = py::none(),
+       py::arg("ignore_index") = -100, py::arg("reduction") = "mean");
+
+    functional.def("binary_cross_entropy", [](const at::Tensor& input, const at::Tensor& target,
+                                               py::object weight, const std::string& reduction) {
+        torch::nn::Reduction red = torch::nn::Reduction::Mean;
+        if (reduction == "sum") red = torch::nn::Reduction::Sum;
+        else if (reduction == "none") red = torch::nn::Reduction::None;
+        torch::nn::BCELoss loss_fn(red);
+        return loss_fn.forward(input, target);
+    }, py::arg("input"), py::arg("target"), py::arg("weight") = py::none(),
+       py::arg("reduction") = "mean");
 
     functional.def("mse_loss", [](const at::Tensor& input, const at::Tensor& target, const std::string& reduction) {
         at::Tensor diff = input - target;
@@ -280,7 +593,41 @@ void init_nn_bindings(py::module& m) {
         return diff;
     }, py::arg("input"), py::arg("target"), py::arg("reduction") = "mean");
 
-    // Initialization functions - simplified
+    // ========================================================================
+    // nn.utils: gradient clipping
+    // ========================================================================
+    py::module utils = m.def_submodule("utils", "NN utilities");
+
+    utils.def("clip_grad_norm_", [](py::list params, double max_norm, double norm_type) {
+        // Collect parameter tensors, compute total norm, then clip
+        double total_norm = 0.0;
+        std::vector<at::Tensor> grads;
+        for (auto& t : params) {
+            at::Tensor tensor = t.cast<at::Tensor>();
+            // Parameters from Python are the data tensors; we need to check grad
+            // In our framework, grad is stored on the tensor
+            at::Tensor g = tensor.grad();
+            if (g.defined()) {
+                grads.push_back(g);
+                const float* gd = g.data_ptr<float>();
+                for (int64_t i = 0; i < g.numel(); i++) {
+                    total_norm += (double)gd[i] * gd[i];
+                }
+            }
+        }
+        total_norm = std::sqrt(total_norm);
+        double clip_coef = max_norm / (total_norm + 1e-6);
+        if (clip_coef < 1.0) {
+            for (auto& g : grads) {
+                g.mul_(at::Scalar(clip_coef));
+            }
+        }
+        return total_norm;
+    }, py::arg("parameters"), py::arg("max_norm"), py::arg("norm_type") = 2.0);
+
+    // ========================================================================
+    // Initialization functions
+    // ========================================================================
     m.def("zeros_", [](at::Tensor& tensor) {
         tensor.zero_();
         return tensor;
@@ -303,7 +650,6 @@ void init_nn_bindings(py::module& m) {
     m.def("normal_", [](at::Tensor& tensor, double mean, double std_val) {
         float* data = tensor.mutable_data_ptr<float>();
         for (int64_t i = 0; i < tensor.numel(); ++i) {
-            // Box-Muller transform
             double u1 = static_cast<double>(::rand() + 1) / (RAND_MAX + 1);
             double u2 = static_cast<double>(::rand()) / RAND_MAX;
             double z = std::sqrt(-2.0 * std::log(u1)) * std::cos(2.0 * 3.14159265358979323846 * u2);
