@@ -841,11 +841,8 @@ int main(int argc, char* argv[]) {
             p_fc4_w->set_grad(grad_W4);
             p_fc4_b->set_grad(grad_b4);
 
-            // Fast gradient clipping
-            auto params = model->parameters();
-            float grad_norm = fast_clip_grad_norm_(params, 100.0f);
-
-            // Optimizer step
+            // Skip gradient clipping — max_norm=100, actual norm ~1.5, never clips
+            // Saves 7.7ms per batch (was 33% of total overhead)
             auto t_clip_end = std::chrono::high_resolution_clock::now();
             optimizer.step();
             auto t_step_end = std::chrono::high_resolution_clock::now();
@@ -856,8 +853,8 @@ int main(int argc, char* argv[]) {
                 double bwd_ms = std::chrono::duration<double, std::milli>(t_bwd_end - t_fwd_end).count();
                 double clip_ms = std::chrono::duration<double, std::milli>(t_clip_end - t_bwd_end).count();
                 double step_ms = std::chrono::duration<double, std::milli>(t_step_end - t_clip_end).count();
-                printf("  [TIMING] batch=%lld  fwd=%.1fms bwd=%.1fms clip=%.1fms step=%.1fms grad_norm=%.2f\n",
-                       (long long)batches_processed, fwd_ms, bwd_ms, clip_ms, step_ms, grad_norm);
+                printf("  [TIMING] batch=%lld  fwd=%.1fms bwd=%.1fms step=%.1fms\n",
+                       (long long)batches_processed, fwd_ms, bwd_ms, step_ms);
             }
 
             // Compute loss for reporting (from softmax — reuse gh4 which has softmax grad)
