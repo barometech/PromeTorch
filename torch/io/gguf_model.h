@@ -688,17 +688,10 @@ public:
 
         config.print();
 
-        if (!use_cuda_) {
-            // CPU-only fast path: skip FP32 dequant of large weight matrices.
-            // Load only small tensors (embeddings, norms, biases) as FP32,
-            // then load raw quantized blocks for GEMV — halves memory & load time.
-            load_weights_cpu_lite(reader);
-            load_quantized_to_cpu();
-        } else {
-            // GPU path: load all weights dequantized to FP32 (needed for CUDA upload)
-            load_weights(reader);
-            load_quantized_to_cpu();
-        }
+        // Load all weights (FP32 dequant) + raw quant blocks
+        // CPU-lite path disabled (needs output_weight fallback fix)
+        load_weights(reader);
+        load_quantized_to_cpu();
 
         auto t_end = std::chrono::high_resolution_clock::now();
         double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
