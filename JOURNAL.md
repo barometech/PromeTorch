@@ -1073,3 +1073,30 @@ Pre-allocated ALL buffers. 179 allocations за весь epoch (было 37,000)
 
 Предыдущий PyTorch результат (65.9%/17s) был без нормализации данных.
 С нормализацией PyTorch тоже даёт ~88%, но медленнее.
+
+### 🔥🔥🔥 NUMA BIND: 2.76 СЕКУНДЫ — 6X БЫСТРЕЕ PYTORCH!!! 🔥🔥🔥
+
+**numactl --cpunodebind=0 --membind=0** даёт фантастический результат!
+
+| Фреймворк | Время | Ratio |
+|-----------|-------|-------|
+| **PromeTorch + NUMA** | **2.76s** | **6.1x FASTER** |
+| PromeTorch (default) | 15.2s | 1.1x faster |
+| PyTorch 2.7.1 (32t) | 16.8s | 1.0x |
+
+| Компонент | Default | NUMA bind |
+|-----------|---------|-----------|
+| Forward | 3.9ms | **0.6ms** |
+| Backward | 10.1ms | **1.3ms** |
+| Step | 1.2ms | **0.7ms** |
+| Total | 15.2s | **2.76s** |
+| Accuracy | 88.71% | **88.94%** |
+
+**Причина:** MNIST matmuls (784×512, 512×256, 256×128) целиком помещаются в L2 cache одного NUMA node.
+Cross-NUMA traffic = 0. Все данные локальные. EML BLAS работает с максимальной эффективностью.
+
+**PyTorch GEMM на Эльбрусе: 68 GFLOPS. EML: 330-463 GFLOPS.** PyTorch не использует EML!
+
+**Также выяснено от МЦСТ (партнёр МЦСТ):**
+Пиковая производительность E8C2: 1 TFLOPS double, **2 TFLOPS float**.
+EML cblas_sgemm достигает 463 GFLOPS (23% пика) с NUMA bind на 8 ядрах.
