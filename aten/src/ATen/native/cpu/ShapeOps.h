@@ -7,6 +7,10 @@
 #include <array>
 #include <string>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 #ifdef PT_USE_CUDA
 #include "aten/src/ATen/cuda/CUDAOps.h"
 #include "c10/cuda/CUDAAllocator.h"
@@ -546,6 +550,7 @@ inline Tensor contiguous(const Tensor& self) {
         int64_t total = self_cpu.numel();
 
         // Use strided copy with ORIGINAL strides
+        _Pragma("omp parallel for schedule(static) if(total > 4096)")
         for (int64_t i = 0; i < total; ++i) {
             // Convert contiguous index to strided index using original strides
             int64_t remaining = i;
