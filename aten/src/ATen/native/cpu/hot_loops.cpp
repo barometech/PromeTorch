@@ -448,22 +448,43 @@ void fused_sgd_multi(SGDParamPack* params, int num_params,
 void cross_entropy_fused(const float* logits, const int64_t* targets,
                          float* loss_out, float* grad_out,
                          int64_t batch, int64_t classes) {
+    // Clamp range: prevents Inf-Inf=NaN when logits contain Inf/-Inf.
+    // 88.0f is close to log(FLT_MAX); beyond that expf() overflows.
+    constexpr float CLAMP_MAX = 88.0f;
+    constexpr float CLAMP_MIN = -88.0f;
+
     float total_loss = 0.0f;
     for (int64_t b = 0; b < batch; b++) {
         const float* row = logits + b * classes;
         float* grow = grad_out + b * classes;
         int64_t tgt = targets[b];
-        float mx = row[0];
-        for (int64_t c = 1; c < classes; c++) if (row[c] > mx) mx = row[c];
+
+        // Find max (with clamp to prevent Inf)
+        float mx = std::max(CLAMP_MIN, std::min(row[0], CLAMP_MAX));
+        for (int64_t c = 1; c < classes; c++) {
+            float v = std::max(CLAMP_MIN, std::min(row[c], CLAMP_MAX));
+            if (v > mx) mx = v;
+        }
+
+        // Compute exp(logit - max) and sum_exp
         float sum_exp = 0;
-        for (int64_t c = 0; c < classes; c++) { grow[c] = expf(row[c] - mx); sum_exp += grow[c]; }
+        for (int64_t c = 0; c < classes; c++) {
+            float v = std::max(CLAMP_MIN, std::min(row[c], CLAMP_MAX));
+            grow[c] = expf(v - mx);
+            sum_exp += grow[c];
+        }
+
+        // Softmax and gradient: (softmax - one_hot) / batch
         float inv = 1.0f / sum_exp;
         float inv_batch = 1.0f / (float)batch;
         for (int64_t c = 0; c < classes; c++) {
             float sm = grow[c] * inv;
             grow[c] = (sm - (c == tgt ? 1.0f : 0.0f)) * inv_batch;
         }
-        total_loss += mx - row[tgt] + logf(sum_exp);
+
+        // Loss: -log(softmax[tgt]) = -(logit[tgt] - max - log(sum_exp))
+        float logit_tgt = std::max(CLAMP_MIN, std::min(row[tgt], CLAMP_MAX));
+        total_loss += mx - logit_tgt + logf(sum_exp);
     }
     *loss_out = total_loss / (float)batch;
 }
