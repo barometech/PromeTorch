@@ -12,9 +12,8 @@
 #include <algorithm>
 #include <numeric>
 
-#ifdef _OPENMP
-#include <omp.h>
-#endif
+// Threading via c10::ThreadPool (hot_loops.cpp handles parallelism for float)
+// Non-float fallback paths run serially.
 
 namespace at {
 namespace native {
@@ -39,7 +38,7 @@ inline Tensor sum(const Tensor& self) {
         const scalar_t* data = contiguous_self.data_ptr<scalar_t>();
         scalar_t total = 0;
         int64_t n = contiguous_self.numel();
-        _Pragma("omp parallel for reduction(+:total) schedule(static) if(n > 4096)")
+
         for (int64_t i = 0; i < n; ++i) total += data[i];
         result.mutable_data_ptr<scalar_t>()[0] = total;
     });
@@ -82,7 +81,7 @@ inline Tensor sum(const Tensor& self, int64_t dim, bool keepdim = false) {
         const scalar_t* in = input.data_ptr<scalar_t>();
         scalar_t* out = result.mutable_data_ptr<scalar_t>();
         int64_t total_work = outer_size * inner_size;
-        _Pragma("omp parallel for schedule(static) if(total_work > 64)")
+
         for (int64_t idx = 0; idx < total_work; ++idx) {
             int64_t outer = idx / inner_size;
             int64_t inner = idx % inner_size;
@@ -118,7 +117,7 @@ inline Tensor mean(const Tensor& self, int64_t dim, bool keepdim = false) {
     PT_DISPATCH_FLOATING_TYPES(self.dtype(), "mean_dim", [&] {
         scalar_t* data = s.mutable_data_ptr<scalar_t>();
         int64_t n = s.numel();
-        _Pragma("omp parallel for schedule(static) if(n > 4096)")
+
         for (int64_t i = 0; i < n; ++i) {
             data[i] /= static_cast<scalar_t>(reduce_size);
         }
@@ -136,7 +135,7 @@ inline Tensor prod(const Tensor& self) {
         const scalar_t* data = contiguous_self.data_ptr<scalar_t>();
         scalar_t total = 1;
         int64_t n = contiguous_self.numel();
-        _Pragma("omp parallel for reduction(*:total) schedule(static) if(n > 4096)")
+
         for (int64_t i = 0; i < n; ++i) {
             total *= data[i];
         }
@@ -163,18 +162,8 @@ inline Tensor max(const Tensor& self) {
         const scalar_t* data = contiguous_self.data_ptr<scalar_t>();
         scalar_t max_val = data[0];
         int64_t n = contiguous_self.numel();
-        // OpenMP reduction(max:) requires OpenMP 3.1+ (not available on MSVC)
-        #if defined(_OPENMP) && _OPENMP >= 201107
-        if (n > 4096) {
-            #pragma omp parallel for reduction(max:max_val) schedule(static)
-            for (int64_t i = 1; i < n; ++i)
-                if (data[i] > max_val) max_val = data[i];
-        } else
-        #endif
-        {
-            for (int64_t i = 1; i < n; ++i)
-                if (data[i] > max_val) max_val = data[i];
-        }
+        for (int64_t i = 1; i < n; ++i)
+            if (data[i] > max_val) max_val = data[i];
         result.mutable_data_ptr<scalar_t>()[0] = max_val;
     });
 
@@ -217,7 +206,7 @@ inline std::tuple<Tensor, Tensor> max(const Tensor& self, int64_t dim, bool keep
         }
 
         int64_t total_work = outer_size * inner_size;
-        _Pragma("omp parallel for schedule(static) if(total_work > 64)")
+
         for (int64_t idx = 0; idx < total_work; ++idx) {
             int64_t outer = idx / inner_size;
             int64_t inner = idx % inner_size;
@@ -259,17 +248,8 @@ inline Tensor min(const Tensor& self) {
         const scalar_t* data = contiguous_self.data_ptr<scalar_t>();
         scalar_t min_val = data[0];
         int64_t n = contiguous_self.numel();
-        #if defined(_OPENMP) && _OPENMP >= 201107
-        if (n > 4096) {
-            #pragma omp parallel for reduction(min:min_val) schedule(static)
-            for (int64_t i = 1; i < n; ++i)
-                if (data[i] < min_val) min_val = data[i];
-        } else
-        #endif
-        {
-            for (int64_t i = 1; i < n; ++i)
-                if (data[i] < min_val) min_val = data[i];
-        }
+        for (int64_t i = 1; i < n; ++i)
+            if (data[i] < min_val) min_val = data[i];
         result.mutable_data_ptr<scalar_t>()[0] = min_val;
     });
 
@@ -312,7 +292,7 @@ inline std::tuple<Tensor, Tensor> min(const Tensor& self, int64_t dim, bool keep
         }
 
         int64_t total_work = outer_size * inner_size;
-        _Pragma("omp parallel for schedule(static) if(total_work > 64)")
+
         for (int64_t idx = 0; idx < total_work; ++idx) {
             int64_t outer = idx / inner_size;
             int64_t inner = idx % inner_size;
@@ -418,7 +398,7 @@ inline Tensor argmax(const Tensor& self, int64_t dim, bool keepdim = false) {
         const scalar_t* data = self.data_ptr<scalar_t>();
         int64_t* out_data = result.mutable_data_ptr<int64_t>();
         int64_t total_work = outer_size * inner_size;
-        _Pragma("omp parallel for schedule(static) if(total_work > 64)")
+
         for (int64_t idx = 0; idx < total_work; ++idx) {
             int64_t outer = idx / inner_size;
             int64_t inner = idx % inner_size;
@@ -468,7 +448,7 @@ inline Tensor argmin(const Tensor& self, int64_t dim, bool keepdim = false) {
         const scalar_t* data = self.data_ptr<scalar_t>();
         int64_t* out_data = result.mutable_data_ptr<int64_t>();
         int64_t total_work = outer_size * inner_size;
-        _Pragma("omp parallel for schedule(static) if(total_work > 64)")
+
         for (int64_t idx = 0; idx < total_work; ++idx) {
             int64_t outer = idx / inner_size;
             int64_t inner = idx % inner_size;
@@ -519,7 +499,7 @@ inline Tensor var(const Tensor& self, bool unbiased = true) {
         scalar_t mean_val = m.data_ptr<scalar_t>()[0];
         scalar_t sum_sq = 0;
         int64_t n = self.numel();
-        _Pragma("omp parallel for reduction(+:sum_sq) schedule(static) if(n > 4096)")
+
         for (int64_t i = 0; i < n; ++i) {
             scalar_t diff = data[i] - mean_val;
             sum_sq += diff * diff;
@@ -572,7 +552,7 @@ inline Tensor norm(const Tensor& self, Scalar p = 2) {
         int64_t n = self.numel();
 
         if (p_val == 2.0) {
-            _Pragma("omp parallel for reduction(+:sum) schedule(static) if(n > 4096)")
+
             for (int64_t i = 0; i < n; ++i) {
                 double val = static_cast<double>(data[i]);
                 sum += val * val;
@@ -580,7 +560,7 @@ inline Tensor norm(const Tensor& self, Scalar p = 2) {
             result.mutable_data_ptr<scalar_t>()[0] = static_cast<scalar_t>(std::sqrt(sum));
         } else if (p_val == 1.0) {
             // L1 norm
-            _Pragma("omp parallel for reduction(+:sum) schedule(static) if(n > 4096)")
+
             for (int64_t i = 0; i < n; ++i) {
                 sum += std::abs(static_cast<double>(data[i]));
             }
@@ -594,7 +574,7 @@ inline Tensor norm(const Tensor& self, Scalar p = 2) {
             result.mutable_data_ptr<scalar_t>()[0] = static_cast<scalar_t>(max_val);
         } else {
             // General Lp norm
-            _Pragma("omp parallel for reduction(+:sum) schedule(static) if(n > 4096)")
+
             for (int64_t i = 0; i < n; ++i) {
                 sum += std::pow(std::abs(static_cast<double>(data[i])), p_val);
             }
@@ -671,7 +651,7 @@ inline Tensor var(const Tensor& self, int64_t dim, bool unbiased = true, bool ke
         const scalar_t* src = s.data_ptr<scalar_t>();
         scalar_t* dst = result.mutable_data_ptr<scalar_t>();
         int64_t nn = s.numel();
-        _Pragma("omp parallel for schedule(static) if(nn > 4096)")
+
         for (int64_t i = 0; i < nn; ++i) {
             dst[i] = src[i] / static_cast<scalar_t>(divisor);
         }

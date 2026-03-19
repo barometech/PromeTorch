@@ -1193,6 +1193,49 @@ struct CrossEntropyBackward : public Node {
 };
 
 // ============================================================================
+// PrecomputedGradBackward — returns a pre-computed gradient (no computation)
+// ============================================================================
+// Used by fused cross-entropy: gradient is computed during forward pass,
+// so backward just returns it (scaled by upstream gradient if needed).
+// This saves one full pass over the logits tensor during backward.
+
+struct PrecomputedGradBackward : public Node {
+    Tensor grad_;
+
+    explicit PrecomputedGradBackward(const Tensor& grad) : grad_(grad) {}
+
+    void release_saved_tensors() override { grad_ = Tensor(); }
+
+    variable_list apply(variable_list&& grads) override {
+        auto& upstream = grads[0];
+
+        Tensor result;
+        if (!upstream.defined() || (upstream.numel() == 1 && upstream.data_ptr<float>()[0] == 1.0f)) {
+            // Common case: upstream is 1.0 (scalar loss), just return pre-computed grad
+            result = std::move(grad_);
+        } else if (upstream.numel() == 1) {
+            // Scalar upstream: scale the pre-computed gradient
+            float scale = upstream.data_ptr<float>()[0];
+            int64_t n = grad_.numel();
+            result = at::empty(grad_.sizes());
+            const float* src = grad_.data_ptr<float>();
+            float* dst = result.mutable_data_ptr<float>();
+            for (int64_t i = 0; i < n; ++i) {
+                dst[i] = src[i] * scale;
+            }
+        } else {
+            // Element-wise upstream (Reduction::None case — not used in fused path)
+            result = grad_.mul(upstream);
+        }
+
+        grad_ = Tensor();  // Release saved tensor
+        return {result};
+    }
+
+    std::string name() const override { return "PrecomputedGradBackward"; }
+};
+
+// ============================================================================
 // SiLU (Swish) Backward
 // ============================================================================
 // y = x * sigmoid(x)

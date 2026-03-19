@@ -232,6 +232,11 @@ public:
         return impl_->suggest_memory_format();
     }
 
+    // Trusted flag: skip dtype/contiguous/device checks in hot paths.
+    // Trusted tensors are guaranteed float32, contiguous, CPU by construction.
+    bool is_trusted() const { return impl_ && impl_->is_trusted(); }
+    void set_trusted(bool t) { if (impl_) impl_->set_trusted(t); }
+
     // ========================================================================
     // Data access
     // ========================================================================

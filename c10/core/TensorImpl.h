@@ -654,6 +654,11 @@ public:
         allow_tensor_metadata_change_ = value;
     }
 
+    // Trusted flag: when true, ops skip dtype/contiguous/device checks.
+    // Set for tensors known to be float32, contiguous, CPU by construction.
+    bool is_trusted() const { return trusted_; }
+    void set_trusted(bool t) { trusted_ = t; }
+
     // ========================================================================
     // Memory
     // ========================================================================
@@ -848,6 +853,7 @@ protected:
     bool is_contiguous_;
     bool is_wrapped_number_;
     bool allow_tensor_metadata_change_;
+    bool trusted_ = false;  // When true, ops skip type/contiguous/device checks
 
     // Autograd metadata
     std::unique_ptr<AutogradMeta> autograd_meta_;

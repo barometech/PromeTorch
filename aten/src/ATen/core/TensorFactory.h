@@ -131,7 +131,12 @@ inline Tensor empty(
     c10::IntArrayRef sizes,
     const TensorOptions& options = TensorOptions()
 ) {
-    return detail::make_tensor(sizes, options);
+    Tensor result = detail::make_tensor(sizes, options);
+    // Float32 CPU tensors from empty() are always contiguous — mark trusted
+    if (options.dtype() == c10::ScalarType::Float && options.device().is_cpu()) {
+        result.set_trusted(true);
+    }
+    return result;
 }
 
 inline Tensor empty(
@@ -159,6 +164,7 @@ inline Tensor zeros(
     // Zero out memory
     std::memset(result.data_ptr(), 0, result.nbytes());
 
+    // Trust propagated from empty() — still float32 contiguous CPU
     return result;
 }
 

@@ -21,6 +21,16 @@ namespace native {
 // ============================================================================
 
 inline Tensor mm(const Tensor& self, const Tensor& other) {
+    // FAST PATH: both trusted (float32, contiguous, CPU) — skip all checks
+    if (self.is_trusted() && other.is_trusted()) {
+        int64_t M = self.size(0), K = self.size(1), N = other.size(1);
+        Tensor result = at::empty({M, N});
+        hot::sgemm(M, K, N, 1.0f, self.data_ptr<float>(), K,
+                   other.data_ptr<float>(), N, 0.0f,
+                   result.mutable_data_ptr<float>(), N);
+        return result;
+    }
+
     PT_CHECK_MSG(self.dim() == 2, "mm requires 2D tensors, got ", self.dim(), "D");
     PT_CHECK_MSG(other.dim() == 2, "mm requires 2D tensors, got ", other.dim(), "D");
     PT_CHECK_MSG(self.size(1) == other.size(0),
@@ -69,7 +79,7 @@ inline Tensor mm(const Tensor& self, const Tensor& other) {
         const scalar_t* A_data = A.data_ptr<scalar_t>();
         const scalar_t* B_data = B.data_ptr<scalar_t>();
         scalar_t* C = result.mutable_data_ptr<scalar_t>();
-        _Pragma("omp parallel for schedule(static) if(M > 16)")
+
         for (int64_t i = 0; i < M; ++i) {
             for (int64_t j = 0; j < N; ++j) {
                 scalar_t sum = 0;
@@ -90,6 +100,15 @@ inline Tensor mm(const Tensor& self, const Tensor& other) {
 // ============================================================================
 
 inline Tensor mv(const Tensor& self, const Tensor& vec) {
+    // FAST PATH: trusted tensors skip all checks and contiguous()
+    if (self.is_trusted() && vec.is_trusted()) {
+        int64_t M = self.size(0), N = self.size(1);
+        Tensor result = at::zeros({M});
+        hot::sgemv(M, N, 1.0f, self.data_ptr<float>(), N, vec.data_ptr<float>(),
+                   0.0f, result.mutable_data_ptr<float>());
+        return result;
+    }
+
     PT_CHECK_MSG(self.dim() == 2, "mv requires matrix to be 2D");
     PT_CHECK_MSG(vec.dim() == 1, "mv requires vector to be 1D");
     PT_CHECK_MSG(self.size(1) == vec.size(0),
@@ -113,7 +132,7 @@ inline Tensor mv(const Tensor& self, const Tensor& vec) {
             const scalar_t* A_data = A.data_ptr<scalar_t>();
             const scalar_t* x_data = x.data_ptr<scalar_t>();
             scalar_t* y = result.mutable_data_ptr<scalar_t>();
-            _Pragma("omp parallel for schedule(static) if(M > 16)")
+    
             for (int64_t i = 0; i < M; ++i) {
                 scalar_t sum = 0;
                 for (int64_t j = 0; j < N; ++j) {
@@ -156,7 +175,7 @@ inline Tensor bmm(const Tensor& self, const Tensor& other) {
         const float* A_data = A.data_ptr<float>();
         const float* B_data = B.data_ptr<float>();
         float* C = result.mutable_data_ptr<float>();
-        _Pragma("omp parallel for schedule(static) if(batch > 1)")
+
         for (int64_t b = 0; b < batch; ++b) {
             hot::sgemm(M, K, N, 1.0f,
                        A_data + b * M * K, K,
@@ -168,7 +187,7 @@ inline Tensor bmm(const Tensor& self, const Tensor& other) {
             const scalar_t* A_data = A.data_ptr<scalar_t>();
             const scalar_t* B_data = B.data_ptr<scalar_t>();
             scalar_t* C = result.mutable_data_ptr<scalar_t>();
-            _Pragma("omp parallel for schedule(static) if(batch > 1)")
+    
             for (int64_t b = 0; b < batch; ++b) {
                 const scalar_t* A_b = A_data + b * M * K;
                 const scalar_t* B_b = B_data + b * K * N;
