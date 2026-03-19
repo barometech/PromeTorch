@@ -579,6 +579,16 @@ void cross_entropy_fused(const float* logits, const int64_t* targets,
 }
 
 
+void bias_relu_fused(float* out, const float* bias, int64_t M, int64_t N) {
+    for (int64_t i = 0; i < M; ++i) {
+        float* row = out + i * N;
+        for (int64_t j = 0; j < N; ++j) {
+            float v = row[j] + bias[j];
+            row[j] = v > 0.0f ? v : 0.0f;
+        }
+    }
+}
+
 } // namespace hot
 } // namespace native
 } // namespace at
