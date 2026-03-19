@@ -113,8 +113,9 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "e2k|elbrus")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -ffast-math")
 
     # Link-Time Optimization: lets LCC optimize across TU boundaries
-    # Critical for PromeTorch since ops span multiple .cpp and header files
-    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
+    # Disabled by default — LCC ar wrapper may not be found
+    # Enable manually: -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON
+    # set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
 
     # EML (Elbrus Math Library) — VLIW-optimized BLAS, 230+ GFLOPS on E8C2
     include_directories(/usr/include/eml)
