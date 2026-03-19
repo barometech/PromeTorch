@@ -131,6 +131,45 @@ inline void unfreeze(Module& module) {
 // Gradient clipping utilities
 // ============================================================================
 
+// Fast L2-only clip_grad_norm: single/two-pass over raw float*, no intermediates
+// Returns the total L2 gradient norm BEFORE clipping
+inline float fast_clip_grad_norm_(std::vector<Parameter*>& params, float max_norm) {
+    float total_sq = 0.0f;
+    for (auto* p : params) {
+        if (!p->grad().defined()) continue;
+        const float* g = p->grad().data_ptr<float>();
+        int64_t n = p->grad().numel();
+        // Unrolled accumulation for ILP
+        float sq0 = 0, sq1 = 0, sq2 = 0, sq3 = 0;
+        int64_t i = 0;
+        for (; i + 3 < n; i += 4) {
+            sq0 += g[i]   * g[i];
+            sq1 += g[i+1] * g[i+1];
+            sq2 += g[i+2] * g[i+2];
+            sq3 += g[i+3] * g[i+3];
+        }
+        for (; i < n; i++) sq0 += g[i] * g[i];
+        total_sq += sq0 + sq1 + sq2 + sq3;
+    }
+    float norm = std::sqrt(total_sq);
+    if (norm > max_norm) {
+        float scale = max_norm / (norm + 1e-6f);
+        for (auto* p : params) {
+            if (!p->grad().defined()) continue;
+            float* g = p->grad().mutable_data_ptr<float>();
+            int64_t n = p->grad().numel();
+            for (int64_t i = 0; i < n; i++) g[i] *= scale;
+        }
+    }
+    return norm;
+}
+
+// Module-based convenience wrapper
+inline float fast_clip_grad_norm_(Module& module, float max_norm) {
+    auto params = module.parameters();
+    return fast_clip_grad_norm_(params, max_norm);
+}
+
 inline double clip_grad_norm_(Module& module, double max_norm, double norm_type = 2.0) {
     std::vector<Parameter*> params = module.parameters();
     if (params.empty()) return 0.0;

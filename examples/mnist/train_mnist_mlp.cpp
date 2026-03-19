@@ -612,63 +612,11 @@ int main(int argc, char* argv[]) {
             torch::autograd::backward({loss});
             auto t_bwd_end = std::chrono::high_resolution_clock::now();
 
-            // DEBUG: Check gradient and weight scale EVERY batch for first 10, then every 100
-            if (batches_processed < 10 || batches_processed % 100 == 0) {
-                auto params = model->parameters();
-                std::cout << "[DBG] batch=" << batches_processed;
-
-                // Check all layer gradients and weights
-                const char* names[] = {"fc1.w", "fc1.b", "fc2.w", "fc2.b", "fc3.w", "fc3.b", "fc4.w", "fc4.b"};
-                std::cout << "\n";
-                for (size_t i = 0; i < params.size() && i < 8; ++i) {
-                    Tensor g = params[i]->grad();
-                    Tensor w = params[i]->data();
-
-                    if (g.defined()) {
-                        Tensor g_cpu = move_to_cpu(g);
-                        float g_norm = 0;
-                        const float* gd = g_cpu.data_ptr<float>();
-                        for (int64_t j = 0; j < g_cpu.numel(); ++j) {
-                            g_norm += gd[j] * gd[j];
-                        }
-                        g_norm = std::sqrt(g_norm);
-
-                        Tensor w_cpu = move_to_cpu(w);
-                        float w_norm = 0;
-                        const float* wd = w_cpu.data_ptr<float>();
-                        for (int64_t j = 0; j < w_cpu.numel(); ++j) {
-                            w_norm += wd[j] * wd[j];
-                        }
-                        w_norm = std::sqrt(w_norm);
-
-                        std::cout << "  " << names[i] << "=(g:" << g_norm << ",w:" << w_norm << ")\n";
-                    } else {
-                        std::cout << "  " << names[i] << "=(NO GRADIENT!)\n";
-                    }
-                }
-            }
-
-            // Gradient clipping (disabled to see raw behavior)
-            double grad_norm = clip_grad_norm_(*model, 100.0);  // Very loose clipping
-            if (batches_processed < 10 || batches_processed % 100 == 0) {
-                std::cout << "[CLIP] total_grad_norm_before_clip=" << grad_norm << std::endl;
-
-                // Verify clipping worked
-                auto params = model->parameters();
-                float total_clipped = 0;
-                for (auto* p : params) {
-                    if (p->grad().defined()) {
-                        Tensor g = move_to_cpu(p->grad());
-                        const float* gd = g.data_ptr<float>();
-                        for (int64_t j = 0; j < g.numel(); ++j) {
-                            total_clipped += gd[j] * gd[j];
-                        }
-                    }
-                }
-                std::cout << "[AFTER_CLIP] total_grad_norm=" << std::sqrt(total_clipped) << std::endl;
-            }
+            // Fast gradient clipping — single pass, no intermediates, no tensor allocs
+            float grad_norm = fast_clip_grad_norm_(*model, 100.0f);
 
             // Optimizer step
+            auto t_clip_end = std::chrono::high_resolution_clock::now();
             optimizer.step();
             auto t_step_end = std::chrono::high_resolution_clock::now();
 
@@ -676,9 +624,10 @@ int main(int argc, char* argv[]) {
             if (batches_processed % 100 == 0) {
                 double fwd_ms = std::chrono::duration<double, std::milli>(t_fwd_end - t_fwd_start).count();
                 double bwd_ms = std::chrono::duration<double, std::milli>(t_bwd_end - t_fwd_end).count();
-                double step_ms = std::chrono::duration<double, std::milli>(t_step_end - t_bwd_end).count();
-                printf("  [TIMING] batch=%lld  fwd=%.1fms bwd=%.1fms step=%.1fms\n",
-                       (long long)batches_processed, fwd_ms, bwd_ms, step_ms);
+                double clip_ms = std::chrono::duration<double, std::milli>(t_clip_end - t_bwd_end).count();
+                double step_ms = std::chrono::duration<double, std::milli>(t_step_end - t_clip_end).count();
+                printf("  [TIMING] batch=%lld  fwd=%.1fms bwd=%.1fms clip=%.1fms step=%.1fms grad_norm=%.2f\n",
+                       (long long)batches_processed, fwd_ms, bwd_ms, clip_ms, step_ms, grad_norm);
             }
 
             // Stats
