@@ -1139,3 +1139,23 @@ EML cblas_sgemm достигает 463 GFLOPS (23% пика) с NUMA bind на 8
 Причина: NUMA cross-node memory traffic при multi-chip sgemm.
 
 **Вопрос к МЦСТ:** есть ли NUMA-aware API в EML? Или рекомендация по тайлингу матриц по NUMA nodes для максимального использования 4 чипов?
+
+### NUMA SCALING BREAKTHROUGH (2026-03-19)
+
+**4× parallel node-local EML = 1840 GFLOPS (92% от 2 TFLOPS пика!)**
+
+| Конфигурация | GFLOPS | % пика |
+|---|---|---|
+| 1 node (8 cores) | 462 | 23% |
+| 2 nodes (16 cores) | 449 | 22% |
+| 4 nodes (32 cores, default) | 324 | 16% |
+| **4× node-local parallel** | **1840** | **92%** |
+
+Ключ: каждый NUMA node считает свою часть матрицы C НЕЗАВИСИМО.
+EML работает идеально на 1 node. Cross-NUMA traffic = 0.
+
+**Нужно:** интегрировать NUMA-aware tiled GEMM в hot_loops.cpp.
+Для MNIST (маленькие матрицы) — NUMA bind на 1 node уже даёт 2.76s.
+Для крупных моделей (4096×4096+) — 4× node-local = 1840 GFLOPS.
+
+**CPU inference qwen3:4b: 0.63 → 4.37 tok/s (7x speedup)**
