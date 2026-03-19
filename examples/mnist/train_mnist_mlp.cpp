@@ -20,6 +20,8 @@
 #include <random>
 #include <algorithm>
 #include <cmath>
+#include <iomanip>
+#include <numeric>
 #ifdef _MSC_VER
 #include <stdlib.h>
 #define bswap32(x) _byteswap_ulong(x)
@@ -134,29 +136,33 @@ public:
         // Full 4-layer MLP: 784 -> 512 -> 256 -> 128 -> 10
         // Use fused_relu=true for first 3 layers (Linear+ReLU in one op)
         // fc4 feeds into CrossEntropy which handles softmax — no fused relu
-        fc1 = std::make_shared<Linear>(784, 512, true, true);   // bias=true, fused_relu=true
-        fc2 = std::make_shared<Linear>(512, 256, true, true);   // bias=true, fused_relu=true
-        fc3 = std::make_shared<Linear>(256, 128, true, true);   // bias=true, fused_relu=true
-        fc4 = std::make_shared<Linear>(128, 10);
+        register_module("fc1", std::make_shared<Linear>(784, 512, true, true));
+        register_module("fc2", std::make_shared<Linear>(512, 256, true, true));
+        register_module("fc3", std::make_shared<Linear>(256, 128, true, true));
+        register_module("fc4", std::make_shared<Linear>(128, 10));
 
-        register_module("fc1", fc1);
-        register_module("fc2", fc2);
-        register_module("fc3", fc3);
-        register_module("fc4", fc4);
+        // Cache layer names for forward pass (in order)
+        layer_names_ = {"fc1", "fc2", "fc3", "fc4"};
+        relu_layers_ = {true, true, true, false};
     }
 
     Tensor forward(const Tensor& x) override {
-        // x: [B, 784] -> fc1(+relu) -> fc2(+relu) -> fc3(+relu) -> fc4 -> [B, 10]
-        // ReLU is fused inside fc1/fc2/fc3 forward — no separate relu calls needed
-        Tensor h = fc1->forward(x);
-        h = fc2->forward(h);
-        h = fc3->forward(h);
-        h = fc4->forward(h);
+        // Forward through submodule registry (supports module replacement)
+        Tensor h = x;
+        for (size_t i = 0; i < layer_names_.size(); ++i) {
+            auto layer = get_submodule(layer_names_[i]);
+            h = layer->forward(h);
+            // LowRankLinear doesn't have fused relu, so apply it separately
+            if (relu_layers_[i] && std::dynamic_pointer_cast<LowRankLinear>(layer)) {
+                h = torch::autograd::relu_autograd(h);
+            }
+        }
         return h;
     }
 
 private:
-    std::shared_ptr<Linear> fc1, fc2, fc3, fc4;
+    std::vector<std::string> layer_names_;
+    std::vector<bool> relu_layers_;
 };
 
 // ============================================================================
@@ -169,6 +175,8 @@ int main(int argc, char* argv[]) {
     int64_t batch_size = 64;
     int64_t epochs = 5;
     float lr = 0.001f;  // Standard learning rate for MLP
+    bool do_compress = false;
+    double compress_ratio = 0.5;
 
     // Parse args
     for (int i = 1; i < argc; ++i) {
@@ -183,6 +191,11 @@ int main(int argc, char* argv[]) {
             epochs = std::stoll(argv[++i]);
         } else if (arg == "--lr" && i + 1 < argc) {
             lr = std::stof(argv[++i]);
+        } else if (arg == "--compress") {
+            do_compress = true;
+            if (i + 1 < argc && argv[i+1][0] != '-') {
+                compress_ratio = std::stod(argv[++i]);
+            }
         }
     }
 
@@ -773,6 +786,268 @@ int main(int argc, char* argv[]) {
     }
 
     std::cout << "=== Training Complete ===" << std::endl;
+
+    // =========== LOW-RANK COMPRESSION ===========
+    if (do_compress) {
+        std::cout << "\n=== Low-Rank Weight Compression ===" << std::endl;
+        std::cout << "Compression ratio: " << compress_ratio << std::endl;
+
+        // Measure pre-compression accuracy and forward time
+        float pre_compress_acc = 0.0f;
+        double pre_compress_fwd_ms = 0.0;
+        {
+            model->eval();
+            int64_t test_correct = 0;
+            auto t_start = std::chrono::high_resolution_clock::now();
+
+            for (int64_t batch_start = 0; batch_start < n_test; batch_start += batch_size) {
+                int64_t batch_end = std::min(batch_start + batch_size, n_test);
+                int64_t B = batch_end - batch_start;
+
+                Tensor inputs = at::empty({B, 784});
+                float* in_ptr = inputs.mutable_data_ptr<float>();
+                constexpr float MNIST_MEAN = 0.1307f;
+                constexpr float MNIST_STD = 0.3081f;
+                for (int64_t i = 0; i < B; ++i) {
+                    int64_t idx = batch_start + i;
+                    for (int j = 0; j < 784; ++j) {
+                        float pixel = test_images[idx][j] / 255.0f;
+                        in_ptr[i * 784 + j] = (pixel - MNIST_MEAN) / MNIST_STD;
+                    }
+                }
+
+                inputs = to_device(inputs);
+                Tensor logits = model->forward(inputs);
+                Tensor logits_cpu = move_to_cpu(logits);
+                const float* log_ptr = logits_cpu.data_ptr<float>();
+
+                for (int64_t i = 0; i < B; ++i) {
+                    int pred = 0;
+                    float max_val = log_ptr[i * 10];
+                    for (int c = 1; c < 10; ++c) {
+                        if (log_ptr[i * 10 + c] > max_val) {
+                            max_val = log_ptr[i * 10 + c];
+                            pred = c;
+                        }
+                    }
+                    if (pred == test_labels[batch_start + i]) test_correct++;
+                }
+            }
+
+            auto t_end = std::chrono::high_resolution_clock::now();
+            pre_compress_acc = 100.0f * test_correct / n_test;
+            pre_compress_fwd_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
+            std::cout << "Pre-compression:  Accuracy=" << pre_compress_acc
+                      << "%, Forward time=" << pre_compress_fwd_ms << "ms" << std::endl;
+        }
+
+        // Report params before compression
+        int64_t params_before = count_parameters(*model);
+        std::cout << "Parameters before: " << params_before << std::endl;
+
+        // Compress the model
+        auto stats = compress_model(*model, compress_ratio);
+        std::cout << "Compressed " << stats.layers_compressed << " layers, skipped "
+                  << stats.layers_skipped << std::endl;
+        std::cout << "Weight params: " << stats.params_before << " -> " << stats.params_after
+                  << " (" << std::fixed << std::setprecision(1)
+                  << (100.0 * (1.0 - (double)stats.params_after / stats.params_before))
+                  << "% reduction)" << std::endl;
+
+        int64_t params_after = count_parameters(*model);
+        std::cout << "Total parameters after: " << params_after << std::endl;
+        std::cout << "Model after compression:\n" << model->repr() << std::endl;
+
+        // Measure post-compression accuracy (before fine-tuning)
+        float post_compress_acc = 0.0f;
+        double post_compress_fwd_ms = 0.0;
+        {
+            model->eval();
+            int64_t test_correct = 0;
+            auto t_start = std::chrono::high_resolution_clock::now();
+
+            for (int64_t batch_start = 0; batch_start < n_test; batch_start += batch_size) {
+                int64_t batch_end = std::min(batch_start + batch_size, n_test);
+                int64_t B = batch_end - batch_start;
+
+                Tensor inputs = at::empty({B, 784});
+                float* in_ptr = inputs.mutable_data_ptr<float>();
+                constexpr float MNIST_MEAN = 0.1307f;
+                constexpr float MNIST_STD = 0.3081f;
+                for (int64_t i = 0; i < B; ++i) {
+                    int64_t idx = batch_start + i;
+                    for (int j = 0; j < 784; ++j) {
+                        float pixel = test_images[idx][j] / 255.0f;
+                        in_ptr[i * 784 + j] = (pixel - MNIST_MEAN) / MNIST_STD;
+                    }
+                }
+
+                inputs = to_device(inputs);
+                Tensor logits = model->forward(inputs);
+                Tensor logits_cpu = move_to_cpu(logits);
+                const float* log_ptr = logits_cpu.data_ptr<float>();
+
+                for (int64_t i = 0; i < B; ++i) {
+                    int pred = 0;
+                    float max_val = log_ptr[i * 10];
+                    for (int c = 1; c < 10; ++c) {
+                        if (log_ptr[i * 10 + c] > max_val) {
+                            max_val = log_ptr[i * 10 + c];
+                            pred = c;
+                        }
+                    }
+                    if (pred == test_labels[batch_start + i]) test_correct++;
+                }
+            }
+
+            auto t_end = std::chrono::high_resolution_clock::now();
+            post_compress_acc = 100.0f * test_correct / n_test;
+            post_compress_fwd_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
+            std::cout << "Post-compression: Accuracy=" << post_compress_acc
+                      << "%, Forward time=" << post_compress_fwd_ms << "ms" << std::endl;
+        }
+
+        // Fine-tune for 1 epoch with reduced learning rate
+        std::cout << "\n--- Fine-tuning compressed model for 1 epoch ---" << std::endl;
+        {
+            model->train();
+            // Create new optimizer for compressed model params
+            SGDOptions ft_opts(lr * 0.1f);  // Lower LR for fine-tuning
+            SGD ft_optimizer(model->parameters(), ft_opts);
+            CrossEntropyLoss ft_criterion;
+
+            std::vector<int64_t> indices(n_train);
+            std::iota(indices.begin(), indices.end(), 0);
+            std::shuffle(indices.begin(), indices.end(), gen);
+
+            float epoch_loss = 0.0f;
+            int64_t correct = 0, total = 0, batches = 0;
+
+            for (int64_t batch_start = 0; batch_start < n_train; batch_start += batch_size) {
+                int64_t batch_end = std::min(batch_start + batch_size, n_train);
+                int64_t B = batch_end - batch_start;
+
+                Tensor inputs = at::empty({B, 784});
+                Tensor targets = at::empty({B});
+                float* in_ptr = inputs.mutable_data_ptr<float>();
+                float* tgt_ptr = targets.mutable_data_ptr<float>();
+                constexpr float MNIST_MEAN = 0.1307f;
+                constexpr float MNIST_STD = 0.3081f;
+
+                for (int64_t i = 0; i < B; ++i) {
+                    int64_t idx = indices[batch_start + i];
+                    tgt_ptr[i] = static_cast<float>(train_labels[idx]);
+                    for (int j = 0; j < 784; ++j) {
+                        float pixel = train_images[idx][j] / 255.0f;
+                        in_ptr[i * 784 + j] = (pixel - MNIST_MEAN) / MNIST_STD;
+                    }
+                }
+
+                inputs = to_device(inputs);
+                targets = to_device(targets);
+
+                ft_optimizer.zero_grad();
+                Tensor logits = model->forward(inputs);
+                Tensor loss = ft_criterion.forward(logits, targets);
+                torch::autograd::backward({loss});
+                clip_grad_norm_(*model, 10.0);
+                ft_optimizer.step();
+
+                Tensor loss_cpu = move_to_cpu(loss);
+                epoch_loss += loss_cpu.data_ptr<float>()[0] * B;
+
+                Tensor logits_cpu = move_to_cpu(logits);
+                Tensor targets_cpu = move_to_cpu(targets);
+                const float* log_ptr = logits_cpu.data_ptr<float>();
+                const float* tgt_cpu_ptr = targets_cpu.data_ptr<float>();
+                for (int64_t i = 0; i < B; ++i) {
+                    int pred = 0;
+                    float max_val = log_ptr[i * 10];
+                    for (int c = 1; c < 10; ++c) {
+                        if (log_ptr[i * 10 + c] > max_val) {
+                            max_val = log_ptr[i * 10 + c];
+                            pred = c;
+                        }
+                    }
+                    if (pred == static_cast<int>(tgt_cpu_ptr[i])) correct++;
+                    total++;
+                }
+                batches++;
+
+                if (batches % 200 == 0) {
+                    std::cout << "  Fine-tune batch " << batches
+                              << " loss=" << (epoch_loss / total)
+                              << " acc=" << (100.0f * correct / total) << "%" << std::endl;
+                }
+            }
+            std::cout << "Fine-tune epoch: Loss=" << (epoch_loss / n_train)
+                      << " Train Acc=" << (100.0f * correct / total) << "%" << std::endl;
+        }
+
+        // Measure post-fine-tune accuracy and speed
+        float finetuned_acc = 0.0f;
+        double finetuned_fwd_ms = 0.0;
+        {
+            model->eval();
+            int64_t test_correct = 0;
+            auto t_start = std::chrono::high_resolution_clock::now();
+
+            for (int64_t batch_start = 0; batch_start < n_test; batch_start += batch_size) {
+                int64_t batch_end = std::min(batch_start + batch_size, n_test);
+                int64_t B = batch_end - batch_start;
+
+                Tensor inputs = at::empty({B, 784});
+                float* in_ptr = inputs.mutable_data_ptr<float>();
+                constexpr float MNIST_MEAN = 0.1307f;
+                constexpr float MNIST_STD = 0.3081f;
+                for (int64_t i = 0; i < B; ++i) {
+                    int64_t idx = batch_start + i;
+                    for (int j = 0; j < 784; ++j) {
+                        float pixel = test_images[idx][j] / 255.0f;
+                        in_ptr[i * 784 + j] = (pixel - MNIST_MEAN) / MNIST_STD;
+                    }
+                }
+
+                inputs = to_device(inputs);
+                Tensor logits = model->forward(inputs);
+                Tensor logits_cpu = move_to_cpu(logits);
+                const float* log_ptr = logits_cpu.data_ptr<float>();
+
+                for (int64_t i = 0; i < B; ++i) {
+                    int pred = 0;
+                    float max_val = log_ptr[i * 10];
+                    for (int c = 1; c < 10; ++c) {
+                        if (log_ptr[i * 10 + c] > max_val) {
+                            max_val = log_ptr[i * 10 + c];
+                            pred = c;
+                        }
+                    }
+                    if (pred == test_labels[batch_start + i]) test_correct++;
+                }
+            }
+
+            auto t_end = std::chrono::high_resolution_clock::now();
+            finetuned_acc = 100.0f * test_correct / n_test;
+            finetuned_fwd_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
+        }
+
+        // Final compression report
+        std::cout << "\n=== Compression Summary ===" << std::endl;
+        std::cout << "Parameters:       " << params_before << " -> " << params_after
+                  << " (" << std::fixed << std::setprecision(1)
+                  << (100.0 * params_after / params_before) << "% of original)" << std::endl;
+        std::cout << "Accuracy (before): " << pre_compress_acc << "%" << std::endl;
+        std::cout << "Accuracy (compressed, no finetune): " << post_compress_acc << "%" << std::endl;
+        std::cout << "Accuracy (compressed + finetuned):  " << finetuned_acc << "%" << std::endl;
+        std::cout << "Forward time (before):     " << std::fixed << std::setprecision(1)
+                  << pre_compress_fwd_ms << " ms" << std::endl;
+        std::cout << "Forward time (compressed): " << std::fixed << std::setprecision(1)
+                  << finetuned_fwd_ms << " ms" << std::endl;
+        double speedup = pre_compress_fwd_ms / (finetuned_fwd_ms + 1e-9);
+        std::cout << "Speedup: " << std::fixed << std::setprecision(2) << speedup << "x" << std::endl;
+        std::cout << "===========================" << std::endl;
+    }
+    // =========== END LOW-RANK COMPRESSION ===========
 
     // Print CPU allocator statistics
     c10::CPUAllocator::get().print_stats();

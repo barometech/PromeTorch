@@ -203,5 +203,82 @@ inline void clip_grad_value_(Module& module, double clip_value) {
     }
 }
 
+// ============================================================================
+// Model compression — replace Linear layers with LowRankLinear via SVD
+// ============================================================================
+// rank_ratio: fraction of min(in, out) to keep as rank (e.g., 0.5 = 50%)
+// min_size: only compress layers with in*out > min_size (skip small layers)
+//
+// Usage:
+//   auto stats = compress_model(model, 0.5);
+//   // model now uses LowRankLinear for large layers
+//
+// Returns: number of layers compressed
+
+struct CompressionStats {
+    int layers_compressed = 0;
+    int layers_skipped = 0;
+    int64_t params_before = 0;
+    int64_t params_after = 0;
+};
+
+inline CompressionStats compress_model(Module& model, double rank_ratio = 0.5,
+                                        int64_t min_size = 1000) {
+    CompressionStats stats;
+
+    // Iterate over direct submodules
+    // Collect replacements first, then apply (can't modify during iteration)
+    auto named = model.named_children();
+    std::vector<std::pair<std::string, std::shared_ptr<LowRankLinear>>> replacements;
+
+    for (auto& [name, submodule] : named) {
+        if (!submodule) continue;
+
+        // Check if it's a Linear layer
+        auto linear = std::dynamic_pointer_cast<Linear>(submodule);
+        if (!linear) {
+            // Recursively compress submodules that are not Linear
+            auto sub_stats = compress_model(*submodule, rank_ratio, min_size);
+            stats.layers_compressed += sub_stats.layers_compressed;
+            stats.layers_skipped += sub_stats.layers_skipped;
+            stats.params_before += sub_stats.params_before;
+            stats.params_after += sub_stats.params_after;
+            continue;
+        }
+
+        int64_t in_f = linear->in_features();
+        int64_t out_f = linear->out_features();
+        int64_t full_size = in_f * out_f;
+
+        // Skip small layers (not worth compressing)
+        if (full_size <= min_size) {
+            stats.layers_skipped++;
+            stats.params_before += full_size;
+            stats.params_after += full_size;
+            continue;
+        }
+
+        // Compute rank
+        int64_t min_dim = std::min(in_f, out_f);
+        int64_t rank = std::max(int64_t(1), static_cast<int64_t>(min_dim * rank_ratio));
+
+        // Compress
+        auto lr = LowRankLinear::from_linear(linear, rank);
+
+        stats.layers_compressed++;
+        stats.params_before += full_size;
+        stats.params_after += lr->compressed_params();
+
+        replacements.push_back({name, lr});
+    }
+
+    // Apply replacements
+    for (auto& [name, lr] : replacements) {
+        model.replace_module(name, lr);
+    }
+
+    return stats;
+}
+
 } // namespace nn
 } // namespace torch

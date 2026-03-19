@@ -2,6 +2,7 @@
 
 #include "torch/optim/optimizer.h"
 #include "aten/src/ATen/native/cpu/tuda/TudaVec.h"
+#include "aten/src/ATen/native/cpu/hot_loops.h"
 #ifdef PT_USE_CUDA
 #include "aten/src/ATen/cuda/CUDADispatch.h"
 #endif
@@ -78,6 +79,15 @@ public:
             double eps = options_.eps;
             bool amsgrad = options_.amsgrad;
 
+            // ================================================================
+            // Phase 1: Initialize states, handle CUDA params individually
+            // ================================================================
+            std::vector<at::native::hot::AdamParamPack> cpu_packs;
+            std::vector<float*> amsgrad_ptrs;  // max_exp_avg_sq pointers
+            // Keep contiguous grads alive until fused_adam_multi completes
+            std::vector<Tensor> grad_holders;
+            int64_t step_val = 0;
+
             for (auto* param : group.params) {
                 if (!param->defined()) continue;
 
@@ -89,6 +99,7 @@ public:
 
                 // Increment step counter
                 state->step++;
+                step_val = state->step;  // All params in group share step count
 
                 // Initialize moment buffers
                 if (!state->exp_avg.defined()) {
@@ -108,7 +119,7 @@ public:
 #endif
                 }
 
-                // CUDA path: fallback to tensor ops
+                // CUDA path: fallback to tensor ops (per-parameter)
                 bool is_cuda = false;
 #ifdef PT_USE_CUDA
                 is_cuda = param->data().is_cuda();
@@ -119,86 +130,35 @@ public:
                 }
 
                 // ================================================================
-                // CPU fast path: fused AVX2 Adam step
+                // CPU path: collect into packs for fused multi-param step
                 // ================================================================
                 Tensor grad_c = grad.contiguous();
-                float* p_data = param->data().mutable_data_ptr<float>();
-                const float* g_data = grad_c.data_ptr<float>();
-                float* m_data = state->exp_avg.mutable_data_ptr<float>();
-                float* v_data = state->exp_avg_sq.mutable_data_ptr<float>();
-                int64_t n = param->numel();
+                grad_holders.push_back(grad_c);
 
-                double bias_correction1 = 1.0 - std::pow(beta1, state->step);
-                double bias_correction2 = 1.0 - std::pow(beta2, state->step);
-                float step_size = static_cast<float>(lr / bias_correction1);
-                float inv_sqrt_bc2 = static_cast<float>(1.0 / std::sqrt(bias_correction2));
-                float b1f = static_cast<float>(beta1);
-                float b2f = static_cast<float>(beta2);
-                float one_minus_b1 = static_cast<float>(1.0 - beta1);
-                float one_minus_b2 = static_cast<float>(1.0 - beta2);
-                float wdf = static_cast<float>(wd);
-                float epsf = static_cast<float>(eps);
+                at::native::hot::AdamParamPack pack;
+                pack.param = param->data().mutable_data_ptr<float>();
+                pack.grad = grad_c.data_ptr<float>();
+                pack.exp_avg = state->exp_avg.mutable_data_ptr<float>();
+                pack.exp_avg_sq = state->exp_avg_sq.mutable_data_ptr<float>();
+                pack.numel = param->numel();
+                cpu_packs.push_back(pack);
 
-                if (!amsgrad) {
-                    using VF = at::native::tuda::VecF;
-                    VF vb1 = VF::broadcast(b1f);
-                    VF vb2 = VF::broadcast(b2f);
-                    VF v1mb1 = VF::broadcast(one_minus_b1);
-                    VF v1mb2 = VF::broadcast(one_minus_b2);
-                    VF vneg_ss = VF::broadcast(-step_size);
-                    VF veps = VF::broadcast(epsf);
-                    VF v_isbc2 = VF::broadcast(inv_sqrt_bc2);
-                    VF vwd = VF::broadcast(wdf);
-
-                    int64_t i = 0;
-                    constexpr int W = VF::width;
-                    for (; i + W <= n; i += W) {
-                        VF g = VF::load(g_data + i);
-                        VF p = VF::load(p_data + i);
-
-                        if (wdf != 0.0f) {
-                            g = VF::fmadd(vwd, p, g);
-                        }
-
-                        VF m = VF::load(m_data + i);
-                        VF v = VF::load(v_data + i);
-
-                        // m = beta1 * m + (1-beta1) * g
-                        m = VF::fmadd(vb1, m, v1mb1 * g);
-                        // v = beta2 * v + (1-beta2) * g^2
-                        v = VF::fmadd(vb2, v, v1mb2 * (g * g));
-
-                        // denom = sqrt(v) * inv_sqrt_bc2 + eps
-                        VF denom = VF::fmadd(v.sqrt(), v_isbc2, veps);
-                        // p -= step_size * m / denom
-                        p = VF::fmadd(vneg_ss, m / denom, p);
-
-                        m.store(m_data + i);
-                        v.store(v_data + i);
-                        p.store(p_data + i);
-                    }
-                    // Scalar tail
-                    for (; i < n; ++i) {
-                        float g = g_data[i];
-                        if (wdf != 0.0f) g += wdf * p_data[i];
-                        m_data[i] = b1f * m_data[i] + one_minus_b1 * g;
-                        v_data[i] = b2f * v_data[i] + one_minus_b2 * g * g;
-                        float denom = std::sqrt(v_data[i]) * inv_sqrt_bc2 + epsf;
-                        p_data[i] -= step_size * m_data[i] / denom;
-                    }
-                } else {
-                    // AMSGrad path: scalar (rare case)
-                    float* max_v_data = state->max_exp_avg_sq.mutable_data_ptr<float>();
-                    for (int64_t i = 0; i < n; ++i) {
-                        float g = g_data[i];
-                        if (wdf != 0.0f) g += wdf * p_data[i];
-                        m_data[i] = b1f * m_data[i] + one_minus_b1 * g;
-                        v_data[i] = b2f * v_data[i] + one_minus_b2 * g * g;
-                        max_v_data[i] = std::max(max_v_data[i], v_data[i]);
-                        float denom = std::sqrt(max_v_data[i]) * inv_sqrt_bc2 + epsf;
-                        p_data[i] -= step_size * m_data[i] / denom;
-                    }
+                if (amsgrad) {
+                    amsgrad_ptrs.push_back(state->max_exp_avg_sq.mutable_data_ptr<float>());
                 }
+            }
+
+            // ================================================================
+            // Phase 2: Fused multi-parameter Adam step (ONE call for all CPU params)
+            // ================================================================
+            if (!cpu_packs.empty()) {
+                at::native::hot::fused_adam_multi(
+                    cpu_packs.data(), static_cast<int>(cpu_packs.size()),
+                    static_cast<float>(lr),
+                    static_cast<float>(beta1), static_cast<float>(beta2),
+                    static_cast<float>(eps), static_cast<float>(wd),
+                    static_cast<int>(step_val),
+                    amsgrad, amsgrad ? amsgrad_ptrs.data() : nullptr);
             }
         }
     }

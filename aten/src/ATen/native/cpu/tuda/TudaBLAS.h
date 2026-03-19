@@ -22,7 +22,7 @@
 #include "aten/src/ATen/native/cpu/tuda/kernels/neon/MicroKernel_4x8.h"
 #endif
 #if defined(TUDA_E2K)
-#include "aten/src/ATen/native/cpu/tuda/kernels/e2k/MicroKernel_4x4.h"
+#include "aten/src/ATen/native/cpu/tuda/kernels/e2k/MicroKernel_6x6.h"
 #endif
 #if defined(TUDA_NMC4)
 #include "aten/src/ATen/native/cpu/tuda/kernels/nmc4/MicroKernel_4x4.h"
@@ -165,7 +165,7 @@ static inline void dispatch_microkernel(
 #elif defined(TUDA_NEON)
     kernels::microkernel_4x8_neon(K, A, B, C, ldc, alpha, beta);
 #elif defined(TUDA_E2K)
-    kernels::microkernel_4x4_e2k(K, A, B, C, ldc, alpha, beta);
+    kernels::microkernel_6x6_e2k(K, A, B, C, ldc, alpha, beta);
 #elif defined(TUDA_NMC4)
     kernels::microkernel_4x4_nmc4(K, A, B, C, ldc, alpha, beta);
 #else

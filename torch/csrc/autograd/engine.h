@@ -5,6 +5,7 @@
 #include "torch/csrc/autograd/autograd_meta.h"
 #include "aten/src/ATen/core/Tensor.h"
 #include "aten/src/ATen/core/TensorFactory.h"
+#include "aten/src/ATen/native/cpu/hot_loops.h"
 #include <queue>
 #include <unordered_map>
 #include <unordered_set>
@@ -238,12 +239,21 @@ inline void Engine::accumulate_grad(
     }
 
     if (!grads[input_nr].defined()) {
-        // First gradient — just move, no copy
+        // First gradient — just move, no copy, no allocation
         grads[input_nr] = std::move(grad);
     } else {
-        // In-place accumulate: avoids allocating a new tensor.
+        // In-place accumulate using hot::add_inplace — bypasses Tensor dispatch.
+        // Avoids: add_ -> operator overload -> type check -> allocate result.
         // On Elbrus E2K, each tensor allocation = malloc syscall.
-        grads[input_nr].add_(grad);
+        auto& existing = grads[input_nr];
+        const int64_t n = existing.numel();
+        if (n == grad.numel() && existing.is_contiguous() && grad.is_contiguous()) {
+            at::native::hot::add_inplace(
+                existing.mutable_data_ptr<float>(),
+                grad.data_ptr<float>(), n);
+        } else {
+            existing.add_(grad);
+        }
     }
 }
 
@@ -261,6 +271,13 @@ inline void Engine::execute_node(
 
     // Execute the node
     variable_list grads = fn->apply(variable_list(node_task.inputs));
+
+    // Gradient tensors produced by backward are float32 contiguous CPU — mark trusted
+    for (auto& g : grads) {
+        if (g.defined() && g.is_cpu() && g.dtype() == c10::ScalarType::Float && g.is_contiguous()) {
+            g.set_trusted(true);
+        }
+    }
 
     // Propagate gradients to next nodes
     const auto& edges = fn->next_edges();
