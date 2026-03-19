@@ -682,7 +682,8 @@ public:
         // no weights, no ignore_index, Mean reduction
         // Single pass over data — critical for E2K with 64KB L1 cache
         // ================================================================
-        if (input.dtype() == c10::ScalarType::Float &&
+        if (false && // DISABLED: fused CE produces NaN, needs debugging
+            input.dtype() == c10::ScalarType::Float &&
             input.dim() == 2 &&
             label_smoothing_ == 0.0 &&
             !has_weight_ &&
