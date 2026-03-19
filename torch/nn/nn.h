@@ -155,8 +155,27 @@ inline double clip_grad_norm_(Module& module, double max_norm, double norm_type 
                 }
             }
         }
+    } else if (norm_type == 2.0) {
+        // L2 norm fast path: x*x instead of pow(abs(x), 2.0)
+        for (auto* param : params) {
+            if (param->grad().defined()) {
+                Tensor grad_cpu = param->grad();
+#ifdef PT_USE_CUDA
+                if (grad_cpu.is_cuda()) {
+                    grad_cpu = at::to_cpu(grad_cpu);
+                }
+#endif
+                const float* grad_data = grad_cpu.data_ptr<float>();
+                int64_t numel = grad_cpu.numel();
+                for (int64_t i = 0; i < numel; ++i) {
+                    float g = grad_data[i];
+                    total_norm += static_cast<double>(g * g);
+                }
+            }
+        }
+        total_norm = std::sqrt(total_norm);
     } else {
-        // Lp norm
+        // General Lp norm
         for (auto* param : params) {
             if (param->grad().defined()) {
                 // Move grad to CPU for computing norm

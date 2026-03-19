@@ -109,8 +109,9 @@ public:
                 }
 
                 // CPU float path: collect for fused multi-param step
-                Tensor grad_c = grad.contiguous();
-                grad_holders.push_back(grad_c);
+                // Avoid contiguous() copy if grad is already contiguous
+                Tensor grad_c = grad.is_contiguous() ? grad : grad.contiguous();
+                if (!grad.is_contiguous()) grad_holders.push_back(grad_c);
 
                 at::native::hot::SGDParamPack pack;
                 pack.param = param->data().mutable_data_ptr<float>();
