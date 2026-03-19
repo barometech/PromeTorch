@@ -35,6 +35,14 @@ void sgemm_nt(int64_t M, int64_t K, int64_t N,
               const float* B, int64_t ldb,
               float beta, float* C, int64_t ldc);
 
+// C[K,N] = alpha * A^T[K,M] @ B[M,N] + beta * C[K,N]
+// A is stored row-major [M,K], transposed logically.
+// Used in backward: grad_weight = grad^T @ input
+void sgemm_tn(int64_t M, int64_t K, int64_t N,
+              float alpha, const float* A, int64_t lda,
+              const float* B, int64_t ldb,
+              float beta, float* C, int64_t ldc);
+
 // y = alpha * A[M,N] @ x + beta * y
 void sgemv(int64_t M, int64_t N,
            float alpha, const float* A, int64_t lda,
@@ -125,6 +133,89 @@ void adam_step_loop(float* param, const float* grad,
 void sgd_step_loop(float* param, const float* grad, float* momentum_buf,
                    int64_t n, float lr, float momentum, float dampening,
                    float weight_decay, bool nesterov);
+
+// ============================================================================
+// Fused multi-parameter optimizer steps (E2K cache-friendly)
+// ============================================================================
+// On Elbrus E2K, per-parameter function calls cause instruction cache misses
+// because parameters are scattered in memory. These fused versions collect ALL
+// parameters into a single array of packs and process them in ONE function call.
+// Benefits:
+//   1. Single function entry — no per-parameter call overhead
+//   2. Bias correction computed once, not per-parameter
+//   3. LCC can schedule the entire outer+inner loop as one VLIW region
+//   4. Better branch predictor utilization (one loop structure, not N)
+
+struct AdamParamPack {
+    float* param;
+    const float* grad;
+    float* exp_avg;
+    float* exp_avg_sq;
+    int64_t numel;
+};
+
+// Fused multi-parameter Adam: process ALL parameters in one function call
+// Reduces per-parameter function call overhead and improves instruction cache
+void fused_adam_multi(AdamParamPack* params, int num_params,
+                     float lr, float beta1, float beta2, float eps,
+                     float weight_decay, int step,
+                     bool amsgrad = false, float** max_exp_avg_sq = nullptr);
+
+struct SGDParamPack {
+    float* param;
+    const float* grad;
+    float* momentum_buf;  // nullptr if no momentum
+    int64_t numel;
+};
+
+// Fused multi-parameter SGD: process ALL parameters in one function call
+void fused_sgd_multi(SGDParamPack* params, int num_params,
+                    float lr, float momentum, float dampening,
+                    float weight_decay, bool nesterov);
+
+// ============================================================================
+// Fused kernels (E2K-optimized: large loop bodies, no branches)
+// ============================================================================
+
+// ============================================================================
+// Fused backward helpers (zero-intermediate backward passes)
+// ============================================================================
+
+// Apply relu mask in-place: out[i] = (mask[i] > 0) ? grad[i] : 0
+// mask is the post-relu output (positive = active)
+void relu_mask_mul(const float* grad, const float* mask, float* out, int64_t n);
+
+// Column sum: out[j] = sum_i(data[i*cols + j]) for j in [0, cols)
+// Used for grad_bias = grad.sum(dim=0)
+void col_sum(const float* data, float* out, int64_t rows, int64_t cols);
+
+// In-place add: dst[i] += src[i]  (no allocation)
+void add_inplace(float* dst, const float* src, int64_t n);
+
+// Fused bias_add + relu: out[i*N+j] = max(0, out[i*N+j] + bias[j])
+// Single pass avoids extra memory traffic (write-back + re-read)
+void bias_relu_fused(float* out, const float* bias, int64_t M, int64_t N);
+
+// Fused bias_add + gelu: out[i*N+j] = gelu(out[i*N+j] + bias[j])
+void bias_gelu_fused(float* out, const float* bias, int64_t M, int64_t N);
+
+// Fused cross-entropy: softmax + log + nll in one pass
+// Avoids 3 separate passes over logits (max, exp+sum, log+gather)
+// loss = -log(softmax(logits)[target]) averaged over batch
+// grad[i,j] = softmax[i,j] - (j == target[i]) / batch
+void cross_entropy_fused(const float* logits, const int64_t* targets,
+                         float* loss, float* grad,
+                         int64_t batch, int64_t classes);
+
+// Fused softmax: max + exp + sum + normalize in one pass per row
+// Avoids 3 separate passes over data
+void softmax_fused(const float* in, float* out, int64_t rows, int64_t cols);
+
+// Fused residual + layer_norm: out = LayerNorm(x + residual)
+// Avoids materializing the intermediate x + residual tensor
+void residual_layernorm_fused(const float* x, const float* residual,
+                              const float* gamma, const float* beta_param,
+                              float* out, int64_t rows, int64_t cols, float eps);
 
 } // namespace hot
 } // namespace native

@@ -89,9 +89,12 @@ constexpr GemmTuning kNEON_A57 = {4, 8, 48, 128, 2048, 16};
 // MC*KC=64*256=16384 floats=64KB → fits L1d
 constexpr GemmTuning kNEON_A75 = {8, 12, 64, 256, 2048, 16};
 
-// E2K Elbrus: 256 regs, 4 FMA units, 64KB L1d
-// 4×4=16 scalar FMA per K-step → fills 4 FMA units in 4 cycles
-constexpr GemmTuning kE2K = {4, 4, 64, 256, 2048, 16};
+// E2K Elbrus: 256 regs, 6 FMA units, 64KB L1d
+// 6x6=36 scalar FMA per K-step → fills 6 FMA units x 6 cycles = perfect VLIW
+// 36 accum + 6 A loads + 6 B loads = 48 regs (of 256 available)
+// MC=96: 96*256*4 = 96KB A panel fits in L2 (512KB on E8C2)
+// KC=256: 256*6*4 = 6KB B panel fits in L1d (64KB on E8C2)
+constexpr GemmTuning kE2K = {6, 6, 96, 256, 2048, 16};
 
 // NMC4 NeuroMatrix: 4 FPU cores, 512KB NMMB local memory
 // On-card GEMM via nmpp (nmppmMul_mm_32f), TUDA tiles for host-side fallback

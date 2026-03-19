@@ -248,6 +248,26 @@ public:
         return result;
     }
 
+    // Get named direct children (name -> module pairs)
+    std::vector<std::pair<std::string, ModulePtr>> named_children() {
+        std::vector<std::pair<std::string, ModulePtr>> result;
+        for (const auto& name : submodule_order_) {
+            if (submodules_[name]) {
+                result.push_back({name, submodules_[name]});
+            }
+        }
+        return result;
+    }
+
+    // Replace a submodule by name (used by compress_model)
+    void replace_module(const std::string& name, ModulePtr module) {
+        auto it = submodules_.find(name);
+        if (it != submodules_.end()) {
+            if (module) module->name_ = name;
+            it->second = std::move(module);
+        }
+    }
+
     // ========================================================================
     // Training Mode
     // ========================================================================

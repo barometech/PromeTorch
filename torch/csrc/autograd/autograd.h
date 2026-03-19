@@ -19,6 +19,9 @@
 // Compiled inner loops for LTO on Elbrus
 #include "aten/src/ATen/native/cpu/hot_loops.h"
 
+// Zero-overhead float32 fast paths (skip dispatch for Elbrus E8C2)
+#include "aten/src/ATen/native/cpu/FastOps.h"
+
 // For graph cleanup
 #include <queue>
 #include <unordered_set>
@@ -90,15 +93,23 @@ inline variable_list AccumulateGrad::apply(variable_list&& grads) {
 
     // Accumulate gradient (using base class grad_ field)
     if (!raw_meta->grad_) {
-        // First gradient - just move/copy (contiguous), no allocation
+        // First gradient — zero-copy move, no allocation, no memcpy.
+        // grad_contig is already contiguous, just transfer ownership.
         raw_meta->grad_ = grad_contig.getIntrusivePtr();
     } else {
-        // In-place accumulate: reuse existing gradient tensor's memory.
-        // Avoids allocating a new tensor on every backward pass.
-        // On Elbrus E2K, each tensor allocation = malloc syscall = pipeline stall.
+        // In-place accumulate using hot::add_inplace — bypasses Tensor dispatch.
+        // Eliminates: operator overload resolution, type checking, temporary creation.
+        // On Elbrus E2K, each avoided Tensor op = ~3 malloc syscalls saved.
         Tensor existing_grad(raw_meta->grad_);
-        existing_grad.add_(grad_contig);
-        // Note: add_ modifies in-place, grad_ already points to it
+        const int64_t n = existing_grad.numel();
+        if (n == grad_contig.numel() && existing_grad.is_contiguous()) {
+            at::native::hot::add_inplace(
+                existing_grad.mutable_data_ptr<float>(),
+                grad_contig.data_ptr<float>(), n);
+        } else {
+            // Fallback for shape mismatch (shouldn't happen in normal training)
+            existing_grad.add_(grad_contig);
+        }
     }
 
     // Call hooks only if we have AutogradMetaImpl (hooks_ is not in base class)
@@ -882,6 +893,9 @@ inline Tensor fused_linear_autograd(const Tensor& input, const Tensor& weight,
         }
     }
 
+    // Output is float32, contiguous, CPU — mark trusted for downstream ops
+    output.set_trusted(true);
+
     // Set up autograd graph: single backward node for input, weight, bias
     if (compute_requires_grad(input, weight)) {
         auto grad_fn = NodePool<FusedLinearBackward>::make_shared(
@@ -933,12 +947,78 @@ inline Tensor fused_linear_relu_autograd(const Tensor& input, const Tensor& weig
         }
     }
 
+    // Output is float32, contiguous, CPU — mark trusted for downstream ops
+    output.set_trusted(true);
+
     // Set up autograd graph: single backward node
     if (compute_requires_grad(input, weight)) {
         auto grad_fn = NodePool<FusedLinearReluBackward>::make_shared(
             input_contig, weight, output, has_bias);
         grad_fn->add_input_metadata(input);
         grad_fn->add_input_metadata(weight);
+        if (has_bias && bias.defined()) {
+            grad_fn->add_input_metadata(bias);
+        }
+        set_grad_fn(output, grad_fn);
+        output.set_requires_grad(true);
+    }
+
+    return output;
+}
+
+// ============================================================================
+// Low-rank linear: output = input @ B^T @ A^T + bias
+// ============================================================================
+// A [N, rank], B [rank, K] — factored weight W ≈ A @ B [N, K]
+// Forward: temp = input @ B^T [M, rank], output = temp @ A^T [M, N] + bias
+
+inline Tensor low_rank_linear_autograd(const Tensor& input, const Tensor& A,
+                                        const Tensor& B, const Tensor& bias,
+                                        bool has_bias) {
+    // input [M, K], A [N, rank], B [rank, K]
+    Tensor input_contig = input.is_contiguous() ? input : input.contiguous();
+    const int64_t M = input_contig.size(0);
+    const int64_t K = input_contig.size(1);
+    const int64_t rank = B.size(0);
+    const int64_t N = A.size(0);
+
+    // Step 1: temp = input @ B^T  [M, K] @ [K, rank] = [M, rank]
+    Tensor temp = at::empty({M, rank});
+    {
+        const float* x_data = input_contig.data_ptr<float>();
+        const float* b_data = B.data_ptr<float>();
+        float* t_data = temp.mutable_data_ptr<float>();
+        // B is [rank, K], we want input @ B^T = sgemm_nt(M, K, rank, ...)
+        at::native::hot::sgemm_nt(M, K, rank, 1.0f, x_data, K, b_data, K, 0.0f, t_data, rank);
+    }
+
+    // Step 2: output = temp @ A^T  [M, rank] @ [rank, N] = [M, N]
+    Tensor output = at::empty({M, N});
+    {
+        const float* t_data = temp.data_ptr<float>();
+        const float* a_data = A.data_ptr<float>();
+        float* o_data = output.mutable_data_ptr<float>();
+        // A is [N, rank], we want temp @ A^T = sgemm_nt(M, rank, N, ...)
+        at::native::hot::sgemm_nt(M, rank, N, 1.0f, t_data, rank, a_data, rank, 0.0f, o_data, N);
+    }
+
+    // Fused bias add
+    if (has_bias && bias.defined()) {
+        float* out_data = output.mutable_data_ptr<float>();
+        const float* b_data = bias.data_ptr<float>();
+        for (int64_t i = 0; i < M; ++i) {
+            float* row = out_data + i * N;
+            for (int64_t j = 0; j < N; ++j) row[j] += b_data[j];
+        }
+    }
+
+    // Set up autograd graph
+    if (compute_requires_grad(input, A) || compute_requires_grad(B)) {
+        auto grad_fn = NodePool<LowRankLinearBackward>::make_shared(
+            input_contig, A, B, temp, has_bias);
+        grad_fn->add_input_metadata(input);
+        grad_fn->add_input_metadata(A);
+        grad_fn->add_input_metadata(B);
         if (has_bias && bias.defined()) {
             grad_fn->add_input_metadata(bias);
         }

@@ -2,6 +2,7 @@
 
 #include "../module.h"
 #include "torch/csrc/autograd/autograd.h"
+#include "aten/src/ATen/native/cpu/hot_loops.h"
 #include <cmath>
 #include <algorithm>
 #include <limits>
@@ -676,7 +677,57 @@ public:
         }
 #endif
 
-        // CPU implementation
+        // ================================================================
+        // FUSED FAST PATH: float32, 2D input, hard labels, no smoothing,
+        // no weights, no ignore_index, Mean reduction
+        // Single pass over data — critical for E2K with 64KB L1 cache
+        // ================================================================
+        if (input.dtype() == c10::ScalarType::Float &&
+            input.dim() == 2 &&
+            label_smoothing_ == 0.0 &&
+            !has_weight_ &&
+            ignore_index_ == -100 &&
+            reduction_ == Reduction::Mean) {
+
+            Tensor input_c = input.contiguous();
+            int64_t batch_size = input_c.size(0);
+            int64_t num_classes = input_c.size(1);
+
+            // Convert targets to int64_t array (existing code stores as float)
+            const float* target_data = target.data_ptr<float>();
+            std::vector<int64_t> targets_i64(batch_size);
+            bool targets_valid = true;
+            for (int64_t i = 0; i < batch_size; ++i) {
+                targets_i64[i] = static_cast<int64_t>(target_data[i]);
+                if (targets_i64[i] == ignore_index_ || targets_i64[i] < 0 || targets_i64[i] >= num_classes) {
+                    targets_valid = false;
+                    break;
+                }
+            }
+
+            if (targets_valid) {
+                Tensor output = at::empty({});
+                Tensor grad_buf = at::empty({batch_size, num_classes});
+
+                at::native::hot::cross_entropy_fused(
+                    input_c.data_ptr<float>(), targets_i64.data(),
+                    output.mutable_data_ptr<float>(), grad_buf.mutable_data_ptr<float>(),
+                    batch_size, num_classes);
+
+                // Wire autograd: backward just returns the pre-computed gradient
+                if (torch::autograd::compute_requires_grad(input)) {
+                    auto grad_fn = torch::autograd::NodePool<torch::autograd::PrecomputedGradBackward>::make_shared(grad_buf);
+                    grad_fn->add_input_metadata(input);
+                    torch::autograd::set_grad_fn(output, grad_fn);
+                    output.set_requires_grad(true);
+                }
+
+                return output;
+            }
+            // Fall through to generic CPU path if targets invalid
+        }
+
+        // CPU implementation (generic path)
         Tensor input_cpu = input;
         Tensor target_cpu = target;
         Tensor weight_cpu = weight_;
