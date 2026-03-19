@@ -285,6 +285,7 @@ if(PT_USE_CUDA)
         aten/src/ATen/cuda/CUDABlas.cu
         aten/src/ATen/cuda/CUDAConv.cu
         aten/src/ATen/cuda/CUDAInference.cu
+        aten/src/ATen/cuda/FlashDecoding.cu
         aten/src/ATen/cuda/CUDAQuantGemv.cu
         aten/src/ATen/cuda/FlashAttention.cu
         # CRITICAL: CUDAAllocator singleton must be in a .cpp file (not header)
