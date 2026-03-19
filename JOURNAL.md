@@ -906,3 +906,27 @@ c10::nmcard::register_nmcard_allocator_local();  // Caller's registry (inline)
 | PromeTorch scalar | 126.3s | 89.1% |
 
 **Вывод:** Bottleneck не в GEMM, а в autograd overhead + tensor allocation. Нужна оптимизация memory pool и autograd dispatch для E2K.
+
+### Performance Optimizations Round 2 (2026-03-19)
+
+**Реализовано:**
+1. CPUAllocator: thread-local 64-slot cache + 16MB arena + 256-slot buckets
+2. FusedLinearBackward + FusedLinearReluBackward (1 node вместо 3-4)
+3. NodePool<T> (thread-local object pool для backward nodes)
+4. SmallEdgeList<4> (inline edges, без heap alloc)
+5. Cached GraphTask (reuse между backward() вызовами)
+6. Fast SVD: randomized O(mnk) + Lanczos + weight compression
+
+**Эльбрус результат:** 121.4s (было 126.3s = **+4% улучшение**)
+Причины скромного результата:
+- train_mnist_mlp не использует fused Linear ops (нужно менять пример)
+- LCC может не поддерживать thread_local в шаблонах (NodePool fallback)
+- Основной bottleneck сдвинулся к forward matmul (уже EML-оптимизирован)
+
+**Итого на Эльбрусе:**
+| Версия | Время | vs PyTorch 32t |
+|--------|-------|---------------|
+| PromeTorch scalar | 126.3s | 7.4x |
+| PromeTorch + EML | 120.6s | 7.1x |
+| PromeTorch + EML + optimizations | 121.4s | 7.1x |
+| PyTorch 2.7.1 (32 threads) | 17.0s | 1x |
