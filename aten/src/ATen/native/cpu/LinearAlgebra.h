@@ -6,6 +6,7 @@
 #include "aten/src/ATen/native/cpu/MathOps.h"
 #include "aten/src/ATen/native/cpu/ShapeOps.h"
 #include "aten/src/ATen/native/cpu/PromeBLAS.h"
+#include "aten/src/ATen/native/cpu/hot_loops.h"
 #include <cmath>
 #include <map>
 #include <algorithm>
@@ -49,11 +50,11 @@ inline Tensor mm(const Tensor& self, const Tensor& other) {
             // B is transposed view of B_orig[N, K]. Use sgemm_nt to avoid copy.
             const float* B_data = other.data_ptr<float>();
             int64_t ldb = other.stride(1); // = K (leading dim of B_orig)
-            blas::sgemm_nt(M, K, N, 1.0f, A_data, K, B_data, ldb, 0.0f, C, N);
+            hot::sgemm_nt(M, K, N, 1.0f, A_data, K, B_data, ldb, 0.0f, C, N);
         } else {
             Tensor B = other.contiguous();
             const float* B_data = B.data_ptr<float>();
-            blas::sgemm(M, K, N, 1.0f, A_data, K, B_data, N, 0.0f, C, N);
+            hot::sgemm(M, K, N, 1.0f, A_data, K, B_data, N, 0.0f, C, N);
         }
 
         return result;
@@ -68,6 +69,7 @@ inline Tensor mm(const Tensor& self, const Tensor& other) {
         const scalar_t* A_data = A.data_ptr<scalar_t>();
         const scalar_t* B_data = B.data_ptr<scalar_t>();
         scalar_t* C = result.mutable_data_ptr<scalar_t>();
+        _Pragma("omp parallel for schedule(static) if(M > 16)")
         for (int64_t i = 0; i < M; ++i) {
             for (int64_t j = 0; j < N; ++j) {
                 scalar_t sum = 0;
@@ -104,13 +106,14 @@ inline Tensor mv(const Tensor& self, const Tensor& vec) {
     Tensor result = zeros({M}, TensorOptions().dtype(result_dtype).device(A.device()));
 
     if (result_dtype == c10::ScalarType::Float) {
-        blas::sgemv(M, N, 1.0f, A.data_ptr<float>(), N, x.data_ptr<float>(),
-                    0.0f, result.mutable_data_ptr<float>());
+        hot::sgemv(M, N, 1.0f, A.data_ptr<float>(), N, x.data_ptr<float>(),
+                   0.0f, result.mutable_data_ptr<float>());
     } else {
         PT_DISPATCH_FLOATING_TYPES(result_dtype, "mv", [&] {
             const scalar_t* A_data = A.data_ptr<scalar_t>();
             const scalar_t* x_data = x.data_ptr<scalar_t>();
             scalar_t* y = result.mutable_data_ptr<scalar_t>();
+            _Pragma("omp parallel for schedule(static) if(M > 16)")
             for (int64_t i = 0; i < M; ++i) {
                 scalar_t sum = 0;
                 for (int64_t j = 0; j < N; ++j) {
@@ -153,17 +156,19 @@ inline Tensor bmm(const Tensor& self, const Tensor& other) {
         const float* A_data = A.data_ptr<float>();
         const float* B_data = B.data_ptr<float>();
         float* C = result.mutable_data_ptr<float>();
+        _Pragma("omp parallel for schedule(static) if(batch > 1)")
         for (int64_t b = 0; b < batch; ++b) {
-            blas::sgemm(M, K, N, 1.0f,
-                        A_data + b * M * K, K,
-                        B_data + b * K * N, N,
-                        0.0f, C + b * M * N, N);
+            hot::sgemm(M, K, N, 1.0f,
+                       A_data + b * M * K, K,
+                       B_data + b * K * N, N,
+                       0.0f, C + b * M * N, N);
         }
     } else {
         PT_DISPATCH_FLOATING_TYPES(result_dtype, "bmm", [&] {
             const scalar_t* A_data = A.data_ptr<scalar_t>();
             const scalar_t* B_data = B.data_ptr<scalar_t>();
             scalar_t* C = result.mutable_data_ptr<scalar_t>();
+            _Pragma("omp parallel for schedule(static) if(batch > 1)")
             for (int64_t b = 0; b < batch; ++b) {
                 const scalar_t* A_b = A_data + b * M * K;
                 const scalar_t* B_b = B_data + b * K * N;
@@ -203,7 +208,7 @@ inline Tensor dot(const Tensor& self, const Tensor& other) {
     Tensor result = zeros({}, TensorOptions().dtype(result_dtype).device(a.device()));
 
     if (result_dtype == c10::ScalarType::Float) {
-        float val = blas::sdot(n, a.data_ptr<float>(), b.data_ptr<float>());
+        float val = hot::sdot(n, a.data_ptr<float>(), b.data_ptr<float>());
         result.mutable_data_ptr<float>()[0] = val;
     } else {
         PT_DISPATCH_FLOATING_TYPES(result_dtype, "dot", [&] {
@@ -422,14 +427,14 @@ inline Tensor addmm(
         // Check if B is a simple 2D transpose
         bool b_is_transpose = (mat2.stride(0) == 1 && mat2.stride(1) == mat2.size(0));
         if (b_is_transpose) {
-            blas::sgemm_nt(M, K, N, alpha_val, A_data, K,
-                           mat2.data_ptr<float>(), mat2.stride(1),
-                           beta_val, C, N);
+            hot::sgemm_nt(M, K, N, alpha_val, A_data, K,
+                          mat2.data_ptr<float>(), mat2.stride(1),
+                          beta_val, C, N);
         } else {
             Tensor B = mat2.contiguous();
-            blas::sgemm(M, K, N, alpha_val, A_data, K,
-                        B.data_ptr<float>(), N,
-                        beta_val, C, N);
+            hot::sgemm(M, K, N, alpha_val, A_data, K,
+                       B.data_ptr<float>(), N,
+                       beta_val, C, N);
         }
     } else {
         Tensor A = mat1.contiguous();

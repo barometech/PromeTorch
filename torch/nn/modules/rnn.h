@@ -132,11 +132,11 @@ private:
         float* g = gates.mutable_data_ptr<float>();
 
         // gates = x @ W_ih^T
-        at::native::blas::sgemm_nt(batch, input_size_, gates_size, 1.0f,
+        at::native::hot::sgemm_nt(batch, input_size_, gates_size, 1.0f,
                                     x.data_ptr<float>(), input_size_,
                                     W_ih, input_size_, 0.0f, g, gates_size);
         // gates += h @ W_hh^T
-        at::native::blas::sgemm_nt(batch, hidden_size_, gates_size, 1.0f,
+        at::native::hot::sgemm_nt(batch, hidden_size_, gates_size, 1.0f,
                                     h.data_ptr<float>(), hidden_size_,
                                     W_hh, hidden_size_, 1.0f, g, gates_size);
 
