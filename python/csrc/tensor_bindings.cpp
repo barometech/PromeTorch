@@ -179,8 +179,12 @@ void init_tensor_bindings(py::module& m) {
         .def("data_ptr", [](const at::Tensor& t) { return (uintptr_t)t.data_ptr(); })
 
         // Shape operations
-        .def("view", &at::Tensor::view)
-        .def("reshape", &at::Tensor::reshape)
+        .def("view", [](const at::Tensor& t, std::vector<int64_t> shape) {
+            return t.view(shape);
+        })
+        .def("reshape", [](const at::Tensor& t, std::vector<int64_t> shape) {
+            return t.reshape(shape);
+        })
         .def("flatten", [](const at::Tensor& t, int64_t start_dim, int64_t end_dim) {
             return t.flatten(start_dim, end_dim);
         }, py::arg("start_dim") = 0, py::arg("end_dim") = -1)
@@ -192,10 +196,16 @@ void init_tensor_bindings(py::module& m) {
         }, py::arg("dim") = py::none())
         .def("unsqueeze", &at::Tensor::unsqueeze)
         .def("transpose", &at::Tensor::transpose)
-        .def("permute", &at::Tensor::permute)
+        .def("permute", [](const at::Tensor& t, std::vector<int64_t> dims) {
+            return t.permute(dims);
+        })
         .def("t", &at::Tensor::t)
-        .def("expand", &at::Tensor::expand)
-        .def("repeat", &at::Tensor::repeat)
+        .def("expand", [](const at::Tensor& t, std::vector<int64_t> shape) {
+            return t.expand(shape);
+        })
+        .def("repeat", [](const at::Tensor& t, std::vector<int64_t> repeats) {
+            return t.repeat(repeats);
+        })
 
         // Math operations
         .def("neg", &at::Tensor::neg)
