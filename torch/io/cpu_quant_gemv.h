@@ -972,6 +972,372 @@ inline bool cpu_quant_gemv_supported(uint32_t quant_type) {
     return quant_type == 12 || quant_type == 8 || quant_type == 14 || quant_type == 13;
 }
 
+// ============================================================================
+// Batched QKV GEMV -- shared x vector across 3 weight matrices
+//
+// Instead of 3 separate GEMVs where each re-reads x from memory,
+// we split total rows (N_q + N_k + N_v) across threads. Each thread
+// reads from the correct weight matrix but x stays hot in L1/L2 cache
+// because all threads reference the same x.
+//
+// This reduces x memory traffic from 3*K to ~K (shared across threads).
+// ============================================================================
+
+inline void cpu_quant_gemv_batched_qkv(
+    uint32_t quant_type,
+    const void* w_q, const void* w_k, const void* w_v,
+    const float* x,
+    float* y_q, float* y_k, float* y_v,
+    int64_t K, int64_t N_q, int64_t N_k, int64_t N_v,
+    int64_t row_stride_bytes) {
+
+    int64_t N_total = N_q + N_k + N_v;
+
+    auto get_weight_row = [&](int64_t global_row) -> const uint8_t* {
+        if (global_row < N_q) {
+            return static_cast<const uint8_t*>(w_q) + global_row * row_stride_bytes;
+        } else if (global_row < N_q + N_k) {
+            return static_cast<const uint8_t*>(w_k) + (global_row - N_q) * row_stride_bytes;
+        } else {
+            return static_cast<const uint8_t*>(w_v) + (global_row - N_q - N_k) * row_stride_bytes;
+        }
+    };
+
+    auto get_output_ptr = [&](int64_t global_row) -> float* {
+        if (global_row < N_q) {
+            return y_q + global_row;
+        } else if (global_row < N_q + N_k) {
+            return y_k + (global_row - N_q);
+        } else {
+            return y_v + (global_row - N_q - N_k);
+        }
+    };
+
+#ifdef __AVX2__
+    if (quant_type == 12) {  // Q4_K
+        const int64_t blocks_per_row = K / 256;
+        c10::get_thread_pool().parallel_for(0, N_total, [&](int64_t start, int64_t end) {
+        for (int64_t n = start; n < end; ++n) {
+            const __m256i mask_lo = _mm256_set1_epi32(0xF);
+            const uint8_t* row_data = get_weight_row(n);
+            __m256 acc = _mm256_setzero_ps();
+
+            for (int64_t bi = 0; bi < blocks_per_row; ++bi) {
+                const uint8_t* block = row_data + bi * 144;
+                const int64_t base_k = bi * 256;
+
+                uint16_t d_bits, dmin_bits;
+                std::memcpy(&d_bits, block, 2);
+                std::memcpy(&dmin_bits, block + 2, 2);
+                const float d = gguf::fp16_to_fp32(d_bits);
+                const float dmin = gguf::fp16_to_fp32(dmin_bits);
+                const uint8_t* scales = block + 4;
+                const uint8_t* qs = block + 16;
+
+                int is = 0;
+                for (int j = 0; j < 256; j += 64) {
+                    uint8_t sc, m_val;
+                    gguf::get_scale_min_k4(is, scales, &sc, &m_val);
+                    const float d1 = d * sc;
+                    const float m1 = dmin * m_val;
+                    gguf::get_scale_min_k4(is + 1, scales, &sc, &m_val);
+                    const float d2 = d * sc;
+                    const float m2 = dmin * m_val;
+
+                    __m256 sum_qx_lo = _mm256_setzero_ps();
+                    __m256 sum_x_lo  = _mm256_setzero_ps();
+                    __m256 sum_qx_hi = _mm256_setzero_ps();
+                    __m256 sum_x_hi  = _mm256_setzero_ps();
+
+                    for (int l = 0; l < 32; l += 8) {
+                        __m128i qs8 = _mm_loadl_epi64(
+                            reinterpret_cast<const __m128i*>(qs + l));
+                        __m256i qi = _mm256_cvtepu8_epi32(qs8);
+                        __m256i q_lo_i = _mm256_and_si256(qi, mask_lo);
+                        __m256i q_hi_i = _mm256_srli_epi32(qi, 4);
+                        __m256 q_lo_f = _mm256_cvtepi32_ps(q_lo_i);
+                        __m256 q_hi_f = _mm256_cvtepi32_ps(q_hi_i);
+                        __m256 vx_lo = _mm256_loadu_ps(x + base_k + j + l);
+                        __m256 vx_hi = _mm256_loadu_ps(x + base_k + j + 32 + l);
+                        sum_qx_lo = _mm256_fmadd_ps(q_lo_f, vx_lo, sum_qx_lo);
+                        sum_x_lo  = _mm256_add_ps(sum_x_lo, vx_lo);
+                        sum_qx_hi = _mm256_fmadd_ps(q_hi_f, vx_hi, sum_qx_hi);
+                        sum_x_hi  = _mm256_add_ps(sum_x_hi, vx_hi);
+                    }
+
+                    acc = _mm256_fmadd_ps(_mm256_set1_ps(d1), sum_qx_lo, acc);
+                    acc = _mm256_fnmadd_ps(_mm256_set1_ps(m1), sum_x_lo, acc);
+                    acc = _mm256_fmadd_ps(_mm256_set1_ps(d2), sum_qx_hi, acc);
+                    acc = _mm256_fnmadd_ps(_mm256_set1_ps(m2), sum_x_hi, acc);
+
+                    qs += 32;
+                    is += 2;
+                }
+            }
+            *get_output_ptr(n) = hsum_avx(acc);
+        }
+        }, 1);
+        return;
+    }
+#endif
+
+    // Fallback: 3 separate GEMVs
+    cpu_quant_gemv(quant_type, w_q, x, y_q, K, N_q, row_stride_bytes);
+    cpu_quant_gemv(quant_type, w_k, x, y_k, K, N_k, row_stride_bytes);
+    cpu_quant_gemv(quant_type, w_v, x, y_v, K, N_v, row_stride_bytes);
+}
+
+// ============================================================================
+// Fused RMSNorm + GEMV on CPU
+//
+// Instead of: RMSNorm -> write to temp buffer -> read temp buffer for GEMV
+// We do:      RMSNorm -> stack buffer (L1 hot) -> GEMV reads from L1
+//
+// Saves one full hidden_size write+read from/to L2/L3 per call.
+// For hidden=3584, that's 14 KB saved per GEMV call.
+// ============================================================================
+
+inline void cpu_fused_rmsnorm_gemv(
+    const float* x, const float* gamma, float eps, bool add_one,
+    uint32_t quant_type, const void* weight_data,
+    float* y, int64_t hidden, int64_t N, int64_t row_stride_bytes) {
+
+    // Step 1: RMSNorm into stack-allocated buffer (stays in L1)
+    constexpr int64_t MAX_STACK_HIDDEN = 8192;
+    float stack_buf[MAX_STACK_HIDDEN];
+    float* x_norm = (hidden <= MAX_STACK_HIDDEN) ? stack_buf
+                   : static_cast<float*>(std::malloc(hidden * sizeof(float)));
+
+#ifdef __AVX2__
+    __m256 sum_sq_vec = _mm256_setzero_ps();
+    int64_t j = 0;
+    for (; j + 7 < hidden; j += 8) {
+        __m256 vx = _mm256_loadu_ps(x + j);
+        sum_sq_vec = _mm256_fmadd_ps(vx, vx, sum_sq_vec);
+    }
+    float sum_sq = hsum_avx(sum_sq_vec);
+    for (; j < hidden; ++j) sum_sq += x[j] * x[j];
+
+    float rms = 1.0f / std::sqrt(sum_sq / hidden + eps);
+    __m256 vrms = _mm256_set1_ps(rms);
+    j = 0;
+    if (add_one) {
+        __m256 one = _mm256_set1_ps(1.0f);
+        for (; j + 7 < hidden; j += 8) {
+            __m256 vx = _mm256_loadu_ps(x + j);
+            __m256 vg = _mm256_loadu_ps(gamma + j);
+            _mm256_storeu_ps(x_norm + j,
+                _mm256_mul_ps(_mm256_mul_ps(vx, vrms), _mm256_add_ps(vg, one)));
+        }
+    } else {
+        for (; j + 7 < hidden; j += 8) {
+            __m256 vx = _mm256_loadu_ps(x + j);
+            __m256 vg = _mm256_loadu_ps(gamma + j);
+            _mm256_storeu_ps(x_norm + j, _mm256_mul_ps(_mm256_mul_ps(vx, vrms), vg));
+        }
+    }
+    for (; j < hidden; ++j) {
+        float w = add_one ? (1.0f + gamma[j]) : gamma[j];
+        x_norm[j] = x[j] * rms * w;
+    }
+#else
+    float sum_sq = 0.0f;
+    for (int64_t j = 0; j < hidden; ++j) sum_sq += x[j] * x[j];
+    float rms = 1.0f / std::sqrt(sum_sq / hidden + eps);
+    for (int64_t j = 0; j < hidden; ++j) {
+        float w = add_one ? (1.0f + gamma[j]) : gamma[j];
+        x_norm[j] = x[j] * rms * w;
+    }
+#endif
+
+    // Step 2: GEMV with normalized x (still hot in L1 cache)
+    cpu_quant_gemv(quant_type, weight_data, x_norm, y, hidden, N, row_stride_bytes);
+
+    if (hidden > MAX_STACK_HIDDEN) std::free(x_norm);
+}
+
+// ============================================================================
+// Fused RMSNorm + batched QKV GEMV
+// Combines both fusions: RMSNorm in L1 + shared x across Q/K/V
+// ============================================================================
+
+inline void cpu_fused_rmsnorm_qkv_gemv(
+    const float* x, const float* gamma, float eps, bool add_one,
+    uint32_t quant_type,
+    const void* w_q, const void* w_k, const void* w_v,
+    float* y_q, float* y_k, float* y_v,
+    int64_t hidden, int64_t N_q, int64_t N_k, int64_t N_v,
+    int64_t row_stride_bytes) {
+
+    constexpr int64_t MAX_STACK_HIDDEN = 8192;
+    float stack_buf[MAX_STACK_HIDDEN];
+    float* x_norm = (hidden <= MAX_STACK_HIDDEN) ? stack_buf
+                   : static_cast<float*>(std::malloc(hidden * sizeof(float)));
+
+#ifdef __AVX2__
+    __m256 sum_sq_vec = _mm256_setzero_ps();
+    int64_t j = 0;
+    for (; j + 7 < hidden; j += 8) {
+        __m256 vx = _mm256_loadu_ps(x + j);
+        sum_sq_vec = _mm256_fmadd_ps(vx, vx, sum_sq_vec);
+    }
+    float sum_sq = hsum_avx(sum_sq_vec);
+    for (; j < hidden; ++j) sum_sq += x[j] * x[j];
+
+    float rms = 1.0f / std::sqrt(sum_sq / hidden + eps);
+    __m256 vrms = _mm256_set1_ps(rms);
+    j = 0;
+    if (add_one) {
+        __m256 one = _mm256_set1_ps(1.0f);
+        for (; j + 7 < hidden; j += 8) {
+            __m256 vx = _mm256_loadu_ps(x + j);
+            __m256 vg = _mm256_loadu_ps(gamma + j);
+            _mm256_storeu_ps(x_norm + j,
+                _mm256_mul_ps(_mm256_mul_ps(vx, vrms), _mm256_add_ps(vg, one)));
+        }
+    } else {
+        for (; j + 7 < hidden; j += 8) {
+            __m256 vx = _mm256_loadu_ps(x + j);
+            __m256 vg = _mm256_loadu_ps(gamma + j);
+            _mm256_storeu_ps(x_norm + j, _mm256_mul_ps(_mm256_mul_ps(vx, vrms), vg));
+        }
+    }
+    for (; j < hidden; ++j) {
+        float w = add_one ? (1.0f + gamma[j]) : gamma[j];
+        x_norm[j] = x[j] * rms * w;
+    }
+#else
+    float sum_sq = 0.0f;
+    for (int64_t j = 0; j < hidden; ++j) sum_sq += x[j] * x[j];
+    float rms = 1.0f / std::sqrt(sum_sq / hidden + eps);
+    for (int64_t j = 0; j < hidden; ++j) {
+        float w = add_one ? (1.0f + gamma[j]) : gamma[j];
+        x_norm[j] = x[j] * rms * w;
+    }
+#endif
+
+    cpu_quant_gemv_batched_qkv(quant_type, w_q, w_k, w_v,
+        x_norm, y_q, y_k, y_v,
+        hidden, N_q, N_k, N_v, row_stride_bytes);
+
+    if (hidden > MAX_STACK_HIDDEN) std::free(x_norm);
+}
+
+// ============================================================================
+// Fused RMSNorm + batched gate+up GEMV
+// Same fusion for FFN: normalize x once, then gate and up share the L1-hot x
+// ============================================================================
+
+inline void cpu_fused_rmsnorm_gate_up_gemv(
+    const float* x, const float* gamma, float eps, bool add_one,
+    uint32_t quant_type_gate, const void* w_gate,
+    uint32_t quant_type_up, const void* w_up,
+    float* y_gate, float* y_up,
+    int64_t hidden, int64_t N_gate, int64_t N_up,
+    int64_t row_stride_gate, int64_t row_stride_up) {
+
+    constexpr int64_t MAX_STACK_HIDDEN = 8192;
+    float stack_buf[MAX_STACK_HIDDEN];
+    float* x_norm = (hidden <= MAX_STACK_HIDDEN) ? stack_buf
+                   : static_cast<float*>(std::malloc(hidden * sizeof(float)));
+
+#ifdef __AVX2__
+    __m256 sum_sq_vec = _mm256_setzero_ps();
+    int64_t j = 0;
+    for (; j + 7 < hidden; j += 8) {
+        __m256 vx = _mm256_loadu_ps(x + j);
+        sum_sq_vec = _mm256_fmadd_ps(vx, vx, sum_sq_vec);
+    }
+    float sum_sq = hsum_avx(sum_sq_vec);
+    for (; j < hidden; ++j) sum_sq += x[j] * x[j];
+
+    float rms = 1.0f / std::sqrt(sum_sq / hidden + eps);
+    __m256 vrms = _mm256_set1_ps(rms);
+    j = 0;
+    if (add_one) {
+        __m256 one = _mm256_set1_ps(1.0f);
+        for (; j + 7 < hidden; j += 8) {
+            __m256 vx = _mm256_loadu_ps(x + j);
+            __m256 vg = _mm256_loadu_ps(gamma + j);
+            _mm256_storeu_ps(x_norm + j,
+                _mm256_mul_ps(_mm256_mul_ps(vx, vrms), _mm256_add_ps(vg, one)));
+        }
+    } else {
+        for (; j + 7 < hidden; j += 8) {
+            __m256 vx = _mm256_loadu_ps(x + j);
+            __m256 vg = _mm256_loadu_ps(gamma + j);
+            _mm256_storeu_ps(x_norm + j, _mm256_mul_ps(_mm256_mul_ps(vx, vrms), vg));
+        }
+    }
+    for (; j < hidden; ++j) {
+        float w = add_one ? (1.0f + gamma[j]) : gamma[j];
+        x_norm[j] = x[j] * rms * w;
+    }
+#else
+    float sum_sq = 0.0f;
+    for (int64_t j = 0; j < hidden; ++j) sum_sq += x[j] * x[j];
+    float rms = 1.0f / std::sqrt(sum_sq / hidden + eps);
+    for (int64_t j = 0; j < hidden; ++j) {
+        float w = add_one ? (1.0f + gamma[j]) : gamma[j];
+        x_norm[j] = x[j] * rms * w;
+    }
+#endif
+
+    cpu_quant_gemv(quant_type_gate, w_gate, x_norm, y_gate, hidden, N_gate, row_stride_gate);
+    cpu_quant_gemv(quant_type_up, w_up, x_norm, y_up, hidden, N_up, row_stride_up);
+
+    if (hidden > MAX_STACK_HIDDEN) std::free(x_norm);
+}
+
+// ============================================================================
+// In-place RMSNorm on a buffer (for use in zero-alloc decode path)
+// ============================================================================
+
+inline void cpu_rmsnorm_inplace(float* x, const float* gamma, float eps,
+                                 bool add_one, int64_t hidden) {
+#ifdef __AVX2__
+    __m256 sum_sq_vec = _mm256_setzero_ps();
+    int64_t j = 0;
+    for (; j + 7 < hidden; j += 8) {
+        __m256 vx = _mm256_loadu_ps(x + j);
+        sum_sq_vec = _mm256_fmadd_ps(vx, vx, sum_sq_vec);
+    }
+    float sum_sq = hsum_avx(sum_sq_vec);
+    for (; j < hidden; ++j) sum_sq += x[j] * x[j];
+
+    float rms = 1.0f / std::sqrt(sum_sq / hidden + eps);
+    __m256 vrms = _mm256_set1_ps(rms);
+    j = 0;
+    if (add_one) {
+        __m256 one = _mm256_set1_ps(1.0f);
+        for (; j + 7 < hidden; j += 8) {
+            __m256 vx = _mm256_loadu_ps(x + j);
+            __m256 vg = _mm256_loadu_ps(gamma + j);
+            _mm256_storeu_ps(x + j,
+                _mm256_mul_ps(_mm256_mul_ps(vx, vrms), _mm256_add_ps(vg, one)));
+        }
+    } else {
+        for (; j + 7 < hidden; j += 8) {
+            __m256 vx = _mm256_loadu_ps(x + j);
+            __m256 vg = _mm256_loadu_ps(gamma + j);
+            _mm256_storeu_ps(x + j, _mm256_mul_ps(_mm256_mul_ps(vx, vrms), vg));
+        }
+    }
+    for (; j < hidden; ++j) {
+        float w = add_one ? (1.0f + gamma[j]) : gamma[j];
+        x[j] = x[j] * rms * w;
+    }
+#else
+    float sum_sq = 0.0f;
+    for (int64_t j = 0; j < hidden; ++j) sum_sq += x[j] * x[j];
+    float rms = 1.0f / std::sqrt(sum_sq / hidden + eps);
+    for (int64_t j = 0; j < hidden; ++j) {
+        float w = add_one ? (1.0f + gamma[j]) : gamma[j];
+        x[j] = x[j] * rms * w;
+    }
+#endif
+}
+
 } // namespace cpu_quant
 } // namespace io
 } // namespace torch
