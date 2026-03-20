@@ -1307,3 +1307,13 @@ CLI использует оптимизированный zero-alloc decode path
 
 Одна строка: `model->forward_decode_cpu()` вместо `model->forward()`.
 PromeServe HTTP теперь на уровне CLI inference.
+
+### Prefill optimization: output_proj 941ms → 126ms (7.5x)
+
+Только проецируем ПОСЛЕДНИЙ token на vocab (не все seq_len).
+Для prefill 6 tokens: вместо 6×151936 dot products → 1×151936.
+
+**CLI: 13.9 tok/s** (было 13.2). **PromeServe: 13.3 tok/s** confirmed.
+**Prefill: 1467ms** для "Explain quantum computing briefly." (21 tokens).
+
+**Путь CPU inference: 0.63 → 13.5 tok/s = 21x ускорение.**
