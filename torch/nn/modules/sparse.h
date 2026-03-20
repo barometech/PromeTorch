@@ -443,7 +443,7 @@ private:
         Tensor output = at::zeros({batch_size, embedding_dim_});
         float* output_data = output.mutable_data_ptr<float>();
 
-        #pragma omp parallel for if(batch_size > 100)
+        // omp removed for LCC
         for (int64_t b = 0; b < batch_size; ++b) {
             int64_t valid_count = 0;
 
