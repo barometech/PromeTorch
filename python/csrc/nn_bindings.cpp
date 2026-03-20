@@ -448,28 +448,40 @@ void init_nn_bindings(py::module& m) {
     functional.def("leaky_relu", [](const at::Tensor& input, double negative_slope, bool inplace) {
         (void)inplace;
         // leaky_relu: max(0, x) + negative_slope * min(0, x)
-        at::Tensor pos = input.relu();
-        at::Tensor neg = (input * negative_slope);
-        at::Tensor mask = input.gt(at::Scalar(0.0)).to(input.dtype());
-        return pos + neg * (at::Scalar(1.0) - mask);
+        // Avoid Bool->Float conversion
+        at::Tensor result = input.clone();
+        float ns = static_cast<float>(negative_slope);
+        float* d = result.mutable_data_ptr<float>();
+        for (int64_t i = 0; i < result.numel(); i++) {
+            if (d[i] < 0.0f) d[i] *= ns;
+        }
+        return result;
     }, py::arg("input"), py::arg("negative_slope") = 0.01, py::arg("inplace") = false);
 
     functional.def("elu", [](const at::Tensor& input, double alpha, bool inplace) {
         (void)inplace;
-        at::Tensor pos = input.relu();
-        at::Tensor neg_mask = input.le(at::Scalar(0.0)).to(input.dtype());
-        at::Tensor neg = (input.exp() - 1.0) * alpha * neg_mask;
-        return pos + neg;
+        at::Tensor result = input.clone();
+        float a = static_cast<float>(alpha);
+        float* d = result.mutable_data_ptr<float>();
+        for (int64_t i = 0; i < result.numel(); i++) {
+            if (d[i] <= 0.0f) d[i] = a * (std::exp(d[i]) - 1.0f);
+        }
+        return result;
     }, py::arg("input"), py::arg("alpha") = 1.0, py::arg("inplace") = false);
 
     functional.def("selu", [](const at::Tensor& input, bool inplace) {
         (void)inplace;
-        constexpr double alpha = 1.6732632423543772;
-        constexpr double scale = 1.0507009873554805;
-        at::Tensor pos = input.relu();
-        at::Tensor neg_mask = input.le(at::Scalar(0.0)).to(input.dtype());
-        at::Tensor neg = (input.exp() - 1.0) * alpha * neg_mask;
-        return (pos + neg) * scale;
+        constexpr float alpha = 1.6732632423543772f;
+        constexpr float scale = 1.0507009873554805f;
+        at::Tensor result = input.clone();
+        float* d = result.mutable_data_ptr<float>();
+        for (int64_t i = 0; i < result.numel(); i++) {
+            if (d[i] <= 0.0f)
+                d[i] = scale * alpha * (std::exp(d[i]) - 1.0f);
+            else
+                d[i] = scale * d[i];
+        }
+        return result;
     }, py::arg("input"), py::arg("inplace") = false);
 
     functional.def("gelu", [](const at::Tensor& input) {
@@ -519,9 +531,17 @@ void init_nn_bindings(py::module& m) {
         if (!training || p == 0.0) {
             return input;
         }
-        at::Tensor mask = torch::rand(input.sizes());
-        mask = mask.gt(at::Scalar(p)).to(input.dtype());
-        return input * mask / (1.0 - p);
+        // Generate random mask: 1.0 where rand > p, 0.0 otherwise
+        // Avoid Bool->Float conversion by comparing floats directly
+        at::Tensor rand_vals = torch::rand(input.sizes());
+        // Create float mask: rand > p gives 1.0, else 0.0
+        // Use element-wise: (rand - p) > 0 ? 1 : 0 via relu + sign-like
+        float threshold = static_cast<float>(p);
+        float* rv = rand_vals.mutable_data_ptr<float>();
+        for (int64_t i = 0; i < rand_vals.numel(); i++) {
+            rv[i] = rv[i] > threshold ? 1.0f : 0.0f;
+        }
+        return input * rand_vals / (1.0 - p);
     }, py::arg("input"), py::arg("p") = 0.5, py::arg("training") = true, py::arg("inplace") = false);
 
     functional.def("linear", [](const at::Tensor& input, const at::Tensor& weight, py::object bias) {

@@ -4,6 +4,7 @@
 #include "torch/csrc/autograd/autograd.h"
 #include <memory>
 #include <string>
+#include <cstring>  // memset for fast zero_grad
 
 namespace torch {
 namespace nn {
@@ -107,8 +108,15 @@ public:
         // Access grad_ from base c10::AutogradMeta (no need for AutogradMetaImpl)
         auto* raw_meta = tensor_.autograd_meta();
         if (raw_meta && raw_meta->grad_) {
-            Tensor g(raw_meta->grad_);
-            g.zero_();
+            // Fast path: memset directly without constructing a Tensor wrapper.
+            // Gradient tensors from backward pass are always contiguous float32.
+            auto* impl = raw_meta->grad_.get();
+            if (impl && impl->is_contiguous()) {
+                std::memset(impl->data(), 0, impl->nbytes());
+            } else if (impl) {
+                Tensor g(raw_meta->grad_);
+                g.zero_();
+            }
         }
     }
 

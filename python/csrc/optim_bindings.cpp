@@ -69,7 +69,9 @@ void init_optim_bindings(py::module& m) {
     // Optimizer base class
     py::class_<torch::optim::Optimizer, std::shared_ptr<torch::optim::Optimizer>>(m, "Optimizer")
         .def("step", &torch::optim::Optimizer::step)
-        .def("zero_grad", &torch::optim::Optimizer::zero_grad);
+        .def("zero_grad", [](torch::optim::Optimizer& self, bool set_to_none) {
+            self.zero_grad(set_to_none);
+        }, py::arg("set_to_none") = false);
 
     // SGDOptions
     py::class_<torch::optim::SGDOptions>(m, "SGDOptions")
@@ -95,7 +97,9 @@ void init_optim_bindings(py::module& m) {
         }), py::arg("params"), py::arg("lr") = 0.01, py::arg("momentum") = 0.0,
            py::arg("dampening") = 0.0, py::arg("weight_decay") = 0.0, py::arg("nesterov") = false)
         .def("step", &torch::optim::SGD::step)
-        .def("zero_grad", &torch::optim::SGD::zero_grad);
+        .def("zero_grad", [](torch::optim::SGD& self, bool set_to_none) {
+            self.zero_grad(set_to_none);
+        }, py::arg("set_to_none") = false);
 
     // AdamOptions
     py::class_<torch::optim::AdamOptions>(m, "AdamOptions")
@@ -125,7 +129,9 @@ void init_optim_bindings(py::module& m) {
         }), py::arg("params"), py::arg("lr") = 0.001, py::arg("betas") = py::make_tuple(0.9, 0.999),
            py::arg("eps") = 1e-8, py::arg("weight_decay") = 0.0, py::arg("amsgrad") = false)
         .def("step", &torch::optim::Adam::step)
-        .def("zero_grad", &torch::optim::Adam::zero_grad);
+        .def("zero_grad", [](torch::optim::Adam& self, bool set_to_none) {
+            self.zero_grad(set_to_none);
+        }, py::arg("set_to_none") = false);
 
     // AdamWOptions
     py::class_<torch::optim::AdamWOptions>(m, "AdamWOptions")
@@ -155,7 +161,9 @@ void init_optim_bindings(py::module& m) {
         }), py::arg("params"), py::arg("lr") = 0.001, py::arg("betas") = py::make_tuple(0.9, 0.999),
            py::arg("eps") = 1e-8, py::arg("weight_decay") = 0.01, py::arg("amsgrad") = false)
         .def("step", &torch::optim::AdamW::step)
-        .def("zero_grad", &torch::optim::AdamW::zero_grad);
+        .def("zero_grad", [](torch::optim::AdamW& self, bool set_to_none) {
+            self.zero_grad(set_to_none);
+        }, py::arg("set_to_none") = false);
 
     // RMSpropOptions
     py::class_<torch::optim::RMSpropOptions>(m, "RMSpropOptions")
@@ -184,7 +192,9 @@ void init_optim_bindings(py::module& m) {
            py::arg("eps") = 1e-8, py::arg("weight_decay") = 0.0,
            py::arg("momentum") = 0.0, py::arg("centered") = false)
         .def("step", &torch::optim::RMSprop::step)
-        .def("zero_grad", &torch::optim::RMSprop::zero_grad);
+        .def("zero_grad", [](torch::optim::RMSprop& self, bool set_to_none) {
+            self.zero_grad(set_to_none);
+        }, py::arg("set_to_none") = false);
 
     // ========================================================================
     // Learning Rate Schedulers
