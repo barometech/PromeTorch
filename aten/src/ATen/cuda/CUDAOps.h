@@ -531,5 +531,82 @@ ATEN_CUDA_API void launch_fused_qknorm_rope_kvwrite(
     int64_t cache_offset_row,
     cudaStream_t stream = nullptr);
 
+// ============================================================================
+// Fused QKV GEMV — Three projections (Q, K, V) in a single kernel launch
+// ============================================================================
+// Loads x into shared memory ONCE, then computes Q, K, V outputs.
+// Saves 2 kernel launches + 2 shared memory loads of x per layer.
+// All three weight matrices must be Q4_K with the same K and row_stride.
+ATEN_CUDA_API void launch_q4km_fused_qkv_gemv(
+    const void* w_q, const void* w_k, const void* w_v,
+    const float* x, float* out_q, float* out_k, float* out_v,
+    int K, int N_q, int N_k, int N_v,
+    int64_t row_stride_bytes,
+    cudaStream_t stream = nullptr);
+
+// ============================================================================
+// Fused RMSNorm + GEMV — Normalize x in shared memory, then compute GEMV
+// ============================================================================
+// Eliminates separate RMSNorm kernel + global memory round-trip.
+ATEN_CUDA_API void launch_q4km_fused_rmsnorm_gemv(
+    const float* x, const float* norm_weight,
+    const void* weights, float* y,
+    int K, int N, int64_t row_stride_bytes,
+    float eps, bool add_one,
+    cudaStream_t stream = nullptr);
+
+// ============================================================================
+// Fused RMSNorm + QKV GEMV — Single kernel: normalize x → Q, K, V projections
+// ============================================================================
+// Combines RMSNorm + fused QKV: saves 4 kernel launches per layer.
+ATEN_CUDA_API void launch_q4km_fused_rmsnorm_qkv_gemv(
+    const float* x, const float* norm_weight,
+    const void* w_q, const void* w_k, const void* w_v,
+    float* out_q, float* out_k, float* out_v,
+    int K, int N_q, int N_k, int N_v,
+    int64_t row_stride_bytes,
+    float eps, bool add_one,
+    cudaStream_t stream = nullptr);
+
+// ============================================================================
+// GEMV with accumulate (beta=1): y[n] += W@x (fused residual add)
+// ============================================================================
+// Used for output_proj and down_proj to fold residual_add into GEMV.
+ATEN_CUDA_API void launch_q4km_persistent_gemv_accumulate(
+    const void* weights, const float* x, float* y,
+    int K, int N, int64_t row_stride_bytes,
+    cudaStream_t stream = nullptr);
+
+// ============================================================================
+// Fused RMSNorm + Gate+Up GEMV — Single kernel: normalize → gate, up
+// ============================================================================
+ATEN_CUDA_API void launch_q4km_fused_rmsnorm_gate_up_gemv(
+    const float* x, const float* norm_weight,
+    const void* w_gate, const void* w_up,
+    float* y_gate, float* y_up,
+    int K, int N_gate, int N_up,
+    int64_t row_stride_bytes,
+    float eps, bool add_one,
+    cudaStream_t stream = nullptr);
+
+// ============================================================================
+// FP16 KV Cache Operations
+// ============================================================================
+
+// Write FP32 K/V to FP16 cache (conversion on the fly)
+ATEN_CUDA_API void launch_fp16_kv_cache_write(
+    const float* src, void* dst_cache_fp16,
+    int64_t num_new_rows, int64_t cols, int64_t offset_row,
+    cudaStream_t stream = nullptr);
+
+// Flash-decode with FP16 KV cache — halves memory bandwidth for attention
+ATEN_CUDA_API void launch_flash_decode_fp16(
+    const float* Q, const void* K_cache_fp16, const void* V_cache_fp16,
+    float* O,
+    float* partial_O, float* partial_lse, float* partial_max,
+    int n_heads, int n_kv_heads, int head_dim,
+    int total_seq, float scale,
+    cudaStream_t stream = nullptr);
+
 } // namespace cuda
 } // namespace at
