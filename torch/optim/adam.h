@@ -264,6 +264,13 @@ public:
             double eps = options_.eps;
             bool amsgrad = options_.amsgrad;
 
+            // ================================================================
+            // Phase 1: Initialize states, collect CPU float params for fused step
+            // ================================================================
+            std::vector<at::native::hot::AdamWParamPack> cpu_packs;
+            std::vector<Tensor> grad_holders;
+            int64_t step_val = 0;
+
             for (auto* param : group.params) {
                 if (!param->defined()) continue;
 
@@ -275,8 +282,9 @@ public:
 
                 // Increment step counter
                 state->step++;
+                step_val = state->step;
 
-                // Initialize moment buffers - must be on same device as param
+                // Initialize moment buffers
                 if (!state->exp_avg.defined()) {
                     state->exp_avg = at::zeros(param->sizes());
                     state->exp_avg_sq = at::zeros(param->sizes());
@@ -284,7 +292,6 @@ public:
                         state->max_exp_avg_sq = at::zeros(param->sizes());
                     }
 #ifdef PT_USE_CUDA
-                    // Move state tensors to same device as param
                     if (param->data().is_cuda()) {
                         state->exp_avg = at::to_cuda(state->exp_avg);
                         state->exp_avg_sq = at::to_cuda(state->exp_avg_sq);
@@ -295,93 +302,81 @@ public:
 #endif
                 }
 
-                // DECOUPLED weight decay: apply directly to parameters
-                // p = (1 - lr * wd) * p = p - lr * wd * p
-                if (wd != 0.0) {
-                    param->data().mul_(at::Scalar(1.0 - lr * wd));
-                }
-
-                // For CUDA tensors, move to CPU for optimizer math, then back
-                Tensor grad_cpu = grad;
-                Tensor exp_avg_cpu = state->exp_avg;
-                Tensor exp_avg_sq_cpu = state->exp_avg_sq;
-                bool is_cuda = grad.is_cuda();
+                // CUDA path: fallback to per-parameter tensor ops
+                bool is_cuda = false;
 #ifdef PT_USE_CUDA
-                if (is_cuda) {
-                    grad_cpu = at::to_cpu(grad);
-                    exp_avg_cpu = at::to_cpu(state->exp_avg);
-                    exp_avg_sq_cpu = at::to_cpu(state->exp_avg_sq);
-                }
+                is_cuda = param->data().is_cuda();
 #endif
-
-                // Update biased first moment estimate
-                exp_avg_cpu.mul_(at::Scalar(beta1));
-                exp_avg_cpu.add_(grad_cpu, at::Scalar(1.0 - beta1));
-
-                // Update biased second moment estimate
-                exp_avg_sq_cpu.mul_(at::Scalar(beta2));
-                exp_avg_sq_cpu.addcmul_(grad_cpu, grad_cpu, at::Scalar(1.0 - beta2));
-
-#ifdef PT_USE_CUDA
-                // Move state back to CUDA
-                if (is_cuda) {
-                    state->exp_avg = at::to_cuda(exp_avg_cpu);
-                    state->exp_avg_sq = at::to_cuda(exp_avg_sq_cpu);
-                }
-#else
-                state->exp_avg = exp_avg_cpu;
-                state->exp_avg_sq = exp_avg_sq_cpu;
-#endif
-
-                // Compute bias correction
-                double bias_correction1 = 1.0 - std::pow(beta1, state->step);
-                double bias_correction2 = 1.0 - std::pow(beta2, state->step);
-
-                // For CUDA: do denom computation on CPU
-                Tensor exp_avg_sq_for_denom = exp_avg_sq_cpu;  // Already on CPU from above
-                Tensor exp_avg_for_update = exp_avg_cpu;       // Already on CPU from above
-
-                // Compute denominator
-                Tensor denom;
-                if (amsgrad) {
-                    Tensor max_exp_avg_sq_cpu = state->max_exp_avg_sq;
-#ifdef PT_USE_CUDA
-                    if (is_cuda) max_exp_avg_sq_cpu = at::to_cpu(state->max_exp_avg_sq);
-#endif
-                    // max_exp_avg_sq = max(max_exp_avg_sq, exp_avg_sq)
-                    float* max_data = max_exp_avg_sq_cpu.mutable_data_ptr<float>();
-                    const float* sq_data = exp_avg_sq_for_denom.data_ptr<float>();
-                    int64_t n = max_exp_avg_sq_cpu.numel();
-                    for (int64_t i = 0; i < n; ++i) {
-                        max_data[i] = std::max(max_data[i], sq_data[i]);
+                if (is_cuda || amsgrad ||
+                    param->data().dtype() != c10::ScalarType::Float) {
+                    // Fallback: original per-parameter path
+                    if (wd != 0.0) {
+                        param->data().mul_(at::Scalar(1.0 - lr * wd));
                     }
+                    Tensor grad_cpu = grad;
+                    Tensor exp_avg_cpu = state->exp_avg;
+                    Tensor exp_avg_sq_cpu = state->exp_avg_sq;
 #ifdef PT_USE_CUDA
-                    if (is_cuda) state->max_exp_avg_sq = at::to_cuda(max_exp_avg_sq_cpu);
-                    else state->max_exp_avg_sq = max_exp_avg_sq_cpu;
-#else
-                    state->max_exp_avg_sq = max_exp_avg_sq_cpu;
+                    if (is_cuda) {
+                        grad_cpu = at::to_cpu(grad);
+                        exp_avg_cpu = at::to_cpu(state->exp_avg);
+                        exp_avg_sq_cpu = at::to_cpu(state->exp_avg_sq);
+                    }
 #endif
-                    denom = max_exp_avg_sq_cpu.sqrt().div(at::Scalar(std::sqrt(bias_correction2)));
-                } else {
-                    denom = exp_avg_sq_for_denom.sqrt().div(at::Scalar(std::sqrt(bias_correction2)));
+                    exp_avg_cpu.mul_(at::Scalar(beta1));
+                    exp_avg_cpu.add_(grad_cpu, at::Scalar(1.0 - beta1));
+                    exp_avg_sq_cpu.mul_(at::Scalar(beta2));
+                    exp_avg_sq_cpu.addcmul_(grad_cpu, grad_cpu, at::Scalar(1.0 - beta2));
+#ifdef PT_USE_CUDA
+                    if (is_cuda) {
+                        state->exp_avg = at::to_cuda(exp_avg_cpu);
+                        state->exp_avg_sq = at::to_cuda(exp_avg_sq_cpu);
+                    }
+#endif
+                    double bc1 = 1.0 - std::pow(beta1, state->step);
+                    double bc2 = 1.0 - std::pow(beta2, state->step);
+                    Tensor denom = exp_avg_sq_cpu.sqrt().div(at::Scalar(std::sqrt(bc2)));
+                    denom.add_(at::Scalar(eps));
+                    double step_size = lr / bc1;
+                    Tensor param_cpu = param->data();
+#ifdef PT_USE_CUDA
+                    if (is_cuda) param_cpu = at::to_cpu(param->data());
+#endif
+                    param_cpu.addcdiv_(exp_avg_cpu, denom, at::Scalar(-step_size));
+#ifdef PT_USE_CUDA
+                    if (is_cuda) at::cuda_ops::copy_(param->data(), at::to_cuda(param_cpu));
+#endif
+                    continue;
                 }
-                denom.add_(at::Scalar(eps));
 
-                // Compute step size
-                double step_size = lr / bias_correction1;
+                // ================================================================
+                // CPU float path: collect for FUSED multi-param AdamW step
+                // Single pass does BOTH decoupled weight decay AND Adam update
+                // (eliminates separate mul_ pass over params)
+                // ================================================================
+                Tensor grad_c = grad.is_contiguous() ? grad : grad.contiguous();
+                if (!grad.is_contiguous()) grad_holders.push_back(grad_c);
 
-                // Update parameters on CPU: p = p - step_size * m / denom
-                Tensor param_cpu = param->data();
-#ifdef PT_USE_CUDA
-                if (is_cuda) param_cpu = at::to_cpu(param->data());
-#endif
-                param_cpu.addcdiv_(exp_avg_for_update, denom, at::Scalar(-step_size));
-#ifdef PT_USE_CUDA
-                if (is_cuda) {
-                    // Copy result back to GPU param
-                    at::cuda_ops::copy_(param->data(), at::to_cuda(param_cpu));
-                }
-#endif
+                at::native::hot::AdamWParamPack pack;
+                pack.param = param->data().mutable_data_ptr<float>();
+                pack.grad = grad_c.data_ptr<float>();
+                pack.exp_avg = state->exp_avg.mutable_data_ptr<float>();
+                pack.exp_avg_sq = state->exp_avg_sq.mutable_data_ptr<float>();
+                pack.numel = param->numel();
+                cpu_packs.push_back(pack);
+            }
+
+            // ================================================================
+            // Phase 2: Fused multi-parameter AdamW step (ONE call for all CPU params)
+            // Weight decay + moment updates + param update in SINGLE pass per element
+            // ================================================================
+            if (!cpu_packs.empty()) {
+                at::native::hot::fused_adamw_multi(
+                    cpu_packs.data(), static_cast<int>(cpu_packs.size()),
+                    static_cast<float>(lr),
+                    static_cast<float>(beta1), static_cast<float>(beta2),
+                    static_cast<float>(eps), static_cast<float>(wd),
+                    static_cast<int>(step_val));
             }
         }
     }
