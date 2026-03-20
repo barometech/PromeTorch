@@ -1346,3 +1346,10 @@ Layer efficiency: L0=6.69x, L1=5.54x, L2=2.16x, L3=1.34x — все ACTIVE.
 
 **TODO:** Перенести в C++ PromeTorch для Эльбруса. parallel_scan уже есть в C++.
 Распределённое обучение на 4×E8C2 (32 ядра) через data parallelism.
+
+### PROMEPIR + Python API Expansion (2026-03-20)
+
+**PROMEPIR.py:** PIR 250M на PromeTorch (1339 строк). torch→promethorch.
+**Python API:** +2403 строк — cumsum, einsum, clamp, topk, sort, from_numpy, zeros_like, AdamW, compile(no-op), amp, nn.Module pure-Python, nn.init.orthogonal_.
+**_C.pyd:** собран (2MB), но DLL load issue на Windows сохраняется (preexisting).
+**Нужно:** тестировать на Эльбрусе через Python (Python 3.11 + LCC + pip install).
