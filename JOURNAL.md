@@ -1294,3 +1294,16 @@ PromeTorch: **13.5 tok/s** — на уровне!
 PromeServe через HTTP медленнее CLI потому что не использует forward_decode_cpu().
 CLI использует оптимизированный zero-alloc decode path.
 Нужно: wire forward_decode_cpu() в PromeServe generate handler.
+
+### 🔥 PROMESERVE CPU: 13.3 TOK/S — ZERO-ALLOC DECODE WIRED! 🔥
+
+| Модель | До | После | Speedup |
+|--------|-----|-------|---------|
+| qwen3:4b | 4.3 | **13.3** | **3.1x** |
+| gemma3:4b | 4.3 | **11.0** | **2.6x** |
+| deepseek-r1:8b | 3.7 | **8.7** | **2.4x** |
+| deepseek-r1:latest | 5.4 | **8.7** | **1.6x** |
+| qwen3:14b | 2.1 | **4.9** | **2.3x** |
+
+Одна строка: `model->forward_decode_cpu()` вместо `model->forward()`.
+PromeServe HTTP теперь на уровне CLI inference.
