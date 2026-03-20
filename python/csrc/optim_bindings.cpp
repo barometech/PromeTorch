@@ -71,7 +71,23 @@ void init_optim_bindings(py::module& m) {
         .def("step", &torch::optim::Optimizer::step)
         .def("zero_grad", [](torch::optim::Optimizer& self, bool set_to_none) {
             self.zero_grad(set_to_none);
-        }, py::arg("set_to_none") = false);
+        }, py::arg("set_to_none") = false)
+        .def("get_lr", &torch::optim::Optimizer::get_lr)
+        .def("set_lr", &torch::optim::Optimizer::set_lr, py::arg("lr"))
+        .def_property("lr",
+            &torch::optim::Optimizer::get_lr,
+            &torch::optim::Optimizer::set_lr)
+        .def("state_dict", [](torch::optim::Optimizer& self) {
+            // Simple state dict: just return lr
+            py::dict d;
+            d["lr"] = self.get_lr();
+            return d;
+        })
+        .def("load_state_dict", [](torch::optim::Optimizer& self, py::dict state_dict) {
+            if (state_dict.contains("lr")) {
+                self.set_lr(state_dict["lr"].cast<double>());
+            }
+        });
 
     // SGDOptions
     py::class_<torch::optim::SGDOptions>(m, "SGDOptions")

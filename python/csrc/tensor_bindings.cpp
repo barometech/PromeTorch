@@ -436,6 +436,92 @@ void init_tensor_bindings(py::module& m) {
             return t.size(0);
         })
 
+        // cumsum
+        .def("cumsum", [](const at::Tensor& t, int64_t dim) {
+            return at::native::cumsum(t, dim);
+        }, py::arg("dim"))
+
+        // topk
+        .def("topk", [](const at::Tensor& t, int64_t k, int64_t dim, bool largest, bool sorted) {
+            auto result = at::native::topk(t, k, dim, largest, sorted);
+            return py::make_tuple(std::get<0>(result), std::get<1>(result));
+        }, py::arg("k"), py::arg("dim") = -1, py::arg("largest") = true, py::arg("sorted") = true)
+
+        // sort
+        .def("sort", [](const at::Tensor& t, int64_t dim, bool descending) {
+            auto result = at::native::sort(t, dim, descending);
+            return py::make_tuple(std::get<0>(result), std::get<1>(result));
+        }, py::arg("dim") = -1, py::arg("descending") = false)
+
+        // norm
+        .def("norm", [](const at::Tensor& t, py::object p_obj, py::object dim_obj, bool keepdim) -> at::Tensor {
+            // Default p=2
+            if (dim_obj.is_none()) {
+                // Global norm
+                at::Tensor sq = t * t;
+                return sq.sum().sqrt();
+            }
+            int64_t dim = dim_obj.cast<int64_t>();
+            at::Tensor sq = t * t;
+            return sq.sum(dim, keepdim).sqrt();
+        }, py::arg("p") = py::none(), py::arg("dim") = py::none(), py::arg("keepdim") = false)
+
+        // type_as
+        .def("type_as", [](const at::Tensor& t, const at::Tensor& other) {
+            return t.to(other.dtype());
+        })
+
+        // scatter
+        .def("scatter", [](const at::Tensor& t, int64_t dim, const at::Tensor& index, const at::Tensor& src) {
+            at::Tensor result = t.clone();
+            // Simple scatter implementation
+            if (dim < 0) dim += t.dim();
+            int64_t ndim = t.dim();
+            if (ndim == 2) {
+                for (int64_t i = 0; i < index.size(0); ++i) {
+                    for (int64_t j = 0; j < index.size(1); ++j) {
+                        int64_t idx = index.data_ptr<int64_t>()[i * index.size(1) + j];
+                        float val = src.data_ptr<float>()[i * src.size(1) + j];
+                        if (dim == 0) {
+                            result.mutable_data_ptr<float>()[idx * result.size(1) + j] = val;
+                        } else {
+                            result.mutable_data_ptr<float>()[i * result.size(1) + idx] = val;
+                        }
+                    }
+                }
+            }
+            return result;
+        }, py::arg("dim"), py::arg("index"), py::arg("src"))
+
+        // clamp_ (in-place)
+        .def("clamp_", [](at::Tensor& t, py::object min_val, py::object max_val) -> at::Tensor& {
+            float* d = t.mutable_data_ptr<float>();
+            bool has_min = !min_val.is_none();
+            bool has_max = !max_val.is_none();
+            float mn = has_min ? (float)min_val.cast<double>() : 0.0f;
+            float mx = has_max ? (float)max_val.cast<double>() : 0.0f;
+            for (int64_t i = 0; i < t.numel(); ++i) {
+                if (has_min && d[i] < mn) d[i] = mn;
+                if (has_max && d[i] > mx) d[i] = mx;
+            }
+            return t;
+        }, py::arg("min") = py::none(), py::arg("max") = py::none(), py::return_value_policy::reference)
+
+        // clamp (out-of-place) as tensor method
+        .def("clamp", [](const at::Tensor& t, py::object min_val, py::object max_val) {
+            at::Tensor result = t.clone();
+            float* d = result.mutable_data_ptr<float>();
+            bool has_min = !min_val.is_none();
+            bool has_max = !max_val.is_none();
+            float mn = has_min ? (float)min_val.cast<double>() : 0.0f;
+            float mx = has_max ? (float)max_val.cast<double>() : 0.0f;
+            for (int64_t i = 0; i < result.numel(); ++i) {
+                if (has_min && d[i] < mn) d[i] = mn;
+                if (has_max && d[i] > mx) d[i] = mx;
+            }
+            return result;
+        }, py::arg("min") = py::none(), py::arg("max") = py::none())
+
         // String representation
         .def("__repr__", [](const at::Tensor& t) {
             std::ostringstream oss;
@@ -681,6 +767,168 @@ void init_tensor_bindings(py::module& m) {
     m.def("where", [](const at::Tensor& condition, const at::Tensor& x, const at::Tensor& y) {
         return torch::where(condition, x, y);
     });
+
+    // ============================================================================
+    // Additional Operations for PIR model support
+    // ============================================================================
+
+    // cumsum
+    m.def("cumsum", [](const at::Tensor& t, int64_t dim) {
+        return at::native::cumsum(t, dim);
+    }, py::arg("input"), py::arg("dim"));
+
+    // rsqrt (module-level)
+    m.def("rsqrt", [](const at::Tensor& t) { return t.rsqrt(); });
+
+    // norm
+    m.def("norm", [](const at::Tensor& t, py::object p_obj, py::object dim_obj, bool keepdim) -> at::Tensor {
+        if (dim_obj.is_none()) {
+            at::Tensor sq = t * t;
+            return sq.sum().sqrt();
+        }
+        int64_t dim = dim_obj.cast<int64_t>();
+        at::Tensor sq = t * t;
+        return sq.sum(dim, keepdim).sqrt();
+    }, py::arg("input"), py::arg("p") = py::none(), py::arg("dim") = py::none(), py::arg("keepdim") = false);
+
+    // topk
+    m.def("topk", [](const at::Tensor& t, int64_t k, int64_t dim, bool largest, bool sorted) {
+        auto result = at::native::topk(t, k, dim, largest, sorted);
+        return py::make_tuple(std::get<0>(result), std::get<1>(result));
+    }, py::arg("input"), py::arg("k"), py::arg("dim") = -1,
+       py::arg("largest") = true, py::arg("sorted") = true);
+
+    // sort
+    m.def("sort", [](const at::Tensor& t, int64_t dim, bool descending) {
+        auto result = at::native::sort(t, dim, descending);
+        return py::make_tuple(std::get<0>(result), std::get<1>(result));
+    }, py::arg("input"), py::arg("dim") = -1, py::arg("descending") = false);
+
+    // zeros_like
+    m.def("zeros_like", [](const at::Tensor& t) {
+        return torch::zeros(t.sizes(), at::TensorOptions().dtype(t.dtype()));
+    }, py::arg("input"));
+
+    // ones_like
+    m.def("ones_like", [](const at::Tensor& t) {
+        return torch::ones(t.sizes(), at::TensorOptions().dtype(t.dtype()));
+    }, py::arg("input"));
+
+    // from_numpy
+    m.def("from_numpy", [](py::array arr) {
+        return numpy_to_tensor(arr, false);
+    }, py::arg("ndarray"));
+
+    // nan_to_num
+    m.def("nan_to_num", [](const at::Tensor& t, double nan_val, double posinf_val, double neginf_val) {
+        at::Tensor result = t.clone();
+        float* d = result.mutable_data_ptr<float>();
+        float nan_f = (float)nan_val;
+        float posinf_f = (float)posinf_val;
+        float neginf_f = (float)neginf_val;
+        for (int64_t i = 0; i < result.numel(); ++i) {
+            if (std::isnan(d[i])) d[i] = nan_f;
+            else if (std::isinf(d[i]) && d[i] > 0) d[i] = posinf_f;
+            else if (std::isinf(d[i]) && d[i] < 0) d[i] = neginf_f;
+        }
+        return result;
+    }, py::arg("input"), py::arg("nan") = 0.0, py::arg("posinf") = 1e4, py::arg("neginf") = -1e4);
+
+    // isinf
+    m.def("isinf", [](const at::Tensor& t) {
+        at::Tensor result = torch::zeros(t.sizes(), at::TensorOptions().dtype(c10::ScalarType::Bool));
+        const float* src = t.data_ptr<float>();
+        bool* dst = result.mutable_data_ptr<bool>();
+        for (int64_t i = 0; i < t.numel(); ++i) {
+            dst[i] = std::isinf(src[i]);
+        }
+        return result;
+    }, py::arg("input"));
+
+    // isnan
+    m.def("isnan", [](const at::Tensor& t) {
+        at::Tensor result = torch::zeros(t.sizes(), at::TensorOptions().dtype(c10::ScalarType::Bool));
+        const float* src = t.data_ptr<float>();
+        bool* dst = result.mutable_data_ptr<bool>();
+        for (int64_t i = 0; i < t.numel(); ++i) {
+            dst[i] = std::isnan(src[i]);
+        }
+        return result;
+    }, py::arg("input"));
+
+    // isfinite
+    m.def("isfinite", [](const at::Tensor& t) {
+        at::Tensor result = torch::zeros(t.sizes(), at::TensorOptions().dtype(c10::ScalarType::Bool));
+        const float* src = t.data_ptr<float>();
+        bool* dst = result.mutable_data_ptr<bool>();
+        for (int64_t i = 0; i < t.numel(); ++i) {
+            dst[i] = std::isfinite(src[i]);
+        }
+        return result;
+    }, py::arg("input"));
+
+    // multinomial
+    m.def("multinomial", [](const at::Tensor& t, int64_t num_samples, bool replacement) {
+        // Simple multinomial sampling from probability distribution
+        // t is [batch, num_classes] or [num_classes]
+        bool batched = t.dim() == 2;
+        int64_t batch_size = batched ? t.size(0) : 1;
+        int64_t num_classes = batched ? t.size(1) : t.size(0);
+
+        std::vector<int64_t> out_shape;
+        if (batched) {
+            out_shape = {batch_size, num_samples};
+        } else {
+            out_shape = {num_samples};
+        }
+        at::Tensor result = torch::zeros(out_shape, at::TensorOptions().dtype(c10::ScalarType::Long));
+        int64_t* out_data = result.mutable_data_ptr<int64_t>();
+
+        at::Tensor tc = t.contiguous();
+        const float* probs = tc.data_ptr<float>();
+
+        for (int64_t b = 0; b < batch_size; ++b) {
+            const float* row = probs + b * num_classes;
+            for (int64_t s = 0; s < num_samples; ++s) {
+                double r = (double)::rand() / RAND_MAX;
+                double cumulative = 0.0;
+                int64_t chosen = num_classes - 1;
+                for (int64_t c = 0; c < num_classes; ++c) {
+                    cumulative += (double)row[c];
+                    if (r < cumulative) {
+                        chosen = c;
+                        break;
+                    }
+                }
+                out_data[b * num_samples + s] = chosen;
+            }
+        }
+        return result;
+    }, py::arg("input"), py::arg("num_samples"), py::arg("replacement") = false);
+
+    // einsum (basic: supports "i,j->ij" outer product and common patterns)
+    m.def("einsum", [](const std::string& equation, py::args tensors) {
+        // Parse simple patterns used in PIR model
+        if (tensors.size() == 2) {
+            at::Tensor a = tensors[0].cast<at::Tensor>();
+            at::Tensor b = tensors[1].cast<at::Tensor>();
+
+            if (equation == "i,j->ij") {
+                // Outer product
+                return a.unsqueeze(1).mm(b.unsqueeze(0));
+            }
+            // For other patterns, delegate to native einsum
+            return at::native::einsum(equation, {a, b});
+        } else if (tensors.size() == 1) {
+            return tensors[0].cast<at::Tensor>();
+        }
+        throw std::runtime_error("einsum: unsupported number of tensors: " + std::to_string(tensors.size()));
+    }, py::arg("equation"));
+
+    // compile (no-op: just returns the model unchanged)
+    m.def("compile", [](py::object model, py::kwargs kwargs) {
+        return model;
+    }, py::arg("model"));
 
     // Note: no_grad context manager is defined in autograd_bindings.cpp
 }
