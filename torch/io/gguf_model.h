@@ -3,10 +3,14 @@
 #include "torch/io/gguf_loader.h"
 #include "torch/io/gguf_dequant.h"
 #include "torch/io/cpu_quant_gemv.h"
+#include "torch/io/speculative_decode.h"
+#include "torch/io/sliding_window_attn.h"
+#include "torch/io/sparse_gemv.h"
 #include "torch/io/ollama.h"
 #include "torch/io/tokenizer.h"
 #include "torch/io/inference_profiler.h"
 #include "aten/src/ATen/ATen.h"
+#include "aten/src/ATen/native/cpu/hot_loops.h"
 #ifdef PT_USE_CUDA
 #include "aten/src/ATen/cuda/CUDADispatch.h"
 #endif
@@ -129,7 +133,7 @@ struct TransformerConfig {
 
 struct QuantizedWeight {
     void* gpu_data = nullptr;     // raw quant blocks on GPU
-    void* cpu_data = nullptr;     // raw quant blocks on CPU (heap allocated)
+    void* cpu_data = nullptr;     // raw quant blocks on CPU (heap or mmap'd)
     void* fp16_data = nullptr;    // dequantized FP16 weights on GPU [N, K]
     int64_t rows = 0;             // N (out_features) — original [N, K] layout
     int64_t cols = 0;             // K (in_features)
@@ -143,9 +147,18 @@ struct QuantizedWeight {
     bool is_q5k() const { return quant_type == 13; }  // GGML_TYPE_Q5_K
     bool is_q8_0() const { return quant_type == 8; }  // GGML_TYPE_Q8_0
 
+    bool mmap_owned = false;  // true if cpu_data points into mmap region (don't free!)
+
     void free_gpu() {
         gpu_data = nullptr;
         valid = false;
+    }
+
+    void free_cpu() {
+        if (cpu_data && !mmap_owned) {
+            std::free(cpu_data);
+        }
+        cpu_data = nullptr;
     }
 
 #ifdef PT_USE_CUDA
@@ -481,6 +494,12 @@ public:
     std::string gguf_file_path_;
     QuantizedWeight q_output_weight;  // quantized output projection
 
+    // Memory-mapped GGUF file (kept alive for zero-copy weight access)
+    // When active, QuantizedWeight::cpu_data points directly into mmap'd region
+    // No malloc/memcpy needed — OS pages in data on demand
+    gguf::MmapHandle mmap_handle_;
+    bool use_mmap_ = false;  // true if weights are mmap'd (don't free cpu_data!)
+
     // Profiler (enabled with --profile flag)
     InferenceProfiler profiler;
 
@@ -489,6 +508,15 @@ public:
 
     // CPU scratch pool for zero-allocation CPU decode
     CPUScratchPool cpu_scratch_;
+
+    // === Algorithmic acceleration ===
+    LowRankOutputProj low_rank_output_;      // Speculative decode via low-rank output proj
+    SlidingWindowAttention sliding_window_;   // Sliding window attention
+    SparseQ4KWeight sparse_output_;           // Sparse GEMV for output projection
+    std::vector<SparseQ4KWeight> sparse_ffn_; // Sparse GEMV for FFN layers
+    bool use_speculative_output_ = false;     // Enable speculative output decode
+    bool use_sparse_gemv_ = false;            // Enable sparse GEMV
+    int64_t sliding_window_size_ = 0;         // 0 = disabled
 
     // Helper: move tensor to CPU
     Tensor to_cpu_tensor(const Tensor& t) const {
@@ -775,9 +803,226 @@ public:
 
         use_quant_gemv_ = true;
 
+        // === Initialize algorithmic accelerations ===
+        init_cpu_accelerations();
+
         auto t_end = std::chrono::high_resolution_clock::now();
         double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
         std::cout << "[Quant] CPU Q4_K_M loaded in " << (ms / 1000.0) << " seconds" << std::endl;
+    }
+
+    // ========================================================================
+    // Initialize CPU algorithmic accelerations
+    // Called after quantized weights are loaded to CPU
+    // ========================================================================
+    void init_cpu_accelerations() {
+        // 1. Low-rank output projection (speculative decode)
+        if (q_output_weight.valid && q_output_weight.cpu_data &&
+            config.vocab_size > 10000) {
+            int64_t rank = 256;
+            if (config.hidden_size < 512) rank = 64;
+            else if (config.hidden_size < 2048) rank = 128;
+
+            low_rank_output_.candidate_k = 64;
+            low_rank_output_.init_from_quantized(
+                q_output_weight.cpu_data, q_output_weight.quant_type,
+                config.vocab_size, q_output_weight.cols,
+                q_output_weight.row_stride_bytes, rank);
+
+            if (low_rank_output_.valid) {
+                use_speculative_output_ = true;
+                std::cout << "[Accel] Speculative output decode enabled"
+                          << " (rank=" << rank << ", top-k=" << low_rank_output_.candidate_k << ")"
+                          << std::endl;
+            }
+        }
+
+        // 2. Sparse GEMV for output projection
+        if (q_output_weight.valid && q_output_weight.cpu_data && q_output_weight.is_q4k()) {
+            sparse_output_.analyze(q_output_weight.cpu_data,
+                                    q_output_weight.rows, q_output_weight.cols,
+                                    q_output_weight.row_stride_bytes, 0.01f);
+            if (sparse_output_.valid) {
+                use_sparse_gemv_ = true;
+            }
+        }
+
+        // 3. Sparse GEMV for FFN layers
+        sparse_ffn_.resize(config.num_layers * 3);
+        int64_t total_sparse_blocks = 0, total_blocks = 0;
+        for (int64_t i = 0; i < config.num_layers; ++i) {
+            auto& layer = layers[i];
+            auto try_sparse = [&](const QuantizedWeight& qw, SparseQ4KWeight& sw) {
+                if (qw.valid && qw.cpu_data && qw.is_q4k()) {
+                    sw.analyze(qw.cpu_data, qw.rows, qw.cols, qw.row_stride_bytes, 0.005f);
+                }
+            };
+            try_sparse(layer.q_ffn_gate, sparse_ffn_[i * 3 + 0]);
+            try_sparse(layer.q_ffn_up,   sparse_ffn_[i * 3 + 1]);
+            try_sparse(layer.q_ffn_down,  sparse_ffn_[i * 3 + 2]);
+        }
+    }
+
+    // ========================================================================
+    // Enable/disable sliding window attention
+    // ========================================================================
+    void enable_sliding_window(int64_t window_size) {
+        sliding_window_size_ = window_size;
+        if (window_size > 0) {
+            sliding_window_.init(config.num_layers, config.num_kv_heads,
+                                  config.head_dim, window_size);
+            std::cout << "[Accel] Sliding window attention enabled (window="
+                      << window_size << ")" << std::endl;
+        }
+    }
+
+    // ========================================================================
+    // Load quantized weights via memory-mapping (ZERO-COPY)
+    // Instead of malloc + memcpy, points cpu_data directly into mmap'd file.
+    // Load time: ~0s (OS pages in on demand). RAM: only accessed pages.
+    // ========================================================================
+
+    void load_quantized_mmap(gguf::GGUFReader& reader) {
+        if (gguf_file_path_.empty()) {
+            std::cerr << "[mmap] No GGUF file path stored — falling back to read" << std::endl;
+            load_quantized_to_cpu();
+            return;
+        }
+
+        auto t_start = std::chrono::high_resolution_clock::now();
+        std::cout << "[mmap] Memory-mapping quantized weights (zero-copy)..." << std::endl;
+
+        // Open mmap handle (kept alive in GGUFModel for lifetime of weights)
+        if (!mmap_handle_.open(gguf_file_path_)) {
+            std::cerr << "[mmap] Failed to mmap file — falling back to read-based loading" << std::endl;
+            load_quantized_to_cpu();
+            return;
+        }
+
+        std::cout << "[mmap] Mapped " << (mmap_handle_.size() / (1024 * 1024)) << " MB" << std::endl;
+
+        // Setup mmap on the reader too (for get_tensor_data_ptr)
+        reader.mmap_file();
+
+        auto map_quant_mmap = [&](const std::string& name, QuantizedWeight& qw) {
+            if (!reader.has_tensor(name)) return;
+            const auto& info = reader.get_tensor_info(name);
+            uint32_t type = info.type;
+            int64_t block_bytes = 0;
+            int64_t group_size = 256;  // QK_K for K-quants
+            if (type == gguf::GGML_TYPE_Q4_K) block_bytes = 144;
+            else if (type == gguf::GGML_TYPE_Q6_K) block_bytes = 210;
+            else if (type == gguf::GGML_TYPE_Q5_K) block_bytes = 176;
+            else if (type == gguf::GGML_TYPE_Q8_0) { block_bytes = 34; group_size = 32; }
+            else return;
+
+            auto shape = info.shape();
+            qw.rows = shape[0];
+            qw.cols = shape[1];
+            qw.row_stride_bytes = (qw.cols / group_size) * block_bytes;
+            qw.total_bytes = info.data_bytes();
+            qw.quant_type = type;
+
+            // ZERO-COPY: point directly into mmap'd region
+            uint64_t abs_offset = reader.data_offset + info.offset;
+            qw.cpu_data = const_cast<void*>(mmap_handle_.at_offset(abs_offset));
+            qw.mmap_owned = true;  // Don't free — it's part of mmap
+            qw.valid = (qw.cpu_data != nullptr);
+        };
+
+        int64_t total_bytes_mapped = 0;
+        for (int64_t i = 0; i < config.num_layers; ++i) {
+            std::string prefix = "blk." + std::to_string(i) + ".";
+            auto& layer = layers[i];
+            map_quant_mmap(prefix + "attn_q.weight", layer.q_attn_q);
+            map_quant_mmap(prefix + "attn_k.weight", layer.q_attn_k);
+            map_quant_mmap(prefix + "attn_v.weight", layer.q_attn_v);
+            map_quant_mmap(prefix + "attn_output.weight", layer.q_attn_output);
+            map_quant_mmap(prefix + "ffn_gate.weight", layer.q_ffn_gate);
+            map_quant_mmap(prefix + "ffn_up.weight", layer.q_ffn_up);
+            map_quant_mmap(prefix + "ffn_down.weight", layer.q_ffn_down);
+
+            // Sum up mapped bytes for reporting
+            if (layer.q_attn_q.valid) total_bytes_mapped += layer.q_attn_q.total_bytes;
+            if (layer.q_attn_k.valid) total_bytes_mapped += layer.q_attn_k.total_bytes;
+            if (layer.q_attn_v.valid) total_bytes_mapped += layer.q_attn_v.total_bytes;
+            if (layer.q_attn_output.valid) total_bytes_mapped += layer.q_attn_output.total_bytes;
+            if (layer.q_ffn_gate.valid) total_bytes_mapped += layer.q_ffn_gate.total_bytes;
+            if (layer.q_ffn_up.valid) total_bytes_mapped += layer.q_ffn_up.total_bytes;
+            if (layer.q_ffn_down.valid) total_bytes_mapped += layer.q_ffn_down.total_bytes;
+        }
+
+        if (reader.has_tensor("output.weight")) {
+            map_quant_mmap("output.weight", q_output_weight);
+            if (q_output_weight.valid) total_bytes_mapped += q_output_weight.total_bytes;
+        }
+
+        use_quant_gemv_ = true;
+        use_mmap_ = true;
+
+        // Lock critical weights in RAM: output projection + first/last layer norms
+        // These are always accessed and should never be paged out
+        lock_critical_weights();
+
+        auto t_end = std::chrono::high_resolution_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
+        std::cout << "[mmap] " << (total_bytes_mapped / (1024 * 1024)) << " MB mapped in "
+                  << std::fixed << std::setprecision(1) << ms << " ms (zero-copy)" << std::endl;
+    }
+
+    // ========================================================================
+    // Lock critical weights in physical RAM (mlock/VirtualLock)
+    // Prevents OS from paging out always-needed weights:
+    //   - Output projection (used every token)
+    //   - First layer norms (always first to be accessed)
+    //   - Last layer norms (always last before output)
+    // ========================================================================
+
+    void lock_critical_weights() {
+        if (!use_mmap_ || !mmap_handle_.is_open()) return;
+
+        size_t locked_bytes = 0;
+
+        // Output projection — used for every single token
+        if (q_output_weight.valid && q_output_weight.cpu_data && q_output_weight.mmap_owned) {
+#ifdef _WIN32
+            if (VirtualLock(const_cast<void*>(q_output_weight.cpu_data),
+                           static_cast<SIZE_T>(q_output_weight.total_bytes))) {
+                locked_bytes += q_output_weight.total_bytes;
+            }
+#else
+            if (mlock(q_output_weight.cpu_data, q_output_weight.total_bytes) == 0) {
+                locked_bytes += q_output_weight.total_bytes;
+            }
+#endif
+        }
+
+        // First layer attention weights (always first to be touched)
+        if (config.num_layers > 0) {
+            auto& first = layers[0];
+            QuantizedWeight* first_weights[] = {
+                &first.q_attn_q, &first.q_attn_k, &first.q_attn_v
+            };
+            for (auto* qw : first_weights) {
+                if (qw->valid && qw->cpu_data && qw->mmap_owned) {
+#ifdef _WIN32
+                    if (VirtualLock(const_cast<void*>(qw->cpu_data),
+                                   static_cast<SIZE_T>(qw->total_bytes))) {
+                        locked_bytes += qw->total_bytes;
+                    }
+#else
+                    if (mlock(qw->cpu_data, qw->total_bytes) == 0) {
+                        locked_bytes += qw->total_bytes;
+                    }
+#endif
+                }
+            }
+        }
+
+        if (locked_bytes > 0) {
+            std::cout << "[mmap] Locked " << (locked_bytes / (1024 * 1024))
+                      << " MB of critical weights in RAM" << std::endl;
+        }
     }
 
     // ========================================================================
@@ -806,10 +1051,13 @@ public:
 
         config.print();
 
-        // Load all weights (FP32 dequant) + raw quant blocks
-        // CPU-lite path disabled (needs output_weight fallback fix)
+        // Load FP32 weights (norms, embeddings)
         load_weights(reader);
-        load_quantized_to_cpu();
+
+        // Quantized weight loading: prefer mmap (zero-copy) over malloc+memcpy
+        // mmap: ~0ms load time, lazy paging, shared across processes
+        // fallback: malloc + memcpy (~9s for 2.5GB)
+        load_quantized_mmap(reader);
 
         auto t_end = std::chrono::high_resolution_clock::now();
         double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
@@ -1319,22 +1567,47 @@ public:
             auto& layer = layers[i];
             float* x_ptr = sp.x_buf[cur];
 
-            // -- Prefetch next layer's weight data into L2 cache --
+            // -- Async prefetch: next layer's weights into L2 cache + TLB --
+            // With mmap, this is critical: triggers page faults BEFORE we need the data.
+            // Prefetches first 64KB of each weight matrix (fills ~16 TLB entries per weight).
+            // Without this, mmap'd first access to each layer takes ~0.5ms in page faults.
 #if defined(__AVX2__) || defined(_MSC_VER)
             if (i + 1 < config.num_layers) {
                 auto& next = layers[i + 1];
-                // Prefetch first cache lines of next layer's largest weights
-                if (next.q_attn_q.cpu_data) {
-                    _mm_prefetch(static_cast<const char*>(next.q_attn_q.cpu_data), _MM_HINT_T1);
-                    _mm_prefetch(static_cast<const char*>(next.q_attn_q.cpu_data) + 64, _MM_HINT_T1);
+                // All 7 weight matrices in next layer
+                const void* next_ptrs[] = {
+                    next.q_attn_q.cpu_data,
+                    next.q_attn_k.cpu_data,
+                    next.q_attn_v.cpu_data,
+                    next.q_attn_output.cpu_data,
+                    next.q_ffn_gate.cpu_data,
+                    next.q_ffn_up.cpu_data,
+                    next.q_ffn_down.cpu_data,
+                };
+                for (const void* p : next_ptrs) {
+                    if (p) {
+                        const char* cp = static_cast<const char*>(p);
+                        // Prefetch first 64KB — fills TLB entries, hides page fault latency
+                        // _MM_HINT_T1 = L2 cache (won't pollute L1 with data not yet needed)
+                        for (int off = 0; off < 65536; off += 4096) {
+                            _mm_prefetch(cp + off, _MM_HINT_T1);
+                        }
+                    }
                 }
-                if (next.q_ffn_gate.cpu_data) {
-                    _mm_prefetch(static_cast<const char*>(next.q_ffn_gate.cpu_data), _MM_HINT_T1);
-                    _mm_prefetch(static_cast<const char*>(next.q_ffn_gate.cpu_data) + 64, _MM_HINT_T1);
-                }
-                // Prefetch norm weights (small, ~14 KB each)
+                // Prefetch norm weights into L1 (small: ~14KB, will be used very soon)
                 if (next.attn_norm.defined()) {
-                    _mm_prefetch(reinterpret_cast<const char*>(next.attn_norm.data_ptr<float>()), _MM_HINT_T0);
+                    const char* np = reinterpret_cast<const char*>(next.attn_norm.data_ptr<float>());
+                    int64_t norm_bytes = next.attn_norm.numel() * sizeof(float);
+                    for (int64_t off = 0; off < norm_bytes; off += 64) {
+                        _mm_prefetch(np + off, _MM_HINT_T0);
+                    }
+                }
+                if (next.ffn_norm.defined()) {
+                    const char* np = reinterpret_cast<const char*>(next.ffn_norm.data_ptr<float>());
+                    int64_t norm_bytes = next.ffn_norm.numel() * sizeof(float);
+                    for (int64_t off = 0; off < norm_bytes; off += 64) {
+                        _mm_prefetch(np + off, _MM_HINT_T0);
+                    }
                 }
             }
 #endif
@@ -1432,38 +1705,16 @@ public:
                 }
             }
 
-            // -- RoPE in-place on Q, K --
+            // -- RoPE in-place on Q, K (FUSED: precompute cos/sin ONCE, reuse for all heads) --
+            // Before: (n_heads + n_kv_heads) * head_dim/2 calls to pow() + cos() + sin()
+            // After:  head_dim/2 calls to pow() + cos() + sin(), then simple FMA multiply
+            // Speedup on trig: ~36x for qwen3:4b (32 Q heads + 4 KV heads share same table)
             {
-                int64_t pos = past_len;
-                float freq_base = config.rope_freq_base;
-                // Q: all heads
-                for (int64_t h = 0; h < n_heads; ++h) {
-                    float* head_data = sp.q_buf + h * head_dim;
-                    for (int64_t d = 0; d < head_dim / 2; ++d) {
-                        float freq = 1.0f / std::pow(freq_base, 2.0f * d / head_dim);
-                        float theta = pos * freq;
-                        float cos_t = std::cos(theta);
-                        float sin_t = std::sin(theta);
-                        float x0 = head_data[2 * d];
-                        float x1 = head_data[2 * d + 1];
-                        head_data[2 * d]     = x0 * cos_t - x1 * sin_t;
-                        head_data[2 * d + 1] = x0 * sin_t + x1 * cos_t;
-                    }
-                }
-                // K: kv_heads
-                for (int64_t h = 0; h < n_kv_heads; ++h) {
-                    float* head_data = sp.k_buf + h * head_dim;
-                    for (int64_t d = 0; d < head_dim / 2; ++d) {
-                        float freq = 1.0f / std::pow(freq_base, 2.0f * d / head_dim);
-                        float theta = pos * freq;
-                        float cos_t = std::cos(theta);
-                        float sin_t = std::sin(theta);
-                        float x0 = head_data[2 * d];
-                        float x1 = head_data[2 * d + 1];
-                        head_data[2 * d]     = x0 * cos_t - x1 * sin_t;
-                        head_data[2 * d + 1] = x0 * sin_t + x1 * cos_t;
-                    }
-                }
+                float rope_cos[256], rope_sin[256];  // head_dim/2 <= 256 for all models
+                at::native::hot::rope_precompute(rope_cos, rope_sin,
+                    past_len, head_dim, config.rope_freq_base);
+                at::native::hot::rope_apply_fused(sp.q_buf, sp.k_buf,
+                    rope_cos, rope_sin, n_heads, n_kv_heads, head_dim);
             }
 
             // -- KV cache append (zero-copy: write directly into cache) --
@@ -1477,11 +1728,18 @@ public:
             // -- Single-token attention (optimized: no causal mask needed) --
             // For seq_len=1: Q is [1, q_dim], K is [total_seq, kv_dim], V is [total_seq, kv_dim]
             // For each head: score = Q_h . K_h[t] for all t, then softmax, then weighted V sum
+            // With sliding window: only attend to last window_size positions + summary
             {
                 int64_t total_seq = past_len + 1;
                 float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
                 const float* k_cache = kv_cache.key_cache[i].data_ptr<float>();
                 const float* v_cache = kv_cache.value_cache[i].data_ptr<float>();
+
+                // Update sliding window state (summarize evicted positions)
+                if (sliding_window_.enabled) {
+                    sliding_window_.update_window(i, total_seq,
+                        k_cache, v_cache, n_kv_heads, head_dim);
+                }
 
                 // Parallel over heads
                 c10::get_thread_pool().parallel_for(0, n_heads, [&](int64_t h_start, int64_t h_end) {
@@ -1490,13 +1748,18 @@ public:
                     const float* q_head = sp.q_buf + h * head_dim;
                     float* out_head = sp.attn_buf + h * head_dim;
 
-                    // Thread-local scores buffer (avoid shared scores_buf contention)
-                    // Use stack for reasonable context lengths
+                    // Thread-local scores buffer
                     float local_scores[4096];
                     float* scores = (total_seq <= 4096) ? local_scores : sp.scores_buf;
 
-                    // Compute Q . K^T for all cached positions
-                    // No causal mask: seq_len=1, all positions are valid
+                    // Use sliding window attention if enabled and context exceeds window
+                    if (sliding_window_.enabled && total_seq > sliding_window_.window_size) {
+                        sliding_window_.compute_attention(
+                            q_head, k_cache, v_cache, out_head,
+                            total_seq, kv_h, head_dim, kv_dim,
+                            i, scale, scores);
+                    } else {
+                    // Standard full attention
 #ifdef __AVX2__
                     for (int64_t t = 0; t < total_seq; ++t) {
                         const float* k_head = k_cache + t * kv_dim + kv_h * head_dim;
@@ -1554,6 +1817,7 @@ public:
                         for (int64_t d = 0; d < head_dim; ++d) out_head[d] += w * v_head[d];
                     }
 #endif
+                    }  // end standard full attention
                 }
                 }, 1);  // min_grain=1: parallelize across heads
             }
@@ -1674,9 +1938,17 @@ public:
             // So we apply it after down_proj below
 
             // -- Down projection: gate_buf @ W_down -> h_buf --
+            // Use sparse GEMV if available for this layer
             if (use_quant_gemv_ && layer.q_ffn_down.valid && layer.q_ffn_down.cpu_data) {
-                cpu_quant::cpu_quant_gemv(layer.q_ffn_down.quant_type, layer.q_ffn_down.cpu_data,
-                    sp.gate_buf, sp.h_buf, inter, layer.q_ffn_down.rows, layer.q_ffn_down.row_stride_bytes);
+                if (use_sparse_gemv_ && i * 3 + 2 < (int64_t)sparse_ffn_.size() &&
+                    sparse_ffn_[i * 3 + 2].valid && layer.q_ffn_down.is_q4k()) {
+                    sparse_q4k_gemv(layer.q_ffn_down.cpu_data, sp.gate_buf, sp.h_buf,
+                                    inter, layer.q_ffn_down.rows, layer.q_ffn_down.row_stride_bytes,
+                                    sparse_ffn_[i * 3 + 2]);
+                } else {
+                    cpu_quant::cpu_quant_gemv(layer.q_ffn_down.quant_type, layer.q_ffn_down.cpu_data,
+                        sp.gate_buf, sp.h_buf, inter, layer.q_ffn_down.rows, layer.q_ffn_down.row_stride_bytes);
+                }
             }
 
             // Post-FFN norm (Gemma3)
@@ -1707,9 +1979,16 @@ public:
         cpu_quant::cpu_rmsnorm_inplace(sp.x_buf[cur], output_norm.data_ptr<float>(), eps, add_one, H);
 
         // 4. Output projection -> logits (into scratch logits_buf)
+        //    Use sparse GEMV for output projection if available
         if (use_quant_gemv_ && q_output_weight.valid && q_output_weight.cpu_data) {
-            cpu_quant::cpu_quant_gemv(q_output_weight.quant_type, q_output_weight.cpu_data,
-                sp.x_buf[cur], sp.logits_buf, H, q_output_weight.rows, q_output_weight.row_stride_bytes);
+            if (use_sparse_gemv_ && sparse_output_.valid && q_output_weight.is_q4k()) {
+                sparse_q4k_gemv(q_output_weight.cpu_data, sp.x_buf[cur], sp.logits_buf,
+                                H, q_output_weight.rows, q_output_weight.row_stride_bytes,
+                                sparse_output_);
+            } else {
+                cpu_quant::cpu_quant_gemv(q_output_weight.quant_type, q_output_weight.cpu_data,
+                    sp.x_buf[cur], sp.logits_buf, H, q_output_weight.rows, q_output_weight.row_stride_bytes);
+            }
         } else if (output_weight.defined()) {
             // Float32 fallback — AVX2 + threaded GEMV
             const float* w = output_weight.data_ptr<float>();

@@ -11,6 +11,18 @@
 #include <variant>
 #include <algorithm>
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+
 namespace torch {
 namespace io {
 namespace gguf {
@@ -101,6 +113,207 @@ struct GGUFTensorInfo {
 };
 
 // ============================================================================
+// Memory-Mapped File Handle
+// Maps GGUF file into virtual address space for zero-copy weight access.
+// OS handles paging — only accessed pages consume physical RAM.
+// Multiple processes sharing the same file share physical pages (CoW).
+// ============================================================================
+
+class MmapHandle {
+    void* data_ = nullptr;
+    size_t size_ = 0;
+#ifdef _WIN32
+    HANDLE file_handle_ = INVALID_HANDLE_VALUE;
+    HANDLE mapping_ = NULL;
+#else
+    int fd_ = -1;
+#endif
+
+public:
+    MmapHandle() = default;
+    MmapHandle(const MmapHandle&) = delete;
+    MmapHandle& operator=(const MmapHandle&) = delete;
+
+    MmapHandle(MmapHandle&& other) noexcept
+        : data_(other.data_), size_(other.size_)
+#ifdef _WIN32
+        , file_handle_(other.file_handle_), mapping_(other.mapping_)
+#else
+        , fd_(other.fd_)
+#endif
+    {
+        other.data_ = nullptr;
+        other.size_ = 0;
+#ifdef _WIN32
+        other.file_handle_ = INVALID_HANDLE_VALUE;
+        other.mapping_ = NULL;
+#else
+        other.fd_ = -1;
+#endif
+    }
+
+    MmapHandle& operator=(MmapHandle&& other) noexcept {
+        if (this != &other) {
+            close();
+            data_ = other.data_;
+            size_ = other.size_;
+#ifdef _WIN32
+            file_handle_ = other.file_handle_;
+            mapping_ = other.mapping_;
+            other.file_handle_ = INVALID_HANDLE_VALUE;
+            other.mapping_ = NULL;
+#else
+            fd_ = other.fd_;
+            other.fd_ = -1;
+#endif
+            other.data_ = nullptr;
+            other.size_ = 0;
+        }
+        return *this;
+    }
+
+    bool open(const std::string& path) {
+        close();  // Close any previous mapping
+
+#ifdef _WIN32
+        // Windows: CreateFile → CreateFileMapping → MapViewOfFile
+        file_handle_ = CreateFileA(
+            path.c_str(),
+            GENERIC_READ,
+            FILE_SHARE_READ,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_FLAG_SEQUENTIAL_SCAN,  // Hint: sequential access pattern
+            nullptr);
+        if (file_handle_ == INVALID_HANDLE_VALUE) {
+            std::cerr << "[mmap] CreateFile failed: " << GetLastError() << std::endl;
+            return false;
+        }
+
+        LARGE_INTEGER file_size;
+        if (!GetFileSizeEx(file_handle_, &file_size)) {
+            std::cerr << "[mmap] GetFileSizeEx failed: " << GetLastError() << std::endl;
+            CloseHandle(file_handle_);
+            file_handle_ = INVALID_HANDLE_VALUE;
+            return false;
+        }
+        size_ = static_cast<size_t>(file_size.QuadPart);
+
+        mapping_ = CreateFileMappingA(
+            file_handle_,
+            nullptr,
+            PAGE_READONLY,
+            static_cast<DWORD>(size_ >> 32),
+            static_cast<DWORD>(size_ & 0xFFFFFFFF),
+            nullptr);
+        if (!mapping_) {
+            std::cerr << "[mmap] CreateFileMapping failed: " << GetLastError() << std::endl;
+            CloseHandle(file_handle_);
+            file_handle_ = INVALID_HANDLE_VALUE;
+            return false;
+        }
+
+        data_ = MapViewOfFile(mapping_, FILE_MAP_READ, 0, 0, 0);
+        if (!data_) {
+            std::cerr << "[mmap] MapViewOfFile failed: " << GetLastError() << std::endl;
+            CloseHandle(mapping_);
+            mapping_ = NULL;
+            CloseHandle(file_handle_);
+            file_handle_ = INVALID_HANDLE_VALUE;
+            return false;
+        }
+
+        return true;
+#else
+        // POSIX: open → fstat → mmap
+        fd_ = ::open(path.c_str(), O_RDONLY);
+        if (fd_ < 0) {
+            std::cerr << "[mmap] open() failed: " << strerror(errno) << std::endl;
+            return false;
+        }
+
+        struct stat st;
+        if (fstat(fd_, &st) != 0) {
+            std::cerr << "[mmap] fstat() failed: " << strerror(errno) << std::endl;
+            ::close(fd_);
+            fd_ = -1;
+            return false;
+        }
+        size_ = static_cast<size_t>(st.st_size);
+
+        data_ = ::mmap(nullptr, size_, PROT_READ, MAP_PRIVATE, fd_, 0);
+        if (data_ == MAP_FAILED) {
+            std::cerr << "[mmap] mmap() failed: " << strerror(errno) << std::endl;
+            data_ = nullptr;
+            ::close(fd_);
+            fd_ = -1;
+            return false;
+        }
+
+        // Hint: sequential access for initial scan, random for inference
+        madvise(data_, size_, MADV_SEQUENTIAL);
+
+        return true;
+#endif
+    }
+
+    void close() {
+        if (!data_) return;
+
+#ifdef _WIN32
+        UnmapViewOfFile(data_);
+        if (mapping_) CloseHandle(mapping_);
+        if (file_handle_ != INVALID_HANDLE_VALUE) CloseHandle(file_handle_);
+        file_handle_ = INVALID_HANDLE_VALUE;
+        mapping_ = NULL;
+#else
+        ::munmap(data_, size_);
+        if (fd_ >= 0) ::close(fd_);
+        fd_ = -1;
+#endif
+        data_ = nullptr;
+        size_ = 0;
+    }
+
+    // Lock a region in physical RAM (prevents paging out)
+    // Use for critical weights: first/last layer norms, output projection
+    bool lock_region(const void* ptr, size_t len) const {
+        if (!data_ || !ptr) return false;
+        // Verify ptr is within our mapping
+        const char* base = static_cast<const char*>(data_);
+        const char* p = static_cast<const char*>(ptr);
+        if (p < base || p + len > base + size_) return false;
+
+#ifdef _WIN32
+        // VirtualLock requires pages to be committed (mmap'd pages are)
+        // May fail if working set quota exceeded — not fatal
+        if (!VirtualLock(const_cast<void*>(ptr), len)) {
+            // Non-fatal: just means OS may page it out under pressure
+            return false;
+        }
+        return true;
+#else
+        if (mlock(ptr, len) != 0) {
+            return false;
+        }
+        return true;
+#endif
+    }
+
+    const void* data() const { return data_; }
+    size_t size() const { return size_; }
+    bool is_open() const { return data_ != nullptr; }
+
+    // Get pointer at offset within the mapped file
+    const void* at_offset(uint64_t offset) const {
+        if (!data_ || offset >= size_) return nullptr;
+        return static_cast<const char*>(data_) + offset;
+    }
+
+    ~MmapHandle() { close(); }
+};
+
+// ============================================================================
 // GGUF File Reader
 // ============================================================================
 
@@ -119,6 +332,61 @@ public:
     // File info
     std::string file_path;
     uint64_t data_offset = 0;  // Absolute offset to data section in file
+
+    // Memory-mapped file handle (optional, for zero-copy weight access)
+    MmapHandle mmap_handle_;
+
+    // ========================================================================
+    // Memory-map the GGUF file for zero-copy tensor access
+    // Must be called AFTER open() (needs data_offset to be computed)
+    // Returns true on success. On failure, falls back to read-based loading.
+    // ========================================================================
+
+    bool mmap_file() {
+        if (file_path.empty()) {
+            std::cerr << "[mmap] No file path — call open() first" << std::endl;
+            return false;
+        }
+        if (mmap_handle_.is_open()) return true;  // Already mapped
+
+        if (!mmap_handle_.open(file_path)) {
+            std::cerr << "[mmap] Failed to mmap: " << file_path << std::endl;
+            return false;
+        }
+
+        std::cout << "[mmap] Mapped " << (mmap_handle_.size() / (1024*1024))
+                  << " MB: " << file_path << std::endl;
+        return true;
+    }
+
+    // ========================================================================
+    // Get direct pointer to tensor data within mmap'd region (zero-copy)
+    // Returns nullptr if mmap not active or tensor not found
+    // ========================================================================
+
+    const void* get_tensor_data_ptr(const std::string& name) const {
+        if (!mmap_handle_.is_open()) return nullptr;
+        if (!has_tensor(name)) return nullptr;
+        const auto& info = get_tensor_info(name);
+        uint64_t abs_offset = data_offset + info.offset;
+        return mmap_handle_.at_offset(abs_offset);
+    }
+
+    // Get tensor data size in bytes
+    int64_t get_tensor_data_bytes(const std::string& name) const {
+        if (!has_tensor(name)) return 0;
+        return get_tensor_info(name).data_bytes();
+    }
+
+    // Lock tensor data in physical RAM (mlock/VirtualLock)
+    bool lock_tensor(const std::string& name) const {
+        const void* ptr = get_tensor_data_ptr(name);
+        if (!ptr) return false;
+        int64_t bytes = get_tensor_data_bytes(name);
+        return mmap_handle_.lock_region(ptr, static_cast<size_t>(bytes));
+    }
+
+    bool is_mmap_active() const { return mmap_handle_.is_open(); }
 
     // ========================================================================
     // Open and parse a GGUF file
