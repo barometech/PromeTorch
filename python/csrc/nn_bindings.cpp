@@ -592,6 +592,48 @@ void init_nn_bindings(py::module& m) {
     }, py::arg("input"), py::arg("target"), py::arg("weight") = py::none(),
        py::arg("reduction") = "mean");
 
+    functional.def("pad", [](const at::Tensor& input, std::vector<int64_t> pad, const std::string& mode, double value) {
+        // Constant padding for N-d tensors
+        // pad format: (left, right) for 1D last dim, (left, right, top, bottom) for 2D last 2 dims
+        at::Tensor result = input;
+
+        int64_t ndim = input.dim();
+        int64_t num_pad_dims = static_cast<int64_t>(pad.size()) / 2;
+
+        // Build output shape
+        std::vector<int64_t> out_shape(input.sizes().begin(), input.sizes().end());
+        for (int64_t i = 0; i < num_pad_dims; ++i) {
+            int64_t dim = ndim - 1 - i;  // pad starts from last dim
+            int64_t pad_before = pad[2 * i];
+            int64_t pad_after = pad[2 * i + 1];
+            out_shape[dim] += pad_before + pad_after;
+        }
+
+        at::Tensor output = torch::full(out_shape, value, at::TensorOptions().dtype(input.dtype()));
+
+        // Copy input into the right position
+        // Build slice indices
+        std::vector<std::pair<int64_t, int64_t>> slices;
+        for (int64_t d = 0; d < ndim; ++d) {
+            slices.push_back({0, input.size(d)});
+        }
+        for (int64_t i = 0; i < num_pad_dims; ++i) {
+            int64_t dim = ndim - 1 - i;
+            int64_t pad_before = pad[2 * i];
+            slices[dim] = {pad_before, pad_before + input.size(dim)};
+        }
+
+        // Use slice operations to copy
+        at::Tensor dst = output;
+        at::Tensor src = input;
+        for (int64_t d = 0; d < ndim; ++d) {
+            dst = dst.slice(d, slices[d].first, slices[d].second);
+        }
+        dst.copy_(src);
+
+        return output;
+    }, py::arg("input"), py::arg("pad"), py::arg("mode") = "constant", py::arg("value") = 0.0);
+
     functional.def("mse_loss", [](const at::Tensor& input, const at::Tensor& target, const std::string& reduction) {
         at::Tensor diff = input - target;
         at::Tensor loss = diff * diff;
@@ -705,4 +747,63 @@ void init_nn_bindings(py::module& m) {
         }
         return tensor;
     }, py::arg("tensor"), py::arg("a") = 0.0, py::arg("mode") = "fan_in", py::arg("nonlinearity") = "leaky_relu");
+
+    // orthogonal_ initialization (via QR decomposition approximation)
+    m.def("orthogonal_", [](at::Tensor& tensor, double gain) {
+        // Simple orthogonal init: fill with random normal, then orthogonalize via Gram-Schmidt
+        int64_t rows = tensor.size(0);
+        int64_t cols = tensor.numel() / rows;
+        float* data = tensor.mutable_data_ptr<float>();
+
+        // Fill with random normal
+        for (int64_t i = 0; i < tensor.numel(); ++i) {
+            double u1 = (double)(::rand() + 1) / (RAND_MAX + 1.0);
+            double u2 = (double)::rand() / RAND_MAX;
+            data[i] = (float)(std::sqrt(-2.0 * std::log(u1)) * std::cos(2.0 * 3.14159265358979323846 * u2));
+        }
+
+        // Gram-Schmidt orthogonalization (for rows)
+        int64_t n = std::min(rows, cols);
+        for (int64_t i = 0; i < n; ++i) {
+            float* row_i = data + i * cols;
+            // Subtract projections of previous rows
+            for (int64_t j = 0; j < i; ++j) {
+                float* row_j = data + j * cols;
+                // dot product
+                double dot = 0.0;
+                for (int64_t k = 0; k < cols; ++k) {
+                    dot += (double)row_i[k] * row_j[k];
+                }
+                for (int64_t k = 0; k < cols; ++k) {
+                    row_i[k] -= (float)(dot * row_j[k]);
+                }
+            }
+            // Normalize
+            double norm = 0.0;
+            for (int64_t k = 0; k < cols; ++k) {
+                norm += (double)row_i[k] * row_i[k];
+            }
+            norm = std::sqrt(norm);
+            if (norm > 1e-8) {
+                float scale = (float)(gain / norm);
+                for (int64_t k = 0; k < cols; ++k) {
+                    row_i[k] *= scale;
+                }
+            }
+        }
+
+        // Scale remaining rows
+        for (int64_t i = n; i < rows; ++i) {
+            float* row_i = data + i * cols;
+            double norm = 0.0;
+            for (int64_t k = 0; k < cols; ++k) norm += (double)row_i[k] * row_i[k];
+            norm = std::sqrt(norm);
+            if (norm > 1e-8) {
+                float scale = (float)(gain / norm);
+                for (int64_t k = 0; k < cols; ++k) row_i[k] *= scale;
+            }
+        }
+
+        return tensor;
+    }, py::arg("tensor"), py::arg("gain") = 1.0);
 }
