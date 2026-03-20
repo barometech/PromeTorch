@@ -2369,9 +2369,26 @@ public:
         }
 #endif
 
+        // Speculative decode state: when speculative decode is used, we get the
+        // next token directly from forward_decode_cpu_speculative (which runs
+        // the full transformer + low-rank output + exact top-k). We store it
+        // here so the next iteration can skip the sampling step.
+        int32_t speculative_next_token = -1;
+        bool speculative_token_ready = false;
+
+        // Can we use speculative decode at all?
+        bool can_speculative = use_speculative_output_ && !use_cuda_ &&
+            use_quant_gemv_ && temperature < 1e-6f && repetition_penalty <= 1.0f;
+
         for (int step = 0; step < max_tokens; ++step) {
             int32_t next_token;
 
+            // If speculative decode already computed the token, use it directly
+            if (speculative_token_ready) {
+                next_token = speculative_next_token;
+                speculative_token_ready = false;
+            } else {
+            // Standard sampling from logits
 #ifdef PT_USE_CUDA
             if (gpu_greedy && logits.is_cuda()) {
                 PROF_BEGIN(profiler, "argmax");
@@ -2446,6 +2463,7 @@ public:
                     next_token = sample_token(last_logits, temperature, top_k, top_p);
                 }
             }
+            }  // end else (not speculative_token_ready)
 
             if (next_token == tokenizer.eos_id) {
                 break;
@@ -2468,8 +2486,14 @@ public:
                 logits = forward_decode(static_cast<int64_t>(next_token));
             } else
 #endif
-            {
-                // Use zero-allocation CPU decode path if quant weights are available
+            if (can_speculative) {
+                // SPECULATIVE DECODE: forward + low-rank output → token directly
+                // Skips 151936-dim GEMV, does rank-256 approx + 64 exact dots instead
+                speculative_next_token = forward_decode_cpu_speculative(
+                    static_cast<int64_t>(next_token));
+                speculative_token_ready = true;
+            } else {
+                // Standard CPU decode path
                 if (use_quant_gemv_) {
                     logits = forward_decode_cpu(static_cast<int64_t>(next_token));
                 } else {
