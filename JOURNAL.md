@@ -1317,3 +1317,15 @@ PromeServe HTTP теперь на уровне CLI inference.
 **Prefill: 1467ms** для "Explain quantum computing briefly." (21 tokens).
 
 **Путь CPU inference: 0.63 → 13.5 tok/s = 21x ускорение.**
+
+### CPU Inference Final Status (2026-03-20)
+
+**PromeTorch CLI:** 13.9 tok/s qwen3:4b
+**PromeServe HTTP:** 13.3 tok/s qwen3:4b
+**llama.cpp reference:** ~10-14 tok/s (AVX2 8-thread benchmark data)
+**Ollama:** невозможно изолировать CPU на Windows (всегда уходит на GPU)
+
+**Вердикт:** PromeTorch CPU inference **на уровне или чуть быстрее** llama.cpp.
+Дальнейшее ускорение требует VNNI/AMX (server Intel) или NUMA (Эльбрус).
+
+**Полный путь: 0.63 → 13.9 tok/s = 22x ускорение.**
