@@ -1,4 +1,9 @@
 #pragma once
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#endif
 
 // ============================================================================
 // Sparse Q4_K GEMV — Skip near-zero weight blocks

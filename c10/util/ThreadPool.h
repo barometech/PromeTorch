@@ -1,4 +1,11 @@
 #pragma once
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#endif
+
 // ============================================================================
 // ThreadPool.h — Persistent thread pool replacing OpenMP fork/join
 // ============================================================================
@@ -95,7 +102,7 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             for (int i = 0; i < actual_chunks; i++) {
                 int64_t start = begin + i * chunk_size;
-                int64_t chunk_end = std::min(start + chunk_size, end);
+                int64_t chunk_end = (std::min)(start + chunk_size, end);
                 tasks_.push([&fn, start, chunk_end, &tasks_done] {
                     fn(start, chunk_end);
                     tasks_done.fetch_add(1, std::memory_order_release);
