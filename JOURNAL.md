@@ -1169,3 +1169,20 @@ EML работает идеально на 1 node. Cross-NUMA traffic = 0.
 - **Нужно:** пересобрать с фиксом cuBLAS FP16 path, протестировать когда GPU свободен
 
 **GPU ЗАНЯТ — тестирование PromeServe отложено.**
+
+### 10-Agent Improvement Round (2026-03-20)
+
+**Все 5 проблем атакованы:**
+
+1. **PromeServe generate fix** — 3 бага найдены и починены (HTTP headers, GPU weight load, error handling)
+2. **CNN MNIST example** — train_mnist_cnn_autograd.cpp написан (Conv2d→Pool→Linear с autograd)
+3. **Python API** — 16/16 тестов PASS (Sequential, backward, LSTM, save/load, view/reshape)
+4. **x86 autograd overhead** — MKL/OpenBLAS integration, RTTI elimination, cached param lookups
+5. **GPU inference** — 5 fused CUDA kernels написаны (RMSNorm+QKV, FP16 KV cache, ~7 launches/layer saved)
+
+**Дополнительно:**
+- NUMA-aware GEMM для Эльбруса (1840 GFLOPS target)
+- 9 fused AVX2 element-wise kernels
+- Docker: 216 тестов, 0 failures (Astra + Elbrus + RED OS)
+
+**+5000+ строк кода, 20+ файлов.**
