@@ -39,11 +39,12 @@ public:
     // Add module with name
     void push_back(const std::string& name, ModulePtr module) {
         register_module(name, std::move(module));
+        cache_dirty_ = true;
     }
 
     // Add module with auto-generated name
     void push_back(ModulePtr module) {
-        push_back(std::to_string(size()), std::move(module));
+        push_back(std::to_string(submodule_order_.size()), std::move(module));
     }
 
     // Alias for push_back
@@ -76,13 +77,13 @@ public:
     }
 
     // Forward pass - chain modules
+    // Uses a cached module pointer vector for O(1) iteration (no map lookups).
+    // Cache is rebuilt lazily when modules are added or replaced.
     Tensor forward(const Tensor& input) override {
+        if (cache_dirty_) rebuild_cache();
         Tensor output = input;
-        for (const auto& name : submodule_order_) {
-            auto& module = submodules_[name];
-            if (module) {
-                output = module->forward(output);
-            }
+        for (auto* mod : cached_ptrs_) {
+            output = mod->forward(output);
         }
         return output;
     }
@@ -90,6 +91,22 @@ public:
     std::string extra_repr() const override {
         return "";
     }
+
+private:
+    // Rebuild the raw pointer cache from the canonical submodule_order_ + submodules_
+    void rebuild_cache() {
+        cached_ptrs_.clear();
+        cached_ptrs_.reserve(submodule_order_.size());
+        for (const auto& name : submodule_order_) {
+            cached_ptrs_.push_back(submodules_[name].get());
+        }
+        cache_dirty_ = false;
+    }
+
+    // Cached raw pointers for zero-overhead forward iteration.
+    // Lifetime managed by submodules_ (shared_ptr keeps modules alive).
+    std::vector<Module*> cached_ptrs_;
+    bool cache_dirty_ = true;
 };
 
 // ============================================================================
