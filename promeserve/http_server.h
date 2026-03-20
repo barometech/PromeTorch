@@ -1,5 +1,15 @@
 #pragma once
 
+// Prevent Windows min/max macros from breaking std::min/std::max
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#endif
+
 // ============================================================================
 // PromeServe — Minimal HTTP/1.1 Server
 //
@@ -381,16 +391,32 @@ private:
         }
 
         if (matched->is_streaming) {
-            // Streaming response
-            StreamWriter writer(client);
-            HttpResponse resp = matched->stream_handler(request, writer);
+            // Streaming response — we need to send headers BEFORE the handler
+            // writes chunks. Use a two-phase approach:
+            // 1. Build response headers (status, content-type, transfer-encoding)
+            // 2. Send headers on the socket
+            // 3. THEN let the handler write chunked data via StreamWriter
+
+            // Pre-build a streaming response with correct headers
+            HttpResponse resp;
+            resp.status = 200;
+            resp.set_ndjson_streaming();
             add_cors_headers(resp);
-            // Send headers first
+
+            // Send HTTP headers first (before any chunk data)
             std::string header_raw = resp.serialize();
             ::send(client, header_raw.c_str(), static_cast<int>(header_raw.size()), 0);
-            // Handler has already written chunks via writer
-            // (in practice, the handler calls writer.write() and writer.finish())
-            // If handler didn't finish, do it now
+
+            // Now create the writer and let the handler stream chunks
+            StreamWriter writer(client);
+            HttpResponse handler_resp = matched->stream_handler(request, writer);
+
+            // If handler returned a non-streaming error response, send it as a chunk
+            if (!handler_resp.streaming && handler_resp.status >= 400 && !handler_resp.body.empty()) {
+                writer.write(handler_resp.body + "\n");
+            }
+
+            // If handler didn't finish the stream, do it now
             if (!writer.is_closed()) {
                 writer.finish();
             }

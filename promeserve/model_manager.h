@@ -221,6 +221,8 @@ public:
 #ifdef PT_USE_CUDA
             if (use_cuda_) {
                 model->to_cuda();
+                model->load_quantized_to_cuda();
+                std::cout << "[ModelManager] Quantized weights loaded to GPU" << std::endl;
             }
 #endif
 
