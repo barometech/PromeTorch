@@ -1705,14 +1705,38 @@ public:
             cpu_quant::cpu_quant_gemv(q_output_weight.quant_type, q_output_weight.cpu_data,
                 sp.x_buf[cur], sp.logits_buf, H, q_output_weight.rows, q_output_weight.row_stride_bytes);
         } else if (output_weight.defined()) {
-            // Float32 fallback
+            // Float32 fallback — AVX2 + threaded GEMV
             const float* w = output_weight.data_ptr<float>();
+            const float* x_ptr_out = sp.x_buf[cur];
             int64_t V = config.vocab_size;
-            for (int64_t n = 0; n < V; ++n) {
-                float dot = 0.0f;
-                for (int64_t k = 0; k < H; ++k) dot += sp.x_buf[cur][k] * w[n * H + k];
-                sp.logits_buf[n] = dot;
-            }
+            c10::get_thread_pool().parallel_for(0, V, [&](int64_t start, int64_t end) {
+                for (int64_t n = start; n < end; ++n) {
+                    const float* w_row = w + n * H;
+#ifdef __AVX2__
+                    __m256 acc0 = _mm256_setzero_ps();
+                    __m256 acc1 = _mm256_setzero_ps();
+                    int64_t k = 0;
+                    for (; k + 15 < H; k += 16) {
+                        acc0 = _mm256_fmadd_ps(_mm256_loadu_ps(x_ptr_out + k),
+                                               _mm256_loadu_ps(w_row + k), acc0);
+                        acc1 = _mm256_fmadd_ps(_mm256_loadu_ps(x_ptr_out + k + 8),
+                                               _mm256_loadu_ps(w_row + k + 8), acc1);
+                    }
+                    acc0 = _mm256_add_ps(acc0, acc1);
+                    for (; k + 7 < H; k += 8) {
+                        acc0 = _mm256_fmadd_ps(_mm256_loadu_ps(x_ptr_out + k),
+                                               _mm256_loadu_ps(w_row + k), acc0);
+                    }
+                    float dot = cpu_quant::hsum_avx(acc0);
+                    for (; k < H; ++k) dot += x_ptr_out[k] * w_row[k];
+                    sp.logits_buf[n] = dot;
+#else
+                    float dot = 0.0f;
+                    for (int64_t k = 0; k < H; ++k) dot += x_ptr_out[k] * w_row[k];
+                    sp.logits_buf[n] = dot;
+#endif
+                }
+            }, 64);  // min_grain=64 to avoid excessive thread overhead
         }
 
         // Wrap logits in a Tensor (zero-copy view of scratch buffer)
@@ -1809,24 +1833,65 @@ public:
             } else
 #endif
             {
-                // CPU path: transfer last row, apply penalties, sample
-                int64_t last_pos = logits.size(0) - 1;
-                Tensor last_logits = get_row(logits, last_pos);
+                // CPU greedy fast path: argmax directly on scratch buffer (no tensor copy)
+                if (use_quant_gemv_ && !use_cuda_ && cpu_scratch_.allocated &&
+                    temperature < 1e-6f && (repetition_penalty <= 1.0f || generated.empty())) {
+                    const float* lbuf = cpu_scratch_.logits_buf;
+                    int64_t V = config.vocab_size;
+                    int32_t best = 0;
+                    float best_val = lbuf[0];
+#ifdef __AVX2__
+                    // AVX2 argmax
+                    __m256 vmax = _mm256_set1_ps(lbuf[0]);
+                    __m256i vidx = _mm256_setzero_si256();
+                    __m256i vstep = _mm256_set1_epi32(8);
+                    __m256i vcur = _mm256_setr_epi32(0,1,2,3,4,5,6,7);
+                    int64_t j = 0;
+                    for (; j + 7 < V; j += 8) {
+                        __m256 vv = _mm256_loadu_ps(lbuf + j);
+                        __m256 cmp = _mm256_cmp_ps(vv, vmax, _CMP_GT_OS);
+                        vmax = _mm256_blendv_ps(vmax, vv, cmp);
+                        vidx = _mm256_castps_si256(_mm256_blendv_ps(
+                            _mm256_castsi256_ps(vidx), _mm256_castsi256_ps(vcur), cmp));
+                        vcur = _mm256_add_epi32(vcur, vstep);
+                    }
+                    // Reduce 8 lanes
+                    alignas(32) float vals[8];
+                    alignas(32) int32_t idxs[8];
+                    _mm256_store_ps(vals, vmax);
+                    _mm256_store_si256(reinterpret_cast<__m256i*>(idxs), vidx);
+                    for (int k = 0; k < 8; ++k) {
+                        if (vals[k] > best_val) { best_val = vals[k]; best = idxs[k]; }
+                    }
+                    for (; j < V; ++j) {
+                        if (lbuf[j] > best_val) { best_val = lbuf[j]; best = static_cast<int32_t>(j); }
+                    }
+#else
+                    for (int64_t j = 1; j < V; ++j) {
+                        if (lbuf[j] > best_val) { best_val = lbuf[j]; best = static_cast<int32_t>(j); }
+                    }
+#endif
+                    next_token = best;
+                } else {
+                    // General path: extract row, apply penalties, sample
+                    int64_t last_pos = logits.size(0) - 1;
+                    Tensor last_logits = get_row(logits, last_pos);
 
-                if (repetition_penalty > 1.0f && !generated.empty()) {
-                    float* logit_data = last_logits.mutable_data_ptr<float>();
-                    for (int32_t prev_token : generated) {
-                        if (prev_token >= 0 && prev_token < static_cast<int32_t>(tokenizer.vocab.size())) {
-                            if (logit_data[prev_token] > 0) {
-                                logit_data[prev_token] /= repetition_penalty;
-                            } else {
-                                logit_data[prev_token] *= repetition_penalty;
+                    if (repetition_penalty > 1.0f && !generated.empty()) {
+                        float* logit_data = last_logits.mutable_data_ptr<float>();
+                        for (int32_t prev_token : generated) {
+                            if (prev_token >= 0 && prev_token < static_cast<int32_t>(tokenizer.vocab.size())) {
+                                if (logit_data[prev_token] > 0) {
+                                    logit_data[prev_token] /= repetition_penalty;
+                                } else {
+                                    logit_data[prev_token] *= repetition_penalty;
+                                }
                             }
                         }
                     }
-                }
 
-                next_token = sample_token(last_logits, temperature, top_k, top_p);
+                    next_token = sample_token(last_logits, temperature, top_k, top_p);
+                }
             }
 
             if (next_token == tokenizer.eos_id) {
