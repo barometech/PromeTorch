@@ -155,8 +155,7 @@ public:
         const float* weight_data = weight_cpu.data_ptr<float>();
         float* output_data = output.mutable_data_ptr<float>();
 
-        // Look up embeddings
-        #pragma omp parallel for if(num_indices > 1000)
+        // Look up embeddings (no OpenMP — throw inside parallel is illegal on LCC)
         for (int64_t i = 0; i < num_indices; ++i) {
             int64_t idx = static_cast<int64_t>(indices_data[i]);
 
