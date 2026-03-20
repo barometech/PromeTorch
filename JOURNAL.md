@@ -1329,3 +1329,20 @@ PromeServe HTTP теперь на уровне CLI inference.
 Дальнейшее ускорение требует VNNI/AMX (server Intel) или NUMA (Эльбрус).
 
 **Полный путь: 0.63 → 13.9 tok/s = 22x ускорение.**
+
+### PIR 250M Модель — Ознакомление (2026-03-20)
+
+**Архитектура:** Pure PIR (no attention), ~250M params
+- 16 блоков × 4 PIR layers (multi-scale decay: 5/25/125/600 tokens)
+- dynamic_parallel_scan: O(T) via cumsum trick
+- SwiGLU FFN + RMSNorm + RoPE
+- vocab=50257, hidden=768, context=2048
+- Chinchilla optimal: 5B tokens, 40K steps
+
+**Файлы:** PIR/20 MARCH MODEL/PIR 270M.py (52KB), GENERATION RESULTS.txt
+
+**Генерация:** Текст генерируется, но качество ранней стадии (зацикливание на self-care topics).
+Layer efficiency: L0=6.69x, L1=5.54x, L2=2.16x, L3=1.34x — все ACTIVE.
+
+**TODO:** Перенести в C++ PromeTorch для Эльбруса. parallel_scan уже есть в C++.
+Распределённое обучение на 4×E8C2 (32 ядра) через data parallelism.
