@@ -23,7 +23,11 @@
 #endif
 
 #if !defined(PT_USE_EML_BLAS) && defined(PT_USE_SYSTEM_BLAS)
+#if __has_include(<mkl_cblas.h>)
+#include <mkl_cblas.h>
+#elif __has_include(<cblas.h>)
 #include <cblas.h>
+#endif
 #endif
 
 #ifdef PT_USE_NUMA

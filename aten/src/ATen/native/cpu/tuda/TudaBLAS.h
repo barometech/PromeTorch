@@ -17,7 +17,13 @@
 
 // System BLAS (MKL, OpenBLAS, etc.) for x86 — if available and not on Elbrus
 #if !defined(TUDA_E2K) && !defined(PT_USE_EML_BLAS) && defined(PT_USE_SYSTEM_BLAS)
+#if __has_include(<mkl_cblas.h>)
+#include <mkl_cblas.h>
+#elif __has_include(<cblas.h>)
 #include <cblas.h>
+#else
+#undef PT_USE_SYSTEM_BLAS
+#endif
 #endif
 
 // Architecture-specific micro-kernels (only compiled on matching platform)
