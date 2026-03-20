@@ -2,6 +2,7 @@
 
 #include "torch/nn/module.h"
 #include "torch/csrc/autograd/autograd.h"
+#include "aten/src/ATen/native/cpu/hot_loops.h"
 #include <cmath>
 
 #ifdef PT_USE_CUDA
@@ -246,15 +247,8 @@ public:
         const float* in_data = input.data_ptr<float>();
 
         if (approximate_ == "tanh") {
-            // Tanh approximation
-            constexpr float sqrt_2_over_pi = 0.7978845608028654f;
-            constexpr float coef = 0.044715f;
-
-            for (int64_t i = 0; i < result.numel(); ++i) {
-                float x = in_data[i];
-                float inner = sqrt_2_over_pi * (x + coef * x * x * x);
-                data[i] = 0.5f * x * (1.0f + std::tanh(inner));
-            }
+            // Fused AVX2 GELU: single pass, no intermediate tensors
+            at::native::hot::fused_gelu(in_data, data, result.numel());
         } else {
             // Exact (using erf)
             constexpr float sqrt_half = 0.7071067811865476f;
@@ -543,6 +537,21 @@ public:
         : Module("SiLU"), inplace_(inplace) {}
 
     Tensor forward(const Tensor& input) override {
+#ifdef PT_USE_CUDA
+        if (input.is_cuda()) {
+            Tensor sigmoid_x = input.sigmoid();
+            return input.mul(sigmoid_x);
+        }
+#endif
+        // CPU fast path: fused SiLU (sigmoid * x) in single AVX2 pass
+        if (input.dtype() == c10::ScalarType::Float && input.is_contiguous()) {
+            Tensor result = at::empty(input.sizes());
+            at::native::hot::fused_silu_scale(
+                input.data_ptr<float>(), 1.0f,
+                result.mutable_data_ptr<float>(), input.numel());
+            return result;
+        }
+        // Fallback
         Tensor sigmoid_x = input.sigmoid();
         return input.mul(sigmoid_x);
     }

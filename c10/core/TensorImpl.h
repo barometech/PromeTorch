@@ -279,6 +279,12 @@ struct PT_API AutogradMeta : public AutogradMetaInterface {
     bool retains_grad_ = false;
     bool is_leaf_ = true;
 
+    // Type tag: true when this is AutogradMetaImpl (avoids dynamic_cast RTTI)
+    // On x86 MSVC, dynamic_cast costs ~20ns per call. In AccumulateGrad::apply
+    // and get_grad_accumulator, this is called per-parameter per-step.
+    // With a type tag, the check is a single bool load (< 1ns).
+    bool is_autograd_meta_impl_ = false;
+
     // Gradient accumulator (for leaf variables)
     // Will be defined later: std::weak_ptr<Node> grad_accumulator_;
 

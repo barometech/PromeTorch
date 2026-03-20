@@ -9,6 +9,7 @@
 // partial softmax(Q*K^T)*V, then reduce using log-sum-exp trick.
 
 #include <cuda_runtime.h>
+#include <cuda_fp16.h>
 #include <cfloat>
 #include <cmath>
 #include "aten/src/ATen/cuda/CUDAOps.h"
@@ -446,6 +447,189 @@ ATEN_CUDA_API int flash_decode_num_splits(int total_seq) {
 
 ATEN_CUDA_API int flash_decode_kv_chunk_size() {
     return KV_CHUNK_SIZE;
+}
+
+// ============================================================================
+// FP16 KV Cache Kernels — Half the memory bandwidth for attention
+// ============================================================================
+// KV cache is the second-largest bandwidth consumer after GEMV projections.
+// Storing K/V in FP16 halves read bandwidth during attention computation.
+// For qwen3:4b with 2048 context: 2048 * 512 * 4B * 2(K+V) = 8 MB/layer FP32
+//                                  2048 * 512 * 2B * 2(K+V) = 4 MB/layer FP16
+// With 28 layers: 224 MB → 112 MB saved in bandwidth per decode step.
+
+// Convert FP32 K/V to FP16 and write to cache
+__global__ void fp16_kv_cache_write_kernel(
+    const float* __restrict__ src,    // [num_new_rows, cols] FP32
+    __half* __restrict__ dst_cache,   // [max_seq, cols] FP16
+    int64_t num_new_rows,
+    int64_t cols,
+    int64_t offset_row)
+{
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total = num_new_rows * cols;
+    if (idx >= total) return;
+
+    int64_t row = idx / cols;
+    int64_t col = idx % cols;
+    dst_cache[(offset_row + row) * cols + col] = __float2half(src[idx]);
+}
+
+ATEN_CUDA_API void launch_fp16_kv_cache_write(
+    const float* src, void* dst_cache_fp16,
+    int64_t num_new_rows, int64_t cols, int64_t offset_row,
+    cudaStream_t stream)
+{
+    int64_t total = num_new_rows * cols;
+    int block = 256;
+    int grid = (int)((total + block - 1) / block);
+    fp16_kv_cache_write_kernel<<<grid, block, 0, stream>>>(
+        src, static_cast<__half*>(dst_cache_fp16),
+        num_new_rows, cols, offset_row);
+}
+
+// ============================================================================
+// Flash-Decode with FP16 KV Cache
+// ============================================================================
+// Same algorithm as flash_decode_partial_kernel but reads FP16 K/V cache.
+// Q stays FP32 (freshly projected). K/V are converted to FP32 on-the-fly
+// during dot product — no separate conversion kernel needed.
+// Memory bandwidth reduction: 2x for K reads, 2x for V reads.
+
+__global__ void flash_decode_fp16_partial_kernel(
+    const float* __restrict__ Q,            // [n_heads * head_dim] FP32
+    const __half* __restrict__ K_cache_fp16, // [total_seq, n_kv_heads * head_dim] FP16
+    const __half* __restrict__ V_cache_fp16, // [total_seq, n_kv_heads * head_dim] FP16
+    float* __restrict__ partial_O,
+    float* __restrict__ partial_lse,
+    float* __restrict__ partial_max,
+    int n_heads, int n_kv_heads, int head_dim,
+    int total_seq, float scale)
+{
+    int split_idx = blockIdx.x;
+    int head_idx = blockIdx.y;
+    int tid = threadIdx.x;
+    int heads_per_group = n_heads / n_kv_heads;
+    int kv_head = head_idx / heads_per_group;
+    int kv_dim = n_kv_heads * head_dim;
+
+    int kv_start = split_idx * KV_CHUNK_SIZE;
+    int kv_end = kv_start + KV_CHUNK_SIZE;
+    if (kv_end > total_seq) kv_end = total_seq;
+    int chunk_len = kv_end - kv_start;
+
+    if (chunk_len <= 0) {
+        if (tid == 0) {
+            int idx = split_idx * n_heads + head_idx;
+            partial_lse[idx] = 0.0f;
+            partial_max[idx] = -FLT_MAX;
+        }
+        if (tid < head_dim) {
+            partial_O[(split_idx * n_heads + head_idx) * head_dim + tid] = 0.0f;
+        }
+        return;
+    }
+
+    extern __shared__ float smem[];
+    float* q_shared = smem;
+    float* scores = smem + head_dim;
+
+    // Load Q into shared memory (FP32)
+    const float* q_head = Q + head_idx * head_dim;
+    for (int d = tid; d < head_dim; d += blockDim.x) {
+        q_shared[d] = q_head[d];
+    }
+    __syncthreads();
+
+    // Step 1: Q*K^T with FP16 K reads
+    for (int t = tid; t < chunk_len; t += blockDim.x) {
+        int kv_pos = kv_start + t;
+        const __half* k_vec = K_cache_fp16 + kv_pos * kv_dim + kv_head * head_dim;
+        float dot = 0.0f;
+        for (int d = 0; d < head_dim; d++) {
+            dot += q_shared[d] * __half2float(k_vec[d]);
+        }
+        scores[t] = dot * scale;
+    }
+    __syncthreads();
+
+    // Step 2: Max for numerical stability
+    __shared__ float s_max;
+    __shared__ float s_sum;
+    if (tid == 0) {
+        float m = -FLT_MAX;
+        for (int t = 0; t < chunk_len; t++) {
+            if (scores[t] > m) m = scores[t];
+        }
+        s_max = m;
+    }
+    __syncthreads();
+
+    // Step 3: exp and sum
+    for (int t = tid; t < chunk_len; t += blockDim.x) {
+        scores[t] = expf(scores[t] - s_max);
+    }
+    __syncthreads();
+
+    if (tid == 0) {
+        float sum = 0.0f;
+        for (int t = 0; t < chunk_len; t++) sum += scores[t];
+        s_sum = sum;
+    }
+    __syncthreads();
+
+    // Step 4: Weighted V sum with FP16 V reads
+    int out_base = (split_idx * n_heads + head_idx) * head_dim;
+    for (int d = tid; d < head_dim; d += blockDim.x) {
+        float acc = 0.0f;
+        for (int t = 0; t < chunk_len; t++) {
+            int kv_pos = kv_start + t;
+            acc += scores[t] * __half2float(
+                V_cache_fp16[kv_pos * kv_dim + kv_head * head_dim + d]);
+        }
+        partial_O[out_base + d] = acc;
+    }
+
+    if (tid == 0) {
+        int idx = split_idx * n_heads + head_idx;
+        partial_max[idx] = s_max;
+        partial_lse[idx] = s_sum;
+    }
+}
+
+ATEN_CUDA_API void launch_flash_decode_fp16(
+    const float* Q, const void* K_cache_fp16, const void* V_cache_fp16,
+    float* O,
+    float* partial_O, float* partial_lse, float* partial_max,
+    int n_heads, int n_kv_heads, int head_dim,
+    int total_seq, float scale,
+    cudaStream_t stream)
+{
+    int num_splits = (total_seq + KV_CHUNK_SIZE - 1) / KV_CHUNK_SIZE;
+
+    // Phase 1: Partial attention per split (FP16 KV reads)
+    {
+        dim3 grid(num_splits, n_heads);
+        int block_size = 128;
+        if (head_dim > 128) block_size = 256;
+        int shared_mem = (head_dim + KV_CHUNK_SIZE) * sizeof(float);
+        flash_decode_fp16_partial_kernel<<<grid, block_size, shared_mem, stream>>>(
+            Q,
+            static_cast<const __half*>(K_cache_fp16),
+            static_cast<const __half*>(V_cache_fp16),
+            partial_O, partial_lse, partial_max,
+            n_heads, n_kv_heads, head_dim, total_seq, scale);
+    }
+
+    // Phase 2: Reduce across splits (same kernel — works on FP32 partials)
+    {
+        int block_size = 128;
+        if (head_dim > 128) block_size = 256;
+        int shared_mem = num_splits * sizeof(float);
+        flash_decode_reduce_kernel<<<n_heads, block_size, shared_mem, stream>>>(
+            partial_O, partial_lse, partial_max, O,
+            n_heads, head_dim, num_splits);
+    }
 }
 
 } // namespace cuda
