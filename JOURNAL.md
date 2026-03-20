@@ -1253,3 +1253,15 @@ CLI inference работает. HTTP handler зависает на forward().
 Пропущены (>32GB): deepseek-r1:70b, llama3.3:70b, qwen2.5:72b
 
 **7/14 работают. 3 MoE не поддержаны. 1 unsupported архитектура.**
+
+### CPU Inference After Optimization (2026-03-20)
+
+| Модель | До | После | Speedup |
+|--------|-----|-------|---------|
+| deepseek-r1:8b (qwen2) | 3.72 | **8.94** | **2.4x** |
+| qwen3:4b | 4.56 | 2.68 | 0.6x (regression) |
+| gemma3:4b | 4.61 | 1.69 | 0.4x (regression) |
+
+deepseek-r1 улучшился 2.4x (простая архитектура, без QK norm).
+qwen3/gemma3 РЕГРЕССИЯ — forward_decode_cpu может неправильно обрабатывать QK norm / post norm.
+Нужна диагностика и фикс для qwen3/gemma3.
