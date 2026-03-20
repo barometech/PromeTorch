@@ -1280,3 +1280,17 @@ PromeTorch: **13.5 tok/s** — на уровне!
 
 Путь: 0.63 → 1.53 → 4.37 → 4.56 → 8.94 → **13.48 tok/s**
 Ускорение: **21x** от начала.
+
+### PromeServe CPU — ВСЕ 5 МОДЕЛЕЙ РАБОТАЮТ (2026-03-20)
+
+| Модель | CLI tok/s | PromeServe tok/s | Статус |
+|--------|----------|-----------------|--------|
+| qwen3:4b | **13.48** | 4.3 | OK |
+| gemma3:4b | **13.30** | 4.3 | OK |
+| deepseek-r1:8b | **8.91** | 3.7 | OK |
+| deepseek-r1:latest | **9.28** | 5.4 | OK |
+| qwen3:14b | **2.07** | 2.1 | OK |
+
+PromeServe через HTTP медленнее CLI потому что не использует forward_decode_cpu().
+CLI использует оптимизированный zero-alloc decode path.
+Нужно: wire forward_decode_cpu() в PromeServe generate handler.
