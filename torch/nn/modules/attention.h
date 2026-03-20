@@ -294,7 +294,7 @@ private:
         const float* a_data = a.data_ptr<float>();
         const float* b_data = b.data_ptr<float>();
 
-        #pragma omp parallel for collapse(3) if(N * H * L > 64)
+        // omp removed for LCC
         for (int64_t n = 0; n < N; ++n) {
             for (int64_t h = 0; h < H; ++h) {
                 for (int64_t l = 0; l < L; ++l) {

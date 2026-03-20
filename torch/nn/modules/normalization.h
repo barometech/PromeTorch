@@ -277,7 +277,7 @@ public:
         const float* gamma = affine_ ? get_parameter("weight")->data().data_ptr<float>() : nullptr;
         const float* beta = affine_ ? get_parameter("bias")->data().data_ptr<float>() : nullptr;
 
-        #pragma omp parallel for collapse(2) if(batch_size * channels > 16)
+        // omp removed for LCC
         for (int64_t n = 0; n < batch_size; ++n) {
             for (int64_t c = 0; c < channels; ++c) {
                 float inv_std = 1.0f / std::sqrt(var[c] + static_cast<float>(eps_));

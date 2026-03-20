@@ -52,7 +52,7 @@ public:
             Tensor output = at::empty(input.sizes());
             float* output_data = output.mutable_data_ptr<float>();
 
-            #pragma omp parallel for if(numel > 10000)
+            // omp removed for LCC compatibility
             for (int64_t i = 0; i < numel; ++i) {
                 output_data[i] = std::abs(input_data[i] - target_data[i]);
             }
@@ -60,7 +60,7 @@ public:
         }
 
         double sum = 0.0;
-        #pragma omp parallel for reduction(+:sum) if(numel > 10000)
+        // omp removed for LCC compatibility
         for (int64_t i = 0; i < numel; ++i) {
             sum += std::abs(input_data[i] - target_data[i]);
         }
@@ -110,7 +110,7 @@ public:
             Tensor output = at::empty(input.sizes());
             float* output_data = output.mutable_data_ptr<float>();
 
-            #pragma omp parallel for if(numel > 10000)
+            // omp removed for LCC compatibility
             for (int64_t i = 0; i < numel; ++i) {
                 float diff = input_data[i] - target_data[i];
                 output_data[i] = diff * diff;
@@ -119,7 +119,7 @@ public:
         }
 
         double sum = 0.0;
-        #pragma omp parallel for reduction(+:sum) if(numel > 10000)
+        // omp removed for LCC compatibility
         for (int64_t i = 0; i < numel; ++i) {
             double diff = input_data[i] - target_data[i];
             sum += diff * diff;
@@ -185,7 +185,7 @@ public:
             Tensor output = at::empty(input.sizes());
             float* output_data = output.mutable_data_ptr<float>();
 
-            #pragma omp parallel for if(numel > 10000)
+            // omp removed for LCC compatibility
             for (int64_t i = 0; i < numel; ++i) {
                 output_data[i] = compute_loss(input_data[i] - target_data[i]);
             }
@@ -193,7 +193,7 @@ public:
         }
 
         double sum = 0.0;
-        #pragma omp parallel for reduction(+:sum) if(numel > 10000)
+        // omp removed for LCC compatibility
         for (int64_t i = 0; i < numel; ++i) {
             sum += compute_loss(input_data[i] - target_data[i]);
         }
@@ -255,7 +255,7 @@ public:
             Tensor output = at::empty(input.sizes());
             float* output_data = output.mutable_data_ptr<float>();
 
-            #pragma omp parallel for if(numel > 10000)
+            // omp removed for LCC compatibility
             for (int64_t i = 0; i < numel; ++i) {
                 output_data[i] = compute_loss(input_data[i] - target_data[i]);
             }
@@ -263,7 +263,7 @@ public:
         }
 
         double sum = 0.0;
-        #pragma omp parallel for reduction(+:sum) if(numel > 10000)
+        // omp removed for LCC compatibility
         for (int64_t i = 0; i < numel; ++i) {
             sum += compute_loss(input_data[i] - target_data[i]);
         }
@@ -330,7 +330,7 @@ public:
             Tensor output = at::empty(input.sizes());
             float* output_data = output.mutable_data_ptr<float>();
 
-            #pragma omp parallel for if(numel > 10000)
+            // omp removed for LCC compatibility
             for (int64_t i = 0; i < numel; ++i) {
                 float loss = compute_bce(input_data[i], target_data[i]);
                 if (weight_data) {
@@ -344,7 +344,7 @@ public:
         double sum = 0.0;
         double weight_sum = 0.0;
 
-        #pragma omp parallel for reduction(+:sum, weight_sum) if(numel > 10000)
+        // omp removed for LCC compatibility
         for (int64_t i = 0; i < numel; ++i) {
             float loss = compute_bce(input_data[i], target_data[i]);
             float w = weight_data ? weight_data[i % weight_.numel()] : 1.0f;
@@ -435,7 +435,7 @@ public:
             Tensor output = at::empty(input.sizes());
             float* output_data = output.mutable_data_ptr<float>();
 
-            #pragma omp parallel for if(numel > 10000)
+            // omp removed for LCC compatibility
             for (int64_t i = 0; i < numel; ++i) {
                 float loss = compute_loss(input_data[i], target_data[i], i);
                 if (weight_data) {
@@ -449,7 +449,7 @@ public:
         double sum = 0.0;
         double weight_sum = 0.0;
 
-        #pragma omp parallel for reduction(+:sum, weight_sum) if(numel > 10000)
+        // omp removed for LCC compatibility
         for (int64_t i = 0; i < numel; ++i) {
             float loss = compute_loss(input_data[i], target_data[i], i);
             float w = weight_data ? weight_data[i % weight_.numel()] : 1.0f;
@@ -530,7 +530,7 @@ public:
             Tensor output = at::empty(output_shape);
             float* output_data = output.mutable_data_ptr<float>();
 
-            #pragma omp parallel for if(total_elements > 1000)
+            // omp removed for LCC compatibility
             for (int64_t i = 0; i < total_elements; ++i) {
                 int64_t b = i / spatial_size;
                 int64_t s = i % spatial_size;
@@ -1016,7 +1016,7 @@ public:
             Tensor output = at::empty(input.sizes());
             float* output_data = output.mutable_data_ptr<float>();
 
-            #pragma omp parallel for if(numel > 10000)
+            // omp removed for LCC compatibility
             for (int64_t i = 0; i < numel; ++i) {
                 output_data[i] = compute_kl(input_data[i], target_data[i]);
             }
@@ -1024,7 +1024,7 @@ public:
         }
 
         double sum = 0.0;
-        #pragma omp parallel for reduction(+:sum) if(numel > 10000)
+        // omp removed for LCC compatibility
         for (int64_t i = 0; i < numel; ++i) {
             sum += compute_kl(input_data[i], target_data[i]);
         }
@@ -1167,7 +1167,7 @@ public:
             Tensor output = at::empty(input1.sizes());
             float* output_data = output.mutable_data_ptr<float>();
 
-            #pragma omp parallel for if(numel > 10000)
+            // omp removed for LCC compatibility
             for (int64_t i = 0; i < numel; ++i) {
                 float loss = -y_data[i] * (x1_data[i] - x2_data[i]) + static_cast<float>(margin_);
                 output_data[i] = std::max(0.0f, loss);
@@ -1176,7 +1176,7 @@ public:
         }
 
         double sum = 0.0;
-        #pragma omp parallel for reduction(+:sum) if(numel > 10000)
+        // omp removed for LCC compatibility
         for (int64_t i = 0; i < numel; ++i) {
             double loss = -y_data[i] * (x1_data[i] - x2_data[i]) + margin_;
             sum += std::max(0.0, loss);
@@ -1458,7 +1458,7 @@ public:
             Tensor output = at::empty(input.sizes());
             float* output_data = output.mutable_data_ptr<float>();
 
-            #pragma omp parallel for if(numel > 10000)
+            // omp removed for LCC compatibility
             for (int64_t i = 0; i < numel; ++i) {
                 output_data[i] = compute_loss(input_data[i], target_data[i]);
             }
@@ -1466,7 +1466,7 @@ public:
         }
 
         double sum = 0.0;
-        #pragma omp parallel for reduction(+:sum) if(numel > 10000)
+        // omp removed for LCC compatibility
         for (int64_t i = 0; i < numel; ++i) {
             sum += compute_loss(input_data[i], target_data[i]);
         }
@@ -1535,7 +1535,7 @@ public:
             Tensor output = at::empty(input.sizes());
             float* output_data = output.mutable_data_ptr<float>();
 
-            #pragma omp parallel for if(numel > 10000)
+            // omp removed for LCC compatibility
             for (int64_t i = 0; i < numel; ++i) {
                 float v = broadcast_var ? var_data[0] : var_data[i];
                 output_data[i] = compute_loss(input_data[i], target_data[i], v);
@@ -1544,7 +1544,7 @@ public:
         }
 
         double sum = 0.0;
-        #pragma omp parallel for reduction(+:sum) if(numel > 10000)
+        // omp removed for LCC compatibility
         for (int64_t i = 0; i < numel; ++i) {
             float v = broadcast_var ? var_data[0] : var_data[i];
             sum += compute_loss(input_data[i], target_data[i], v);
@@ -1650,7 +1650,7 @@ public:
             Tensor output = at::empty(input.sizes());
             float* output_data = output.mutable_data_ptr<float>();
 
-            #pragma omp parallel for if(numel > 10000)
+            // omp removed for LCC compatibility
             for (int64_t i = 0; i < numel; ++i) {
                 output_data[i] = compute_focal(input_data[i], target_data[i]);
             }
@@ -1658,7 +1658,7 @@ public:
         }
 
         double sum = 0.0;
-        #pragma omp parallel for reduction(+:sum) if(numel > 10000)
+        // omp removed for LCC compatibility
         for (int64_t i = 0; i < numel; ++i) {
             sum += compute_focal(input_data[i], target_data[i]);
         }

@@ -53,7 +53,7 @@ public:
         const float* in_data = input.data_ptr<float>();
         float* out_data = output.mutable_data_ptr<float>();
 
-        #pragma omp parallel for collapse(2) if(batch_size * channels > 16)
+        // omp removed for LCC
         for (int64_t n = 0; n < batch_size; ++n) {
             for (int64_t c = 0; c < channels; ++c) {
                 for (int64_t ol = 0; ol < out_length; ++ol) {
@@ -148,7 +148,7 @@ public:
         const float* in_data = input.data_ptr<float>();
         float* out_data = output.mutable_data_ptr<float>();
 
-        #pragma omp parallel for collapse(2) if(batch_size * channels > 16)
+        // omp removed for LCC
         for (int64_t n = 0; n < batch_size; ++n) {
             for (int64_t c = 0; c < channels; ++c) {
                 for (int64_t oh = 0; oh < out_height; ++oh) {
@@ -314,7 +314,7 @@ public:
 
         int64_t pool_size = kernel_size_[0] * kernel_size_[1];
 
-        #pragma omp parallel for collapse(2) if(batch_size * channels > 16)
+        // omp removed for LCC
         for (int64_t n = 0; n < batch_size; ++n) {
             for (int64_t c = 0; c < channels; ++c) {
                 for (int64_t oh = 0; oh < out_height; ++oh) {
