@@ -326,7 +326,7 @@ inline Tensor dynamic_parallel_scan(
         float* out_data = output.mutable_data_ptr<float>();
         float* gates_data = gates.mutable_data_ptr<float>();
 
-        #pragma omp parallel for if(B > 4)
+        // omp removed for LCC
         for (int64_t b = 0; b < B; ++b) {
             std::vector<float> h(D, 0.0f);
 
