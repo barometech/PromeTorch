@@ -475,7 +475,7 @@ public:
             return gray.unsqueeze(0);  // [1, H, W]
         } else if (num_output_channels_ == 3) {
             // Stack same grayscale 3 times
-            return at::stack({gray, gray, gray}, 0);
+            return torch::stack({gray, gray, gray}, 0);
         }
 
         return gray.unsqueeze(0);
