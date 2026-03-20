@@ -804,13 +804,15 @@ private:
                 }
 
                 // Next forward pass
-                std::cerr << "[Generate] Step " << step << ": next forward()..." << std::flush;
 #ifdef PT_USE_CUDA
                 if (model->use_cuda_) {
                     logits = model->forward_decode(static_cast<int64_t>(next_token));
                 } else
 #endif
-                {
+                if (model->use_quant_gemv_) {
+                    // Zero-allocation optimized CPU decode path (13.5 tok/s)
+                    logits = model->forward_decode_cpu(static_cast<int64_t>(next_token));
+                } else {
                     std::vector<int64_t> next_input = {static_cast<int64_t>(next_token)};
                     logits = model->forward(next_input, true);
                 }
@@ -1015,13 +1017,14 @@ private:
                     }
                 }
 
-                std::cerr << "[Chat] Step " << step << ": next forward()..." << std::flush;
 #ifdef PT_USE_CUDA
                 if (model->use_cuda_) {
                     logits = model->forward_decode(static_cast<int64_t>(next_token));
                 } else
 #endif
-                {
+                if (model->use_quant_gemv_) {
+                    logits = model->forward_decode_cpu(static_cast<int64_t>(next_token));
+                } else {
                     std::vector<int64_t> next_input = {static_cast<int64_t>(next_token)};
                     logits = model->forward(next_input, true);
                 }
