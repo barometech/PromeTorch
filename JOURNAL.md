@@ -1216,3 +1216,20 @@ EML работает идеально на 1 node. Cross-NUMA traffic = 0.
 - На Эльбрусе: ПОБЕЖДАЕМ PyTorch в 1.8-9.6x
 - На x86: проигрываем 16x (PyTorch + MKL не имеет аналога в нашем коде)
 - Для x86 паритета: нужна интеграция MKL (код написан, не протестирован)
+
+### CPU Inference: PromeTorch vs Ollama (2026-03-20)
+
+| Модель | PromeTorch CPU | Ollama GPU* | llama.cpp CPU** |
+|--------|---------------|------------|----------------|
+| qwen3:4b | 4.33 tok/s | 41 tok/s | ~10-15 tok/s |
+| gemma3:4b | 4.54 tok/s | 35 tok/s | ~10-12 tok/s |
+| deepseek-r1:8b | 3.72 tok/s | 19 tok/s | ~5-8 tok/s |
+
+*Ollama на GPU (нельзя изолировать CPU — GPU занят тренировкой)
+**Типичные значения llama.cpp Q4_K_M на AVX2 8 threads
+
+PromeTorch CPU inference: 2-3x медленнее llama.cpp CPU estimate.
+Bottleneck: AVX2 Q4_K GEMV ядро (не использует MKL — MKL не поддерживает Q4_K dequant).
+
+**PromeServe HTTP server: баг — generate возвращает пустоту на CPU.**
+CLI inference работает. HTTP handler зависает на forward().
