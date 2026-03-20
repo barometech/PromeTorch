@@ -872,7 +872,13 @@ public:
         PROF_END(profiler, "final_norm");
 
         // 4. Output projection → logits
-        Tensor x_last = x;
+        // For prefill: only project LAST position (saves seq_len-1 × vocab matmuls)
+        Tensor x_last;
+        if (seq_len > 1) {
+            x_last = x.select(0, seq_len - 1).unsqueeze(0);  // [1, hidden]
+        } else {
+            x_last = x;
+        }
         PROF_BEGIN(profiler, "output_proj");
         Tensor logits = matmul_q(x_last, output_weight, q_output_weight, true);
         PROF_END(profiler, "output_proj");
