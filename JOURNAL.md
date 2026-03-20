@@ -1233,3 +1233,23 @@ Bottleneck: AVX2 Q4_K GEMV ядро (не использует MKL — MKL не 
 
 **PromeServe HTTP server: баг — generate возвращает пустоту на CPU.**
 CLI inference работает. HTTP handler зависает на forward().
+
+### ALL MODELS CPU Inference (2026-03-20)
+
+| # | Модель | Параметры | tok/s | Статус |
+|---|--------|-----------|-------|--------|
+| 1 | qwen3:4b | 4B | **4.56** | OK |
+| 2 | gemma3:4b | 4B | **4.61** | OK |
+| 3 | deepseek-r1:latest | 7.6B | **5.44** | OK |
+| 4 | deepseek-r1:8b | 8B | **3.69** | OK |
+| 5 | qwen3:14b | 14B | **2.07** | OK |
+| 6 | gemma3:27b | 27B | **0.995** | OK |
+| 7 | gemma3b:27b-reasoner | 27B | **0.905** | OK |
+| 8 | gpt-oss:20b | 20B | — | ERROR: unsupported tensor names |
+| 9 | qwen3:30b (MoE) | 30B | — | ERROR: MoE not supported |
+| 10 | qwen3-coder:30b (MoE) | 30B | — | ERROR: MoE not supported |
+| 11 | qwen3-vl:30b (MoE) | 30B | — | ERROR: MoE not supported |
+
+Пропущены (>32GB): deepseek-r1:70b, llama3.3:70b, qwen2.5:72b
+
+**7/14 работают. 3 MoE не поддержаны. 1 unsupported архитектура.**
