@@ -48,8 +48,25 @@ from ._C import (
     clamp,
     where,
 
+    # New operations for PIR support
+    cumsum,
+    rsqrt,
+    norm,
+    topk,
+    sort,
+    zeros_like,
+    ones_like,
+    from_numpy,
+    nan_to_num,
+    isinf,
+    isnan,
+    isfinite,
+    multinomial,
+    einsum,
+    compile,
+
     # Autograd
-    no_grad,
+    no_grad as _CppNoGrad,
     enable_grad,
     is_grad_enabled,
     set_grad_enabled,
@@ -81,10 +98,75 @@ cuda = type('cuda', (), {
     'device_count': staticmethod(cuda_device_count),
 })()
 
+class no_grad:
+    """Context manager and decorator that disables gradient computation."""
+    def __enter__(self):
+        self._guard = _CppNoGrad()
+        self._guard.__enter__()
+        return self
+
+    def __exit__(self, *args):
+        self._guard.__exit__(*args)
+
+    def __call__(self, func):
+        """Support usage as @torch.no_grad() decorator."""
+        import functools
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            with self:
+                return func(*args, **kwargs)
+        return wrapper
+
 def manual_seed(seed: int):
     """Set the random seed for reproducibility."""
     import random
     random.seed(seed)
+
+
+# ============================================================================
+# AMP (Automatic Mixed Precision) — no-op shims for PIR compatibility
+# ============================================================================
+
+class _AutocastContext:
+    """No-op autocast context manager"""
+    def __init__(self, device_type='cuda', dtype=None, enabled=True):
+        pass
+    def __enter__(self):
+        return self
+    def __exit__(self, *args):
+        pass
+
+class _GradScaler:
+    """No-op GradScaler for compatibility"""
+    def __init__(self, device='cuda', enabled=True):
+        self._enabled = enabled
+        self._scale = 1.0
+
+    def scale(self, loss):
+        return loss
+
+    def unscale_(self, optimizer):
+        pass
+
+    def step(self, optimizer):
+        optimizer.step()
+
+    def update(self):
+        pass
+
+    def state_dict(self):
+        return {'scale': self._scale}
+
+    def load_state_dict(self, state_dict):
+        self._scale = state_dict.get('scale', 1.0)
+
+# Create amp submodule
+class _AmpModule:
+    autocast = _AutocastContext
+    GradScaler = _GradScaler
+
+amp = _AmpModule()
+
 
 __all__ = [
     # Core
@@ -132,6 +214,23 @@ __all__ = [
     'clamp',
     'where',
 
+    # New ops
+    'cumsum',
+    'rsqrt',
+    'norm',
+    'topk',
+    'sort',
+    'zeros_like',
+    'ones_like',
+    'from_numpy',
+    'nan_to_num',
+    'isinf',
+    'isnan',
+    'isfinite',
+    'multinomial',
+    'einsum',
+    'compile',
+
     # Autograd
     'no_grad',
     'enable_grad',
@@ -148,6 +247,9 @@ __all__ = [
 
     # CUDA
     'cuda',
+
+    # AMP
+    'amp',
 
     # Submodules
     'nn',
