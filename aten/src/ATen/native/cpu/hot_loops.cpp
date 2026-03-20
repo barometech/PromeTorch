@@ -1410,7 +1410,7 @@ int32_t fused_rmsnorm_gemv_argmax(const float* x, const float* norm_w,
     std::vector<ThreadResult> results(nt, {0, -1e30f});
     std::atomic<int> tid_counter{0};
 
-    pool.parallel_for(V, [&](int64_t start, int64_t end) {
+    pool.parallel_for(0, V, [&](int64_t start, int64_t end) {
         int my_tid = tid_counter.fetch_add(1, std::memory_order_relaxed);
         if (my_tid >= nt) my_tid = nt - 1;  // safety
         int32_t local_best_idx = static_cast<int32_t>(start);

@@ -1,4 +1,9 @@
 #pragma once
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#endif
 
 // ============================================================================
 // Speculative Decoding via Low-Rank Output Projection
@@ -92,7 +97,7 @@ struct LowRankOutputProj {
     void init_from_float(const float* W, int64_t V_size, int64_t H, int64_t r = 256) {
         vocab = V_size;
         hidden = H;
-        rank = std::min(r, std::min(vocab, hidden));
+        rank = (std::min)(r, (std::min)(vocab, hidden));
 
         auto t_start = std::chrono::high_resolution_clock::now();
         std::cout << "[LowRank] Computing rank-" << rank << " SVD of output weight ["
@@ -103,7 +108,7 @@ struct LowRankOutputProj {
         // Then: logits = W @ x ≈ U_s @ (Vt @ x)
 
         // Step 1: Random projection Y = W @ Omega, Omega[hidden, rank+oversample]
-        int64_t oversample = std::min((int64_t)20, hidden - rank);
+        int64_t oversample = (std::min)((int64_t)20, hidden - rank);
         if (oversample < 0) oversample = 0;
         int64_t l = rank + oversample;
 
@@ -464,8 +469,8 @@ struct LowRankOutputProj {
         }
 
         // Step 5: Apply temperature and sample
-        int32_t n_sample = std::min(top_k_sample, candidate_k);
-        float inv_temp = 1.0f / std::max(temperature, 1e-6f);
+        int32_t n_sample = (std::min)(top_k_sample, candidate_k);
+        float inv_temp = 1.0f / (std::max)(temperature, 1e-6f);
 
         // Find max for numerical stability
         float max_logit = exact_logits[0];
@@ -963,7 +968,7 @@ private:
         std::vector<float> U_sorted(m * m);
         for (int64_t j = 0; j < m; ++j) {
             int64_t src = eig_pairs[j].second;
-            float eigval = std::max(eig_pairs[j].first, 0.0f);
+            float eigval = (std::max)(eig_pairs[j].first, 0.0f);
             S_out[j] = std::sqrt(eigval);
             for (int64_t i = 0; i < m; ++i)
                 U_sorted[i * m + j] = U_out[i * m + src];
