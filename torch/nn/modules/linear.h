@@ -45,6 +45,8 @@ public:
         , out_features_(out_features)
         , has_bias_(bias)
         , fused_relu_(fused_relu)
+        , cached_weight_(nullptr)
+        , cached_bias_(nullptr)
     {
         // Initialize weight: [out_features, in_features]
         Tensor weight = at::empty({out_features, in_features});
@@ -54,6 +56,10 @@ public:
             Tensor bias_tensor = at::empty({out_features});
             register_parameter("bias", Parameter(bias_tensor));
         }
+
+        // Cache parameter pointers to avoid map lookup on every forward()
+        cached_weight_ = get_parameter("weight");
+        if (has_bias_) cached_bias_ = get_parameter("bias");
 
         reset_parameters();
     }
@@ -88,8 +94,8 @@ public:
     }
 
     Tensor forward(const Tensor& input) override {
-        auto* weight_param = get_parameter("weight");
-        Tensor W = weight_param->data();  // [out_features, in_features]
+        // Use cached pointers (avoid map lookup on every forward call)
+        Tensor W = cached_weight_->data();  // [out_features, in_features]
 
         // ================================================================
         // FAST PATH: float32, no autograd (inference or NoGradGuard)
@@ -104,10 +110,10 @@ public:
             if (input.dim() == 2 && input.is_contiguous()) {
                 if (fused_relu_ && has_bias_) {
                     return at::native::fast::fused_linear_relu_f32(
-                        input, W, get_parameter("bias")->data());
+                        input, W, cached_bias_->data());
                 } else if (has_bias_) {
                     return at::native::fast::fused_linear_f32(
-                        input, W, get_parameter("bias")->data());
+                        input, W, cached_bias_->data());
                 } else if (fused_relu_) {
                     return at::native::fast::fused_linear_relu_nobias_f32(input, W);
                 } else {
@@ -125,10 +131,10 @@ public:
                 Tensor result;
                 if (fused_relu_ && has_bias_) {
                     result = at::native::fast::fused_linear_relu_f32(
-                        x_2d, W, get_parameter("bias")->data());
+                        x_2d, W, cached_bias_->data());
                 } else if (has_bias_) {
                     result = at::native::fast::fused_linear_f32(
-                        x_2d, W, get_parameter("bias")->data());
+                        x_2d, W, cached_bias_->data());
                 } else if (fused_relu_) {
                     result = at::native::fast::fused_linear_relu_nobias_f32(x_2d, W);
                 } else {
@@ -153,8 +159,7 @@ public:
         if (input.dim() == 2 && W.dtype() == c10::ScalarType::Float) {
             Tensor bias_data;
             if (has_bias_) {
-                auto* bias_param = get_parameter("bias");
-                bias_data = bias_param->data();
+                bias_data = cached_bias_->data();
             }
 
             if (fused_relu_) {
@@ -186,8 +191,7 @@ public:
         }
 
         if (has_bias_) {
-            auto* bias_param = get_parameter("bias");
-            output = torch::autograd::add_autograd(output, bias_param->data());
+            output = torch::autograd::add_autograd(output, cached_bias_->data());
         }
 
         return output;
@@ -212,6 +216,10 @@ private:
     int64_t out_features_;
     bool has_bias_;
     bool fused_relu_;
+    // Cached parameter pointers — avoids std::map lookup on every forward() call.
+    // Linear's parameters never change identity (only data), so caching is safe.
+    Parameter* cached_weight_;
+    Parameter* cached_bias_;
 };
 
 // ============================================================================
