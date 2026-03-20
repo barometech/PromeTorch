@@ -15,6 +15,11 @@
 #include <eml/cblas.h>
 #endif
 
+// System BLAS (MKL, OpenBLAS, etc.) for x86 — if available and not on Elbrus
+#if !defined(TUDA_E2K) && !defined(PT_USE_EML_BLAS) && defined(PT_USE_SYSTEM_BLAS)
+#include <cblas.h>
+#endif
+
 // Architecture-specific micro-kernels (only compiled on matching platform)
 #if defined(TUDA_NEON_A75)
 #include "aten/src/ATen/native/cpu/tuda/kernels/neon/MicroKernel_8x12.h"
@@ -313,9 +318,16 @@ static void sgemm(
     float beta,
     float* __restrict C, int64_t ldc
 ) {
-#ifdef PT_USE_EML_BLAS
+#if defined(PT_USE_EML_BLAS)
     // Use EML (Elbrus Math Library) optimized BLAS — VLIW-tuned, multi-threaded
     // EML cblas_sgemm on E8C2: 230-269 GFLOPS (vs ~10 GFLOPS our scalar)
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                (int)M, (int)N, (int)K,
+                alpha, A, (int)lda, B, (int)ldb,
+                beta, C, (int)ldc);
+    return;
+#elif defined(PT_USE_SYSTEM_BLAS)
+    // Use system BLAS (MKL, OpenBLAS) — highly optimized for x86 cache hierarchy
     cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
                 (int)M, (int)N, (int)K,
                 alpha, A, (int)lda, B, (int)ldb,
@@ -384,8 +396,14 @@ static void sgemm_nt(
     float beta,
     float* __restrict C, int64_t ldc
 ) {
-#ifdef PT_USE_EML_BLAS
+#if defined(PT_USE_EML_BLAS)
     // B is transposed: C = alpha * A @ B^T + beta * C
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                (int)M, (int)N, (int)K,
+                alpha, A, (int)lda, B, (int)ldb,
+                beta, C, (int)ldc);
+    return;
+#elif defined(PT_USE_SYSTEM_BLAS)
     cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
                 (int)M, (int)N, (int)K,
                 alpha, A, (int)lda, B, (int)ldb,

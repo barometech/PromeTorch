@@ -122,6 +122,18 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "e2k|elbrus")
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -leml_mt -lpthread")
 
     add_compile_definitions(TUDA_E2K PT_USE_EML_BLAS)
+
+    # NUMA support for multi-chip Elbrus (4-chip E8C2: 1840 GFLOPS with NUMA-aware GEMM)
+    # libnuma enables per-node memory allocation and thread pinning.
+    # Without NUMA: 4-chip E8C2 gets only 330 GFLOPS (worse than 1-chip 463 GFLOPS!)
+    # With NUMA: 4× node-local parallel = 1840 GFLOPS (linear scaling)
+    find_library(NUMA_LIB numa)
+    if(NUMA_LIB)
+        message(STATUS "  NUMA: ${NUMA_LIB} — NUMA-aware tiled GEMM enabled")
+        add_compile_definitions(PT_USE_NUMA)
+    else()
+        message(STATUS "  NUMA: not found — single-node EML BLAS only")
+    endif()
 endif()
 
 # ============================================================================
@@ -353,6 +365,35 @@ target_link_libraries(aten_cpu PUBLIC c10)
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "e2k|elbrus")
     target_compile_options(aten_cpu PRIVATE -O3 -ffast-math)
     target_link_libraries(aten_cpu PUBLIC eml_mt pthread)
+    # NUMA: link libnuma for NUMA-aware tiled GEMM on multi-chip systems
+    if(NUMA_LIB)
+        target_link_libraries(aten_cpu PUBLIC ${NUMA_LIB})
+    endif()
+endif()
+
+# On x86: try to find system BLAS (MKL, OpenBLAS) for optimized GEMM
+# MKL gives ~2-3x speedup over our AVX2 GEMM on Intel CPUs (cache tuning)
+if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "e2k|elbrus")
+    find_package(BLAS)
+    if(BLAS_FOUND)
+        message(STATUS "System BLAS found: ${BLAS_LIBRARIES}")
+        target_link_libraries(aten_cpu PUBLIC ${BLAS_LIBRARIES})
+        target_compile_definitions(aten_cpu PUBLIC PT_USE_SYSTEM_BLAS)
+        # Try to find cblas.h header
+        find_path(CBLAS_INCLUDE_DIR cblas.h
+            HINTS
+                ENV MKLROOT
+                ENV OpenBLAS_HOME
+                ENV BLAS_HOME
+            PATH_SUFFIXES include include/mkl include/openblas
+        )
+        if(CBLAS_INCLUDE_DIR)
+            message(STATUS "  cblas.h found at: ${CBLAS_INCLUDE_DIR}")
+            target_include_directories(aten_cpu PUBLIC ${CBLAS_INCLUDE_DIR})
+        endif()
+    else()
+        message(STATUS "System BLAS not found — using built-in AVX2 GEMM")
+    endif()
 endif()
 
 if(PT_USE_OPENMP)
@@ -981,5 +1022,10 @@ message(STATUS "  AVX2: ${PT_USE_AVX2}")
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "e2k|elbrus")
     message(STATUS "  Elbrus LTO: ON")
     message(STATUS "  EML BLAS: ON")
+    if(NUMA_LIB)
+        message(STATUS "  NUMA-aware GEMM: ON (${NUMA_LIB})")
+    else()
+        message(STATUS "  NUMA-aware GEMM: OFF (libnuma not found)")
+    endif()
 endif()
 message(STATUS "")

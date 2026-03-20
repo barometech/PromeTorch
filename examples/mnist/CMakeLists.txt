@@ -34,6 +34,23 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/train_mnist_cnn.cpp")
     endif()
 endif()
 
+# CNN Autograd Example
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/train_mnist_cnn_autograd.cpp")
+    add_executable(train_mnist_cnn_autograd train_mnist_cnn_autograd.cpp)
+    target_include_directories(train_mnist_cnn_autograd PRIVATE
+        ${PROJECT_SOURCE_DIR}
+        ${PROJECT_SOURCE_DIR}/aten/src
+    )
+    target_link_libraries(train_mnist_cnn_autograd PRIVATE c10 aten torch_autograd torch_nn torch_optim torch_data)
+    if(PT_USE_CUDA)
+        target_link_libraries(train_mnist_cnn_autograd PRIVATE aten_cuda ${CUDA_LIBRARIES})
+        target_compile_definitions(train_mnist_cnn_autograd PRIVATE PT_USE_CUDA)
+    endif()
+    if(MSVC)
+        target_link_options(train_mnist_cnn_autograd PRIVATE /STACK:10485760)
+    endif()
+endif()
+
 # Legacy train_mnist
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/train_mnist.cpp")
     add_executable(train_mnist train_mnist.cpp)

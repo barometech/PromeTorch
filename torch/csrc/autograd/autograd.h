@@ -114,7 +114,9 @@ inline variable_list AccumulateGrad::apply(variable_list&& grads) {
     }
 
     // Call hooks only if we have AutogradMetaImpl (hooks_ is not in base class)
-    auto* meta_impl = dynamic_cast<AutogradMetaImpl*>(raw_meta);
+    // Use type tag instead of dynamic_cast (saves ~20ns per call on x86 MSVC)
+    auto* meta_impl = raw_meta->is_autograd_meta_impl_
+                       ? static_cast<AutogradMetaImpl*>(raw_meta) : nullptr;
     if (meta_impl && !meta_impl->hooks_.empty()) {
         Tensor grad_tensor(raw_meta->grad_);
         for (auto& hook : meta_impl->hooks_) {
@@ -147,9 +149,9 @@ inline std::shared_ptr<Node> get_grad_accumulator(const Tensor& tensor) {
     // Use const_cast since we're only upgrading internal metadata
     Tensor& mutable_tensor = const_cast<Tensor&>(tensor);
 
-    // Check if we need to upgrade metadata
+    // Check if we need to upgrade metadata (type tag avoids dynamic_cast)
     auto* raw_meta = tensor.autograd_meta();
-    bool was_base = raw_meta && !dynamic_cast<AutogradMetaImpl*>(raw_meta);
+    bool was_base = raw_meta && !raw_meta->is_autograd_meta_impl_;
 
     auto* meta = ensure_autograd_meta_impl(mutable_tensor);
 

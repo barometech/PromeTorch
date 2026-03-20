@@ -414,7 +414,7 @@ inline edge_list collect_next_edges(const variable_list& tensors) {
 
     for (const auto& tensor : tensors) {
         if (tensor.defined() && tensor.requires_grad()) {
-            // Use dynamic_cast to safely check for AutogradMetaImpl
+            // Uses type tag (not dynamic_cast) to check for AutogradMetaImpl
             auto* meta = get_autograd_meta(tensor);
             if (meta && meta->grad_fn) {
                 edges.emplace_back(meta->grad_fn, meta->output_nr_);

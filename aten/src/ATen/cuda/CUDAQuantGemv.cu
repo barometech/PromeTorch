@@ -973,5 +973,711 @@ ATEN_CUDA_API void launch_cublas_hgemv(
     );
 }
 
+// ============================================================================
+// Fused QKV GEMV — THREE GEMVs in a single kernel launch
+// ============================================================================
+// Q, K, V projections share the same input vector x. Loading x into shared
+// memory once and computing all three outputs saves 2 kernel launches and
+// 2 shared memory loads of x per layer. This targets the 57% qkv_proj
+// bottleneck directly.
+//
+// Strategy: concatenate Q/K/V rows into a single virtual [N_total, K] matrix.
+// Each warp processes one output row. blockIdx.x * warps_per_block + warp_id
+// determines which row (and thus which output — Q, K, or V).
+
+__global__ void q4km_fused_qkv_gemv_kernel(
+    const uint8_t* __restrict__ w_q,
+    const uint8_t* __restrict__ w_k,
+    const uint8_t* __restrict__ w_v,
+    const float* __restrict__ x,
+    float* __restrict__ out_q,
+    float* __restrict__ out_k,
+    float* __restrict__ out_v,
+    int K, int N_q, int N_k, int N_v,
+    int64_t row_stride_bytes)
+{
+    extern __shared__ float x_shared[];
+
+    const int tid = threadIdx.x;
+    const int block_size = blockDim.x;
+    const int warps_per_block = block_size / 32;
+    const int warp_id = tid / 32;
+    const int lane = tid & 31;
+
+    // Load x into shared memory ONCE (shared across all 3 projections)
+    for (int k = tid; k < K; k += block_size) {
+        x_shared[k] = x[k];
+    }
+    __syncthreads();
+
+    const int group = lane / 8;
+    const int pos = (lane & 7) * 4;
+    const int num_blocks_per_row = K / 256;
+    const int N_total = N_q + N_k + N_v;
+
+    // Grid-stride loop over all Q, K, V rows
+    for (int base_n = blockIdx.x * warps_per_block; base_n < N_total;
+         base_n += gridDim.x * warps_per_block)
+    {
+        int n = base_n + warp_id;
+        if (n >= N_total) continue;
+
+        // Determine which weight matrix and output buffer
+        const uint8_t* weights;
+        float* y_out;
+        int row_idx;
+        if (n < N_q) {
+            weights = w_q;
+            y_out = out_q;
+            row_idx = n;
+        } else if (n < N_q + N_k) {
+            weights = w_k;
+            y_out = out_k;
+            row_idx = n - N_q;
+        } else {
+            weights = w_v;
+            y_out = out_v;
+            row_idx = n - N_q - N_k;
+        }
+
+        const uint8_t* row_data = weights + (int64_t)row_idx * row_stride_bytes;
+        float sum = 0.0f;
+
+        for (int blk = 0; blk < num_blocks_per_row; ++blk) {
+            const uint8_t* bp = row_data + blk * 144;
+
+            uint16_t d_bits, dmin_bits;
+            memcpy(&d_bits, bp, 2);
+            memcpy(&dmin_bits, bp + 2, 2);
+            const float d = fp16_to_fp32_device(d_bits);
+            const float dm = fp16_to_fp32_device(dmin_bits);
+
+            uint8_t sc_lo, m_lo, sc_hi, m_hi;
+            get_scale_min_k4_device(group * 2, bp + 4, &sc_lo, &m_lo);
+            get_scale_min_k4_device(group * 2 + 1, bp + 4, &sc_hi, &m_hi);
+
+            uint32_t qs4;
+            memcpy(&qs4, bp + 16 + lane * 4, 4);
+
+            float dl = d * sc_lo, ml = dm * m_lo;
+            float dh = d * sc_hi, mh = dm * m_hi;
+
+            const int k_base = blk * 256 + group * 64 + pos;
+            const float4 x_lo = *reinterpret_cast<const float4*>(&x_shared[k_base]);
+            const float4 x_hi = *reinterpret_cast<const float4*>(&x_shared[k_base + 32]);
+
+            sum += (dl * (float)( qs4        & 0xF) - ml) * x_lo.x;
+            sum += (dl * (float)((qs4 >>  8) & 0xF) - ml) * x_lo.y;
+            sum += (dl * (float)((qs4 >> 16) & 0xF) - ml) * x_lo.z;
+            sum += (dl * (float)((qs4 >> 24) & 0xF) - ml) * x_lo.w;
+            sum += (dh * (float)((qs4 >>  4) & 0xF) - mh) * x_hi.x;
+            sum += (dh * (float)((qs4 >> 12) & 0xF) - mh) * x_hi.y;
+            sum += (dh * (float)((qs4 >> 20) & 0xF) - mh) * x_hi.z;
+            sum += (dh * (float)((qs4 >> 28) & 0xF) - mh) * x_hi.w;
+        }
+
+        // Warp shuffle reduction
+        #pragma unroll
+        for (int offset = 16; offset > 0; offset >>= 1) {
+            sum += __shfl_down_sync(0xffffffff, sum, offset);
+        }
+        if (lane == 0) y_out[row_idx] = sum;
+    }
+}
+
+ATEN_CUDA_API void launch_q4km_fused_qkv_gemv(
+    const void* w_q, const void* w_k, const void* w_v,
+    const float* x, float* out_q, float* out_k, float* out_v,
+    int K, int N_q, int N_k, int N_v,
+    int64_t row_stride_bytes,
+    cudaStream_t stream)
+{
+    int device = 0;
+    cudaGetDevice(&device);
+    int sm_count = 0;
+    cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, device);
+
+    const int WARPS = 8;
+    const int BLOCK_SIZE = WARPS * 32;
+    int grid = sm_count * 2;
+    int smem_bytes = K * sizeof(float);
+
+    if (smem_bytes > 48 * 1024) {
+        cudaFuncSetAttribute(q4km_fused_qkv_gemv_kernel,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
+    }
+
+    q4km_fused_qkv_gemv_kernel<<<grid, BLOCK_SIZE, smem_bytes, stream>>>(
+        static_cast<const uint8_t*>(w_q),
+        static_cast<const uint8_t*>(w_k),
+        static_cast<const uint8_t*>(w_v),
+        x, out_q, out_k, out_v,
+        K, N_q, N_k, N_v,
+        row_stride_bytes);
+}
+
+// ============================================================================
+// Fused RMSNorm + Q4_K GEMV — Normalize x, then use it for GEMV
+// ============================================================================
+// Eliminates a separate RMSNorm kernel launch + a global memory round-trip.
+// Step 1: Load x into shared memory, compute RMS norm in-place.
+// Step 2: Use normalized x_shared for GEMV (same as persistent kernel).
+// This saves 1 kernel launch + 2 * hidden_size * sizeof(float) bandwidth/layer.
+
+__global__ void q4km_fused_rmsnorm_gemv_kernel(
+    const float* __restrict__ x,
+    const float* __restrict__ norm_weight,
+    const uint8_t* __restrict__ weights,
+    float* __restrict__ y,
+    int K, int N,
+    int64_t row_stride_bytes,
+    float eps, bool add_one)
+{
+    extern __shared__ float x_shared[];
+    // x_shared[0..K-1] = normalized x
+    // x_shared[K..K+blockDim.x-1] = reduction scratch
+
+    const int tid = threadIdx.x;
+    const int block_size = blockDim.x;
+    const int warps_per_block = block_size / 32;
+    const int warp_id = tid / 32;
+    const int lane = tid & 31;
+
+    float* reduce_buf = x_shared + K;
+
+    // Step 1: Load x into shared memory
+    for (int k = tid; k < K; k += block_size) {
+        x_shared[k] = x[k];
+    }
+    __syncthreads();
+
+    // Step 2: Compute sum of squares (parallel reduction)
+    float local_sum_sq = 0.0f;
+    for (int k = tid; k < K; k += block_size) {
+        float val = x_shared[k];
+        local_sum_sq += val * val;
+    }
+    reduce_buf[tid] = local_sum_sq;
+    __syncthreads();
+
+    for (int s = block_size / 2; s > 0; s >>= 1) {
+        if (tid < s) reduce_buf[tid] += reduce_buf[tid + s];
+        __syncthreads();
+    }
+
+    float rms_inv = rsqrtf(reduce_buf[0] / K + eps);
+
+    // Step 3: Apply RMSNorm in-place in shared memory
+    for (int k = tid; k < K; k += block_size) {
+        float w = add_one ? (1.0f + norm_weight[k]) : norm_weight[k];
+        x_shared[k] = x_shared[k] * rms_inv * w;
+    }
+    __syncthreads();
+
+    // Step 4: GEMV using normalized x_shared (same as persistent kernel)
+    const int group = lane / 8;
+    const int pos = (lane & 7) * 4;
+    const int num_blocks_per_row = K / 256;
+
+    for (int base_n = blockIdx.x * warps_per_block; base_n < N;
+         base_n += gridDim.x * warps_per_block)
+    {
+        int n = base_n + warp_id;
+        if (n >= N) continue;
+
+        const uint8_t* row_data = weights + (int64_t)n * row_stride_bytes;
+        float sum = 0.0f;
+
+        for (int blk = 0; blk < num_blocks_per_row; ++blk) {
+            const uint8_t* bp = row_data + blk * 144;
+
+            uint16_t d_bits, dmin_bits;
+            memcpy(&d_bits, bp, 2);
+            memcpy(&dmin_bits, bp + 2, 2);
+            const float d = fp16_to_fp32_device(d_bits);
+            const float dm = fp16_to_fp32_device(dmin_bits);
+
+            uint8_t sc_lo, m_lo, sc_hi, m_hi;
+            get_scale_min_k4_device(group * 2, bp + 4, &sc_lo, &m_lo);
+            get_scale_min_k4_device(group * 2 + 1, bp + 4, &sc_hi, &m_hi);
+
+            uint32_t qs4;
+            memcpy(&qs4, bp + 16 + lane * 4, 4);
+
+            float dl = d * sc_lo, ml = dm * m_lo;
+            float dh = d * sc_hi, mh = dm * m_hi;
+
+            const int k_base = blk * 256 + group * 64 + pos;
+            const float4 x_lo = *reinterpret_cast<const float4*>(&x_shared[k_base]);
+            const float4 x_hi = *reinterpret_cast<const float4*>(&x_shared[k_base + 32]);
+
+            sum += (dl * (float)( qs4        & 0xF) - ml) * x_lo.x;
+            sum += (dl * (float)((qs4 >>  8) & 0xF) - ml) * x_lo.y;
+            sum += (dl * (float)((qs4 >> 16) & 0xF) - ml) * x_lo.z;
+            sum += (dl * (float)((qs4 >> 24) & 0xF) - ml) * x_lo.w;
+            sum += (dh * (float)((qs4 >>  4) & 0xF) - mh) * x_hi.x;
+            sum += (dh * (float)((qs4 >> 12) & 0xF) - mh) * x_hi.y;
+            sum += (dh * (float)((qs4 >> 20) & 0xF) - mh) * x_hi.z;
+            sum += (dh * (float)((qs4 >> 28) & 0xF) - mh) * x_hi.w;
+        }
+
+        #pragma unroll
+        for (int offset = 16; offset > 0; offset >>= 1) {
+            sum += __shfl_down_sync(0xffffffff, sum, offset);
+        }
+        if (lane == 0) y[n] = sum;
+    }
+}
+
+ATEN_CUDA_API void launch_q4km_fused_rmsnorm_gemv(
+    const float* x, const float* norm_weight,
+    const void* weights, float* y,
+    int K, int N, int64_t row_stride_bytes,
+    float eps, bool add_one,
+    cudaStream_t stream)
+{
+    int device = 0;
+    cudaGetDevice(&device);
+    int sm_count = 0;
+    cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, device);
+
+    const int WARPS = 8;
+    const int BLOCK_SIZE = WARPS * 32;
+    int grid = sm_count * 2;
+    // Shared: K floats for x + BLOCK_SIZE floats for reduction
+    int smem_bytes = (K + BLOCK_SIZE) * sizeof(float);
+
+    if (smem_bytes > 48 * 1024) {
+        cudaFuncSetAttribute(q4km_fused_rmsnorm_gemv_kernel,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
+    }
+
+    q4km_fused_rmsnorm_gemv_kernel<<<grid, BLOCK_SIZE, smem_bytes, stream>>>(
+        x, norm_weight,
+        static_cast<const uint8_t*>(weights), y,
+        K, N, row_stride_bytes,
+        eps, add_one);
+}
+
+// ============================================================================
+// Fused RMSNorm + QKV GEMV — Normalize x, then compute Q, K, V in one kernel
+// ============================================================================
+// Combines fused_rmsnorm_gemv + fused_qkv_gemv: a single kernel that
+// normalizes x and produces all 3 attention projections.
+// Saves: 1 RMSNorm launch + 2 GEMV launches + 3 shared memory x loads = 4 launches/layer.
+
+__global__ void q4km_fused_rmsnorm_qkv_gemv_kernel(
+    const float* __restrict__ x,
+    const float* __restrict__ norm_weight,
+    const uint8_t* __restrict__ w_q,
+    const uint8_t* __restrict__ w_k,
+    const uint8_t* __restrict__ w_v,
+    float* __restrict__ out_q,
+    float* __restrict__ out_k,
+    float* __restrict__ out_v,
+    int K, int N_q, int N_k, int N_v,
+    int64_t row_stride_bytes,
+    float eps, bool add_one)
+{
+    extern __shared__ float x_shared[];
+    float* reduce_buf = x_shared + K;
+
+    const int tid = threadIdx.x;
+    const int block_size = blockDim.x;
+    const int warps_per_block = block_size / 32;
+    const int warp_id = tid / 32;
+    const int lane = tid & 31;
+
+    // Step 1: Load x into shared memory
+    for (int k = tid; k < K; k += block_size) {
+        x_shared[k] = x[k];
+    }
+    __syncthreads();
+
+    // Step 2: Compute sum of squares
+    float local_sum_sq = 0.0f;
+    for (int k = tid; k < K; k += block_size) {
+        float val = x_shared[k];
+        local_sum_sq += val * val;
+    }
+    reduce_buf[tid] = local_sum_sq;
+    __syncthreads();
+
+    for (int s = block_size / 2; s > 0; s >>= 1) {
+        if (tid < s) reduce_buf[tid] += reduce_buf[tid + s];
+        __syncthreads();
+    }
+
+    float rms_inv = rsqrtf(reduce_buf[0] / K + eps);
+
+    // Step 3: Apply RMSNorm in-place in shared memory
+    for (int k = tid; k < K; k += block_size) {
+        float w = add_one ? (1.0f + norm_weight[k]) : norm_weight[k];
+        x_shared[k] = x_shared[k] * rms_inv * w;
+    }
+    __syncthreads();
+
+    // Step 4: Fused QKV GEMV using normalized x_shared
+    const int group = lane / 8;
+    const int pos = (lane & 7) * 4;
+    const int num_blocks_per_row = K / 256;
+    const int N_total = N_q + N_k + N_v;
+
+    for (int base_n = blockIdx.x * warps_per_block; base_n < N_total;
+         base_n += gridDim.x * warps_per_block)
+    {
+        int n = base_n + warp_id;
+        if (n >= N_total) continue;
+
+        const uint8_t* w_ptr;
+        float* y_out;
+        int row_idx;
+        if (n < N_q) {
+            w_ptr = w_q; y_out = out_q; row_idx = n;
+        } else if (n < N_q + N_k) {
+            w_ptr = w_k; y_out = out_k; row_idx = n - N_q;
+        } else {
+            w_ptr = w_v; y_out = out_v; row_idx = n - N_q - N_k;
+        }
+
+        const uint8_t* row_data = w_ptr + (int64_t)row_idx * row_stride_bytes;
+        float sum = 0.0f;
+
+        for (int blk = 0; blk < num_blocks_per_row; ++blk) {
+            const uint8_t* bp = row_data + blk * 144;
+
+            uint16_t d_bits, dmin_bits;
+            memcpy(&d_bits, bp, 2);
+            memcpy(&dmin_bits, bp + 2, 2);
+            const float d = fp16_to_fp32_device(d_bits);
+            const float dm = fp16_to_fp32_device(dmin_bits);
+
+            uint8_t sc_lo, m_lo, sc_hi, m_hi;
+            get_scale_min_k4_device(group * 2, bp + 4, &sc_lo, &m_lo);
+            get_scale_min_k4_device(group * 2 + 1, bp + 4, &sc_hi, &m_hi);
+
+            uint32_t qs4;
+            memcpy(&qs4, bp + 16 + lane * 4, 4);
+
+            float dl = d * sc_lo, ml = dm * m_lo;
+            float dh = d * sc_hi, mh = dm * m_hi;
+
+            const int k_base = blk * 256 + group * 64 + pos;
+            const float4 x_lo = *reinterpret_cast<const float4*>(&x_shared[k_base]);
+            const float4 x_hi = *reinterpret_cast<const float4*>(&x_shared[k_base + 32]);
+
+            sum += (dl * (float)( qs4        & 0xF) - ml) * x_lo.x;
+            sum += (dl * (float)((qs4 >>  8) & 0xF) - ml) * x_lo.y;
+            sum += (dl * (float)((qs4 >> 16) & 0xF) - ml) * x_lo.z;
+            sum += (dl * (float)((qs4 >> 24) & 0xF) - ml) * x_lo.w;
+            sum += (dh * (float)((qs4 >>  4) & 0xF) - mh) * x_hi.x;
+            sum += (dh * (float)((qs4 >> 12) & 0xF) - mh) * x_hi.y;
+            sum += (dh * (float)((qs4 >> 20) & 0xF) - mh) * x_hi.z;
+            sum += (dh * (float)((qs4 >> 28) & 0xF) - mh) * x_hi.w;
+        }
+
+        #pragma unroll
+        for (int offset = 16; offset > 0; offset >>= 1) {
+            sum += __shfl_down_sync(0xffffffff, sum, offset);
+        }
+        if (lane == 0) y_out[row_idx] = sum;
+    }
+}
+
+ATEN_CUDA_API void launch_q4km_fused_rmsnorm_qkv_gemv(
+    const float* x, const float* norm_weight,
+    const void* w_q, const void* w_k, const void* w_v,
+    float* out_q, float* out_k, float* out_v,
+    int K, int N_q, int N_k, int N_v,
+    int64_t row_stride_bytes,
+    float eps, bool add_one,
+    cudaStream_t stream)
+{
+    int device = 0;
+    cudaGetDevice(&device);
+    int sm_count = 0;
+    cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, device);
+
+    const int WARPS = 8;
+    const int BLOCK_SIZE = WARPS * 32;
+    int grid = sm_count * 2;
+    int smem_bytes = (K + BLOCK_SIZE) * sizeof(float);
+
+    if (smem_bytes > 48 * 1024) {
+        cudaFuncSetAttribute(q4km_fused_rmsnorm_qkv_gemv_kernel,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
+    }
+
+    q4km_fused_rmsnorm_qkv_gemv_kernel<<<grid, BLOCK_SIZE, smem_bytes, stream>>>(
+        x, norm_weight,
+        static_cast<const uint8_t*>(w_q),
+        static_cast<const uint8_t*>(w_k),
+        static_cast<const uint8_t*>(w_v),
+        out_q, out_k, out_v,
+        K, N_q, N_k, N_v,
+        row_stride_bytes,
+        eps, add_one);
+}
+
+// ============================================================================
+// GEMV with beta=1 accumulate — y[n] += sum_k dequant(W[n,k]) * x[k]
+// ============================================================================
+// Used for output_proj: residual[i] += W @ attn_out[i]
+// Eliminates the separate residual_add kernel launch.
+
+__global__ void q4km_persistent_gemv_accumulate_kernel(
+    const uint8_t* __restrict__ weights,
+    const float* __restrict__ x,
+    float* __restrict__ y,  // read-modify-write (y += W@x)
+    int K, int N,
+    int64_t row_stride_bytes)
+{
+    extern __shared__ float x_shared[];
+
+    const int tid = threadIdx.x;
+    const int block_size = blockDim.x;
+    const int warps_per_block = block_size / 32;
+    const int warp_id = tid / 32;
+    const int lane = tid & 31;
+
+    // Load x into shared memory ONCE
+    for (int k = tid; k < K; k += block_size) {
+        x_shared[k] = x[k];
+    }
+    __syncthreads();
+
+    const int group = lane / 8;
+    const int pos = (lane & 7) * 4;
+    const int num_blocks_per_row = K / 256;
+
+    for (int base_n = blockIdx.x * warps_per_block; base_n < N;
+         base_n += gridDim.x * warps_per_block)
+    {
+        int n = base_n + warp_id;
+        if (n >= N) continue;
+
+        const uint8_t* row_data = weights + (int64_t)n * row_stride_bytes;
+        float sum = 0.0f;
+
+        for (int blk = 0; blk < num_blocks_per_row; ++blk) {
+            const uint8_t* bp = row_data + blk * 144;
+
+            uint16_t d_bits, dmin_bits;
+            memcpy(&d_bits, bp, 2);
+            memcpy(&dmin_bits, bp + 2, 2);
+            const float d = fp16_to_fp32_device(d_bits);
+            const float dm = fp16_to_fp32_device(dmin_bits);
+
+            uint8_t sc_lo, m_lo, sc_hi, m_hi;
+            get_scale_min_k4_device(group * 2, bp + 4, &sc_lo, &m_lo);
+            get_scale_min_k4_device(group * 2 + 1, bp + 4, &sc_hi, &m_hi);
+
+            uint32_t qs4;
+            memcpy(&qs4, bp + 16 + lane * 4, 4);
+
+            float dl = d * sc_lo, ml = dm * m_lo;
+            float dh = d * sc_hi, mh = dm * m_hi;
+
+            const int k_base = blk * 256 + group * 64 + pos;
+            const float4 x_lo = *reinterpret_cast<const float4*>(&x_shared[k_base]);
+            const float4 x_hi = *reinterpret_cast<const float4*>(&x_shared[k_base + 32]);
+
+            sum += (dl * (float)( qs4        & 0xF) - ml) * x_lo.x;
+            sum += (dl * (float)((qs4 >>  8) & 0xF) - ml) * x_lo.y;
+            sum += (dl * (float)((qs4 >> 16) & 0xF) - ml) * x_lo.z;
+            sum += (dl * (float)((qs4 >> 24) & 0xF) - ml) * x_lo.w;
+            sum += (dh * (float)((qs4 >>  4) & 0xF) - mh) * x_hi.x;
+            sum += (dh * (float)((qs4 >> 12) & 0xF) - mh) * x_hi.y;
+            sum += (dh * (float)((qs4 >> 20) & 0xF) - mh) * x_hi.z;
+            sum += (dh * (float)((qs4 >> 28) & 0xF) - mh) * x_hi.w;
+        }
+
+        #pragma unroll
+        for (int offset = 16; offset > 0; offset >>= 1) {
+            sum += __shfl_down_sync(0xffffffff, sum, offset);
+        }
+        if (lane == 0) y[n] += sum;  // ACCUMULATE, not overwrite
+    }
+}
+
+ATEN_CUDA_API void launch_q4km_persistent_gemv_accumulate(
+    const void* weights, const float* x, float* y,
+    int K, int N, int64_t row_stride_bytes,
+    cudaStream_t stream)
+{
+    int device = 0;
+    cudaGetDevice(&device);
+    int sm_count = 0;
+    cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, device);
+
+    const int WARPS = 8;
+    const int BLOCK_SIZE = WARPS * 32;
+    int grid = sm_count * 2;
+    int smem_bytes = K * sizeof(float);
+
+    if (smem_bytes > 48 * 1024) {
+        cudaFuncSetAttribute(q4km_persistent_gemv_accumulate_kernel,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
+    }
+
+    q4km_persistent_gemv_accumulate_kernel<<<grid, BLOCK_SIZE, smem_bytes, stream>>>(
+        static_cast<const uint8_t*>(weights), x, y,
+        K, N, row_stride_bytes);
+}
+
+// ============================================================================
+// Fused RMSNorm + Gate+Up GEMV — Normalize x, then compute gate and up
+// ============================================================================
+// Same pattern as fused_rmsnorm_qkv but for FFN path.
+// Saves: 1 RMSNorm launch + 1 GEMV launch + 2 shared memory x loads.
+
+__global__ void q4km_fused_rmsnorm_gate_up_kernel(
+    const float* __restrict__ x,
+    const float* __restrict__ norm_weight,
+    const uint8_t* __restrict__ w_gate,
+    const uint8_t* __restrict__ w_up,
+    float* __restrict__ y_gate,
+    float* __restrict__ y_up,
+    int K, int N_gate, int N_up,
+    int64_t row_stride_bytes,
+    float eps, bool add_one)
+{
+    extern __shared__ float x_shared[];
+    float* reduce_buf = x_shared + K;
+
+    const int tid = threadIdx.x;
+    const int block_size = blockDim.x;
+    const int warps_per_block = block_size / 32;
+    const int warp_id = tid / 32;
+    const int lane = tid & 31;
+
+    // Step 1: Load x into shared memory
+    for (int k = tid; k < K; k += block_size) {
+        x_shared[k] = x[k];
+    }
+    __syncthreads();
+
+    // Step 2: Compute sum of squares
+    float local_sum_sq = 0.0f;
+    for (int k = tid; k < K; k += block_size) {
+        float val = x_shared[k];
+        local_sum_sq += val * val;
+    }
+    reduce_buf[tid] = local_sum_sq;
+    __syncthreads();
+
+    for (int s = block_size / 2; s > 0; s >>= 1) {
+        if (tid < s) reduce_buf[tid] += reduce_buf[tid + s];
+        __syncthreads();
+    }
+
+    float rms_inv = rsqrtf(reduce_buf[0] / K + eps);
+
+    // Step 3: Apply RMSNorm in-place
+    for (int k = tid; k < K; k += block_size) {
+        float w = add_one ? (1.0f + norm_weight[k]) : norm_weight[k];
+        x_shared[k] = x_shared[k] * rms_inv * w;
+    }
+    __syncthreads();
+
+    // Step 4: Fused gate+up GEMV
+    const int group = lane / 8;
+    const int pos = (lane & 7) * 4;
+    const int num_blocks_per_row = K / 256;
+    const int N_total = N_gate + N_up;
+
+    for (int base_n = blockIdx.x * warps_per_block; base_n < N_total;
+         base_n += gridDim.x * warps_per_block)
+    {
+        int n = base_n + warp_id;
+        if (n >= N_total) continue;
+
+        const uint8_t* w_ptr;
+        float* y_out;
+        int row_idx;
+        if (n < N_gate) {
+            w_ptr = w_gate; y_out = y_gate; row_idx = n;
+        } else {
+            w_ptr = w_up; y_out = y_up; row_idx = n - N_gate;
+        }
+
+        const uint8_t* row_data = w_ptr + (int64_t)row_idx * row_stride_bytes;
+        float sum = 0.0f;
+
+        for (int blk = 0; blk < num_blocks_per_row; ++blk) {
+            const uint8_t* bp = row_data + blk * 144;
+
+            uint16_t d_bits, dmin_bits;
+            memcpy(&d_bits, bp, 2);
+            memcpy(&dmin_bits, bp + 2, 2);
+            const float d = fp16_to_fp32_device(d_bits);
+            const float dm = fp16_to_fp32_device(dmin_bits);
+
+            uint8_t sc_lo, m_lo, sc_hi, m_hi;
+            get_scale_min_k4_device(group * 2, bp + 4, &sc_lo, &m_lo);
+            get_scale_min_k4_device(group * 2 + 1, bp + 4, &sc_hi, &m_hi);
+
+            uint32_t qs4;
+            memcpy(&qs4, bp + 16 + lane * 4, 4);
+
+            float dl = d * sc_lo, ml = dm * m_lo;
+            float dh = d * sc_hi, mh = dm * m_hi;
+
+            const int k_base = blk * 256 + group * 64 + pos;
+            const float4 x_lo = *reinterpret_cast<const float4*>(&x_shared[k_base]);
+            const float4 x_hi = *reinterpret_cast<const float4*>(&x_shared[k_base + 32]);
+
+            sum += (dl * (float)( qs4        & 0xF) - ml) * x_lo.x;
+            sum += (dl * (float)((qs4 >>  8) & 0xF) - ml) * x_lo.y;
+            sum += (dl * (float)((qs4 >> 16) & 0xF) - ml) * x_lo.z;
+            sum += (dl * (float)((qs4 >> 24) & 0xF) - ml) * x_lo.w;
+            sum += (dh * (float)((qs4 >>  4) & 0xF) - mh) * x_hi.x;
+            sum += (dh * (float)((qs4 >> 12) & 0xF) - mh) * x_hi.y;
+            sum += (dh * (float)((qs4 >> 20) & 0xF) - mh) * x_hi.z;
+            sum += (dh * (float)((qs4 >> 28) & 0xF) - mh) * x_hi.w;
+        }
+
+        #pragma unroll
+        for (int offset = 16; offset > 0; offset >>= 1) {
+            sum += __shfl_down_sync(0xffffffff, sum, offset);
+        }
+        if (lane == 0) y_out[row_idx] = sum;
+    }
+}
+
+ATEN_CUDA_API void launch_q4km_fused_rmsnorm_gate_up_gemv(
+    const float* x, const float* norm_weight,
+    const void* w_gate, const void* w_up,
+    float* y_gate, float* y_up,
+    int K, int N_gate, int N_up,
+    int64_t row_stride_bytes,
+    float eps, bool add_one,
+    cudaStream_t stream)
+{
+    int device = 0;
+    cudaGetDevice(&device);
+    int sm_count = 0;
+    cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, device);
+
+    const int WARPS = 8;
+    const int BLOCK_SIZE = WARPS * 32;
+    int grid = sm_count * 2;
+    int smem_bytes = (K + BLOCK_SIZE) * sizeof(float);
+
+    if (smem_bytes > 48 * 1024) {
+        cudaFuncSetAttribute(q4km_fused_rmsnorm_gate_up_kernel,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
+    }
+
+    q4km_fused_rmsnorm_gate_up_kernel<<<grid, BLOCK_SIZE, smem_bytes, stream>>>(
+        x, norm_weight,
+        static_cast<const uint8_t*>(w_gate),
+        static_cast<const uint8_t*>(w_up),
+        y_gate, y_up,
+        K, N_gate, N_up,
+        row_stride_bytes,
+        eps, add_one);
+}
+
 } // namespace cuda
 } // namespace at
