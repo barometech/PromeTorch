@@ -1353,3 +1353,14 @@ Layer efficiency: L0=6.69x, L1=5.54x, L2=2.16x, L3=1.34x — все ACTIVE.
 **Python API:** +2403 строк — cumsum, einsum, clamp, topk, sort, from_numpy, zeros_like, AdamW, compile(no-op), amp, nn.Module pure-Python, nn.init.orthogonal_.
 **_C.pyd:** собран (2MB), но DLL load issue на Windows сохраняется (preexisting).
 **Нужно:** тестировать на Эльбрусе через Python (Python 3.11 + LCC + pip install).
+
+### 🔥 PromeTorch Python API НА ЭЛЬБРУСЕ — РАБОТАЕТ! 🔥
+
+_C.cpython-311-e2k-linux-gnu.so (14MB) собран через LCC 1.29 + Ninja.
+randn, zeros, mm, Linear — всё работает нативно на E8C2.
+
+LCC fixes:
+- PT_CHECK variadic → explicit if/throw
+- omp parallel с throw → удалён (30 pragmas в nn modules)
+
+Следующий шаг: запустить PROMEPIR.py на Эльбрусе через PromeTorch.
