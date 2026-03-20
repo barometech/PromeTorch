@@ -288,6 +288,80 @@ void fused_gelu(const float* x, float* out, int64_t n);
 // Fills the declared-but-unimplemented bias_gelu_fused from above
 // (implementation shared, declaration already present)
 
+// ============================================================================
+// INFERENCE FUSIONS — CPU decode hot path (forward_decode_cpu)
+// ============================================================================
+
+// Fusion 1: GEMV + residual add (accumulate into x_next instead of h_buf + add)
+// Eliminates: intermediate h_buf write + separate x_next = x + h AVX2 pass
+// y[i] = x_residual[i] + dot(W[i,:], src)  for i in [0, N)
+// Instead of:  gemv(W, src, h_buf);  x_next = x + h_buf
+// We do:       gemv_residual_add(W, src, x, x_next)
+void gemv_residual_add(const float* W, int64_t N, int64_t K,
+                       const float* src, const float* x_residual,
+                       float* x_out);
+
+// Fusion 2: Final RMSNorm + output GEMV + argmax (skip full logits store)
+// Eliminates: logits_buf write + separate argmax pass over vocab_size elements
+// Returns argmax token id and writes logits only if logits_out != nullptr
+// x is [H], norm_w is [H], output_weight is [V, H]
+// This avoids writing V floats and re-reading them for argmax
+int32_t fused_rmsnorm_gemv_argmax(const float* x, const float* norm_w,
+                                   float eps, bool add_one, int64_t H,
+                                   const float* output_weight, int64_t V,
+                                   float* logits_out);
+
+// Fusion 3: Softmax for attention already done inline in forward_decode_cpu
+// (QK dot + scale + softmax + V weighted sum is one function per head)
+// softmax_fused and residual_layernorm_fused declared above — implementations added to .cpp
+
+// ============================================================================
+// TRAINING FUSIONS — eliminate redundant passes in training loop
+// ============================================================================
+
+// Fusion 4: AdamW single-pass step (decoupled weight decay + Adam in one loop)
+// Current code: param *= (1 - lr*wd); then adam_step_loop (two passes over param)
+// Fused: single pass does both weight decay and Adam update per element
+void fused_adamw_step(float* param, const float* grad,
+                      float* exp_avg, float* exp_avg_sq,
+                      int64_t n, float lr, float beta1, float beta2,
+                      float eps, float weight_decay,
+                      float bc1, float bc2);
+
+// Fusion 5: Fused multi-parameter AdamW (like fused_adam_multi but with
+// decoupled weight decay built in — no separate mul_ pass)
+struct AdamWParamPack {
+    float* param;
+    const float* grad;
+    float* exp_avg;
+    float* exp_avg_sq;
+    int64_t numel;
+};
+
+void fused_adamw_multi(AdamWParamPack* params, int num_params,
+                       float lr, float beta1, float beta2, float eps,
+                       float weight_decay, int step);
+
+// Fusion 6: zero_grad + set_to_none — memset all grad buffers in one call
+// Eliminates per-parameter function call overhead and improves cache locality
+// for the common pattern: optimizer.zero_grad() before backward()
+struct GradBufPack {
+    float* grad_data;
+    int64_t numel;
+};
+void fused_zero_grad_multi(GradBufPack* bufs, int num_bufs);
+
+// Fusion 7: Fused RoPE (precomputed sin/cos table, AVX2)
+// Current code computes pow() + sin() + cos() per dimension per token
+// Precompute table once, then apply with FMA
+void rope_apply_fused(float* q, float* k,
+                      const float* cos_table, const float* sin_table,
+                      int64_t n_heads, int64_t n_kv_heads, int64_t head_dim);
+
+// Precompute RoPE table for a given position
+void rope_precompute(float* cos_out, float* sin_out,
+                     int64_t pos, int64_t head_dim, float freq_base);
+
 } // namespace hot
 } // namespace native
 } // namespace at

@@ -2034,6 +2034,274 @@ public:
         return logits;
     }
 
+    // ========================================================================
+    // Speculative CPU decode: skip full output GEMV, use low-rank + exact top-k
+    // Returns token ID directly (greedy). Much faster for large vocab models.
+    // Only call when use_speculative_output_ is true and greedy decode.
+    // ========================================================================
+    int32_t forward_decode_cpu_speculative(int64_t token_id) {
+        int64_t H = config.hidden_size;
+        int64_t q_dim = config.num_heads * config.head_dim;
+        int64_t kv_dim = config.num_kv_heads * config.head_dim;
+        int64_t n_heads = config.num_heads;
+        int64_t n_kv_heads = config.num_kv_heads;
+        int64_t head_dim = config.head_dim;
+        int64_t inter = config.intermediate_size;
+        int64_t past_len = kv_cache.seq_len;
+        float eps = config.rms_norm_eps;
+        bool add_one = config.gemma_norm_add_one;
+        int64_t heads_per_group = n_heads / n_kv_heads;
+
+        if (!cpu_scratch_.allocated) {
+            int64_t max_seq = kv_cache.max_seq > 0 ? kv_cache.max_seq : 4096;
+            cpu_scratch_.allocate(config, max_seq);
+        }
+
+        auto& sp = cpu_scratch_;
+        int cur = 0;
+
+        // 1. Embedding lookup
+        const float* emb_table = token_embedding.data_ptr<float>();
+        std::memcpy(sp.x_buf[cur], emb_table + token_id * H, H * sizeof(float));
+
+        if (config.scale_embeddings) {
+            float scale = std::sqrt(static_cast<float>(H));
+            for (int64_t j = 0; j < H; ++j) sp.x_buf[cur][j] *= scale;
+        }
+
+        // 2. Run all transformer layers (same logic as forward_decode_cpu)
+        for (int64_t i = 0; i < config.num_layers; ++i) {
+            auto& layer = layers[i];
+            float* x_ptr = sp.x_buf[cur];
+
+            // Fused RMSNorm + QKV
+            bool can_fuse = use_quant_gemv_ &&
+                layer.q_attn_q.valid && layer.q_attn_k.valid && layer.q_attn_v.valid &&
+                layer.q_attn_q.cpu_data && layer.q_attn_k.cpu_data && layer.q_attn_v.cpu_data &&
+                cpu_quant::cpu_quant_gemv_supported(layer.q_attn_q.quant_type) &&
+                layer.q_attn_q.quant_type == layer.q_attn_k.quant_type &&
+                layer.q_attn_q.quant_type == layer.q_attn_v.quant_type &&
+                layer.q_attn_q.cols == layer.q_attn_k.cols &&
+                layer.q_attn_q.cols == layer.q_attn_v.cols &&
+                layer.q_attn_q.row_stride_bytes == layer.q_attn_k.row_stride_bytes;
+
+            if (can_fuse) {
+                cpu_quant::cpu_fused_rmsnorm_qkv_gemv(
+                    x_ptr, layer.attn_norm.data_ptr<float>(), eps, add_one,
+                    layer.q_attn_q.quant_type,
+                    layer.q_attn_q.cpu_data, layer.q_attn_k.cpu_data, layer.q_attn_v.cpu_data,
+                    sp.q_buf, sp.k_buf, sp.v_buf,
+                    H, layer.q_attn_q.rows, layer.q_attn_k.rows, layer.q_attn_v.rows,
+                    layer.q_attn_q.row_stride_bytes);
+            } else {
+                float norm_buf[8192];
+                float* x_normed = (H <= 8192) ? norm_buf
+                    : static_cast<float*>(std::malloc(H * sizeof(float)));
+                float sum_sq = 0.0f;
+                for (int64_t j = 0; j < H; ++j) sum_sq += x_ptr[j] * x_ptr[j];
+                float rms = 1.0f / std::sqrt(sum_sq / H + eps);
+                const float* gamma = layer.attn_norm.data_ptr<float>();
+                for (int64_t j = 0; j < H; ++j) {
+                    float w = add_one ? (1.0f + gamma[j]) : gamma[j];
+                    x_normed[j] = x_ptr[j] * rms * w;
+                }
+                if (layer.q_attn_q.valid && layer.q_attn_q.cpu_data)
+                    cpu_quant::cpu_quant_gemv(layer.q_attn_q.quant_type, layer.q_attn_q.cpu_data,
+                        x_normed, sp.q_buf, H, layer.q_attn_q.rows, layer.q_attn_q.row_stride_bytes);
+                if (layer.q_attn_k.valid && layer.q_attn_k.cpu_data)
+                    cpu_quant::cpu_quant_gemv(layer.q_attn_k.quant_type, layer.q_attn_k.cpu_data,
+                        x_normed, sp.k_buf, H, layer.q_attn_k.rows, layer.q_attn_k.row_stride_bytes);
+                if (layer.q_attn_v.valid && layer.q_attn_v.cpu_data)
+                    cpu_quant::cpu_quant_gemv(layer.q_attn_v.quant_type, layer.q_attn_v.cpu_data,
+                        x_normed, sp.v_buf, H, layer.q_attn_v.rows, layer.q_attn_v.row_stride_bytes);
+                if (H > 8192) std::free(x_normed);
+            }
+
+            // Biases (Qwen3)
+            if (layer.attn_q_bias.defined()) {
+                const float* bq = layer.attn_q_bias.data_ptr<float>();
+                const float* bk = layer.attn_k_bias.data_ptr<float>();
+                const float* bv = layer.attn_v_bias.data_ptr<float>();
+                for (int64_t j = 0; j < q_dim; ++j) sp.q_buf[j] += bq[j];
+                for (int64_t j = 0; j < kv_dim; ++j) { sp.k_buf[j] += bk[j]; sp.v_buf[j] += bv[j]; }
+            }
+
+            // QK-norm
+            if (layer.attn_q_norm.defined()) {
+                const float* qn_w = layer.attn_q_norm.data_ptr<float>();
+                const float* kn_w = layer.attn_k_norm.data_ptr<float>();
+                for (int64_t h = 0; h < n_heads; ++h)
+                    cpu_quant::cpu_rmsnorm_inplace(sp.q_buf + h * head_dim, qn_w, eps, add_one, head_dim);
+                for (int64_t h = 0; h < n_kv_heads; ++h)
+                    cpu_quant::cpu_rmsnorm_inplace(sp.k_buf + h * head_dim, kn_w, eps, add_one, head_dim);
+            }
+
+            // RoPE
+            {
+                int64_t pos = past_len;
+                float freq_base = config.rope_freq_base;
+                for (int64_t h = 0; h < n_heads; ++h) {
+                    float* hd = sp.q_buf + h * head_dim;
+                    for (int64_t d = 0; d < head_dim / 2; ++d) {
+                        float freq = 1.0f / std::pow(freq_base, 2.0f * d / head_dim);
+                        float theta = pos * freq;
+                        float ct = std::cos(theta), st = std::sin(theta);
+                        float x0 = hd[2*d], x1 = hd[2*d+1];
+                        hd[2*d] = x0*ct - x1*st; hd[2*d+1] = x0*st + x1*ct;
+                    }
+                }
+                for (int64_t h = 0; h < n_kv_heads; ++h) {
+                    float* hd = sp.k_buf + h * head_dim;
+                    for (int64_t d = 0; d < head_dim / 2; ++d) {
+                        float freq = 1.0f / std::pow(freq_base, 2.0f * d / head_dim);
+                        float theta = pos * freq;
+                        float ct = std::cos(theta), st = std::sin(theta);
+                        float x0 = hd[2*d], x1 = hd[2*d+1];
+                        hd[2*d] = x0*ct - x1*st; hd[2*d+1] = x0*st + x1*ct;
+                    }
+                }
+            }
+
+            // KV cache append
+            {
+                float* k_cache_w = kv_cache.key_cache[i].mutable_data_ptr<float>();
+                float* v_cache_w = kv_cache.value_cache[i].mutable_data_ptr<float>();
+                std::memcpy(k_cache_w + past_len * kv_dim, sp.k_buf, kv_dim * sizeof(float));
+                std::memcpy(v_cache_w + past_len * kv_dim, sp.v_buf, kv_dim * sizeof(float));
+            }
+
+            // Attention (with sliding window)
+            {
+                int64_t total_seq = past_len + 1;
+                float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+                const float* k_cache_r = kv_cache.key_cache[i].data_ptr<float>();
+                const float* v_cache_r = kv_cache.value_cache[i].data_ptr<float>();
+
+                if (sliding_window_.enabled)
+                    sliding_window_.update_window(i, total_seq, k_cache_r, v_cache_r, n_kv_heads, head_dim);
+
+                for (int64_t h = 0; h < n_heads; ++h) {
+                    int64_t kv_h = h / heads_per_group;
+                    const float* q_head = sp.q_buf + h * head_dim;
+                    float* out_head = sp.attn_buf + h * head_dim;
+                    float local_scores[4096];
+                    float* scores = (total_seq <= 4096) ? local_scores : sp.scores_buf;
+
+                    if (sliding_window_.enabled && total_seq > sliding_window_.window_size) {
+                        sliding_window_.compute_attention(q_head, k_cache_r, v_cache_r, out_head,
+                            total_seq, kv_h, head_dim, kv_dim, i, scale, scores);
+                    } else {
+                        for (int64_t t = 0; t < total_seq; ++t) {
+                            const float* kh = k_cache_r + t * kv_dim + kv_h * head_dim;
+                            float dot = 0.0f;
+                            for (int64_t d = 0; d < head_dim; ++d) dot += q_head[d] * kh[d];
+                            scores[t] = dot * scale;
+                        }
+                        float mx = scores[0];
+                        for (int64_t t = 1; t < total_seq; ++t) if (scores[t] > mx) mx = scores[t];
+                        float se = 0.0f;
+                        for (int64_t t = 0; t < total_seq; ++t) { scores[t] = std::exp(scores[t] - mx); se += scores[t]; }
+                        float inv_s = 1.0f / (se + 1e-10f);
+                        for (int64_t t = 0; t < total_seq; ++t) scores[t] *= inv_s;
+                        std::fill(out_head, out_head + head_dim, 0.0f);
+                        for (int64_t t = 0; t < total_seq; ++t) {
+                            const float* vh = v_cache_r + t * kv_dim + kv_h * head_dim;
+                            for (int64_t d = 0; d < head_dim; ++d) out_head[d] += scores[t] * vh[d];
+                        }
+                    }
+                }
+            }
+
+            // Output projection
+            if (layer.post_attention_norm.defined())
+                cpu_quant::cpu_rmsnorm_inplace(sp.attn_buf, layer.post_attention_norm.data_ptr<float>(), eps, add_one, q_dim);
+            if (use_quant_gemv_ && layer.q_attn_output.valid && layer.q_attn_output.cpu_data)
+                cpu_quant::cpu_quant_gemv(layer.q_attn_output.quant_type, layer.q_attn_output.cpu_data,
+                    sp.attn_buf, sp.h_buf, q_dim, layer.q_attn_output.rows, layer.q_attn_output.row_stride_bytes);
+
+            // Residual
+            int next = 1 - cur;
+            for (int64_t j = 0; j < H; ++j) sp.x_buf[next][j] = sp.x_buf[cur][j] + sp.h_buf[j];
+            cur = next;
+
+            // FFN
+            bool can_fuse_ffn = use_quant_gemv_ &&
+                layer.q_ffn_gate.valid && layer.q_ffn_up.valid &&
+                layer.q_ffn_gate.cpu_data && layer.q_ffn_up.cpu_data &&
+                cpu_quant::cpu_quant_gemv_supported(layer.q_ffn_gate.quant_type) &&
+                cpu_quant::cpu_quant_gemv_supported(layer.q_ffn_up.quant_type);
+
+            if (can_fuse_ffn) {
+                cpu_quant::cpu_fused_rmsnorm_gate_up_gemv(
+                    sp.x_buf[cur], layer.ffn_norm.data_ptr<float>(), eps, add_one,
+                    layer.q_ffn_gate.quant_type, layer.q_ffn_gate.cpu_data,
+                    layer.q_ffn_up.quant_type, layer.q_ffn_up.cpu_data,
+                    sp.gate_buf, sp.up_buf,
+                    H, layer.q_ffn_gate.rows, layer.q_ffn_up.rows,
+                    layer.q_ffn_gate.row_stride_bytes, layer.q_ffn_up.row_stride_bytes);
+            } else {
+                float nb[8192];
+                float* xn = (H <= 8192) ? nb : static_cast<float*>(std::malloc(H * sizeof(float)));
+                float ssq = 0.0f;
+                for (int64_t j = 0; j < H; ++j) ssq += sp.x_buf[cur][j] * sp.x_buf[cur][j];
+                float rms_v = 1.0f / std::sqrt(ssq / H + eps);
+                const float* gamma = layer.ffn_norm.data_ptr<float>();
+                for (int64_t j = 0; j < H; ++j) {
+                    float w = add_one ? (1.0f + gamma[j]) : gamma[j];
+                    xn[j] = sp.x_buf[cur][j] * rms_v * w;
+                }
+                if (layer.q_ffn_gate.valid && layer.q_ffn_gate.cpu_data)
+                    cpu_quant::cpu_quant_gemv(layer.q_ffn_gate.quant_type, layer.q_ffn_gate.cpu_data,
+                        xn, sp.gate_buf, H, layer.q_ffn_gate.rows, layer.q_ffn_gate.row_stride_bytes);
+                if (layer.q_ffn_up.valid && layer.q_ffn_up.cpu_data)
+                    cpu_quant::cpu_quant_gemv(layer.q_ffn_up.quant_type, layer.q_ffn_up.cpu_data,
+                        xn, sp.up_buf, H, layer.q_ffn_up.rows, layer.q_ffn_up.row_stride_bytes);
+                if (H > 8192) std::free(xn);
+            }
+
+            // SiLU(gate) * up
+            for (int64_t j = 0; j < inter; ++j) {
+                float g = sp.gate_buf[j];
+                sp.gate_buf[j] = (g / (1.0f + std::exp(-g))) * sp.up_buf[j];
+            }
+
+            // Down projection (with sparse GEMV)
+            if (use_quant_gemv_ && layer.q_ffn_down.valid && layer.q_ffn_down.cpu_data) {
+                if (use_sparse_gemv_ && i * 3 + 2 < (int64_t)sparse_ffn_.size() &&
+                    sparse_ffn_[i * 3 + 2].valid && layer.q_ffn_down.is_q4k()) {
+                    sparse_q4k_gemv(layer.q_ffn_down.cpu_data, sp.gate_buf, sp.h_buf,
+                                    inter, layer.q_ffn_down.rows, layer.q_ffn_down.row_stride_bytes,
+                                    sparse_ffn_[i * 3 + 2]);
+                } else {
+                    cpu_quant::cpu_quant_gemv(layer.q_ffn_down.quant_type, layer.q_ffn_down.cpu_data,
+                        sp.gate_buf, sp.h_buf, inter, layer.q_ffn_down.rows, layer.q_ffn_down.row_stride_bytes);
+                }
+            }
+
+            if (layer.post_ffw_norm.defined())
+                cpu_quant::cpu_rmsnorm_inplace(sp.h_buf, layer.post_ffw_norm.data_ptr<float>(), eps, add_one, H);
+
+            // Residual
+            next = 1 - cur;
+            for (int64_t j = 0; j < H; ++j) sp.x_buf[next][j] = sp.x_buf[cur][j] + sp.h_buf[j];
+            cur = next;
+        }
+
+        // 3. Final RMS norm
+        cpu_quant::cpu_rmsnorm_inplace(sp.x_buf[cur], output_norm.data_ptr<float>(), eps, add_one, H);
+
+        // 4. SPECULATIVE output: low-rank approx -> top-k -> exact -> argmax
+        //    Skips computing 151936 dot products, does only ~40M FMAs + 64 exact dots
+        int32_t result = low_rank_output_.decode_greedy(
+            sp.x_buf[cur],
+            q_output_weight.cpu_data,
+            q_output_weight.quant_type,
+            q_output_weight.row_stride_bytes);
+
+        kv_cache.seq_len += 1;
+        return result;
+    }
+
 
     // ========================================================================
     // Chat template formatting
