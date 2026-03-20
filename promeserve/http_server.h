@@ -44,6 +44,7 @@ using socket_t = SOCKET;
 #else
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <signal.h>
@@ -164,6 +165,14 @@ private:
         while (remaining > 0) {
             int sent = ::send(sock_, ptr, remaining, 0);
             if (sent <= 0) {
+#ifdef _WIN32
+                int err = WSAGetLastError();
+                std::cerr << "[StreamWriter] send failed: WSA error " << err
+                          << " (remaining=" << remaining << ")" << std::endl;
+#else
+                std::cerr << "[StreamWriter] send failed: errno=" << errno
+                          << " (remaining=" << remaining << ")" << std::endl;
+#endif
                 closed_ = true;
                 return false;
             }
@@ -339,6 +348,11 @@ private:
     }
 
     void handle_connection(socket_t client) {
+        // Disable Nagle's algorithm for low-latency streaming
+        int flag = 1;
+        setsockopt(client, IPPROTO_TCP, TCP_NODELAY,
+                   reinterpret_cast<const char*>(&flag), sizeof(flag));
+
         // Receive full request
         HttpRequest request;
         if (!parse_request(client, request)) {
@@ -397,6 +411,9 @@ private:
             // 2. Send headers on the socket
             // 3. THEN let the handler write chunked data via StreamWriter
 
+            std::cerr << "[HTTP] Streaming request: " << request.method << " " << request.path
+                      << " body_size=" << request.body.size() << std::endl;
+
             // Pre-build a streaming response with correct headers
             HttpResponse resp;
             resp.status = 200;
@@ -405,11 +422,13 @@ private:
 
             // Send HTTP headers first (before any chunk data)
             std::string header_raw = resp.serialize();
-            ::send(client, header_raw.c_str(), static_cast<int>(header_raw.size()), 0);
+            int header_sent = ::send(client, header_raw.c_str(), static_cast<int>(header_raw.size()), 0);
+            std::cerr << "[HTTP] Sent streaming headers: " << header_sent << " bytes" << std::endl;
 
             // Now create the writer and let the handler stream chunks
             StreamWriter writer(client);
             HttpResponse handler_resp = matched->stream_handler(request, writer);
+            std::cerr << "[HTTP] Handler returned, writer.closed=" << writer.is_closed() << std::endl;
 
             // If handler returned a non-streaming error response, send it as a chunk
             if (!handler_resp.streaming && handler_resp.status >= 400 && !handler_resp.body.empty()) {
@@ -418,6 +437,7 @@ private:
 
             // If handler didn't finish the stream, do it now
             if (!writer.is_closed()) {
+                std::cerr << "[HTTP] Handler didn't finish stream, closing now" << std::endl;
                 writer.finish();
             }
         } else {

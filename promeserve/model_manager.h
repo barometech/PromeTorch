@@ -216,14 +216,27 @@ public:
 
         try {
             auto model = std::make_unique<torch::io::GGUFModel>();
+            std::cerr << "[ModelManager] Loading GGUF: " << gguf_path << std::endl;
             model->load(gguf_path);
+            std::cerr << "[ModelManager] GGUF loaded. use_cuda_=" << use_cuda_
+                      << " model->use_cuda_=" << model->use_cuda_
+                      << " model->use_quant_gemv_=" << model->use_quant_gemv_
+                      << " arch=" << model->config.architecture
+                      << " layers=" << model->config.num_layers
+                      << " hidden=" << model->config.hidden_size
+                      << " vocab=" << model->config.vocab_size << std::endl;
 
 #ifdef PT_USE_CUDA
             if (use_cuda_) {
                 model->to_cuda();
                 model->load_quantized_to_cuda();
                 std::cout << "[ModelManager] Quantized weights loaded to GPU" << std::endl;
+            } else {
+                std::cerr << "[ModelManager] CPU mode: model->use_cuda_ stays "
+                          << model->use_cuda_ << std::endl;
             }
+#else
+            std::cerr << "[ModelManager] Built without PT_USE_CUDA, CPU-only mode" << std::endl;
 #endif
 
             loaded_model_name_ = name;
