@@ -1296,6 +1296,447 @@ void fused_gelu(const float* x, float* out, int64_t n) {
 #endif
 }
 
+// ============================================================================
+// INFERENCE FUSIONS — CPU decode hot path
+// ============================================================================
+
+// Fusion 1: GEMV + residual add
+// y[i] = x_residual[i] + dot(W[i,:], src)
+// Eliminates: writing h_buf then reading it back for x_next = x + h_buf
+void gemv_residual_add(const float* W, int64_t N, int64_t K,
+                       const float* src, const float* x_residual,
+                       float* x_out) {
+    // Parallelize over output rows
+    c10::get_thread_pool().parallel_for(0, N, [&](int64_t start, int64_t end) {
+        for (int64_t n = start; n < end; ++n) {
+            const float* w_row = W + n * K;
+#if defined(TUDA_AVX2)
+            __m256 acc0 = _mm256_setzero_ps();
+            __m256 acc1 = _mm256_setzero_ps();
+            int64_t k = 0;
+            for (; k + 15 < K; k += 16) {
+                acc0 = _mm256_fmadd_ps(_mm256_loadu_ps(src + k),
+                                       _mm256_loadu_ps(w_row + k), acc0);
+                acc1 = _mm256_fmadd_ps(_mm256_loadu_ps(src + k + 8),
+                                       _mm256_loadu_ps(w_row + k + 8), acc1);
+            }
+            acc0 = _mm256_add_ps(acc0, acc1);
+            for (; k + 7 < K; k += 8) {
+                acc0 = _mm256_fmadd_ps(_mm256_loadu_ps(src + k),
+                                       _mm256_loadu_ps(w_row + k), acc0);
+            }
+            // hsum
+            __m128 lo = _mm256_castps256_ps128(acc0);
+            __m128 hi = _mm256_extractf128_ps(acc0, 1);
+            lo = _mm_add_ps(lo, hi);
+            lo = _mm_hadd_ps(lo, lo);
+            lo = _mm_hadd_ps(lo, lo);
+            float dot = _mm_cvtss_f32(lo);
+            for (; k < K; ++k) dot += src[k] * w_row[k];
+#else
+            float dot = 0.0f;
+            for (int64_t k = 0; k < K; ++k) dot += src[k] * w_row[k];
+#endif
+            x_out[n] = x_residual[n] + dot;
+        }
+    }, 64);
+}
+
+// Fusion 2: Final RMSNorm + output GEMV + argmax
+// Avoids writing full logits array and re-scanning for argmax
+int32_t fused_rmsnorm_gemv_argmax(const float* x, const float* norm_w,
+                                   float eps, bool add_one, int64_t H,
+                                   const float* output_weight, int64_t V,
+                                   float* logits_out) {
+    // Step 1: RMSNorm x -> x_normed (on stack)
+    constexpr int64_t MAX_STACK = 8192;
+    float stack_buf[MAX_STACK];
+    float* x_normed = (H <= MAX_STACK) ? stack_buf
+        : static_cast<float*>(std::malloc(H * sizeof(float)));
+
+#if defined(TUDA_AVX2)
+    __m256 sum_sq_vec = _mm256_setzero_ps();
+    int64_t j = 0;
+    for (; j + 7 < H; j += 8) {
+        __m256 vx = _mm256_loadu_ps(x + j);
+        sum_sq_vec = _mm256_fmadd_ps(vx, vx, sum_sq_vec);
+    }
+    // hsum
+    __m128 lo_s = _mm256_castps256_ps128(sum_sq_vec);
+    __m128 hi_s = _mm256_extractf128_ps(sum_sq_vec, 1);
+    lo_s = _mm_add_ps(lo_s, hi_s);
+    lo_s = _mm_hadd_ps(lo_s, lo_s);
+    lo_s = _mm_hadd_ps(lo_s, lo_s);
+    float sum_sq = _mm_cvtss_f32(lo_s);
+    for (; j < H; ++j) sum_sq += x[j] * x[j];
+
+    float rms = 1.0f / std::sqrt(sum_sq / H + eps);
+    __m256 vrms = _mm256_set1_ps(rms);
+    j = 0;
+    if (add_one) {
+        __m256 one = _mm256_set1_ps(1.0f);
+        for (; j + 7 < H; j += 8) {
+            __m256 vx = _mm256_loadu_ps(x + j);
+            __m256 vg = _mm256_loadu_ps(norm_w + j);
+            _mm256_storeu_ps(x_normed + j,
+                _mm256_mul_ps(_mm256_mul_ps(vx, vrms), _mm256_add_ps(vg, one)));
+        }
+    } else {
+        for (; j + 7 < H; j += 8) {
+            __m256 vx = _mm256_loadu_ps(x + j);
+            __m256 vg = _mm256_loadu_ps(norm_w + j);
+            _mm256_storeu_ps(x_normed + j, _mm256_mul_ps(_mm256_mul_ps(vx, vrms), vg));
+        }
+    }
+    for (; j < H; ++j) {
+        float w = add_one ? (1.0f + norm_w[j]) : norm_w[j];
+        x_normed[j] = x[j] * rms * w;
+    }
+#else
+    float sum_sq = 0.0f;
+    for (int64_t j = 0; j < H; ++j) sum_sq += x[j] * x[j];
+    float rms = 1.0f / std::sqrt(sum_sq / H + eps);
+    for (int64_t j = 0; j < H; ++j) {
+        float w = add_one ? (1.0f + norm_w[j]) : norm_w[j];
+        x_normed[j] = x[j] * rms * w;
+    }
+#endif
+
+    // Step 2: GEMV + argmax fused — find max during dot products
+    // Split across threads, each finds local max
+    struct ThreadResult { int32_t idx; float val; };
+    auto& pool = c10::get_thread_pool();
+    int nt = pool.num_threads();
+    std::vector<ThreadResult> results(nt, {0, -1e30f});
+    std::atomic<int> tid_counter{0};
+
+    pool.parallel_for(V, [&](int64_t start, int64_t end) {
+        int my_tid = tid_counter.fetch_add(1, std::memory_order_relaxed);
+        if (my_tid >= nt) my_tid = nt - 1;  // safety
+        int32_t local_best_idx = static_cast<int32_t>(start);
+        float local_best_val = -1e30f;
+
+        for (int64_t n = start; n < end; ++n) {
+            const float* w_row = output_weight + n * H;
+#if defined(TUDA_AVX2)
+            __m256 acc0 = _mm256_setzero_ps();
+            __m256 acc1 = _mm256_setzero_ps();
+            int64_t k = 0;
+            for (; k + 15 < H; k += 16) {
+                acc0 = _mm256_fmadd_ps(_mm256_loadu_ps(x_normed + k),
+                                       _mm256_loadu_ps(w_row + k), acc0);
+                acc1 = _mm256_fmadd_ps(_mm256_loadu_ps(x_normed + k + 8),
+                                       _mm256_loadu_ps(w_row + k + 8), acc1);
+            }
+            acc0 = _mm256_add_ps(acc0, acc1);
+            for (; k + 7 < H; k += 8) {
+                acc0 = _mm256_fmadd_ps(_mm256_loadu_ps(x_normed + k),
+                                       _mm256_loadu_ps(w_row + k), acc0);
+            }
+            __m128 lo2 = _mm256_castps256_ps128(acc0);
+            __m128 hi2 = _mm256_extractf128_ps(acc0, 1);
+            lo2 = _mm_add_ps(lo2, hi2);
+            lo2 = _mm_hadd_ps(lo2, lo2);
+            lo2 = _mm_hadd_ps(lo2, lo2);
+            float dot = _mm_cvtss_f32(lo2);
+            for (; k < H; ++k) dot += x_normed[k] * w_row[k];
+#else
+            float dot = 0.0f;
+            for (int64_t k = 0; k < H; ++k) dot += x_normed[k] * w_row[k];
+#endif
+            // Write logits if requested
+            if (logits_out) logits_out[n] = dot;
+
+            // Track argmax
+            if (dot > local_best_val) {
+                local_best_val = dot;
+                local_best_idx = static_cast<int32_t>(n);
+            }
+        }
+        results[my_tid] = {local_best_idx, local_best_val};
+    }, 64);
+
+    // Reduce across threads
+    int32_t best_idx = results[0].idx;
+    float best_val = results[0].val;
+    for (int t = 1; t < nt; ++t) {
+        if (results[t].val > best_val) {
+            best_val = results[t].val;
+            best_idx = results[t].idx;
+        }
+    }
+
+    if (H > MAX_STACK) std::free(x_normed);
+    return best_idx;
+}
+
+// Softmax fused (declared in header, was missing impl)
+void softmax_fused(const float* in, float* out, int64_t rows, int64_t cols) {
+    c10::parallel_for_1d(rows, [&](int64_t start, int64_t end) {
+        for (int64_t r = start; r < end; ++r) {
+            const float* row_in = in + r * cols;
+            float* row_out = out + r * cols;
+
+            // Find max
+            float mx = row_in[0];
+#if defined(TUDA_AVX2)
+            __m256 vmx = _mm256_set1_ps(row_in[0]);
+            int64_t j = 0;
+            for (; j + 7 < cols; j += 8) {
+                vmx = _mm256_max_ps(vmx, _mm256_loadu_ps(row_in + j));
+            }
+            // hsum max
+            __m128 lo = _mm256_castps256_ps128(vmx);
+            __m128 hi = _mm256_extractf128_ps(vmx, 1);
+            lo = _mm_max_ps(lo, hi);
+            float tmp4[4]; _mm_storeu_ps(tmp4, lo);
+            mx = tmp4[0];
+            for (int k = 1; k < 4; ++k) if (tmp4[k] > mx) mx = tmp4[k];
+            for (; j < cols; ++j) if (row_in[j] > mx) mx = row_in[j];
+#else
+            for (int64_t j = 1; j < cols; ++j) if (row_in[j] > mx) mx = row_in[j];
+#endif
+
+            // Exp + sum
+            float sum_exp = 0.0f;
+            for (int64_t j = 0; j < cols; ++j) {
+                row_out[j] = std::exp(row_in[j] - mx);
+                sum_exp += row_out[j];
+            }
+
+            // Normalize
+            float inv = 1.0f / sum_exp;
+#if defined(TUDA_AVX2)
+            __m256 vinv = _mm256_set1_ps(inv);
+            j = 0;
+            for (; j + 7 < cols; j += 8) {
+                _mm256_storeu_ps(row_out + j,
+                    _mm256_mul_ps(_mm256_loadu_ps(row_out + j), vinv));
+            }
+            for (; j < cols; ++j) row_out[j] *= inv;
+#else
+            for (int64_t j = 0; j < cols; ++j) row_out[j] *= inv;
+#endif
+        }
+    }, 16);
+}
+
+// Residual + LayerNorm fused
+void residual_layernorm_fused(const float* x, const float* residual,
+                              const float* gamma, const float* beta_param,
+                              float* out, int64_t rows, int64_t cols, float eps) {
+    c10::parallel_for_1d(rows, [&](int64_t start, int64_t end) {
+        for (int64_t r = start; r < end; ++r) {
+            const float* x_row = x + r * cols;
+            const float* res_row = residual + r * cols;
+            float* out_row = out + r * cols;
+
+            // Combined residual add + compute mean
+            float sum = 0.0f;
+            for (int64_t j = 0; j < cols; ++j) {
+                out_row[j] = x_row[j] + res_row[j];  // residual add
+                sum += out_row[j];
+            }
+            float mean = sum / cols;
+
+            // Compute variance
+            float var = 0.0f;
+            for (int64_t j = 0; j < cols; ++j) {
+                float d = out_row[j] - mean;
+                var += d * d;
+            }
+            float inv_std = 1.0f / std::sqrt(var / cols + eps);
+
+            // Normalize + scale + shift
+            for (int64_t j = 0; j < cols; ++j) {
+                float normed = (out_row[j] - mean) * inv_std;
+                out_row[j] = normed * gamma[j] + (beta_param ? beta_param[j] : 0.0f);
+            }
+        }
+    }, 16);
+}
+
+// ============================================================================
+// TRAINING FUSIONS
+// ============================================================================
+
+// Fusion 4: AdamW single-pass step (decoupled weight decay + Adam in one loop)
+void fused_adamw_step(float* param, const float* grad,
+                      float* exp_avg, float* exp_avg_sq,
+                      int64_t n, float lr, float beta1, float beta2,
+                      float eps, float weight_decay,
+                      float bc1, float bc2) {
+    // Single pass: param *= (1 - lr*wd) then Adam update
+    // Instead of separate mul_ + adam passes
+    float decay_factor = 1.0f - lr * weight_decay;
+    float step_size = lr / bc1;
+    float inv_bc2_sqrt = 1.0f / std::sqrt(bc2);
+
+#if defined(TUDA_AVX2)
+    __m256 vdecay = _mm256_set1_ps(decay_factor);
+    __m256 vb1 = _mm256_set1_ps(beta1);
+    __m256 vb2 = _mm256_set1_ps(beta2);
+    __m256 v1b1 = _mm256_set1_ps(1.0f - beta1);
+    __m256 v1b2 = _mm256_set1_ps(1.0f - beta2);
+    __m256 veps = _mm256_set1_ps(eps);
+    __m256 vss = _mm256_set1_ps(step_size);
+    __m256 vibc2 = _mm256_set1_ps(inv_bc2_sqrt);
+    constexpr int W = VecF::width;
+
+    c10::parallel_for_1d(n, [&](int64_t start, int64_t end) {
+        int64_t i = start;
+        for (; i < end && (i % W != 0); ++i) {
+            float p = param[i] * decay_factor;  // weight decay
+            float g = grad[i];
+            exp_avg[i] = beta1 * exp_avg[i] + (1.0f - beta1) * g;
+            exp_avg_sq[i] = beta2 * exp_avg_sq[i] + (1.0f - beta2) * g * g;
+            float denom = std::sqrt(exp_avg_sq[i]) * inv_bc2_sqrt + eps;
+            param[i] = p - step_size * exp_avg[i] / denom;
+        }
+        int64_t se = end - ((end - i) % (4*W));
+        for (; i < se; i += 4*W) {
+            for (int k = 0; k < 4; ++k) {
+                int64_t idx = i + k * W;
+                __m256 p = _mm256_mul_ps(_mm256_loadu_ps(param + idx), vdecay);
+                __m256 g = _mm256_loadu_ps(grad + idx);
+                __m256 mi = _mm256_fmadd_ps(vb1, _mm256_loadu_ps(exp_avg + idx), _mm256_mul_ps(v1b1, g));
+                _mm256_storeu_ps(exp_avg + idx, mi);
+                __m256 vi = _mm256_fmadd_ps(vb2, _mm256_loadu_ps(exp_avg_sq + idx), _mm256_mul_ps(v1b2, _mm256_mul_ps(g, g)));
+                _mm256_storeu_ps(exp_avg_sq + idx, vi);
+                __m256 denom = _mm256_fmadd_ps(_mm256_sqrt_ps(vi), vibc2, veps);
+                _mm256_storeu_ps(param + idx, _mm256_fnmadd_ps(vss, _mm256_div_ps(mi, denom), p));
+            }
+        }
+        for (; i + W <= end; i += W) {
+            __m256 p = _mm256_mul_ps(_mm256_loadu_ps(param + i), vdecay);
+            __m256 g = _mm256_loadu_ps(grad + i);
+            __m256 mi = _mm256_fmadd_ps(vb1, _mm256_loadu_ps(exp_avg + i), _mm256_mul_ps(v1b1, g));
+            _mm256_storeu_ps(exp_avg + i, mi);
+            __m256 vi = _mm256_fmadd_ps(vb2, _mm256_loadu_ps(exp_avg_sq + i), _mm256_mul_ps(v1b2, _mm256_mul_ps(g, g)));
+            _mm256_storeu_ps(exp_avg_sq + i, vi);
+            __m256 denom = _mm256_fmadd_ps(_mm256_sqrt_ps(vi), vibc2, veps);
+            _mm256_storeu_ps(param + i, _mm256_fnmadd_ps(vss, _mm256_div_ps(mi, denom), p));
+        }
+        for (; i < end; ++i) {
+            float p = param[i] * decay_factor;
+            float g = grad[i];
+            exp_avg[i] = beta1 * exp_avg[i] + (1.0f - beta1) * g;
+            exp_avg_sq[i] = beta2 * exp_avg_sq[i] + (1.0f - beta2) * g * g;
+            float denom = std::sqrt(exp_avg_sq[i]) * inv_bc2_sqrt + eps;
+            param[i] = p - step_size * exp_avg[i] / denom;
+        }
+    });
+#else
+    for (int64_t i = 0; i < n; ++i) {
+        float p = param[i] * decay_factor;
+        float g = grad[i];
+        exp_avg[i] = beta1 * exp_avg[i] + (1.0f - beta1) * g;
+        exp_avg_sq[i] = beta2 * exp_avg_sq[i] + (1.0f - beta2) * g * g;
+        float denom = std::sqrt(exp_avg_sq[i]) * inv_bc2_sqrt + eps;
+        param[i] = p - step_size * exp_avg[i] / denom;
+    }
+#endif
+}
+
+// Fusion 5: Fused multi-parameter AdamW
+void fused_adamw_multi(AdamWParamPack* params, int num_params,
+                       float lr, float beta1, float beta2, float eps,
+                       float weight_decay, int step) {
+    float bc1 = 1.0f - powf(beta1, (float)step);
+    float bc2 = 1.0f - powf(beta2, (float)step);
+    for (int p = 0; p < num_params; p++) {
+        fused_adamw_step(params[p].param, params[p].grad,
+                         params[p].exp_avg, params[p].exp_avg_sq,
+                         params[p].numel, lr, beta1, beta2, eps,
+                         weight_decay, bc1, bc2);
+    }
+}
+
+// Fusion 6: zero_grad multi — memset all grad buffers in one call
+void fused_zero_grad_multi(GradBufPack* bufs, int num_bufs) {
+    for (int i = 0; i < num_bufs; ++i) {
+        std::memset(bufs[i].grad_data, 0, bufs[i].numel * sizeof(float));
+    }
+}
+
+// Fusion 7: RoPE precompute + apply
+void rope_precompute(float* cos_out, float* sin_out,
+                     int64_t pos, int64_t head_dim, float freq_base) {
+    for (int64_t d = 0; d < head_dim / 2; ++d) {
+        float freq = 1.0f / std::pow(freq_base, 2.0f * d / head_dim);
+        float theta = pos * freq;
+        cos_out[d] = std::cos(theta);
+        sin_out[d] = std::sin(theta);
+    }
+}
+
+void rope_apply_fused(float* q, float* k,
+                      const float* cos_table, const float* sin_table,
+                      int64_t n_heads, int64_t n_kv_heads, int64_t head_dim) {
+    int64_t half_dim = head_dim / 2;
+    // Q: all heads
+#if defined(TUDA_AVX2)
+    for (int64_t h = 0; h < n_heads; ++h) {
+        float* hd = q + h * head_dim;
+        int64_t d = 0;
+        for (; d + 3 < half_dim; d += 4) {
+            // Pair (2d, 2d+1) for each d
+            for (int dd = 0; dd < 4; ++dd) {
+                float c = cos_table[d + dd];
+                float s = sin_table[d + dd];
+                float x0 = hd[2*(d+dd)];
+                float x1 = hd[2*(d+dd)+1];
+                hd[2*(d+dd)]   = x0 * c - x1 * s;
+                hd[2*(d+dd)+1] = x0 * s + x1 * c;
+            }
+        }
+        for (; d < half_dim; ++d) {
+            float c = cos_table[d];
+            float s = sin_table[d];
+            float x0 = hd[2*d];
+            float x1 = hd[2*d+1];
+            hd[2*d]   = x0 * c - x1 * s;
+            hd[2*d+1] = x0 * s + x1 * c;
+        }
+    }
+    // K: kv_heads
+    for (int64_t h = 0; h < n_kv_heads; ++h) {
+        float* hd = k + h * head_dim;
+        for (int64_t d = 0; d < half_dim; ++d) {
+            float c = cos_table[d];
+            float s = sin_table[d];
+            float x0 = hd[2*d];
+            float x1 = hd[2*d+1];
+            hd[2*d]   = x0 * c - x1 * s;
+            hd[2*d+1] = x0 * s + x1 * c;
+        }
+    }
+#else
+    for (int64_t h = 0; h < n_heads; ++h) {
+        float* hd = q + h * head_dim;
+        for (int64_t d = 0; d < half_dim; ++d) {
+            float c = cos_table[d];
+            float s = sin_table[d];
+            float x0 = hd[2*d];
+            float x1 = hd[2*d+1];
+            hd[2*d]   = x0 * c - x1 * s;
+            hd[2*d+1] = x0 * s + x1 * c;
+        }
+    }
+    for (int64_t h = 0; h < n_kv_heads; ++h) {
+        float* hd = k + h * head_dim;
+        for (int64_t d = 0; d < half_dim; ++d) {
+            float c = cos_table[d];
+            float s = sin_table[d];
+            float x0 = hd[2*d];
+            float x1 = hd[2*d+1];
+            hd[2*d]   = x0 * c - x1 * s;
+            hd[2*d+1] = x0 * s + x1 * c;
+        }
+    }
+#endif
+}
+
 } // namespace hot
 } // namespace native
 } // namespace at
