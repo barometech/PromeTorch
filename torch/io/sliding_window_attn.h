@@ -1,4 +1,9 @@
 #pragma once
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#endif
 
 // ============================================================================
 // Sliding Window Attention for CPU Decode
