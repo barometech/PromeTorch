@@ -97,7 +97,9 @@ inline std::pair<std::string, Tensor> read_tensor(std::ifstream& f) {
     read_bytes(f, &nbytes, sizeof(nbytes));
 
     Tensor tensor = at::empty(sizes, at::TensorOptions().dtype(dtype));
-    PT_CHECK(nbytes == tensor.nbytes(), "serialization: nbytes mismatch");
+    if (nbytes != tensor.nbytes()) {
+        throw std::runtime_error("serialization: nbytes mismatch");
+    }
     read_bytes(f, tensor.data_ptr(), nbytes);
 
     return {name, tensor};
