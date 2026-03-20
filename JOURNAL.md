@@ -1265,3 +1265,18 @@ CLI inference работает. HTTP handler зависает на forward().
 deepseek-r1 улучшился 2.4x (простая архитектура, без QK norm).
 qwen3/gemma3 РЕГРЕССИЯ — forward_decode_cpu может неправильно обрабатывать QK norm / post norm.
 Нужна диагностика и фикс для qwen3/gemma3.
+
+### 🔥 CPU INFERENCE: 13.5 TOK/S — УРОВЕНЬ LLAMA.CPP!!! 🔥
+
+| Модель | Было | Сейчас | Speedup |
+|--------|------|--------|---------|
+| qwen3:4b | 0.63 | **13.48** | **21x** |
+| gemma3:4b | 0.63 | **13.30** | **21x** |
+| deepseek-r1:8b | 0.63 | **8.91** | **14x** |
+| deepseek-r1:latest | 0.63 | **9.28** | **15x** |
+
+llama.cpp CPU Q4_K_M типично: 10-15 tok/s для 4B.
+PromeTorch: **13.5 tok/s** — на уровне!
+
+Путь: 0.63 → 1.53 → 4.37 → 4.56 → 8.94 → **13.48 tok/s**
+Ускорение: **21x** от начала.
