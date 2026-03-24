@@ -408,11 +408,21 @@ int main(int argc, char** argv) {
             unsigned lr_bits;
             memcpy(&lr_bits, &lr, 4);
 
-            // Run backward for each chip: one core at a time within chip
-            for (int ch = 0; ch < num_chips; ch++) {
-                int cores_on_chip = (int)chip_core_ids[ch].size();
-                for (int idx = 0; idx < cores_on_chip; idx++) {
+            // Run backward: interleaved across chips for parallelism.
+            // Round-robin: dispatch core[idx] on ALL chips simultaneously, wait, next idx.
+            // Within each chip: sequential (shared DDR). Across chips: parallel (separate DDR).
+            int max_cores_per_chip = 0;
+            for (int ch = 0; ch < num_chips; ch++)
+                if ((int)chip_core_ids[ch].size() > max_cores_per_chip)
+                    max_cores_per_chip = (int)chip_core_ids[ch].size();
+
+            for (int idx = 0; idx < max_cores_per_chip; idx++) {
+                // Dispatch core[idx] on all chips in parallel
+                std::vector<int> dispatched;
+                for (int ch = 0; ch < num_chips; ch++) {
+                    if (idx >= (int)chip_core_ids[ch].size()) continue;
                     int ci = chip_core_ids[ch][idx];
+                    int cores_on_chip = (int)chip_core_ids[ch].size();
                     unsigned bk_args[18] = {
                         (unsigned)B_per_core,
                         (unsigned)T, (unsigned)D, (unsigned)H, (unsigned)FF,
@@ -427,11 +437,14 @@ int main(int argc, char** argv) {
                         (unsigned)(core_addrs[ci].h_out + (L+1)*BT*D + L*BT*D),
                         lr_bits,
                         core_addrs[ci].bk_scratch,
-                        (unsigned)cores_on_chip  // scale by cores on THIS chip
+                        (unsigned)cores_on_chip
                     };
                     core_dispatch(ci, OP_FUSED_BACKWARD_ROWPAR, bk_args, 18);
-                    if (!core_wait(ci)) printf("BACKWARD TIMEOUT core %d\n", ci);
+                    dispatched.push_back(ci);
                 }
+                // Wait all dispatched (one per chip, parallel)
+                for (int ci : dispatched)
+                    if (!core_wait(ci)) printf("BACKWARD TIMEOUT core %d\n", ci);
             }
 
             // 7. Cross-chip weight sync (average weights across chips)
