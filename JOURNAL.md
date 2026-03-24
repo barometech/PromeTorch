@@ -5,6 +5,54 @@
 
 ---
 
+## 2026-03-24: NM QUAD Row-Parallel 64-Core Architecture (dispatcher_v3)
+
+### Проблема
+dispatcher_v2 (coordinator+workers) зависал: Core 0 пыталось координировать Core 1-15 через DDR, но ядра NM6408 НЕ координируются между собой. HOST должен диспатчить отдельно.
+
+### Решение: ROW-PARALLEL FUSED
+Каждое из 16 ядер (на каждом чипе) запускает ПОЛНЫЙ fused forward+backward для своих строк batch. Нет inter-core координации. Нет coordinator/worker split.
+
+**dispatcher_nmquad_v3.cpp** — Новые opcodes:
+- `OP_FUSED_FORWARD_ROWPAR (32)` — полный transformer forward на B/N_cores строках
+- `OP_FUSED_BACKWARD_ROWPAR (33)` — полный backward + SGD с lr/N_cores scaling
+
+**Архитектура:**
+- Core 0: rows 0..B_mine-1
+- Core 1: rows B_mine..2*B_mine-1
+- ...
+- Core 15: rows 15*B_mine..B-1
+- Каждое ядро читает ОБЩИЕ веса (read-only), пишет в СВОЮ часть output
+- Weight updates: lr_scaled = lr / N_cores → каждое ядро обновляет частично, сумма = полный update
+
+**train_gpt_4chip.cpp** — Host dispatch:
+- 4 чипа × 16 ядер = 64 fused forward параллельно
+- Dispatch ALL → Wait ALL (не по одному)
+- Cross-chip weight sync каждые 10 шагов (average weights across chips)
+- Два режима: `--model small` (D=128, 200K params) и `--model large` (D=768, 85M params)
+
+### Новые файлы
+- `aten/src/ATen/nmquad/nmc_programs/dispatcher_nmquad_v3.cpp`
+- `examples/nmquad/train_gpt_4chip.cpp` (rewritten)
+
+### Ключевые отличия v3 от v2
+| | v2 (coordinator+workers) | v3 (row-parallel) |
+|--|--------------------------|-------------------|
+| Core 0 | Координатор | Равноправное ядро |
+| Cores 1-15 | Matmul workers | Полный transformer |
+| Inter-core sync | DDR polling (ЗАВИСАЛО) | НЕТ (каждый независим) |
+| Масштабирование | 1 chip, 16 cores | 4 chips × 16 cores = 64 |
+
+### Scratch per core (D=768, B_mine=4, T=64)
+h + hn + Q + K + V + proj + ff2 + Kt + scores + attn_out + ff1 + Q_tmp + V_bh ≈ 7MB/core
+
+### Целевые метрики
+- > 200 GFLOPS (10% пика 2 TFLOPS)
+- > 5000 tok/s small model (16 cores)
+- > 500 tok/s LARGE 85M (64 cores)
+
+---
+
 ## 2026-03-18: cuBLAS GEMM + Full Verification
 
 ### cuBLAS Integration
