@@ -246,7 +246,7 @@ static void op_fused_backward_rowpar() {
     int n_cores       = (int)mem[18];
 
     if (Bm <= 0) return;
-    float lr_s = lr / (float)n_cores;
+    float lr_s = lr;  // each core has independent data, host normalizes dlogits
 
     int HD = D / H, BT = Bm * T, BH = Bm * H;
     int lsz = 4*D*D + 2*D*FF + D;

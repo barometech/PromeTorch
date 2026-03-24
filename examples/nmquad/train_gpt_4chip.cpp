@@ -282,7 +282,10 @@ int main(int argc, char** argv) {
     int cache_words = (L+1)*BT*D + L*BT*D + L*BT*FF;
     int fwd_scratch_words = BT*D*5 + BH*HD*T + BH*T*T
                           + BT*D + BT*D + BT*FF + BT*D + BH*T*HD*2;
-    int bwd_scratch_words = D*V + BT*D + BT*FF + BT*FF + BT*D;
+    // Backward scratch must include full attention backward buffers:
+    // dW(D*V) + dx(BT*D) + temp1(BT*FF) + temp2(BT*FF) + temp3(BT*D)
+    // + Q_full+K_full+V_full+d_O+d_Q+d_K+d_V (7*BT*D) + Wt(D*D) + dx_add(BT*D)
+    int bwd_scratch_words = D*V + 10*BT*D + 2*BT*FF + D*D;
 
     core_addrs.resize(NC);
 
@@ -399,7 +402,7 @@ int main(int argc, char** argv) {
                     if (std::distance(l, std::max_element(l, l+V)) == tgt) correct++;
                     total_tok++;
                 }
-                for (auto& d : dl) d /= B_per_core;
+                for (auto& d : dl) d /= (float)B_total;  // normalize by total batch, not per-core
 
                 // Upload dlogits
                 core_wr(ci, core_addrs[ci].dlogits, dl.data(), BT * V);

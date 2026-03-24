@@ -313,9 +313,9 @@ static void op_fused_backward_rowpar() {
 
     if (Bm <= 0) return;
 
-    // Scale lr by 1/n_cores so each core's update is partial
-    // Total effect: sum of all cores = full gradient update
-    float lr_scaled = lr / (float)n_cores;
+    // Each core processes independent data, so use full lr.
+    // Host normalizes dlogits by total batch, so gradients are already averaged.
+    float lr_scaled = lr;
 
     int HD = D / H, BT = Bm * T, BH = Bm * H;
     int lsz = 4*D*D + 2*D*FF + D;
