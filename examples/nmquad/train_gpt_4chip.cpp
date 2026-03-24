@@ -188,6 +188,7 @@ int main(int argc, char** argv) {
     PL_LoadInitCode(board);
 
     // Enumerate cores: cluster_id = chip, nm_id = core within cluster
+    // CRITICAL: core_id must match dispatcher's (cluster_id << 2) + nm_id
     for (int cl = 0; cl < max_chips; cl++) {
         int chip_cores = 0;
         for (int co = 0; co < (max_cores < 4 ? max_cores : 4); co++) {
@@ -198,7 +199,7 @@ int main(int argc, char** argv) {
                     CoreHandle ch;
                     ch.access = a;
                     ch.chip_id = cl;
-                    ch.core_id = chip_cores;  // sequential within chip
+                    ch.core_id = (cl << 2) + co;  // matches dispatcher: (cluster_id<<2)+nm_id
                     all_cores.push_back(ch);
                     chip_cores++;
                 } else {
@@ -264,11 +265,15 @@ int main(int argc, char** argv) {
     for (int ci = 0; ci < NC; ci++)
         chip_core_ids[all_cores[ci].chip_id].push_back(ci);
 
-    // Per-core cache and scratch sizes
+    // Per-core cache and scratch sizes (must match dispatcher layout EXACTLY)
+    int BH = B_per_core * H;
     int cache_words = (L+1)*BT*D + L*BT*D + L*BT*FF;
-    int fwd_scratch_words = BT*D*7 + B_per_core*H*HD*T + B_per_core*H*T*T
-                          + BT*D + BT*FF + B_per_core*H*T*HD*2;
-    int bwd_scratch_words = D*V + BT*D*9 + BT*FF*2 + D*D + BT*D;
+    // Forward scratch: h,hn,Q,K,V (5*BT*D) + Kt(BH*HD*T) + scores(BH*T*T)
+    //   + attn_out(BT*D) + proj(BT*D) + ff1(BT*FF) + ff2(BT*D) + Q_tmp(BH*T*HD) + V_bh(BH*T*HD)
+    int fwd_scratch_words = BT*D*5 + BH*HD*T + BH*T*T
+                          + BT*D + BT*D + BT*FF + BT*D + BH*T*HD*2;
+    // Backward scratch: dW(D*V) + dx(BT*D) + temp1(BT*FF) + temp2(BT*FF) + temp3(BT*D)
+    int bwd_scratch_words = D*V + BT*D + BT*FF + BT*FF + BT*D;
 
     core_addrs.resize(NC);
 
@@ -467,8 +472,8 @@ int main(int argc, char** argv) {
                ep+1, epoch_loss/steps, 100.0f*correct/total_tok, sec,
                (double)steps*B_total*T/sec);
 
-        // === Sample generation (greedy, single core) ===
-        if (ep == epochs - 1 || (ep+1) % 5 == 0) {
+        // === Sample generation (greedy, single core) — disabled for multi-core ===
+        if (false && (ep == epochs - 1 || (ep+1) % 5 == 0)) {
             printf("--- Sample ---\n\"");
             std::vector<unsigned int> gen(T, 0);
             gen[0] = rng() % V;
