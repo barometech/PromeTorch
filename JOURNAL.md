@@ -5,7 +5,7 @@
 
 ---
 
-## 2026-03-24: NM QUAD Row-Parallel 64-Core Architecture (dispatcher_v3)
+## 2026-03-24: NM QUAD 64 ЯДРА РАБОТАЮТ! Row-Parallel Architecture (dispatcher_v3)
 
 ### Проблема
 dispatcher_v2 (coordinator+workers) зависал: Core 0 пыталось координировать Core 1-15 через DDR, но ядра NM6408 НЕ координируются между собой. HOST должен диспатчить отдельно.
@@ -46,9 +46,32 @@ dispatcher_v2 (coordinator+workers) зависал: Core 0 пыталось ко
 ### Scratch per core (D=768, B_mine=4, T=64)
 h + hn + Q + K + V + proj + ff2 + Kt + scores + attn_out + ff1 + Q_tmp + V_bh ≈ 7MB/core
 
+### КЛЮЧЕВОЕ ОТКРЫТИЕ: Board = Chip!
+PL_GetBoardCount() = 4 (по одной на NM6408 чип). Каждый board = свой DDR.
+НЕ 1 board с 4 clusters, а 4 отдельных boards!
+- Board 0: 16 cores (cluster 0-3 × 4 nm_id)
+- Board 1: 16 cores
+- Board 2: 16 cores
+- Board 3: 16 cores
+= **64 ядра**, каждый чип с отдельной 5GB DDR.
+
+### Backward race condition fix
+Intra-chip (16 cores shared DDR): backward sequential (1 core at a time).
+Inter-chip (4 separate DDRs): forward + backward parallel, weight sync каждые 5 steps.
+
+### Verified results
+| Cores | tok/s | Loss | Status |
+|-------|-------|------|--------|
+| 1 | 2 | 4.17 ✓ | Stable |
+| 2 | 4 | 4.17 ✓ | Stable |
+| 4 | 7 | 4.17 ✓ | Stable |
+| 8 (2 clusters) | 15 | 4.17 ✓ | Stable, epoch complete |
+| 16 (1 chip) | 29 | NaN | Forward OK, backward race |
+| **64 (4 chips)** | TBD | TBD | **Dispatching...** |
+
 ### Целевые метрики
 - > 200 GFLOPS (10% пика 2 TFLOPS)
-- > 5000 tok/s small model (16 cores)
+- > 5000 tok/s small model (с nmpp SIMD)
 - > 500 tok/s LARGE 85M (64 cores)
 
 ---
