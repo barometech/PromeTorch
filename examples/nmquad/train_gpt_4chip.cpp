@@ -417,7 +417,7 @@ int main(int argc, char** argv) {
                 core_wr(ci, core_addrs[ci].tokens,
                         tok_per_core[ci].data(), BT);
 
-            // 3. DISPATCH FUSED FORWARD to ALL cores simultaneously
+            // 3. DISPATCH FUSED FORWARD — ALL cores at once
             for (int ci = 0; ci < NC; ci++) {
                 int ch = all_cores[ci].chip_id;
                 unsigned args[15] = {
@@ -436,10 +436,10 @@ int main(int argc, char** argv) {
                 core_dispatch(ci, OP_FUSED_FORWARD_ROWPAR, args, 15);
             }
 
-            // 4. WAIT ALL cores
+            // 4. WAIT ALL forward
             bool ok = true;
             for (int ci = 0; ci < NC; ci++)
-                if (!core_wait(ci)) { ok = false; break; }
+                if (!core_wait(ci)) { ok = false; printf("FWD TIMEOUT core %d\n", ci); break; }
             if (!ok) { printf("FORWARD FAILED step %d\n", step); break; }
 
             // 5. Download logits, compute loss + dlogits on host
