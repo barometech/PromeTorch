@@ -178,45 +178,51 @@ int main(int argc, char** argv) {
     printf("Data: %zu chars, V=%d\n", data_tokens.size(), V);
 
     // ======================== Init hardware ========================
+    // NM QUAD: 4 boards (1 per NM6408 chip), each with 4 clusters × 4 cores = 16
+    // Total: 4 boards × 16 cores = 64 cores
     PL_SetTimeout(60000);
     unsigned cnt;
     if (PL_GetBoardCount(&cnt) != 0 || cnt == 0) {
         printf("No NM QUAD boards found\n"); return 1;
     }
-    PL_GetBoardDesc(0, &board);
-    PL_ResetBoard(board);
-    PL_LoadInitCode(board);
+    printf("Boards detected: %u\n", cnt);
 
-    // Enumerate ALL cores: 16 clusters × 4 cores = 64 possible
-    // core_id must match dispatcher's (cluster_id << 2) + nm_id
-    for (int cl = 0; cl < max_clusters; cl++) {
-        int cluster_cores = 0;
-        for (int co = 0; co < max_cores_per_cluster; co++) {
-            PL_CoreNo cn = {co, cl};
-            PL_Access* a;
-            if (PL_GetAccess(board, &cn, &a) == 0) {
-                if (PL_LoadProgramFile(a, disp_path.c_str()) == 0) {
-                    CoreHandle ch;
-                    ch.access = a;
-                    ch.chip_id = cl / 4;  // 4 clusters per chip
-                    ch.core_id = (cl << 2) + co;  // matches dispatcher
-                    all_cores.push_back(ch);
-                    cluster_cores++;
-                } else {
-                    PL_CloseAccess(a);
+    // Each board = 1 NM6408 chip with its own DDR
+    PL_Board* boards[4] = {};
+    int num_boards = (int)cnt < 4 ? (int)cnt : 4;
+
+    for (int b = 0; b < num_boards; b++) {
+        if (PL_GetBoardDesc(b, &boards[b]) != 0) { num_boards = b; break; }
+        PL_ResetBoard(boards[b]);
+        PL_LoadInitCode(boards[b]);
+
+        // Each board has 4 clusters × 4 cores = 16 NMC4 cores
+        for (int cl = 0; cl < 4; cl++) {
+            for (int co = 0; co < 4; co++) {
+                PL_CoreNo cn = {co, cl};
+                PL_Access* a;
+                if (PL_GetAccess(boards[b], &cn, &a) == 0) {
+                    if (PL_LoadProgramFile(a, disp_path.c_str()) == 0) {
+                        CoreHandle ch;
+                        ch.access = a;
+                        ch.chip_id = b;  // board = chip
+                        ch.core_id = (cl << 2) + co;  // matches dispatcher
+                        all_cores.push_back(ch);
+                    } else {
+                        PL_CloseAccess(a);
+                    }
                 }
             }
         }
-        if (cluster_cores > 0) {
-            printf("  Cluster %d: %d cores\n", cl, cluster_cores);
-            num_chips = cl / 4 + 1;  // track highest chip
-        }
+        printf("  Board %d: %d cores\n", b, (int)all_cores.size() - b * 16);
     }
+    num_chips = num_boards;
+    board = boards[0];  // keep for cleanup
 
     usleep(1000000);  // 1s for dispatchers to init
 
     int NC = (int)all_cores.size();
-    printf("NM QUAD: %d chips, %d total cores\n", num_chips, NC);
+    printf("NM QUAD: %d boards (chips), %d total cores\n", num_boards, NC);
     if (NC == 0) { printf("No cores!\n"); return 1; }
 
     // ======================== Adjust batch ========================
@@ -260,9 +266,8 @@ int main(int argc, char** argv) {
     printf("Batch: %d total, %d/core, %d cores\n", B_total, B_per_core, NC);
 
     // ======================== Upload weights + allocate per-core areas ========================
-    // CRITICAL: All clusters on one NM6408 board share DDR!
-    // Must use ONE global allocation, not per-chip.
-    // Group cores by chip for weight sync purposes only
+    // Each board (chip) has its OWN 5GB DDR.
+    // Weights replicated on each chip. Per-core areas on their chip's DDR.
     std::vector<std::vector<int>> chip_core_ids(num_chips);
     for (int ci = 0; ci < NC; ci++)
         chip_core_ids[all_cores[ci].chip_id].push_back(ci);
@@ -276,41 +281,41 @@ int main(int argc, char** argv) {
 
     core_addrs.resize(NC);
 
-    // Single global DDR allocation (shared across all clusters)
-    PL_Addr dp = DATA0;
+    for (int ch = 0; ch < num_chips; ch++) {
+        PL_Addr dp = DATA0;
+        int first_ci = chip_core_ids[ch][0];
 
-    // Upload shared weights once (via core 0)
-    chip_addrs[0].wte = dp;
-    core_wr(0, dp, wte.data(), V*D); dp += V*D;
-    chip_addrs[0].wpe = dp;
-    core_wr(0, dp, wpe.data(), T*D); dp += T*D;
-    chip_addrs[0].layers = dp;
-    core_wr(0, dp, packed.data(), L*lsz); dp += L*lsz;
-    chip_addrs[0].lm_head = dp;
-    core_wr(0, dp, lm_w.data(), D*V); dp += D*V;
+        // Upload weights to this chip's DDR
+        chip_addrs[ch].wte = dp;
+        core_wr(first_ci, dp, wte.data(), V*D); dp += V*D;
+        chip_addrs[ch].wpe = dp;
+        core_wr(first_ci, dp, wpe.data(), T*D); dp += T*D;
+        chip_addrs[ch].layers = dp;
+        core_wr(first_ci, dp, packed.data(), L*lsz); dp += L*lsz;
+        chip_addrs[ch].lm_head = dp;
+        core_wr(first_ci, dp, lm_w.data(), D*V); dp += D*V;
 
-    // All chips share same weight addresses
-    for (int ch = 1; ch < num_chips; ch++) {
-        chip_addrs[ch].wte = chip_addrs[0].wte;
-        chip_addrs[ch].wpe = chip_addrs[0].wpe;
-        chip_addrs[ch].layers = chip_addrs[0].layers;
-        chip_addrs[ch].lm_head = chip_addrs[0].lm_head;
-    }
+        // Allocate per-core areas on this chip's DDR
+        for (int ci : chip_core_ids[ch]) {
+            core_addrs[ci].tokens     = dp; dp += B_per_core * T;
+            core_addrs[ci].logits     = dp; dp += BT * V;
+            core_addrs[ci].h_out      = dp; dp += cache_words;
+            core_addrs[ci].scratch    = dp; dp += fwd_scratch_words;
+            core_addrs[ci].dlogits    = dp; dp += BT * V;
+            core_addrs[ci].bk_scratch = dp; dp += bwd_scratch_words;
+        }
 
-    // Allocate per-core areas (all in same DDR, non-overlapping)
-    for (int ci = 0; ci < NC; ci++) {
-        core_addrs[ci].tokens     = dp; dp += B_per_core * T;
-        core_addrs[ci].logits     = dp; dp += BT * V;
-        core_addrs[ci].h_out      = dp; dp += cache_words;
-        core_addrs[ci].scratch    = dp; dp += fwd_scratch_words;
-        core_addrs[ci].dlogits    = dp; dp += BT * V;
-        core_addrs[ci].bk_scratch = dp; dp += bwd_scratch_words;
+        chip_addrs[ch].data_end = dp;
+        float ddr_mb = (dp - DATA0) * 4.0f / (1024*1024);
+        printf("  Chip %d DDR: %.1f MB / 5120 MB (%d cores)\n",
+               ch, ddr_mb, (int)chip_core_ids[ch].size());
     }
 
     {
-        float ddr_mb = (dp - DATA0) * 4.0f / (1024*1024);
-        printf("DDR used: %.1f MB / 509 MB (%d cores)\n", ddr_mb, NC);
-        if (ddr_mb > 500) printf("WARNING: DDR almost full!\n");
+        float total_mb = 0;
+        for (int ch = 0; ch < num_chips; ch++)
+            total_mb += (chip_addrs[ch].data_end - DATA0) * 4.0f / (1024*1024);
+        printf("Total DDR: %.1f MB across %d chips\n", total_mb, num_chips);
     }
 
     printf("\nTraining: %d epochs x %d steps, lr=%.4f\n", epochs, steps, lr);
@@ -396,36 +401,69 @@ int main(int argc, char** argv) {
             }
             epoch_loss += batch_loss / (B_total * T);
 
-            // 6. DISPATCH FUSED BACKWARD — ALL cores simultaneously
-            // Each core updates shared weights with lr/NC. With shared DDR,
-            // concurrent writes may cause small numerical noise but SGD is robust to this.
+            // 6. DISPATCH FUSED BACKWARD
+            // Within each chip: 16 cores share DDR, so run backward ONE per chip
+            // to avoid race condition on shared weights.
+            // Across chips: separate DDR, safe to run in parallel.
             unsigned lr_bits;
             memcpy(&lr_bits, &lr, 4);
 
-            for (int ci = 0; ci < NC; ci++) {
-                int ch = all_cores[ci].chip_id;
-                unsigned bk_args[18] = {
-                    (unsigned)B_per_core,
-                    (unsigned)T, (unsigned)D, (unsigned)H, (unsigned)FF,
-                    (unsigned)V, (unsigned)L,
-                    core_addrs[ci].dlogits,
-                    core_addrs[ci].tokens,
-                    chip_addrs[ch].wte,
-                    chip_addrs[ch].layers,
-                    chip_addrs[ch].lm_head,
-                    core_addrs[ci].h_out,  // h_cache
-                    (unsigned)(core_addrs[ci].h_out + (L+1)*BT*D),  // hn_cache
-                    (unsigned)(core_addrs[ci].h_out + (L+1)*BT*D + L*BT*D), // ff1r_cache
-                    lr_bits,
-                    core_addrs[ci].bk_scratch,
-                    (unsigned)NC  // n_cores for lr scaling
-                };
-                core_dispatch(ci, OP_FUSED_BACKWARD_ROWPAR, bk_args, 18);
+            // Run backward for each chip: one core at a time within chip
+            for (int ch = 0; ch < num_chips; ch++) {
+                int cores_on_chip = (int)chip_core_ids[ch].size();
+                for (int idx = 0; idx < cores_on_chip; idx++) {
+                    int ci = chip_core_ids[ch][idx];
+                    unsigned bk_args[18] = {
+                        (unsigned)B_per_core,
+                        (unsigned)T, (unsigned)D, (unsigned)H, (unsigned)FF,
+                        (unsigned)V, (unsigned)L,
+                        core_addrs[ci].dlogits,
+                        core_addrs[ci].tokens,
+                        chip_addrs[ch].wte,
+                        chip_addrs[ch].layers,
+                        chip_addrs[ch].lm_head,
+                        core_addrs[ci].h_out,
+                        (unsigned)(core_addrs[ci].h_out + (L+1)*BT*D),
+                        (unsigned)(core_addrs[ci].h_out + (L+1)*BT*D + L*BT*D),
+                        lr_bits,
+                        core_addrs[ci].bk_scratch,
+                        (unsigned)cores_on_chip  // scale by cores on THIS chip
+                    };
+                    core_dispatch(ci, OP_FUSED_BACKWARD_ROWPAR, bk_args, 18);
+                    if (!core_wait(ci)) printf("BACKWARD TIMEOUT core %d\n", ci);
+                }
             }
 
-            // 7. WAIT ALL backward
-            for (int ci = 0; ci < NC; ci++)
-                if (!core_wait(ci)) printf("BACKWARD TIMEOUT core %d\n", ci);
+            // 7. Cross-chip weight sync (average weights across chips)
+            if (num_chips > 1 && (step + 1) % 5 == 0) {
+                // Download from chip 0
+                int ref_ci = chip_core_ids[0][0];
+                core_rd(ref_ci, chip_addrs[0].layers, packed.data(), L*lsz);
+                core_rd(ref_ci, chip_addrs[0].lm_head, lm_w.data(), D*V);
+                core_rd(ref_ci, chip_addrs[0].wte, wte.data(), V*D);
+
+                for (int ch = 1; ch < num_chips; ch++) {
+                    int ci2 = chip_core_ids[ch][0];
+                    std::vector<float> tl(L*lsz), tm(D*V), tw(V*D);
+                    core_rd(ci2, chip_addrs[ch].layers, tl.data(), L*lsz);
+                    core_rd(ci2, chip_addrs[ch].lm_head, tm.data(), D*V);
+                    core_rd(ci2, chip_addrs[ch].wte, tw.data(), V*D);
+                    for (int i = 0; i < L*lsz; i++) packed[i] += tl[i];
+                    for (int i = 0; i < D*V; i++) lm_w[i] += tm[i];
+                    for (int i = 0; i < V*D; i++) wte[i] += tw[i];
+                }
+                float inv = 1.0f / num_chips;
+                for (auto& x : packed) x *= inv;
+                for (auto& x : lm_w) x *= inv;
+                for (auto& x : wte) x *= inv;
+
+                for (int ch = 0; ch < num_chips; ch++) {
+                    int ci2 = chip_core_ids[ch][0];
+                    core_wr(ci2, chip_addrs[ch].layers, packed.data(), L*lsz);
+                    core_wr(ci2, chip_addrs[ch].lm_head, lm_w.data(), D*V);
+                    core_wr(ci2, chip_addrs[ch].wte, wte.data(), V*D);
+                }
+            }
 
             if ((step+1) % 10 == 0) {
                 auto now = std::chrono::steady_clock::now();
@@ -485,7 +523,8 @@ int main(int argc, char** argv) {
     usleep(500000);
     for (int ci = 0; ci < NC; ci++)
         PL_CloseAccess(all_cores[ci].access);
-    PL_CloseBoardDesc(board);
+    for (int b = 0; b < num_boards; b++)
+        PL_CloseBoardDesc(boards[b]);
     printf("=== DONE ===\n");
     return 0;
 }
