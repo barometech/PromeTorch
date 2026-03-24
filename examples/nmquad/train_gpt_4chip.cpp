@@ -132,7 +132,7 @@ int main(int argc, char** argv) {
     std::string model_name = "small";
     int epochs = 10, steps = 200, B_total = 64;
     float lr = 0.001f;
-    int max_chips = 4, max_cores = 16;
+    int max_clusters = 16, max_cores_per_cluster = 4;
 
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
@@ -143,8 +143,8 @@ int main(int argc, char** argv) {
         else if (a == "--steps") steps = atoi(argv[++i]);
         else if (a == "--batch") B_total = atoi(argv[++i]);
         else if (a == "--lr") lr = atof(argv[++i]);
-        else if (a == "--chips") max_chips = atoi(argv[++i]);
-        else if (a == "--cores") max_cores = atoi(argv[++i]);
+        else if (a == "--clusters") max_clusters = atoi(argv[++i]);
+        else if (a == "--cores") max_cores_per_cluster = atoi(argv[++i]);
     }
 
     // Model configs
@@ -187,29 +187,29 @@ int main(int argc, char** argv) {
     PL_ResetBoard(board);
     PL_LoadInitCode(board);
 
-    // Enumerate cores: cluster_id = chip, nm_id = core within cluster
-    // CRITICAL: core_id must match dispatcher's (cluster_id << 2) + nm_id
-    for (int cl = 0; cl < max_chips; cl++) {
-        int chip_cores = 0;
-        for (int co = 0; co < (max_cores < 4 ? max_cores : 4); co++) {
+    // Enumerate ALL cores: 16 clusters × 4 cores = 64 possible
+    // core_id must match dispatcher's (cluster_id << 2) + nm_id
+    for (int cl = 0; cl < max_clusters; cl++) {
+        int cluster_cores = 0;
+        for (int co = 0; co < max_cores_per_cluster; co++) {
             PL_CoreNo cn = {co, cl};
             PL_Access* a;
             if (PL_GetAccess(board, &cn, &a) == 0) {
                 if (PL_LoadProgramFile(a, disp_path.c_str()) == 0) {
                     CoreHandle ch;
                     ch.access = a;
-                    ch.chip_id = cl;
-                    ch.core_id = (cl << 2) + co;  // matches dispatcher: (cluster_id<<2)+nm_id
+                    ch.chip_id = cl / 4;  // 4 clusters per chip
+                    ch.core_id = (cl << 2) + co;  // matches dispatcher
                     all_cores.push_back(ch);
-                    chip_cores++;
+                    cluster_cores++;
                 } else {
                     PL_CloseAccess(a);
                 }
             }
         }
-        if (chip_cores > 0) {
-            printf("  Chip %d: %d cores\n", cl, chip_cores);
-            num_chips++;
+        if (cluster_cores > 0) {
+            printf("  Cluster %d: %d cores\n", cl, cluster_cores);
+            num_chips = cl / 4 + 1;  // track highest chip
         }
     }
 
@@ -260,7 +260,9 @@ int main(int argc, char** argv) {
     printf("Batch: %d total, %d/core, %d cores\n", B_total, B_per_core, NC);
 
     // ======================== Upload weights + allocate per-core areas ========================
-    // Group cores by chip
+    // CRITICAL: All clusters on one NM6408 board share DDR!
+    // Must use ONE global allocation, not per-chip.
+    // Group cores by chip for weight sync purposes only
     std::vector<std::vector<int>> chip_core_ids(num_chips);
     for (int ci = 0; ci < NC; ci++)
         chip_core_ids[all_cores[ci].chip_id].push_back(ci);
@@ -268,45 +270,47 @@ int main(int argc, char** argv) {
     // Per-core cache and scratch sizes (must match dispatcher layout EXACTLY)
     int BH = B_per_core * H;
     int cache_words = (L+1)*BT*D + L*BT*D + L*BT*FF;
-    // Forward scratch: h,hn,Q,K,V (5*BT*D) + Kt(BH*HD*T) + scores(BH*T*T)
-    //   + attn_out(BT*D) + proj(BT*D) + ff1(BT*FF) + ff2(BT*D) + Q_tmp(BH*T*HD) + V_bh(BH*T*HD)
     int fwd_scratch_words = BT*D*5 + BH*HD*T + BH*T*T
                           + BT*D + BT*D + BT*FF + BT*D + BH*T*HD*2;
-    // Backward scratch: dW(D*V) + dx(BT*D) + temp1(BT*FF) + temp2(BT*FF) + temp3(BT*D)
     int bwd_scratch_words = D*V + BT*D + BT*FF + BT*FF + BT*D;
 
     core_addrs.resize(NC);
 
-    for (int ch = 0; ch < num_chips; ch++) {
-        PL_Addr dp = DATA0;
+    // Single global DDR allocation (shared across all clusters)
+    PL_Addr dp = DATA0;
 
-        // Upload shared weights (via first core of this chip)
-        int first_ci = chip_core_ids[ch][0];
-        chip_addrs[ch].wte = dp;
-        core_wr(first_ci, dp, wte.data(), V*D); dp += V*D;
-        chip_addrs[ch].wpe = dp;
-        core_wr(first_ci, dp, wpe.data(), T*D); dp += T*D;
-        chip_addrs[ch].layers = dp;
-        core_wr(first_ci, dp, packed.data(), L*lsz); dp += L*lsz;
-        chip_addrs[ch].lm_head = dp;
-        core_wr(first_ci, dp, lm_w.data(), D*V); dp += D*V;
+    // Upload shared weights once (via core 0)
+    chip_addrs[0].wte = dp;
+    core_wr(0, dp, wte.data(), V*D); dp += V*D;
+    chip_addrs[0].wpe = dp;
+    core_wr(0, dp, wpe.data(), T*D); dp += T*D;
+    chip_addrs[0].layers = dp;
+    core_wr(0, dp, packed.data(), L*lsz); dp += L*lsz;
+    chip_addrs[0].lm_head = dp;
+    core_wr(0, dp, lm_w.data(), D*V); dp += D*V;
 
-        // Allocate per-core areas
-        for (int ci : chip_core_ids[ch]) {
-            core_addrs[ci].tokens     = dp; dp += B_per_core * T;
-            core_addrs[ci].logits     = dp; dp += BT * V;
-            core_addrs[ci].h_out      = dp; dp += cache_words;
-            core_addrs[ci].scratch    = dp; dp += fwd_scratch_words;
-            core_addrs[ci].dlogits    = dp; dp += BT * V;
-            core_addrs[ci].bk_scratch = dp; dp += bwd_scratch_words;
-        }
+    // All chips share same weight addresses
+    for (int ch = 1; ch < num_chips; ch++) {
+        chip_addrs[ch].wte = chip_addrs[0].wte;
+        chip_addrs[ch].wpe = chip_addrs[0].wpe;
+        chip_addrs[ch].layers = chip_addrs[0].layers;
+        chip_addrs[ch].lm_head = chip_addrs[0].lm_head;
+    }
 
-        chip_addrs[ch].data_end = dp;
+    // Allocate per-core areas (all in same DDR, non-overlapping)
+    for (int ci = 0; ci < NC; ci++) {
+        core_addrs[ci].tokens     = dp; dp += B_per_core * T;
+        core_addrs[ci].logits     = dp; dp += BT * V;
+        core_addrs[ci].h_out      = dp; dp += cache_words;
+        core_addrs[ci].scratch    = dp; dp += fwd_scratch_words;
+        core_addrs[ci].dlogits    = dp; dp += BT * V;
+        core_addrs[ci].bk_scratch = dp; dp += bwd_scratch_words;
+    }
+
+    {
         float ddr_mb = (dp - DATA0) * 4.0f / (1024*1024);
-        printf("Chip %d DDR: %.1f MB / 509 MB\n", ch, ddr_mb);
-        if (ddr_mb > 500) {
-            printf("WARNING: DDR almost full on chip %d!\n", ch);
-        }
+        printf("DDR used: %.1f MB / 509 MB (%d cores)\n", ddr_mb, NC);
+        if (ddr_mb > 500) printf("WARNING: DDR almost full!\n");
     }
 
     printf("\nTraining: %d epochs x %d steps, lr=%.4f\n", epochs, steps, lr);
@@ -392,7 +396,8 @@ int main(int argc, char** argv) {
             }
             epoch_loss += batch_loss / (B_total * T);
 
-            // 6. DISPATCH FUSED BACKWARD to ALL cores simultaneously
+            // 6. DISPATCH FUSED BACKWARD — SEQUENTIAL (shared DDR = race condition if parallel)
+            // Each core updates shared weights with lr/NC. Must run one at a time.
             unsigned lr_bits;
             memcpy(&lr_bits, &lr, 4);
 
@@ -415,45 +420,7 @@ int main(int argc, char** argv) {
                     (unsigned)NC  // n_cores for lr scaling
                 };
                 core_dispatch(ci, OP_FUSED_BACKWARD_ROWPAR, bk_args, 18);
-            }
-
-            // 7. WAIT ALL backward
-            for (int ci = 0; ci < NC; ci++)
                 if (!core_wait(ci)) printf("BACKWARD TIMEOUT core %d\n", ci);
-
-            // 8. Cross-chip weight sync (only needed when num_chips > 1)
-            // Each chip has updated its weights independently with lr/NC.
-            // For multi-chip: download, average, re-upload.
-            // For single-chip with multiple cores: weights are in same DDR,
-            // so all cores' updates sum automatically (DDR is shared).
-            if (num_chips > 1 && (step + 1) % 10 == 0) {
-                // Sync every 10 steps to amortize DDR transfer cost
-                int ref_ci = chip_core_ids[0][0];
-                core_rd(ref_ci, chip_addrs[0].layers, packed.data(), L*lsz);
-                core_rd(ref_ci, chip_addrs[0].lm_head, lm_w.data(), D*V);
-                core_rd(ref_ci, chip_addrs[0].wte, wte.data(), V*D);
-
-                for (int ch = 1; ch < num_chips; ch++) {
-                    int ci2 = chip_core_ids[ch][0];
-                    std::vector<float> tl(L*lsz), tm(D*V), tw(V*D);
-                    core_rd(ci2, chip_addrs[ch].layers, tl.data(), L*lsz);
-                    core_rd(ci2, chip_addrs[ch].lm_head, tm.data(), D*V);
-                    core_rd(ci2, chip_addrs[ch].wte, tw.data(), V*D);
-                    for (int i = 0; i < L*lsz; i++) packed[i] += tl[i];
-                    for (int i = 0; i < D*V; i++) lm_w[i] += tm[i];
-                    for (int i = 0; i < V*D; i++) wte[i] += tw[i];
-                }
-                float inv = 1.0f / num_chips;
-                for (auto& x : packed) x *= inv;
-                for (auto& x : lm_w) x *= inv;
-                for (auto& x : wte) x *= inv;
-
-                for (int ch = 0; ch < num_chips; ch++) {
-                    int ci2 = chip_core_ids[ch][0];
-                    core_wr(ci2, chip_addrs[ch].layers, packed.data(), L*lsz);
-                    core_wr(ci2, chip_addrs[ch].lm_head, lm_w.data(), D*V);
-                    core_wr(ci2, chip_addrs[ch].wte, wte.data(), V*D);
-                }
             }
 
             if ((step+1) % 10 == 0) {
