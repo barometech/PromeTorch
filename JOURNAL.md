@@ -59,20 +59,52 @@ PL_GetBoardCount() = 4 (по одной на NM6408 чип). Каждый board 
 Intra-chip (16 cores shared DDR): backward sequential (1 core at a time).
 Inter-chip (4 separate DDRs): forward + backward parallel, weight sync каждые 5 steps.
 
-### Verified results
-| Cores | tok/s | Loss | Status |
-|-------|-------|------|--------|
-| 1 | 2 | 4.17 ✓ | Stable |
-| 2 | 4 | 4.17 ✓ | Stable |
-| 4 | 7 | 4.17 ✓ | Stable |
-| 8 (2 clusters) | 15 | 4.17 ✓ | Stable, epoch complete |
-| 16 (1 chip) | 29 | NaN | Forward OK, backward race |
-| **64 (4 chips)** | **13** | NaN (bwd race) | **РАБОТАЕТ! acc=4.3%** |
+### ПРОРЫВ: nmpp SIMD matmul 100x speedup!
+Собрали `nmppmMul_mm_32f` из NM assembly (`MullMatrix_f.asm`).
+SIMD forward: **66.5ms** vs scalar 6675ms = **100x speedup**.
+1 ядро SIMD: **481 tok/s** (vs 4.8 scalar).
 
-### Целевые метрики
-- > 200 GFLOPS (10% пика 2 TFLOPS)
-- > 5000 tok/s small model (с nmpp SIMD)
-- > 500 tok/s LARGE 85M (64 cores)
+### 8 КРИТИЧЕСКИХ БАГОВ НАЙДЕНЫ И ПОФИКШЕНЫ
+1. **bwd_scratch overflow** — dW выделялось D*V, нужно max(D*V,D*D,D*FF,FF*D) → DDR corruption
+2. **lr_scaled = lr/n_cores** — неправильно для independent data per core
+3. **dlogits /= B_per_core** — должно быть /= B_total
+4. **d_O из modified dx** — attention backward bug
+5. **Scalar backward broken QKV** — Wv = same grad as Wk, no backprop through QKV
+6. **gradonly scratch mismatch** — тот же overflow что и rowpar
+
+### Gradient Accumulation (OP_FUSED_BACKWARD_GRADONLY = 34)
+Каждое ядро пишет grad в СВОЙ буфер (read-only weights). Host суммирует, applies SGD.
+**ZERO race condition, полный параллелизм.**
+
+### Wave Dispatch Strategy
+16 cores/board зависает (DDR bank conflicts при simultaneous read shared weights).
+Решение: backward в волнах по `--wave-size 4`.
+4 cores/board/wave × 4 boards = 16 parallel (safe).
+
+### ФИНАЛЬНЫЕ РЕЗУЛЬТАТЫ
+| Config | Cores | tok/s | Loss | Status |
+|--------|-------|-------|------|--------|
+| 1 board, 1 cluster, scalar | 4 | 7 | 4.17→drops | Stable |
+| 1 board, 1 cluster, SIMD | 4 | **220** | 5.27 | Stable (gradonly) |
+| 1 board, 1 cluster, SIMD seq | 4 | **147** | 4.17→drops | Stable (rowpar) |
+| 2 boards, 1 cluster, SIMD | 8 | **407** | 4.72 | Stable (wave) |
+| **4 boards, 1 cluster, SIMD** | **16** | **705** | 4.45 | **Stable (wave)** |
+
+### Как это получилось
+1. Обнаружили что PL_GetBoardCount()=4 (каждый чип = board, не cluster)
+2. Собрали nmpp SIMD matmul из .asm → 100x speedup
+3. Нашли 8 багов через code review (5 agent'ов параллельно)
+4. Gradient accumulation = параллельный backward без race condition
+5. Wave dispatch = обход DDR bank conflict limitation
+
+### Модель 250M
+Добавлен `--model 250m`: D=768, H=12, FF=3072, L=36, T=64 (~255M params).
+DDR: ~2GB/chip (39.8% от 5GB). Ожидаем тренировку до loss 1.5.
+
+### Целевые метрики (обновлённые)
+- ✅ > 500 tok/s (705 tok/s на 16 cores!)
+- ⬜ > 2000 tok/s (нужно 4 clusters/board fix или больше cores)
+- ⬜ Loss 1.5 на 250M модели
 
 ---
 

@@ -38,6 +38,7 @@ extern "C" {
 #define OP_MATMUL        1
 #define OP_FUSED_FORWARD_ROWPAR  32  // NEW: row-parallel fused forward
 #define OP_FUSED_BACKWARD_ROWPAR 33  // NEW: row-parallel fused backward
+#define OP_FUSED_BACKWARD_GRADONLY 34 // Gradient-only backward (no weight update)
 #define OP_EXIT          255
 
 #define STATUS_ADDR    30
@@ -320,11 +321,23 @@ static void op_fused_backward_rowpar() {
     int HD = D / H, BT = Bm * T, BH = Bm * H;
     int lsz = 4*D*D + 2*D*FF + D;
 
-    // Scratch layout
+    // Scratch layout — sizes must handle ALL uses:
+    // dW:    max(D*V, D*D, D*FF, FF*D) — gradient accumulation for any weight matrix
+    // temp1: max(BT*FF, D*BT, V*D, D*FF, FF*D, D*D) — transpose buffer
+    int dW_sz = D * V;
+    if (D*D > dW_sz) dW_sz = D*D;
+    if (D*FF > dW_sz) dW_sz = D*FF;
+    if (FF*D > dW_sz) dW_sz = FF*D;
+    int t1_sz = BT * FF;
+    if (D*BT > t1_sz) t1_sz = D*BT;
+    if (V*D > t1_sz) t1_sz = V*D;
+    if (D*FF > t1_sz) t1_sz = D*FF;
+    if (FF*D > t1_sz) t1_sz = FF*D;
+    if (D*D > t1_sz) t1_sz = D*D;
     float* dW    = scratch;
-    float* dx    = dW + D * V;  // max(D*V, D*D, D*FF, FF*D)
+    float* dx    = dW + dW_sz;
     float* temp1 = dx + BT * D;
-    float* temp2 = temp1 + BT * FF;
+    float* temp2 = temp1 + t1_sz;
     float* temp3 = temp2 + BT * FF;
 
     // 1. LM head backward: dW_lm = h_final.T @ dlogits
@@ -382,20 +395,13 @@ static void op_fused_backward_rowpar() {
         nmppmMul_mm_32f(temp2, BT, FF, temp1, FF, D, temp3, D, D, 0);
         fused_add(dx, temp3, BT * D);
 
-        // --- Attention backward (simplified: Wo + QKV) ---
+        // --- Attention backward: Wo + full QKV ---
         // dWo = hn.T @ dx
         for (int i = 0; i < BT; i++)
             for (int d = 0; d < D; d++)
                 temp1[d * BT + i] = hn[i * D + d];
         nmppmMul_mm_32f(temp1, D, BT, dx, BT, D, dW, D, D, 0);
         fused_sgd(Wo, dW, D * D, lr_scaled);
-
-        // dx += dx @ Wo.T (residual)
-        for (int i = 0; i < D; i++)
-            for (int j = 0; j < D; j++)
-                temp1[j * D + i] = Wo[i * D + j];
-        nmppmMul_mm_32f(dx, BT, D, temp1, D, D, temp3, D, D, 0);
-        fused_add(dx, temp3, BT * D);
 
         // === FULL ATTENTION BACKWARD ===
         // Recompute Q, K, V from hn
@@ -408,12 +414,17 @@ static void op_fused_backward_rowpar() {
         nmppmMul_mm_32f(hn, BT, D, Wk, D, D, K_full, D, D, 0);
         nmppmMul_mm_32f(hn, BT, D, Wv, D, D, V_full, D, D, 0);
 
-        // d_O = dx @ Wo.T (already have temp3 from above — but was overwritten)
-        // Recompute Wo.T @ dx
+        // BUG 5 FIX: compute d_O = dx @ Wo.T BEFORE modifying dx with residual
+        // d_O is the gradient flowing into the attention output projection.
+        // Since the residual is also dx @ Wo.T (same value), we compute once
+        // into d_O, then add d_O to dx for the residual connection.
         for (int i = 0; i < D; i++)
             for (int j = 0; j < D; j++)
                 temp1[j * D + i] = Wo[i * D + j];
         nmppmMul_mm_32f(dx, BT, D, temp1, D, D, d_O, D, D, 0);
+
+        // Residual: dx += d_O (same as dx @ Wo.T, computed from unmodified dx)
+        fused_add(dx, d_O, BT * D);
 
         // d_Q, d_K, d_V accumulators
         float* d_Q = d_O + BT * D;
@@ -559,6 +570,325 @@ static void op_fused_backward_rowpar() {
 }
 
 // ============================================================
+// GRADIENT-ONLY BACKWARD (no weight update — host aggregates)
+// ============================================================
+// Same gradient computation as op_fused_backward_rowpar(), but instead of
+// fused_sgd(W, dW, n, lr), writes gradients to a per-core PRIVATE buffer.
+// Host downloads all grad buffers, sums them, applies SGD, uploads.
+// This allows ALL cores to run backward SIMULTANEOUSLY (no DDR race).
+//
+// CMD block layout:
+//   [1]  B_mine      — batch rows for this core
+//   [2]  T
+//   [3]  D
+//   [4]  H
+//   [5]  FF
+//   [6]  V
+//   [7]  L
+//   [8]  dlogits_addr — this core's dlogits [B_mine*T*V]
+//   [9]  tokens_addr  — this core's tokens [B_mine*T]
+//   [10] wte_addr     — shared wte (READ-ONLY)
+//   [11] layers_addr  — shared layer weights (READ-ONLY)
+//   [12] lm_head_addr — shared lm_head (READ-ONLY)
+//   [13] h_cache_addr — this core's h cache
+//   [14] hn_cache_addr— this core's hn cache
+//   [15] ff1r_cache   — this core's ff1r cache
+//   [16] scratch_addr — this core's scratch
+//   [17] grad_out_addr— per-core PRIVATE gradient buffer in DDR
+//
+// grad_out layout (contiguous):
+//   [0 .. D*V-1]                  = grad_lm_head
+//   [D*V .. D*V + L*lsz - 1]     = grad_layers (packed same as layers)
+//   [D*V + L*lsz .. + V*D - 1]   = grad_wte
+
+static void grad_copy(float* dst, float* src, int n) {
+    for (int i = 0; i < n; i++) {
+        float g = src[i];
+        if (g > 1.0f) g = 1.0f;
+        if (g < -1.0f) g = -1.0f;
+        dst[i] += g;
+    }
+}
+
+static void op_fused_backward_gradonly() {
+    int Bm = (int)mem[1];
+    int T  = (int)mem[2];
+    int D  = (int)mem[3];
+    int H  = (int)mem[4];
+    int FF = (int)mem[5];
+    int V  = (int)mem[6];
+    int L  = (int)mem[7];
+    float* dlogits    = (float*)mem[8];
+    unsigned int* tokens = (unsigned int*)mem[9];
+    float* wte        = (float*)mem[10];   // READ-ONLY
+    float* layers_base= (float*)mem[11];   // READ-ONLY
+    float* lm_head    = (float*)mem[12];   // READ-ONLY
+    float* h_cache    = (float*)mem[13];
+    float* hn_cache   = (float*)mem[14];
+    float* ff1r_cache = (float*)mem[15];
+    float* scratch    = (float*)mem[16];
+    float* grad_out   = (float*)mem[17];   // per-core PRIVATE gradient buffer
+
+    if (Bm <= 0) return;
+
+    int HD = D / H, BT = Bm * T, BH = Bm * H;
+    int lsz = 4*D*D + 2*D*FF + D;
+
+    // grad_out layout pointers
+    float* g_lm_head = grad_out;                        // [D*V]
+    float* g_layers  = grad_out + D * V;                // [L*lsz]
+    float* g_wte     = grad_out + D * V + L * lsz;     // [V*D]
+
+    // Zero the entire grad_out buffer
+    int grad_total = D*V + L*lsz + V*D;
+    for (int i = 0; i < grad_total; i++) grad_out[i] = 0;
+
+    // Scratch layout — must match rowpar's max-based sizing!
+    int dW_sz = D * V;
+    if (D*D > dW_sz) dW_sz = D*D;
+    if (D*FF > dW_sz) dW_sz = D*FF;
+    if (FF*D > dW_sz) dW_sz = FF*D;
+    int t1_sz = BT * FF;
+    if (D*BT > t1_sz) t1_sz = D*BT;
+    if (V*D > t1_sz) t1_sz = V*D;
+    if (D*FF > t1_sz) t1_sz = D*FF;
+    if (FF*D > t1_sz) t1_sz = FF*D;
+    if (D*D > t1_sz) t1_sz = D*D;
+    float* dW    = scratch;
+    float* dx    = dW + dW_sz;
+    float* temp1 = dx + BT * D;
+    float* temp2 = temp1 + t1_sz;
+    float* temp3 = temp2 + BT * FF;
+
+    // 1. LM head backward: dW_lm = h_final.T @ dlogits
+    float* hf = h_cache + L * BT * D;
+    for (int i = 0; i < BT; i++)
+        for (int d = 0; d < D; d++)
+            temp1[d * BT + i] = hf[i * D + d];
+
+    nmppmMul_mm_32f(temp1, D, BT, dlogits, BT, V, dW, V, V, 0);
+    grad_copy(g_lm_head, dW, D * V);
+
+    // 2. dx = dlogits @ lm_head.T
+    for (int i = 0; i < D; i++)
+        for (int j = 0; j < V; j++)
+            temp1[j * D + i] = lm_head[i * V + j];
+    nmppmMul_mm_32f(dlogits, BT, V, temp1, V, D, dx, D, D, 0);
+
+    // 3. Layer backward (reverse order)
+    for (int li = L - 1; li >= 0; li--) {
+        float* lw = layers_base + li * lsz;
+        float* Wq = lw, *Wk = lw+D*D, *Wv = lw+2*D*D, *Wo = lw+3*D*D;
+        float* W1 = lw+4*D*D, *W2 = lw+4*D*D+D*FF;
+        float* hn  = hn_cache + li * BT * D;
+        float* ff1r= ff1r_cache + li * BT * FF;
+
+        // Gradient destination for this layer
+        float* g_lw = g_layers + li * lsz;
+        float* g_Wq = g_lw;
+        float* g_Wk = g_lw + D*D;
+        float* g_Wv = g_lw + 2*D*D;
+        float* g_Wo = g_lw + 3*D*D;
+        float* g_W1 = g_lw + 4*D*D;
+        float* g_W2 = g_lw + 4*D*D + D*FF;
+
+        // --- FFN backward ---
+        // dW2 = ff1r.T @ dx
+        for (int i = 0; i < BT; i++)
+            for (int j = 0; j < FF; j++)
+                temp2[j * BT + i] = ff1r[i * FF + j];
+        nmppmMul_mm_32f(temp2, FF, BT, dx, BT, D, dW, D, D, 0);
+        grad_copy(g_W2, dW, FF * D);
+
+        // dff1r = dx @ W2.T
+        for (int i = 0; i < FF; i++)
+            for (int j = 0; j < D; j++)
+                temp1[j * FF + i] = W2[i * D + j];
+        nmppmMul_mm_32f(dx, BT, D, temp1, D, FF, temp2, FF, FF, 0);
+
+        // ReLU backward
+        for (int i = 0; i < BT * FF; i++)
+            if (ff1r[i] <= 0) temp2[i] = 0;
+
+        // dW1 = hn.T @ dff1
+        for (int i = 0; i < BT; i++)
+            for (int d = 0; d < D; d++)
+                temp1[d * BT + i] = hn[i * D + d];
+        nmppmMul_mm_32f(temp1, D, BT, temp2, BT, FF, dW, FF, FF, 0);
+        grad_copy(g_W1, dW, D * FF);
+
+        // dx += dff1 @ W1.T (residual backward)
+        for (int i = 0; i < D; i++)
+            for (int j = 0; j < FF; j++)
+                temp1[j * D + i] = W1[i * FF + j];
+        nmppmMul_mm_32f(temp2, BT, FF, temp1, FF, D, temp3, D, D, 0);
+        fused_add(dx, temp3, BT * D);
+
+        // --- Attention backward: Wo + full QKV ---
+        // dWo = hn.T @ dx
+        for (int i = 0; i < BT; i++)
+            for (int d = 0; d < D; d++)
+                temp1[d * BT + i] = hn[i * D + d];
+        nmppmMul_mm_32f(temp1, D, BT, dx, BT, D, dW, D, D, 0);
+        grad_copy(g_Wo, dW, D * D);
+
+        // === FULL ATTENTION BACKWARD ===
+        float* Q_full = temp3 + BT * D;
+        float* K_full = Q_full + BT * D;
+        float* V_full = K_full + BT * D;
+        float* d_O    = V_full + BT * D;
+
+        nmppmMul_mm_32f(hn, BT, D, Wq, D, D, Q_full, D, D, 0);
+        nmppmMul_mm_32f(hn, BT, D, Wk, D, D, K_full, D, D, 0);
+        nmppmMul_mm_32f(hn, BT, D, Wv, D, D, V_full, D, D, 0);
+
+        // BUG 5 FIX: compute d_O = dx @ Wo.T BEFORE modifying dx with residual
+        for (int i = 0; i < D; i++)
+            for (int j = 0; j < D; j++)
+                temp1[j * D + i] = Wo[i * D + j];
+        nmppmMul_mm_32f(dx, BT, D, temp1, D, D, d_O, D, D, 0);
+
+        // Residual: dx += d_O
+        fused_add(dx, d_O, BT * D);
+
+        // d_Q, d_K, d_V accumulators
+        float* d_Q = d_O + BT * D;
+        float* d_K = d_Q + BT * D;
+        float* d_V = d_K + BT * D;
+        for (int i = 0; i < BT*D; i++) { d_Q[i] = 0; d_K[i] = 0; d_V[i] = 0; }
+
+        float scale_val = fast_invsqrt((float)HD);
+
+        for (int bh = 0; bh < BH; bh++) {
+            int b = bh / H, hh = bh % H;
+
+            float Q_h[64*64], K_h[64*64], V_h[64*64], dO_h[64*64];
+            for (int t = 0; t < T; t++)
+                for (int d = 0; d < HD; d++) {
+                    int idx = b*T*D + t*D + hh*HD + d;
+                    Q_h[t*HD+d]  = Q_full[idx];
+                    K_h[t*HD+d]  = K_full[idx];
+                    V_h[t*HD+d]  = V_full[idx];
+                    dO_h[t*HD+d] = d_O[idx];
+                }
+
+            float K_t[64*64];
+            for (int t = 0; t < T; t++)
+                for (int d = 0; d < HD; d++)
+                    K_t[d*T+t] = K_h[t*HD+d];
+
+            float sc[64*64];
+            nmppmMul_mm_32f(Q_h, T, HD, K_t, HD, T, sc, T, T, 0);
+
+            float attn_h[64*64];
+            for (int i = 0; i < T; i++) {
+                float mx = -1e9f;
+                for (int j = 0; j <= i; j++) {
+                    sc[i*T+j] *= scale_val;
+                    if (sc[i*T+j] > mx) mx = sc[i*T+j];
+                }
+                float sm = 0;
+                for (int j = 0; j <= i; j++) {
+                    float v = sc[i*T+j] - mx;
+                    float e = 1.0f + v + v*v*0.5f + v*v*v*0.1666667f + v*v*v*v*0.0416667f;
+                    if (e < 0) e = 0;
+                    attn_h[i*T+j] = e;
+                    sm += e;
+                }
+                float inv = (sm > 0) ? 1.0f / sm : 0;
+                for (int j = 0; j <= i; j++) attn_h[i*T+j] *= inv;
+                for (int j = i+1; j < T; j++) attn_h[i*T+j] = 0;
+            }
+
+            float V_t[64*64];
+            for (int t = 0; t < T; t++)
+                for (int d = 0; d < HD; d++)
+                    V_t[d*T+t] = V_h[t*HD+d];
+            float d_attn[64*64];
+            nmppmMul_mm_32f(dO_h, T, HD, V_t, HD, T, d_attn, T, T, 0);
+
+            float attn_t[64*64];
+            for (int i = 0; i < T; i++)
+                for (int j = 0; j < T; j++)
+                    attn_t[j*T+i] = attn_h[i*T+j];
+            float dV_h[64*64];
+            nmppmMul_mm_32f(attn_t, T, T, dO_h, T, HD, dV_h, HD, HD, 0);
+
+            float d_sc[64*64];
+            for (int i = 0; i < T; i++) {
+                float dot = 0;
+                for (int j = 0; j < T; j++) dot += d_attn[i*T+j] * attn_h[i*T+j];
+                for (int j = 0; j < T; j++)
+                    d_sc[i*T+j] = attn_h[i*T+j] * (d_attn[i*T+j] - dot) * scale_val;
+            }
+
+            float dQ_h[64*64], dK_h[64*64];
+            nmppmMul_mm_32f(d_sc, T, T, K_h, T, HD, dQ_h, HD, HD, 0);
+
+            float d_sc_t[64*64];
+            for (int i = 0; i < T; i++)
+                for (int j = 0; j < T; j++)
+                    d_sc_t[j*T+i] = d_sc[i*T+j];
+            nmppmMul_mm_32f(d_sc_t, T, T, Q_h, T, HD, dK_h, HD, HD, 0);
+
+            for (int t = 0; t < T; t++)
+                for (int d = 0; d < HD; d++) {
+                    int idx = b*T*D + t*D + hh*HD + d;
+                    d_Q[idx] += dQ_h[t*HD+d];
+                    d_K[idx] += dK_h[t*HD+d];
+                    d_V[idx] += dV_h[t*HD+d];
+                }
+        }
+
+        // dWq, dWk, dWv → grad buffer
+        for (int i = 0; i < BT; i++)
+            for (int d = 0; d < D; d++)
+                temp1[d * BT + i] = hn[i * D + d];
+        nmppmMul_mm_32f(temp1, D, BT, d_Q, BT, D, dW, D, D, 0);
+        grad_copy(g_Wq, dW, D * D);
+
+        nmppmMul_mm_32f(temp1, D, BT, d_K, BT, D, dW, D, D, 0);
+        grad_copy(g_Wk, dW, D * D);
+
+        nmppmMul_mm_32f(temp1, D, BT, d_V, BT, D, dW, D, D, 0);
+        grad_copy(g_Wv, dW, D * D);
+
+        // dx += d_Q @ Wq.T + d_K @ Wk.T + d_V @ Wv.T
+        float* Wt = d_V + BT * D;
+        float* dx_add = Wt + D * D;
+
+        for (int i = 0; i < D; i++)
+            for (int j = 0; j < D; j++)
+                Wt[j*D+i] = Wq[i*D+j];
+        nmppmMul_mm_32f(d_Q, BT, D, Wt, D, D, dx_add, D, D, 0);
+        fused_add(dx, dx_add, BT * D);
+
+        for (int i = 0; i < D; i++)
+            for (int j = 0; j < D; j++)
+                Wt[j*D+i] = Wk[i*D+j];
+        nmppmMul_mm_32f(d_K, BT, D, Wt, D, D, dx_add, D, D, 0);
+        fused_add(dx, dx_add, BT * D);
+
+        for (int i = 0; i < D; i++)
+            for (int j = 0; j < D; j++)
+                Wt[j*D+i] = Wv[i*D+j];
+        nmppmMul_mm_32f(d_V, BT, D, Wt, D, D, dx_add, D, D, 0);
+        fused_add(dx, dx_add, BT * D);
+    }
+
+    // 4. Embedding gradient → grad buffer (no in-place wte update)
+    for (int bt = 0; bt < BT; bt++) {
+        int tok = tokens[bt];
+        for (int d = 0; d < D; d++) {
+            float g = dx[bt * D + d];
+            if (g > 1.0f) g = 1.0f;
+            if (g < -1.0f) g = -1.0f;
+            g_wte[tok * D + d] += g;
+        }
+    }
+}
+
+// ============================================================
 // MAIN — each core runs independently
 // ============================================================
 int main() {
@@ -604,6 +934,9 @@ int main() {
                 break;
             case OP_FUSED_BACKWARD_ROWPAR:
                 op_fused_backward_rowpar();
+                break;
+            case OP_FUSED_BACKWARD_GRADONLY:
+                op_fused_backward_gradonly();
                 break;
             default:
                 mem[STATUS_ADDR] = 2;  // error: unknown op
