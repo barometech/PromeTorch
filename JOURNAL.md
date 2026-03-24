@@ -67,7 +67,7 @@ Inter-chip (4 separate DDRs): forward + backward parallel, weight sync кажд�
 | 4 | 7 | 4.17 ✓ | Stable |
 | 8 (2 clusters) | 15 | 4.17 ✓ | Stable, epoch complete |
 | 16 (1 chip) | 29 | NaN | Forward OK, backward race |
-| **64 (4 chips)** | TBD | TBD | **Dispatching...** |
+| **64 (4 chips)** | **13** | NaN (bwd race) | **РАБОТАЕТ! acc=4.3%** |
 
 ### Целевые метрики
 - > 200 GFLOPS (10% пика 2 TFLOPS)
