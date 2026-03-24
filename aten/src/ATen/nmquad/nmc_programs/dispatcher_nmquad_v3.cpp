@@ -906,11 +906,21 @@ int main() {
     unsigned int watchdog = 0;
 
     while (1) {
+        // Only update watchdog every 256 iterations to reduce DDR write traffic.
+        // Host polls watchdog infrequently, so this is fine for liveness detection.
         watchdog++;
-        mem[WATCHDOG_ADDR] = watchdog;
+        if ((watchdog & 0xFF) == 0) {
+            mem[WATCHDOG_ADDR] = watchdog;
+        }
 
         unsigned int op = mem[0];
-        if (op == OP_NOP) continue;
+        if (op == OP_NOP) {
+            // CRITICAL FIX: Reduce DDR polling traffic from idle cores.
+            // Idle cores MUST NOT hammer DDR or active cores' SIMD DMA stalls.
+            // Busy-wait ~100K iterations in registers (no DDR access) ≈ 1 ms.
+            for (volatile unsigned int d = 0; d < 100000; d++) {}
+            continue;
+        }
 
         if (op == OP_EXIT) {
             mem[STATUS_ADDR] = 1;
