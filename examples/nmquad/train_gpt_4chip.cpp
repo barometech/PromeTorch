@@ -11,12 +11,18 @@
 // transformer for its own batch rows. Weight updates are lr-scaled so
 // all cores' updates sum to the correct gradient step.
 //
-// Supports two modes:
-//   --model small:  D=128, H=4, FF=256, L=2  (~200K params)
-//   --model large:  D=768, H=12, FF=1536, L=12 (~85M params, fits 5GB/chip)
+// Supports three modes:
+//   --model small:  D=128, H=4, FF=256, L=2, T=32  (~200K params)
+//   --model large:  D=768, H=12, FF=1536, L=12, T=64 (~85M params, fits 5GB/chip)
+//   --model 250m:   D=768, H=12, FF=3072, L=36, T=64 (~255M params, ~2GB/chip with B=1)
+//
+// 250m DDR budget (per chip, B_per_core=1, 16 cores):
+//   Weights: ~972 MB (shared), Per-core: ~66.6 MB × 16 = ~1066 MB
+//   Total: ~2038 MB / 5120 MB (39.8%) — fits comfortably
+//   HD=64 matches dispatcher_v3 stack arrays Q_h[64*64] exactly
 //
 // Build: g++ -O2 -o train_gpt_4chip train_gpt_4chip.cpp -ldl -lnm_quad_load
-// Run:   ./train_gpt_4chip --data tiny_shakespeare.txt --model small --chips 1 --cores 4
+// Run:   ./train_gpt_4chip --data tiny_shakespeare.txt --model small --boards 1 --clusters 4 --cores 4
 
 #include <iostream>
 #include <fstream>
@@ -52,6 +58,7 @@ extern "C" {
 
 #define OP_FUSED_FORWARD_ROWPAR  32
 #define OP_FUSED_BACKWARD_ROWPAR 33
+#define OP_FUSED_BACKWARD_GRADONLY 34
 #define OP_EXIT  255
 
 // ============================================================
@@ -75,6 +82,7 @@ struct CoreAddrs {
     PL_Addr scratch;      // forward scratch
     PL_Addr dlogits;      // backward input
     PL_Addr bk_scratch;   // backward scratch
+    PL_Addr grad_buf;     // per-core gradient buffer for GRADONLY mode
 };
 
 // Per-chip shared addresses
@@ -132,7 +140,9 @@ int main(int argc, char** argv) {
     std::string model_name = "small";
     int epochs = 10, steps = 200, B_total = 64;
     float lr = 0.001f;
-    int max_clusters = 16, max_cores_per_cluster = 4;
+    int max_boards = 4, max_clusters = 4, max_cores_per_cluster = 4;
+    bool parallel_backward = false;  // --parallel-backward: use GRADONLY opcode
+    int wave_size = 4;  // max cores per board that can run backward simultaneously
 
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
@@ -143,13 +153,21 @@ int main(int argc, char** argv) {
         else if (a == "--steps") steps = atoi(argv[++i]);
         else if (a == "--batch") B_total = atoi(argv[++i]);
         else if (a == "--lr") lr = atof(argv[++i]);
+        else if (a == "--boards") max_boards = atoi(argv[++i]);
         else if (a == "--clusters") max_clusters = atoi(argv[++i]);
         else if (a == "--cores") max_cores_per_cluster = atoi(argv[++i]);
+        else if (a == "--parallel-backward") parallel_backward = true;
+        else if (a == "--wave-size") wave_size = atoi(argv[++i]);
     }
 
     // Model configs
     int D, H, FF, L, T;
-    if (model_name == "large") {
+    if (model_name == "250m") {
+        // ~255M params: 36 layers, GPT-2 small dimensions, 4x wider FFN
+        // HD = 768/12 = 64, fits dispatcher_v3 Q_h[64*64] exactly
+        // DDR ~2.0 GB/chip with B_per_core=1, 16 cores (39.8% of 5GB)
+        D = 768; H = 12; FF = 3072; L = 36; T = 64;
+    } else if (model_name == "large") {
         D = 768; H = 12; FF = 1536; L = 12; T = 64;
     } else {
         D = 128; H = 4; FF = 256; L = 2; T = 32;
@@ -189,7 +207,6 @@ int main(int argc, char** argv) {
 
     // Each board = 1 NM6408 chip with its own DDR
     PL_Board* boards[4] = {};
-    int max_boards = max_clusters / 4;  // clusters maps to boards (4 clusters per board)
     if (max_boards < 1) max_boards = 1;
     if (max_boards > 4) max_boards = 4;
     int num_boards = (int)cnt < max_boards ? (int)cnt : max_boards;
@@ -283,9 +300,30 @@ int main(int argc, char** argv) {
     int fwd_scratch_words = BT*D*5 + BH*HD*T + BH*T*T
                           + BT*D + BT*D + BT*FF + BT*D + BH*T*HD*2;
     // Backward scratch must include full attention backward buffers:
-    // dW(D*V) + dx(BT*D) + temp1(BT*FF) + temp2(BT*FF) + temp3(BT*D)
+    // dW needs max(D*V, D*D, D*FF, FF*D) — used for ALL gradient matrices
+    // temp1 needs max(BT*FF, D*BT, V*D, D*FF, FF*D) — used for transpose buffers
+    // Layout: dW + dx(BT*D) + temp1 + temp2(BT*FF) + temp3(BT*D)
     // + Q_full+K_full+V_full+d_O+d_Q+d_K+d_V (7*BT*D) + Wt(D*D) + dx_add(BT*D)
-    int bwd_scratch_words = D*V + 10*BT*D + 2*BT*FF + D*D;
+    int dW_size = D*V;
+    if (D*D > dW_size) dW_size = D*D;
+    if (D*FF > dW_size) dW_size = D*FF;
+    if (FF*D > dW_size) dW_size = FF*D;
+    int temp1_size = BT*FF;
+    if (D*BT > temp1_size) temp1_size = D*BT;
+    if (V*D > temp1_size) temp1_size = V*D;
+    if (D*FF > temp1_size) temp1_size = D*FF;
+    if (FF*D > temp1_size) temp1_size = FF*D;
+    if (D*D > temp1_size) temp1_size = D*D;
+    // Total: dW_size + dx(BT*D) + temp1_size + temp2(BT*FF)
+    //      + temp3(BT*D) + Q/K/V/dO/dQ/dK/dV(7*BT*D) + Wt(D*D) + dx_add(BT*D)
+    //      = dW_size + temp1_size + BT*FF + 10*BT*D + D*D
+    int bwd_scratch_words = dW_size + temp1_size + BT*FF + 10*BT*D + D*D;
+    printf("Scratch: dW=%d (was D*V=%d), temp1=%d (was BT*FF=%d), bwd_total=%d words\n",
+           dW_size, D*V, temp1_size, BT*FF, bwd_scratch_words);
+
+    // Gradient buffer size per core (for GRADONLY mode):
+    // grad_lm_head[D*V] + grad_layers[L*lsz] + grad_wte[V*D]
+    int grad_buf_words = D*V + L*lsz + V*D;
 
     core_addrs.resize(NC);
 
@@ -311,6 +349,11 @@ int main(int argc, char** argv) {
             core_addrs[ci].scratch    = dp; dp += fwd_scratch_words;
             core_addrs[ci].dlogits    = dp; dp += BT * V;
             core_addrs[ci].bk_scratch = dp; dp += bwd_scratch_words;
+            if (parallel_backward) {
+                core_addrs[ci].grad_buf = dp; dp += grad_buf_words;
+            } else {
+                core_addrs[ci].grad_buf = 0;
+            }
         }
 
         chip_addrs[ch].data_end = dp;
@@ -326,8 +369,24 @@ int main(int argc, char** argv) {
         printf("Total DDR: %.1f MB across %d chips\n", total_mb, num_chips);
     }
 
+    if (parallel_backward) {
+        float grad_mb = grad_buf_words * 4.0f / (1024*1024);
+        int cores_per_board = 0;
+        for (int ch = 0; ch < num_chips; ch++)
+            if ((int)chip_core_ids[ch].size() > cores_per_board)
+                cores_per_board = (int)chip_core_ids[ch].size();
+        int num_waves = (cores_per_board + wave_size - 1) / wave_size;
+        printf("PARALLEL BACKWARD: grad_buf=%.1f MB/core, %d cores = %.1f MB total\n",
+               grad_mb, NC, grad_mb * NC);
+        printf("  WAVE STRATEGY: %d cores/board, wave_size=%d, %d waves per step\n",
+               cores_per_board, wave_size, num_waves);
+        printf("  Each wave: %d backward/board × %d boards = %d parallel backward ops (safe: ≤4/DDR)\n",
+               wave_size, num_chips, wave_size * num_chips);
+    }
+
     printf("\nTraining: %d epochs x %d steps, lr=%.4f\n", epochs, steps, lr);
-    printf("ROW-PARALLEL: %d cores × fused forward+backward (ZERO coordination)\n", NC);
+    printf("ROW-PARALLEL: %d cores × fused forward+backward (%s)\n", NC,
+           parallel_backward ? "BATCHED WAVE grad-only" : "SEQUENTIAL in-place SGD");
     printf("ALL compute on NM6408, ZERO CPU fallback\n\n");
 
     // ======================== Training loop ========================
@@ -410,49 +469,155 @@ int main(int argc, char** argv) {
             epoch_loss += batch_loss / (B_total * T);
 
             // 6. DISPATCH FUSED BACKWARD
-            // Within each chip: 16 cores share DDR, so run backward ONE per chip
-            // to avoid race condition on shared weights.
-            // Across chips: separate DDR, safe to run in parallel.
             unsigned lr_bits;
             memcpy(&lr_bits, &lr, 4);
 
-            // Run backward: interleaved across chips for parallelism.
-            // Round-robin: dispatch core[idx] on ALL chips simultaneously, wait, next idx.
-            // Within each chip: sequential (shared DDR). Across chips: parallel (separate DDR).
-            int max_cores_per_chip = 0;
-            for (int ch = 0; ch < num_chips; ch++)
-                if ((int)chip_core_ids[ch].size() > max_cores_per_chip)
-                    max_cores_per_chip = (int)chip_core_ids[ch].size();
+            if (parallel_backward) {
+                // ============================================================
+                // BATCHED BACKWARD (GRADONLY): cores run in WAVES to avoid DDR hang.
+                // Max `wave_size` cores per board run backward simultaneously.
+                // 16 cores/board at once = HANGS. 4 cores/board at once = SAFE.
+                //
+                // Wave strategy (wave_size=4, 16 cores/board):
+                //   Wave 0: cores 0-3 on each board (4/board × 4 boards = 16 parallel)
+                //   Wave 1: cores 4-7 on each board
+                //   Wave 2: cores 8-11 on each board
+                //   Wave 3: cores 12-15 on each board
+                //
+                // After all waves: host downloads grad_buf from ALL cores, sums, SGD.
+                // ============================================================
 
-            for (int idx = 0; idx < max_cores_per_chip; idx++) {
-                // Dispatch core[idx] on all chips in parallel
-                std::vector<int> dispatched;
-                for (int ch = 0; ch < num_chips; ch++) {
-                    if (idx >= (int)chip_core_ids[ch].size()) continue;
-                    int ci = chip_core_ids[ch][idx];
-                    int cores_on_chip = (int)chip_core_ids[ch].size();
-                    unsigned bk_args[18] = {
-                        (unsigned)B_per_core,
-                        (unsigned)T, (unsigned)D, (unsigned)H, (unsigned)FF,
-                        (unsigned)V, (unsigned)L,
-                        core_addrs[ci].dlogits,
-                        core_addrs[ci].tokens,
-                        chip_addrs[ch].wte,
-                        chip_addrs[ch].layers,
-                        chip_addrs[ch].lm_head,
-                        core_addrs[ci].h_out,
-                        (unsigned)(core_addrs[ci].h_out + (L+1)*BT*D),
-                        (unsigned)(core_addrs[ci].h_out + (L+1)*BT*D + L*BT*D),
-                        lr_bits,
-                        core_addrs[ci].bk_scratch,
-                        (unsigned)cores_on_chip
-                    };
-                    core_dispatch(ci, OP_FUSED_BACKWARD_ROWPAR, bk_args, 18);
-                    dispatched.push_back(ci);
+                // Determine number of waves needed
+                int max_cores_on_board = 0;
+                for (int ch = 0; ch < num_chips; ch++)
+                    if ((int)chip_core_ids[ch].size() > max_cores_on_board)
+                        max_cores_on_board = (int)chip_core_ids[ch].size();
+                int num_waves = (max_cores_on_board + wave_size - 1) / wave_size;
+
+                // 6a. Dispatch backward in waves
+                for (int wave = 0; wave < num_waves; wave++) {
+                    int start = wave * wave_size;
+
+                    // Dispatch this wave's cores on ALL boards
+                    for (int ch = 0; ch < num_chips; ch++) {
+                        int end = start + wave_size;
+                        if (end > (int)chip_core_ids[ch].size())
+                            end = (int)chip_core_ids[ch].size();
+                        for (int idx = start; idx < end; idx++) {
+                            int ci = chip_core_ids[ch][idx];
+                            unsigned bk_args[17] = {
+                                (unsigned)B_per_core,
+                                (unsigned)T, (unsigned)D, (unsigned)H, (unsigned)FF,
+                                (unsigned)V, (unsigned)L,
+                                core_addrs[ci].dlogits,
+                                core_addrs[ci].tokens,
+                                chip_addrs[ch].wte,           // read-only
+                                chip_addrs[ch].layers,         // read-only
+                                chip_addrs[ch].lm_head,        // read-only
+                                core_addrs[ci].h_out,
+                                (unsigned)(core_addrs[ci].h_out + (L+1)*BT*D),
+                                (unsigned)(core_addrs[ci].h_out + (L+1)*BT*D + L*BT*D),
+                                core_addrs[ci].bk_scratch,
+                                core_addrs[ci].grad_buf        // per-core private grad buffer
+                            };
+                            core_dispatch(ci, OP_FUSED_BACKWARD_GRADONLY, bk_args, 17);
+                        }
+                    }
+
+                    // Wait this wave's cores on ALL boards
+                    for (int ch = 0; ch < num_chips; ch++) {
+                        int end = start + wave_size;
+                        if (end > (int)chip_core_ids[ch].size())
+                            end = (int)chip_core_ids[ch].size();
+                        for (int idx = start; idx < end; idx++) {
+                            int ci = chip_core_ids[ch][idx];
+                            if (!core_wait(ci))
+                                printf("BACKWARD TIMEOUT wave %d core %d (chip %d)\n",
+                                       wave, all_cores[ci].core_id, ch);
+                        }
+                    }
                 }
-                // Wait all dispatched (one per chip, parallel)
-                for (int ci : dispatched)
-                    if (!core_wait(ci)) printf("BACKWARD TIMEOUT core %d\n", ci);
+
+                // 6b. Per-chip: download grad buffers, sum, apply SGD, upload weights
+                for (int ch = 0; ch < num_chips; ch++) {
+                    int cores_on_chip = (int)chip_core_ids[ch].size();
+                    int first_ci = chip_core_ids[ch][0];
+
+                    // Download first core's gradient as accumulator
+                    std::vector<float> sum_grad(grad_buf_words);
+                    core_rd(first_ci, core_addrs[first_ci].grad_buf,
+                            sum_grad.data(), grad_buf_words);
+
+                    // Sum gradients from remaining cores
+                    for (int k = 1; k < cores_on_chip; k++) {
+                        int ci = chip_core_ids[ch][k];
+                        std::vector<float> core_grad(grad_buf_words);
+                        core_rd(ci, core_addrs[ci].grad_buf,
+                                core_grad.data(), grad_buf_words);
+                        for (int i = 0; i < grad_buf_words; i++)
+                            sum_grad[i] += core_grad[i];
+                    }
+
+                    // grad_out layout: [grad_lm_head(D*V), grad_layers(L*lsz), grad_wte(V*D)]
+                    float* g_lm = sum_grad.data();
+                    float* g_lay = sum_grad.data() + D*V;
+                    float* g_wte = sum_grad.data() + D*V + L*lsz;
+
+                    // Download current weights from this chip
+                    core_rd(first_ci, chip_addrs[ch].lm_head, lm_w.data(), D*V);
+                    core_rd(first_ci, chip_addrs[ch].layers, packed.data(), L*lsz);
+                    core_rd(first_ci, chip_addrs[ch].wte, wte.data(), V*D);
+
+                    // Apply SGD: W -= lr * sum_grad
+                    for (int i = 0; i < D*V; i++)   lm_w[i]   -= lr * g_lm[i];
+                    for (int i = 0; i < L*lsz; i++) packed[i]  -= lr * g_lay[i];
+                    for (int i = 0; i < V*D; i++)   wte[i]     -= lr * g_wte[i];
+
+                    // Upload updated weights back to chip
+                    core_wr(first_ci, chip_addrs[ch].lm_head, lm_w.data(), D*V);
+                    core_wr(first_ci, chip_addrs[ch].layers, packed.data(), L*lsz);
+                    core_wr(first_ci, chip_addrs[ch].wte, wte.data(), V*D);
+                }
+
+            } else {
+                // ============================================================
+                // SEQUENTIAL BACKWARD (original): one core at a time per chip
+                // Each core does in-place SGD on shared weights.
+                // ============================================================
+
+                int max_cores_per_chip = 0;
+                for (int ch = 0; ch < num_chips; ch++)
+                    if ((int)chip_core_ids[ch].size() > max_cores_per_chip)
+                        max_cores_per_chip = (int)chip_core_ids[ch].size();
+
+                for (int idx = 0; idx < max_cores_per_chip; idx++) {
+                    std::vector<int> dispatched;
+                    for (int ch = 0; ch < num_chips; ch++) {
+                        if (idx >= (int)chip_core_ids[ch].size()) continue;
+                        int ci = chip_core_ids[ch][idx];
+                        int cores_on_chip = (int)chip_core_ids[ch].size();
+                        unsigned bk_args[18] = {
+                            (unsigned)B_per_core,
+                            (unsigned)T, (unsigned)D, (unsigned)H, (unsigned)FF,
+                            (unsigned)V, (unsigned)L,
+                            core_addrs[ci].dlogits,
+                            core_addrs[ci].tokens,
+                            chip_addrs[ch].wte,
+                            chip_addrs[ch].layers,
+                            chip_addrs[ch].lm_head,
+                            core_addrs[ci].h_out,
+                            (unsigned)(core_addrs[ci].h_out + (L+1)*BT*D),
+                            (unsigned)(core_addrs[ci].h_out + (L+1)*BT*D + L*BT*D),
+                            lr_bits,
+                            core_addrs[ci].bk_scratch,
+                            (unsigned)cores_on_chip
+                        };
+                        core_dispatch(ci, OP_FUSED_BACKWARD_ROWPAR, bk_args, 18);
+                        dispatched.push_back(ci);
+                    }
+                    for (int ci : dispatched)
+                        if (!core_wait(ci)) printf("BACKWARD TIMEOUT core %d\n", ci);
+                }
             }
 
             // 7. Cross-chip weight sync (average weights across chips)
