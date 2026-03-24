@@ -189,16 +189,21 @@ int main(int argc, char** argv) {
 
     // Each board = 1 NM6408 chip with its own DDR
     PL_Board* boards[4] = {};
-    int num_boards = (int)cnt < 4 ? (int)cnt : 4;
+    int max_boards = max_clusters / 4;  // clusters maps to boards (4 clusters per board)
+    if (max_boards < 1) max_boards = 1;
+    if (max_boards > 4) max_boards = 4;
+    int num_boards = (int)cnt < max_boards ? (int)cnt : max_boards;
 
     for (int b = 0; b < num_boards; b++) {
         if (PL_GetBoardDesc(b, &boards[b]) != 0) { num_boards = b; break; }
         PL_ResetBoard(boards[b]);
         PL_LoadInitCode(boards[b]);
 
-        // Each board has 4 clusters × 4 cores = 16 NMC4 cores
-        for (int cl = 0; cl < 4; cl++) {
-            for (int co = 0; co < 4; co++) {
+        // Each board has up to 4 clusters × 4 cores
+        int cls_limit = max_clusters < 4 ? max_clusters : 4;
+        int co_limit = max_cores_per_cluster < 4 ? max_cores_per_cluster : 4;
+        for (int cl = 0; cl < cls_limit; cl++) {
+            for (int co = 0; co < co_limit; co++) {
                 PL_CoreNo cn = {co, cl};
                 PL_Access* a;
                 if (PL_GetAccess(boards[b], &cn, &a) == 0) {
