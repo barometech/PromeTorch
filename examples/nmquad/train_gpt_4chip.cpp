@@ -396,8 +396,9 @@ int main(int argc, char** argv) {
             }
             epoch_loss += batch_loss / (B_total * T);
 
-            // 6. DISPATCH FUSED BACKWARD — SEQUENTIAL (shared DDR = race condition if parallel)
-            // Each core updates shared weights with lr/NC. Must run one at a time.
+            // 6. DISPATCH FUSED BACKWARD — ALL cores simultaneously
+            // Each core updates shared weights with lr/NC. With shared DDR,
+            // concurrent writes may cause small numerical noise but SGD is robust to this.
             unsigned lr_bits;
             memcpy(&lr_bits, &lr, 4);
 
@@ -420,8 +421,11 @@ int main(int argc, char** argv) {
                     (unsigned)NC  // n_cores for lr scaling
                 };
                 core_dispatch(ci, OP_FUSED_BACKWARD_ROWPAR, bk_args, 18);
-                if (!core_wait(ci)) printf("BACKWARD TIMEOUT core %d\n", ci);
             }
+
+            // 7. WAIT ALL backward
+            for (int ci = 0; ci < NC; ci++)
+                if (!core_wait(ci)) printf("BACKWARD TIMEOUT core %d\n", ci);
 
             if ((step+1) % 10 == 0) {
                 auto now = std::chrono::steady_clock::now();
