@@ -33,6 +33,17 @@ struct SGDOptions {
 
 struct SGDParamState : public OptimizerParamState {
     Tensor momentum_buffer;  // Momentum buffer (velocity)
+
+    std::unordered_map<std::string, Tensor> save() const override {
+        std::unordered_map<std::string, Tensor> m;
+        if (momentum_buffer.defined()) m["momentum_buffer"] = momentum_buffer;
+        return m;
+    }
+
+    void load(const std::unordered_map<std::string, Tensor>& m) override {
+        auto it = m.find("momentum_buffer");
+        if (it != m.end()) momentum_buffer = it->second.clone();
+    }
 };
 
 // ============================================================================
@@ -153,6 +164,11 @@ public:
     // Get options
     SGDOptions& options() { return options_; }
     const SGDOptions& options() const { return options_; }
+
+protected:
+    std::unique_ptr<OptimizerParamState> create_param_state() const override {
+        return std::make_unique<SGDParamState>();
+    }
 
 private:
     SGDOptions options_;

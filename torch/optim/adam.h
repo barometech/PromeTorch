@@ -41,6 +41,29 @@ struct AdamParamState : public OptimizerParamState {
     Tensor exp_avg;             // First moment estimate (m)
     Tensor exp_avg_sq;          // Second moment estimate (v)
     Tensor max_exp_avg_sq;      // Max of second moment (for AMSGrad)
+
+    std::unordered_map<std::string, Tensor> save() const override {
+        std::unordered_map<std::string, Tensor> m;
+        // Store step as a 0-dim float tensor
+        Tensor step_t = at::zeros({});
+        step_t.mutable_data_ptr<float>()[0] = static_cast<float>(step);
+        m["step"] = step_t;
+        if (exp_avg.defined()) m["exp_avg"] = exp_avg;
+        if (exp_avg_sq.defined()) m["exp_avg_sq"] = exp_avg_sq;
+        if (max_exp_avg_sq.defined()) m["max_exp_avg_sq"] = max_exp_avg_sq;
+        return m;
+    }
+
+    void load(const std::unordered_map<std::string, Tensor>& m) override {
+        auto it = m.find("step");
+        if (it != m.end()) step = static_cast<int64_t>(it->second.data_ptr<float>()[0]);
+        it = m.find("exp_avg");
+        if (it != m.end()) exp_avg = it->second.clone();
+        it = m.find("exp_avg_sq");
+        if (it != m.end()) exp_avg_sq = it->second.clone();
+        it = m.find("max_exp_avg_sq");
+        if (it != m.end()) max_exp_avg_sq = it->second.clone();
+    }
 };
 
 // ============================================================================
@@ -201,6 +224,11 @@ public:
     // Get options
     AdamOptions& options() { return options_; }
     const AdamOptions& options() const { return options_; }
+
+protected:
+    std::unique_ptr<OptimizerParamState> create_param_state() const override {
+        return std::make_unique<AdamParamState>();
+    }
 
 private:
     AdamOptions options_;
@@ -384,6 +412,11 @@ public:
     // Get options
     AdamWOptions& options() { return options_; }
     const AdamWOptions& options() const { return options_; }
+
+protected:
+    std::unique_ptr<OptimizerParamState> create_param_state() const override {
+        return std::make_unique<AdamParamState>();
+    }
 
 private:
     AdamWOptions options_;

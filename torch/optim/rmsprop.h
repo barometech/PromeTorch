@@ -36,6 +36,23 @@ struct RMSpropParamState : public OptimizerParamState {
     Tensor square_avg;       // Running average of squared gradients
     Tensor grad_avg;         // Running average of gradients (for centered)
     Tensor momentum_buffer;  // Momentum buffer
+
+    std::unordered_map<std::string, Tensor> save() const override {
+        std::unordered_map<std::string, Tensor> m;
+        if (square_avg.defined()) m["square_avg"] = square_avg;
+        if (grad_avg.defined()) m["grad_avg"] = grad_avg;
+        if (momentum_buffer.defined()) m["momentum_buffer"] = momentum_buffer;
+        return m;
+    }
+
+    void load(const std::unordered_map<std::string, Tensor>& m) override {
+        auto it = m.find("square_avg");
+        if (it != m.end()) square_avg = it->second.clone();
+        it = m.find("grad_avg");
+        if (it != m.end()) grad_avg = it->second.clone();
+        it = m.find("momentum_buffer");
+        if (it != m.end()) momentum_buffer = it->second.clone();
+    }
 };
 
 // ============================================================================
@@ -139,6 +156,11 @@ public:
     // Get options
     RMSpropOptions& options() { return options_; }
     const RMSpropOptions& options() const { return options_; }
+
+protected:
+    std::unique_ptr<OptimizerParamState> create_param_state() const override {
+        return std::make_unique<RMSpropParamState>();
+    }
 
 private:
     RMSpropOptions options_;

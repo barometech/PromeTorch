@@ -36,6 +36,30 @@ struct NAdamParamState : public OptimizerParamState {
     Tensor exp_avg;     // First moment (m)
     Tensor exp_avg_sq;  // Second moment (v)
     double mu_product = 1.0;  // Running product of mu_t values
+
+    std::unordered_map<std::string, Tensor> save() const override {
+        std::unordered_map<std::string, Tensor> m;
+        Tensor step_t = at::zeros({});
+        step_t.mutable_data_ptr<float>()[0] = static_cast<float>(step);
+        m["step"] = step_t;
+        Tensor mu_t = at::zeros({});
+        mu_t.mutable_data_ptr<float>()[0] = static_cast<float>(mu_product);
+        m["mu_product"] = mu_t;
+        if (exp_avg.defined()) m["exp_avg"] = exp_avg;
+        if (exp_avg_sq.defined()) m["exp_avg_sq"] = exp_avg_sq;
+        return m;
+    }
+
+    void load(const std::unordered_map<std::string, Tensor>& m) override {
+        auto it = m.find("step");
+        if (it != m.end()) step = static_cast<int64_t>(it->second.data_ptr<float>()[0]);
+        it = m.find("mu_product");
+        if (it != m.end()) mu_product = static_cast<double>(it->second.data_ptr<float>()[0]);
+        it = m.find("exp_avg");
+        if (it != m.end()) exp_avg = it->second.clone();
+        it = m.find("exp_avg_sq");
+        if (it != m.end()) exp_avg_sq = it->second.clone();
+    }
 };
 
 // ============================================================================
@@ -120,6 +144,11 @@ public:
 
     NAdamOptions& options() { return options_; }
     const NAdamOptions& options() const { return options_; }
+
+protected:
+    std::unique_ptr<OptimizerParamState> create_param_state() const override {
+        return std::make_unique<NAdamParamState>();
+    }
 
 private:
     NAdamOptions options_;

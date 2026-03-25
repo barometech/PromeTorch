@@ -499,6 +499,112 @@ inline Tensor hardswish_autograd(const Tensor& self) {
     return result;
 }
 
+inline Tensor silu_autograd(const Tensor& self) {
+    // Forward: SiLU(x) = x * sigmoid(x)
+    Tensor self_contig = self.is_contiguous() ? self : self.contiguous();
+    Tensor sigmoid_x;
+#ifdef PT_USE_CUDA
+    if (self.is_cuda()) {
+        sigmoid_x = self_contig.sigmoid();
+        Tensor result = self_contig.mul(sigmoid_x);
+        if (compute_requires_grad(self)) {
+            auto grad_fn = std::make_shared<SiLUBackward>(self_contig, sigmoid_x);
+            grad_fn->add_input_metadata(self);
+            set_grad_fn(result, grad_fn);
+            result.set_requires_grad(true);
+        }
+        return result;
+    }
+#endif
+    // CPU fast path
+    Tensor result = at::empty(self_contig.sizes(), self_contig.dtype());
+    sigmoid_x = at::empty(self_contig.sizes(), self_contig.dtype());
+    const float* in_data = self_contig.data_ptr<float>();
+    float* out_data = result.mutable_data_ptr<float>();
+    float* sig_data = sigmoid_x.mutable_data_ptr<float>();
+
+    for (int64_t i = 0; i < self_contig.numel(); ++i) {
+        float sig = 1.0f / (1.0f + std::exp(-in_data[i]));
+        sig_data[i] = sig;
+        out_data[i] = in_data[i] * sig;
+    }
+
+    if (compute_requires_grad(self)) {
+        auto grad_fn = std::make_shared<SiLUBackward>(self_contig, sigmoid_x);
+        grad_fn->add_input_metadata(self);
+        set_grad_fn(result, grad_fn);
+        result.set_requires_grad(true);
+    }
+    return result;
+}
+
+inline Tensor gelu_autograd(const Tensor& self, bool approximate = false) {
+    // Forward: GELU(x) = 0.5 * x * (1 + erf(x / sqrt(2)))
+    Tensor self_contig = self.is_contiguous() ? self : self.contiguous();
+    Tensor result = at::empty(self_contig.sizes(), self_contig.dtype());
+    const float* in_data = self_contig.data_ptr<float>();
+    float* out_data = result.mutable_data_ptr<float>();
+
+#ifdef PT_USE_CUDA
+    if (self.is_cuda()) {
+        result = at::cuda_ops::gelu(self_contig);
+        if (compute_requires_grad(self)) {
+            auto grad_fn = std::make_shared<GeluBackward>(self_contig, approximate);
+            grad_fn->add_input_metadata(self);
+            set_grad_fn(result, grad_fn);
+            result.set_requires_grad(true);
+        }
+        return result;
+    }
+#endif
+
+    if (approximate) {
+        at::native::hot::fused_gelu(in_data, out_data, self_contig.numel());
+    } else {
+        constexpr float sqrt_half = 0.7071067811865476f;
+        for (int64_t i = 0; i < self_contig.numel(); ++i) {
+            float x = in_data[i];
+            out_data[i] = 0.5f * x * (1.0f + std::erf(x * sqrt_half));
+        }
+    }
+
+    if (compute_requires_grad(self)) {
+        auto grad_fn = std::make_shared<GeluBackward>(self_contig, approximate);
+        grad_fn->add_input_metadata(self);
+        set_grad_fn(result, grad_fn);
+        result.set_requires_grad(true);
+    }
+    return result;
+}
+
+inline Tensor softplus_autograd(const Tensor& self, double beta = 1.0, double threshold = 20.0) {
+    // Forward: Softplus(x) = (1/beta) * ln(1 + exp(beta*x))
+    Tensor self_contig = self.is_contiguous() ? self : self.contiguous();
+    Tensor result = at::empty(self_contig.sizes(), self_contig.dtype());
+    const float* in_data = self_contig.data_ptr<float>();
+    float* out_data = result.mutable_data_ptr<float>();
+    float b = static_cast<float>(beta);
+    float inv_b = 1.0f / b;
+    float thresh = static_cast<float>(threshold);
+
+    for (int64_t i = 0; i < self_contig.numel(); ++i) {
+        float x = in_data[i];
+        if (x * b > thresh) {
+            out_data[i] = x;
+        } else {
+            out_data[i] = inv_b * std::log(1.0f + std::exp(b * x));
+        }
+    }
+
+    if (compute_requires_grad(self)) {
+        auto grad_fn = std::make_shared<SoftplusBackward>(self_contig, beta, threshold);
+        grad_fn->add_input_metadata(self);
+        set_grad_fn(result, grad_fn);
+        result.set_requires_grad(true);
+    }
+    return result;
+}
+
 // ============================================================================
 // Binary Operations with Autograd
 // ============================================================================

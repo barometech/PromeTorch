@@ -33,6 +33,22 @@ struct AdagradOptions {
 struct AdagradParamState : public OptimizerParamState {
     int64_t step = 0;
     Tensor sum;  // Accumulated squared gradients
+
+    std::unordered_map<std::string, Tensor> save() const override {
+        std::unordered_map<std::string, Tensor> m;
+        Tensor step_t = at::zeros({});
+        step_t.mutable_data_ptr<float>()[0] = static_cast<float>(step);
+        m["step"] = step_t;
+        if (sum.defined()) m["sum"] = sum;
+        return m;
+    }
+
+    void load(const std::unordered_map<std::string, Tensor>& m) override {
+        auto it = m.find("step");
+        if (it != m.end()) step = static_cast<int64_t>(it->second.data_ptr<float>()[0]);
+        it = m.find("sum");
+        if (it != m.end()) sum = it->second.clone();
+    }
 };
 
 // ============================================================================
@@ -90,6 +106,11 @@ public:
 
     AdagradOptions& options() { return options_; }
     const AdagradOptions& options() const { return options_; }
+
+protected:
+    std::unique_ptr<OptimizerParamState> create_param_state() const override {
+        return std::make_unique<AdagradParamState>();
+    }
 
 private:
     AdagradOptions options_;
