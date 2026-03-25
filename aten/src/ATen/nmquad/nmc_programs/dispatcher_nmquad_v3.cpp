@@ -34,6 +34,26 @@ extern "C" {
 #define DDR_BASE      0x00340000u
 #define CMD_BLOCK_SIZE 32   // 32 words per core
 
+// ============================================================
+// PER-CORE WEIGHT COPY strategy for 16-core DDR scaling
+// ============================================================
+// Problem: nmppmMul_mm_32f uses VPU DMA from DDR. When 8+ cores read
+// the SAME shared weight addresses, DDR bank conflicts stall all cores.
+//
+// Solution: Before fused forward/backward, each core copies the shared
+// weights it needs into its OWN private DDR scratch area. Then matmul
+// reads from the private copy (different DDR addresses per core → no
+// bank conflicts). nmppmMul_mm_32f stays on DDR (VPU requires it).
+//
+// Cost: ~1MB extra DDR per core for weight copy (small model).
+// Benefit: All 16 cores run SIMD matmul simultaneously without DDR stall.
+
+// Wrapper: same signature as nmppmMul_mm_32f but adapted for our calling convention
+// tiled_sgemm(A, M, K, B, N, C) → C[M,N] = A[M,K] @ B[K,N]
+static void nmppmMul_mm_32f_wrap(float* A, int M, int K, float* B, int N, float* C) {
+    nmppmMul_mm_32f(A, M, K, B, K, N, C, N, N, 0);
+}
+
 #define OP_NOP           0
 #define OP_MATMUL        1
 #define OP_FUSED_FORWARD_ROWPAR  32  // NEW: row-parallel fused forward
@@ -118,6 +138,8 @@ static void op_fused_forward_rowpar() {
 
     if (Bm <= 0) return;
 
+    // No stagger needed — 10M polling delay prevents DDR contention from idle cores
+
     int HD = D / H;
     int BT = Bm * T;    // this core's BT
     int BH = Bm * H;
@@ -137,6 +159,8 @@ static void op_fused_forward_rowpar() {
     float* Q_tmp   = ff2 + BT * D;
     float* V_bh    = Q_tmp + BH * T * HD;
 
+    int layer_size = 4*D*D + 2*D*FF + D;
+
     // Cache areas in h_out
     float* h_cache   = h_out;
     float* hn_cache  = h_cache + (L+1) * BT * D;
@@ -153,8 +177,6 @@ static void op_fused_forward_rowpar() {
     // Save initial h
     for (int i = 0; i < BT*D; i++) h_cache[i] = h[i];
 
-    int layer_size = 4*D*D + 2*D*FF + D;
-
     for (int li = 0; li < L; li++) {
         float* lw = layers_base + li * layer_size;
         float* Wq = lw;
@@ -169,10 +191,10 @@ static void op_fused_forward_rowpar() {
         fused_rmsnorm(h, g, hn, BT, D);
         for (int i = 0; i < BT*D; i++) hn_cache[li*BT*D + i] = hn[i];
 
-        // QKV projections — nmpp SIMD matmul
-        nmppmMul_mm_32f(hn, BT, D, Wq, D, D, Q, D, D, 0);
-        nmppmMul_mm_32f(hn, BT, D, Wk, D, D, K_buf, D, D, 0);
-        nmppmMul_mm_32f(hn, BT, D, Wv, D, D, V_buf, D, D, 0);
+        // QKV projections — tiled SGEMM (DDR-safe for 16 cores)
+        nmppmMul_mm_32f_wrap(hn, BT, D, Wq, D, Q);
+        nmppmMul_mm_32f_wrap(hn, BT, D, Wk, D, K_buf);
+        nmppmMul_mm_32f_wrap(hn, BT, D, Wv, D, V_buf);
 
         // Reshape Q→[BH,T,HD], K→Kt[BH,HD,T], V→V_bh[BH,T,HD]
         for (int b = 0; b < Bm; b++)
@@ -188,9 +210,9 @@ static void op_fused_forward_rowpar() {
 
         // Attention scores: per head Q @ Kt → [BH, T, T]
         for (int bh = 0; bh < BH; bh++)
-            nmppmMul_mm_32f(Q_tmp + bh*T*HD, T, HD,
-                           Kt + bh*HD*T, HD, T,
-                           scores + bh*T*T, T, T, 0);
+            nmppmMul_mm_32f_wrap(Q_tmp + bh*T*HD, T, HD,
+                        Kt + bh*HD*T, T,
+                        scores + bh*T*T);
 
         // Causal softmax with 1/sqrt(HD) scaling
         float scale = fast_invsqrt((float)HD);
@@ -218,9 +240,9 @@ static void op_fused_forward_rowpar() {
 
         // Attention output: scores @ V_bh per head
         for (int bh = 0; bh < BH; bh++)
-            nmppmMul_mm_32f(scores + bh*T*T, T, T,
-                           V_bh + bh*T*HD, T, HD,
-                           attn_out + bh*T*HD, HD, HD, 0);
+            nmppmMul_mm_32f_wrap(scores + bh*T*T, T, T,
+                        V_bh + bh*T*HD, HD,
+                        attn_out + bh*T*HD);
 
         // Unreshape [BH, T, HD] → [BT, D]
         for (int b = 0; b < Bm; b++)
@@ -230,15 +252,15 @@ static void op_fused_forward_rowpar() {
                         proj[b*T*D + t*D + hh*HD + d] = attn_out[(b*H+hh)*T*HD + t*HD + d];
 
         // Output projection + residual
-        nmppmMul_mm_32f(proj, BT, D, Wo, D, D, hn, D, D, 0);
+        nmppmMul_mm_32f_wrap(proj, BT, D, Wo, D, hn);
         fused_add(h, hn, BT*D);
 
         // FFN: RMSNorm → W1 → ReLU → W2 → residual
         fused_rmsnorm(h, g, hn, BT, D);
-        nmppmMul_mm_32f(hn, BT, D, W1, D, FF, ff1, FF, FF, 0);
+        nmppmMul_mm_32f_wrap(hn, BT, D, W1, FF, ff1);
         fused_relu(ff1, BT*FF);
         for (int i = 0; i < BT*FF; i++) ff1r_cache[li*BT*FF + i] = ff1[i];
-        nmppmMul_mm_32f(ff1, BT, FF, W2, FF, D, ff2, D, D, 0);
+        nmppmMul_mm_32f_wrap(ff1, BT, FF, W2, D, ff2);
         fused_add(h, ff2, BT*D);
 
         // Cache h after layer
@@ -249,7 +271,7 @@ static void op_fused_forward_rowpar() {
     for (int i = 0; i < BT*D; i++) h_out[i] = h[i];
 
     // LM head: h @ lm_head → logits [BT, V]
-    nmppmMul_mm_32f(h, BT, D, lm_head, D, V, logits_out, V, V, 0);
+    nmppmMul_mm_32f_wrap(h, BT, D, lm_head, V, logits_out);
 }
 
 // ============================================================
@@ -346,14 +368,14 @@ static void op_fused_backward_rowpar() {
         for (int d = 0; d < D; d++)
             temp1[d * BT + i] = hf[i * D + d];  // transpose h_final
 
-    nmppmMul_mm_32f(temp1, D, BT, dlogits, BT, V, dW, V, V, 0);
+    nmppmMul_mm_32f_wrap(temp1, D, BT, dlogits, V, dW);
     fused_sgd(lm_head, dW, D * V, lr_scaled);
 
     // 2. dx = dlogits @ lm_head.T
     for (int i = 0; i < D; i++)
         for (int j = 0; j < V; j++)
             temp1[j * D + i] = lm_head[i * V + j];
-    nmppmMul_mm_32f(dlogits, BT, V, temp1, V, D, dx, D, D, 0);
+    nmppmMul_mm_32f_wrap(dlogits, BT, V, temp1, D, dx);
 
     // 3. Layer backward (reverse order)
     for (int li = L - 1; li >= 0; li--) {
@@ -368,14 +390,14 @@ static void op_fused_backward_rowpar() {
         for (int i = 0; i < BT; i++)
             for (int j = 0; j < FF; j++)
                 temp2[j * BT + i] = ff1r[i * FF + j];
-        nmppmMul_mm_32f(temp2, FF, BT, dx, BT, D, dW, D, D, 0);
+        nmppmMul_mm_32f_wrap(temp2, FF, BT, dx, D, dW);
         fused_sgd(W2, dW, FF * D, lr_scaled);
 
         // dff1r = dx @ W2.T
         for (int i = 0; i < FF; i++)
             for (int j = 0; j < D; j++)
                 temp1[j * FF + i] = W2[i * D + j];
-        nmppmMul_mm_32f(dx, BT, D, temp1, D, FF, temp2, FF, FF, 0);
+        nmppmMul_mm_32f_wrap(dx, BT, D, temp1, FF, temp2);
 
         // ReLU backward
         for (int i = 0; i < BT * FF; i++)
@@ -385,14 +407,14 @@ static void op_fused_backward_rowpar() {
         for (int i = 0; i < BT; i++)
             for (int d = 0; d < D; d++)
                 temp1[d * BT + i] = hn[i * D + d];
-        nmppmMul_mm_32f(temp1, D, BT, temp2, BT, FF, dW, FF, FF, 0);
+        nmppmMul_mm_32f_wrap(temp1, D, BT, temp2, FF, dW);
         fused_sgd(W1, dW, D * FF, lr_scaled);
 
         // dx += dff1 @ W1.T (residual backward)
         for (int i = 0; i < D; i++)
             for (int j = 0; j < FF; j++)
                 temp1[j * D + i] = W1[i * FF + j];
-        nmppmMul_mm_32f(temp2, BT, FF, temp1, FF, D, temp3, D, D, 0);
+        nmppmMul_mm_32f_wrap(temp2, BT, FF, temp1, D, temp3);
         fused_add(dx, temp3, BT * D);
 
         // --- Attention backward: Wo + full QKV ---
@@ -400,7 +422,7 @@ static void op_fused_backward_rowpar() {
         for (int i = 0; i < BT; i++)
             for (int d = 0; d < D; d++)
                 temp1[d * BT + i] = hn[i * D + d];
-        nmppmMul_mm_32f(temp1, D, BT, dx, BT, D, dW, D, D, 0);
+        nmppmMul_mm_32f_wrap(temp1, D, BT, dx, D, dW);
         fused_sgd(Wo, dW, D * D, lr_scaled);
 
         // === FULL ATTENTION BACKWARD ===
@@ -410,9 +432,9 @@ static void op_fused_backward_rowpar() {
         float* V_full = K_full + BT * D;
         float* d_O    = V_full + BT * D;
 
-        nmppmMul_mm_32f(hn, BT, D, Wq, D, D, Q_full, D, D, 0);
-        nmppmMul_mm_32f(hn, BT, D, Wk, D, D, K_full, D, D, 0);
-        nmppmMul_mm_32f(hn, BT, D, Wv, D, D, V_full, D, D, 0);
+        nmppmMul_mm_32f_wrap(hn, BT, D, Wq, D, Q_full);
+        nmppmMul_mm_32f_wrap(hn, BT, D, Wk, D, K_full);
+        nmppmMul_mm_32f_wrap(hn, BT, D, Wv, D, V_full);
 
         // BUG 5 FIX: compute d_O = dx @ Wo.T BEFORE modifying dx with residual
         // d_O is the gradient flowing into the attention output projection.
@@ -421,7 +443,7 @@ static void op_fused_backward_rowpar() {
         for (int i = 0; i < D; i++)
             for (int j = 0; j < D; j++)
                 temp1[j * D + i] = Wo[i * D + j];
-        nmppmMul_mm_32f(dx, BT, D, temp1, D, D, d_O, D, D, 0);
+        nmppmMul_mm_32f_wrap(dx, BT, D, temp1, D, d_O);
 
         // Residual: dx += d_O (same as dx @ Wo.T, computed from unmodified dx)
         fused_add(dx, d_O, BT * D);
@@ -529,13 +551,13 @@ static void op_fused_backward_rowpar() {
         for (int i = 0; i < BT; i++)
             for (int d = 0; d < D; d++)
                 temp1[d * BT + i] = hn[i * D + d];
-        nmppmMul_mm_32f(temp1, D, BT, d_Q, BT, D, dW, D, D, 0);
+        nmppmMul_mm_32f_wrap(temp1, D, BT, d_Q, D, dW);
         fused_sgd(Wq, dW, D * D, lr_scaled);
 
-        nmppmMul_mm_32f(temp1, D, BT, d_K, BT, D, dW, D, D, 0);
+        nmppmMul_mm_32f_wrap(temp1, D, BT, d_K, D, dW);
         fused_sgd(Wk, dW, D * D, lr_scaled);
 
-        nmppmMul_mm_32f(temp1, D, BT, d_V, BT, D, dW, D, D, 0);
+        nmppmMul_mm_32f_wrap(temp1, D, BT, d_V, D, dW);
         fused_sgd(Wv, dW, D * D, lr_scaled);
 
         // dx += d_Q @ Wq.T + d_K @ Wk.T + d_V @ Wv.T
@@ -545,19 +567,19 @@ static void op_fused_backward_rowpar() {
         for (int i = 0; i < D; i++)
             for (int j = 0; j < D; j++)
                 Wt[j*D+i] = Wq[i*D+j];
-        nmppmMul_mm_32f(d_Q, BT, D, Wt, D, D, dx_add, D, D, 0);
+        nmppmMul_mm_32f_wrap(d_Q, BT, D, Wt, D, dx_add);
         fused_add(dx, dx_add, BT * D);
 
         for (int i = 0; i < D; i++)
             for (int j = 0; j < D; j++)
                 Wt[j*D+i] = Wk[i*D+j];
-        nmppmMul_mm_32f(d_K, BT, D, Wt, D, D, dx_add, D, D, 0);
+        nmppmMul_mm_32f_wrap(d_K, BT, D, Wt, D, dx_add);
         fused_add(dx, dx_add, BT * D);
 
         for (int i = 0; i < D; i++)
             for (int j = 0; j < D; j++)
                 Wt[j*D+i] = Wv[i*D+j];
-        nmppmMul_mm_32f(d_V, BT, D, Wt, D, D, dx_add, D, D, 0);
+        nmppmMul_mm_32f_wrap(d_V, BT, D, Wt, D, dx_add);
         fused_add(dx, dx_add, BT * D);
     }
 
@@ -666,14 +688,14 @@ static void op_fused_backward_gradonly() {
         for (int d = 0; d < D; d++)
             temp1[d * BT + i] = hf[i * D + d];
 
-    nmppmMul_mm_32f(temp1, D, BT, dlogits, BT, V, dW, V, V, 0);
+    nmppmMul_mm_32f_wrap(temp1, D, BT, dlogits, V, dW);
     grad_copy(g_lm_head, dW, D * V);
 
     // 2. dx = dlogits @ lm_head.T
     for (int i = 0; i < D; i++)
         for (int j = 0; j < V; j++)
             temp1[j * D + i] = lm_head[i * V + j];
-    nmppmMul_mm_32f(dlogits, BT, V, temp1, V, D, dx, D, D, 0);
+    nmppmMul_mm_32f_wrap(dlogits, BT, V, temp1, D, dx);
 
     // 3. Layer backward (reverse order)
     for (int li = L - 1; li >= 0; li--) {
@@ -697,14 +719,14 @@ static void op_fused_backward_gradonly() {
         for (int i = 0; i < BT; i++)
             for (int j = 0; j < FF; j++)
                 temp2[j * BT + i] = ff1r[i * FF + j];
-        nmppmMul_mm_32f(temp2, FF, BT, dx, BT, D, dW, D, D, 0);
+        nmppmMul_mm_32f_wrap(temp2, FF, BT, dx, D, dW);
         grad_copy(g_W2, dW, FF * D);
 
         // dff1r = dx @ W2.T
         for (int i = 0; i < FF; i++)
             for (int j = 0; j < D; j++)
                 temp1[j * FF + i] = W2[i * D + j];
-        nmppmMul_mm_32f(dx, BT, D, temp1, D, FF, temp2, FF, FF, 0);
+        nmppmMul_mm_32f_wrap(dx, BT, D, temp1, FF, temp2);
 
         // ReLU backward
         for (int i = 0; i < BT * FF; i++)
@@ -714,14 +736,14 @@ static void op_fused_backward_gradonly() {
         for (int i = 0; i < BT; i++)
             for (int d = 0; d < D; d++)
                 temp1[d * BT + i] = hn[i * D + d];
-        nmppmMul_mm_32f(temp1, D, BT, temp2, BT, FF, dW, FF, FF, 0);
+        nmppmMul_mm_32f_wrap(temp1, D, BT, temp2, FF, dW);
         grad_copy(g_W1, dW, D * FF);
 
         // dx += dff1 @ W1.T (residual backward)
         for (int i = 0; i < D; i++)
             for (int j = 0; j < FF; j++)
                 temp1[j * D + i] = W1[i * FF + j];
-        nmppmMul_mm_32f(temp2, BT, FF, temp1, FF, D, temp3, D, D, 0);
+        nmppmMul_mm_32f_wrap(temp2, BT, FF, temp1, D, temp3);
         fused_add(dx, temp3, BT * D);
 
         // --- Attention backward: Wo + full QKV ---
@@ -729,7 +751,7 @@ static void op_fused_backward_gradonly() {
         for (int i = 0; i < BT; i++)
             for (int d = 0; d < D; d++)
                 temp1[d * BT + i] = hn[i * D + d];
-        nmppmMul_mm_32f(temp1, D, BT, dx, BT, D, dW, D, D, 0);
+        nmppmMul_mm_32f_wrap(temp1, D, BT, dx, D, dW);
         grad_copy(g_Wo, dW, D * D);
 
         // === FULL ATTENTION BACKWARD ===
@@ -738,15 +760,15 @@ static void op_fused_backward_gradonly() {
         float* V_full = K_full + BT * D;
         float* d_O    = V_full + BT * D;
 
-        nmppmMul_mm_32f(hn, BT, D, Wq, D, D, Q_full, D, D, 0);
-        nmppmMul_mm_32f(hn, BT, D, Wk, D, D, K_full, D, D, 0);
-        nmppmMul_mm_32f(hn, BT, D, Wv, D, D, V_full, D, D, 0);
+        nmppmMul_mm_32f_wrap(hn, BT, D, Wq, D, Q_full);
+        nmppmMul_mm_32f_wrap(hn, BT, D, Wk, D, K_full);
+        nmppmMul_mm_32f_wrap(hn, BT, D, Wv, D, V_full);
 
         // BUG 5 FIX: compute d_O = dx @ Wo.T BEFORE modifying dx with residual
         for (int i = 0; i < D; i++)
             for (int j = 0; j < D; j++)
                 temp1[j * D + i] = Wo[i * D + j];
-        nmppmMul_mm_32f(dx, BT, D, temp1, D, D, d_O, D, D, 0);
+        nmppmMul_mm_32f_wrap(dx, BT, D, temp1, D, d_O);
 
         // Residual: dx += d_O
         fused_add(dx, d_O, BT * D);
@@ -844,13 +866,13 @@ static void op_fused_backward_gradonly() {
         for (int i = 0; i < BT; i++)
             for (int d = 0; d < D; d++)
                 temp1[d * BT + i] = hn[i * D + d];
-        nmppmMul_mm_32f(temp1, D, BT, d_Q, BT, D, dW, D, D, 0);
+        nmppmMul_mm_32f_wrap(temp1, D, BT, d_Q, D, dW);
         grad_copy(g_Wq, dW, D * D);
 
-        nmppmMul_mm_32f(temp1, D, BT, d_K, BT, D, dW, D, D, 0);
+        nmppmMul_mm_32f_wrap(temp1, D, BT, d_K, D, dW);
         grad_copy(g_Wk, dW, D * D);
 
-        nmppmMul_mm_32f(temp1, D, BT, d_V, BT, D, dW, D, D, 0);
+        nmppmMul_mm_32f_wrap(temp1, D, BT, d_V, D, dW);
         grad_copy(g_Wv, dW, D * D);
 
         // dx += d_Q @ Wq.T + d_K @ Wk.T + d_V @ Wv.T
@@ -860,19 +882,19 @@ static void op_fused_backward_gradonly() {
         for (int i = 0; i < D; i++)
             for (int j = 0; j < D; j++)
                 Wt[j*D+i] = Wq[i*D+j];
-        nmppmMul_mm_32f(d_Q, BT, D, Wt, D, D, dx_add, D, D, 0);
+        nmppmMul_mm_32f_wrap(d_Q, BT, D, Wt, D, dx_add);
         fused_add(dx, dx_add, BT * D);
 
         for (int i = 0; i < D; i++)
             for (int j = 0; j < D; j++)
                 Wt[j*D+i] = Wk[i*D+j];
-        nmppmMul_mm_32f(d_K, BT, D, Wt, D, D, dx_add, D, D, 0);
+        nmppmMul_mm_32f_wrap(d_K, BT, D, Wt, D, dx_add);
         fused_add(dx, dx_add, BT * D);
 
         for (int i = 0; i < D; i++)
             for (int j = 0; j < D; j++)
                 Wt[j*D+i] = Wv[i*D+j];
-        nmppmMul_mm_32f(d_V, BT, D, Wt, D, D, dx_add, D, D, 0);
+        nmppmMul_mm_32f_wrap(d_V, BT, D, Wt, D, dx_add);
         fused_add(dx, dx_add, BT * D);
     }
 
@@ -915,10 +937,10 @@ int main() {
 
         unsigned int op = mem[0];
         if (op == OP_NOP) {
-            // CRITICAL FIX: Reduce DDR polling traffic from idle cores.
-            // Idle cores MUST NOT hammer DDR or active cores' SIMD DMA stalls.
-            // Busy-wait ~100K iterations in registers (no DDR access) ≈ 1 ms.
-            for (volatile unsigned int d = 0; d < 100000; d++) {}
+            // CRITICAL: idle cores must NOT touch DDR while active cores do SIMD DMA.
+            // 10M register iterations ≈ 100ms between DDR polls.
+            // This completely frees the DDR controller for active cores.
+            for (volatile unsigned int d = 0; d < 10000000; d++) {}
             continue;
         }
 
@@ -936,7 +958,7 @@ int main() {
                 float* A = (float*)mem[4];
                 float* B = (float*)mem[5];
                 float* C = (float*)mem[6];
-                nmppmMul_mm_32f(A, M, K, B, K, N, C, N, N, 0);
+                nmppmMul_mm_32f_wrap(A, M, K, B, N, C);
                 break;
             }
             case OP_FUSED_FORWARD_ROWPAR:

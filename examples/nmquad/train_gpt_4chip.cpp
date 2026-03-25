@@ -83,6 +83,8 @@ struct CoreAddrs {
     PL_Addr dlogits;      // backward input
     PL_Addr bk_scratch;   // backward scratch
     PL_Addr grad_buf;     // per-core gradient buffer for GRADONLY mode
+    PL_Addr layers_priv;  // per-core weight copy (eliminates DDR bank conflicts)
+    PL_Addr lm_priv;      // per-core lm_head copy
 };
 
 // Per-chip shared addresses
@@ -343,6 +345,10 @@ int main(int argc, char** argv) {
 
         // Allocate per-core areas on this chip's DDR
         for (int ci : chip_core_ids[ch]) {
+            // Use shared weights (per-chip, not per-core)
+            core_addrs[ci].layers_priv = chip_addrs[ch].layers;
+            core_addrs[ci].lm_priv = chip_addrs[ch].lm_head;
+
             core_addrs[ci].tokens     = dp; dp += B_per_core * T;
             core_addrs[ci].logits     = dp; dp += BT * V;
             core_addrs[ci].h_out      = dp; dp += cache_words;
@@ -417,29 +423,49 @@ int main(int argc, char** argv) {
                 core_wr(ci, core_addrs[ci].tokens,
                         tok_per_core[ci].data(), BT);
 
-            // 3. DISPATCH FUSED FORWARD — ALL cores at once
-            for (int ci = 0; ci < NC; ci++) {
-                int ch = all_cores[ci].chip_id;
-                unsigned args[15] = {
-                    (unsigned)B_per_core,
-                    (unsigned)T, (unsigned)D, (unsigned)H, (unsigned)FF,
-                    (unsigned)V, (unsigned)L,
-                    core_addrs[ci].tokens,
-                    chip_addrs[ch].wte,
-                    chip_addrs[ch].wpe,
-                    chip_addrs[ch].layers,
-                    chip_addrs[ch].lm_head,
-                    core_addrs[ci].logits,
-                    core_addrs[ci].h_out,
-                    core_addrs[ci].scratch
-                };
-                core_dispatch(ci, OP_FUSED_FORWARD_ROWPAR, args, 15);
+            // 3. DISPATCH FUSED FORWARD — dispatch all, wait all
+            //    NM6408 DDR supports max 8 simultaneous SIMD DMA streams
+            {
+                int FWD_WAVE = 8;
+                int max_cpb = 0;
+                for (int ch = 0; ch < num_chips; ch++)
+                    if ((int)chip_core_ids[ch].size() > max_cpb)
+                        max_cpb = (int)chip_core_ids[ch].size();
+
+                for (int w = 0; w < (max_cpb + FWD_WAVE - 1) / FWD_WAVE; w++) {
+                    for (int ch = 0; ch < num_chips; ch++) {
+                        int s = w * FWD_WAVE, e = s + FWD_WAVE;
+                        if (e > (int)chip_core_ids[ch].size()) e = (int)chip_core_ids[ch].size();
+                        for (int idx = s; idx < e; idx++) {
+                            int ci = chip_core_ids[ch][idx];
+                            unsigned args[15] = {
+                                (unsigned)B_per_core,
+                                (unsigned)T, (unsigned)D, (unsigned)H, (unsigned)FF,
+                                (unsigned)V, (unsigned)L,
+                                core_addrs[ci].tokens,
+                                chip_addrs[ch].wte,
+                                chip_addrs[ch].wpe,
+                                core_addrs[ci].layers_priv,
+                                core_addrs[ci].lm_priv,
+                                core_addrs[ci].logits,
+                                core_addrs[ci].h_out,
+                                core_addrs[ci].scratch
+                            };
+                            core_dispatch(ci, OP_FUSED_FORWARD_ROWPAR, args, 15);
+                        }
+                    }
+                    for (int ch = 0; ch < num_chips; ch++) {
+                        int s = w * FWD_WAVE, e = s + FWD_WAVE;
+                        if (e > (int)chip_core_ids[ch].size()) e = (int)chip_core_ids[ch].size();
+                        for (int idx = s; idx < e; idx++)
+                            if (!core_wait(chip_core_ids[ch][idx]))
+                                printf("FWD TIMEOUT w%d core %d\n", w, chip_core_ids[ch][idx]);
+                    }
+                }
             }
 
-            // 4. WAIT ALL forward
+            // 4. Check success
             bool ok = true;
-            for (int ci = 0; ci < NC; ci++)
-                if (!core_wait(ci)) { ok = false; printf("FWD TIMEOUT core %d\n", ci); break; }
             if (!ok) { printf("FORWARD FAILED step %d\n", step); break; }
 
             // 5. Download logits, compute loss + dlogits on host
@@ -511,9 +537,9 @@ int main(int argc, char** argv) {
                                 (unsigned)V, (unsigned)L,
                                 core_addrs[ci].dlogits,
                                 core_addrs[ci].tokens,
-                                chip_addrs[ch].wte,           // read-only
-                                chip_addrs[ch].layers,         // read-only
-                                chip_addrs[ch].lm_head,        // read-only
+                                chip_addrs[ch].wte,           // read-only (shared, small)
+                                core_addrs[ci].layers_priv,    // per-core copy!
+                                core_addrs[ci].lm_priv,        // per-core copy!
                                 core_addrs[ci].h_out,
                                 (unsigned)(core_addrs[ci].h_out + (L+1)*BT*D),
                                 (unsigned)(core_addrs[ci].h_out + (L+1)*BT*D + L*BT*D),
@@ -563,9 +589,9 @@ int main(int argc, char** argv) {
                     float* g_lay = sum_grad.data() + D*V;
                     float* g_wte = sum_grad.data() + D*V + L*lsz;
 
-                    // Download current weights from this chip
-                    core_rd(first_ci, chip_addrs[ch].lm_head, lm_w.data(), D*V);
-                    core_rd(first_ci, chip_addrs[ch].layers, packed.data(), L*lsz);
+                    // Download current weights from first core's private copy
+                    core_rd(first_ci, core_addrs[first_ci].lm_priv, lm_w.data(), D*V);
+                    core_rd(first_ci, core_addrs[first_ci].layers_priv, packed.data(), L*lsz);
                     core_rd(first_ci, chip_addrs[ch].wte, wte.data(), V*D);
 
                     // Apply SGD: W -= lr * sum_grad
@@ -573,9 +599,11 @@ int main(int argc, char** argv) {
                     for (int i = 0; i < L*lsz; i++) packed[i]  -= lr * g_lay[i];
                     for (int i = 0; i < V*D; i++)   wte[i]     -= lr * g_wte[i];
 
-                    // Upload updated weights back to chip
-                    core_wr(first_ci, chip_addrs[ch].lm_head, lm_w.data(), D*V);
-                    core_wr(first_ci, chip_addrs[ch].layers, packed.data(), L*lsz);
+                    // Upload updated weights to ALL per-core copies on this chip
+                    for (int ci : chip_core_ids[ch]) {
+                        core_wr(first_ci, core_addrs[ci].layers_priv, packed.data(), L*lsz);
+                        core_wr(first_ci, core_addrs[ci].lm_priv, lm_w.data(), D*V);
+                    }
                     core_wr(first_ci, chip_addrs[ch].wte, wte.data(), V*D);
                 }
 
