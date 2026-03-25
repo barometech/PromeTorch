@@ -17,47 +17,68 @@ namespace py = pybind11;
 // ============================================================================
 // We need thin wrappers because the C++ guards are non-copyable RAII objects.
 // These wrappers delegate to torch::autograd::GradMode directly.
+//
+// BUG-C9 FIX: Added `restored_` flag to prevent double-restore.
+// Without it, __exit__() restores prev_enabled_, then the destructor
+// restores it AGAIN — which can flip grad mode to the wrong state if
+// another guard was entered/exited between __exit__ and destruction.
 
 class PyNoGradGuard {
 public:
-    PyNoGradGuard() : prev_enabled_(torch::autograd::GradMode::is_enabled()) {
+    PyNoGradGuard()
+        : prev_enabled_(torch::autograd::GradMode::is_enabled())
+        , restored_(false) {
         torch::autograd::GradMode::set_enabled(false);
     }
 
     ~PyNoGradGuard() {
-        torch::autograd::GradMode::set_enabled(prev_enabled_);
+        if (!restored_) {
+            torch::autograd::GradMode::set_enabled(prev_enabled_);
+        }
     }
 
     // __enter__ must return self for Python context manager protocol
     PyNoGradGuard& enter() { return *this; }
 
     void exit(py::object, py::object, py::object) {
-        torch::autograd::GradMode::set_enabled(prev_enabled_);
+        if (!restored_) {
+            torch::autograd::GradMode::set_enabled(prev_enabled_);
+            restored_ = true;
+        }
     }
 
 private:
     bool prev_enabled_;
+    bool restored_;
 };
 
 class PyEnableGradGuard {
 public:
-    PyEnableGradGuard() : prev_enabled_(torch::autograd::GradMode::is_enabled()) {
+    PyEnableGradGuard()
+        : prev_enabled_(torch::autograd::GradMode::is_enabled())
+        , restored_(false) {
         torch::autograd::GradMode::set_enabled(true);
     }
 
     ~PyEnableGradGuard() {
-        torch::autograd::GradMode::set_enabled(prev_enabled_);
+        if (!restored_) {
+            torch::autograd::GradMode::set_enabled(prev_enabled_);
+        }
     }
 
     // __enter__ must return self for Python context manager protocol
     PyEnableGradGuard& enter() { return *this; }
 
     void exit(py::object, py::object, py::object) {
-        torch::autograd::GradMode::set_enabled(prev_enabled_);
+        if (!restored_) {
+            torch::autograd::GradMode::set_enabled(prev_enabled_);
+            restored_ = true;
+        }
     }
 
 private:
     bool prev_enabled_;
+    bool restored_;
 };
 
 // ============================================================================

@@ -108,9 +108,11 @@ examples/                     # 12 production examples + 22 тестов
 **Файл:** `aten/src/ATen/cuda/CUDAKernels.cu:850-852`
 **Верификация:** ПОДТВЕРЖДЕНО. `dim3 threads(inner_size)` — если inner_size > 1024, kernel launch fails.
 
-### BUG-C9: Python `no_grad()` отключён от C++ autograd
-**Файл:** `python/csrc/autograd_bindings.cpp:18-26`
-**Верификация:** ПОДТВЕРЖДЕНО. Анонимный `thread_local bool grad_enabled_` в `namespace {}` — это НЕ `torch::autograd::GradMode`. Python `no_grad()` ничего не делает для C++ engine.
+### BUG-C9: Python `no_grad()` отключён от C++ autograd — FIXED (2026-03-25)
+**Файл:** `python/csrc/autograd_bindings.cpp`, `torch/csrc/autograd/grad_mode.h`
+**Верификация:** ПОДТВЕРЖДЕНО И ИСПРАВЛЕНО.
+**Root cause:** `GradMode::get_enabled_()` определялся как `static thread_local` в header → каждая DLL получала свою копию.
+**Fix:** (1) Вынесен `get_enabled_()` в `torch/csrc/autograd/grad_mode.cpp`, `torch_autograd` стал STATIC library. (2) Добавлен `restored_` flag в PyNoGradGuard/PyEnableGradGuard для предотвращения double-restore (exit + destructor).
 
 ### BUG-C10: Python `g_param_storage` — бесконечный memory leak
 **Файл:** `python/csrc/optim_bindings.cpp:17`
@@ -355,7 +357,7 @@ unsigned int core_index = (cluster_id << 2) + core_id;
 
 ### P1 — ВАЖНЫЕ
 5. **BUG-C2-C6**: FlashAttention — полная переписка
-6. **BUG-C9**: Python no_grad — связать с C++ GradMode
+6. **BUG-C9**: Python no_grad — связать с C++ GradMode — **FIXED (2026-03-25)**
 7. **BUG-C10**: Python g_param_storage leak — чистить при уничтожении optimizer
 8. **BUG-M4**: TransformerEncoder shared layers — clone в первом конструкторе
 9. **BUG-M5**: Dropout1d/2d/3d autograd
@@ -597,7 +599,7 @@ StepLR, MultiStepLR, ExponentialLR, CosineAnnealingLR, LinearLR, ConstantLR, Red
 - `optim_bindings.cpp` (220): SGD, Adam, AdamW, RMSprop, schedulers
 - `__init__.py` (146), `nn/__init__.py` (78), `nn/functional.py` (27), `optim/__init__.py` (26), `setup.py` (126)
 
-**Python баги:** BUG-C9 (no_grad disconnected), BUG-C10 (g_param_storage leak), BUG-M11 (tensor_to_numpy dangling ptr), BUG-M12 (numpy_to_tensor non-contiguous), `::rand()` in nn_bindings (not seedable), no_grad __enter__ returns None
+**Python баги:** ~~BUG-C9 (no_grad disconnected)~~ FIXED, BUG-C10 (g_param_storage leak), BUG-M11 (tensor_to_numpy dangling ptr), BUG-M12 (numpy_to_tensor non-contiguous), `::rand()` in nn_bindings (not seedable), ~~no_grad __enter__ returns None~~ FIXED
 
 **Оценка:** 6/10 (Python bindings самая слабая часть)
 
@@ -908,7 +910,7 @@ L1-L19 — см. таблицу выше
 
 | Клейм | Проверка | Результат |
 |-------|----------|-----------|
-| BUG-C9: Python no_grad disconnected | Прочитан `autograd_bindings.cpp:18-26` | **ПОДТВЕРЖДЕНО.** Anonymous namespace `thread_local bool` — not `torch::autograd::GradMode`. |
+| BUG-C9: Python no_grad disconnected | Прочитан `autograd_bindings.cpp:18-26` | **FIXED (2026-03-25).** `get_enabled_()` moved to `grad_mode.cpp`, double-restore fix added. |
 | BUG-C10: g_param_storage leak | Прочитан `optim_bindings.cpp:17-28` | **ПОДТВЕРЖДЕНО.** Static vector, only push_back, no cleanup. |
 | BUG-M7: serialization no nbytes validation | Прочитан `serialization.h:96-100` | **ПОДТВЕРЖДЕНО.** `read_bytes(f, tensor.data_ptr(), nbytes)` without size check. |
 | CLAIM: no_grad __enter__ returns None | Прочитан `autograd_bindings.cpp:42` | **ПОДТВЕРЖДЕНО.** `void enter() {}` — returns nothing. Python `with` gets None. |

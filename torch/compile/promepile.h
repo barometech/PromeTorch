@@ -23,6 +23,7 @@
 #include "torch/nn/parameter.h"
 #include "torch/nn/modules/linear.h"
 #include "torch/nn/modules/activation.h"
+#include "torch/nn/modules/normalization.h"
 #include "torch/csrc/autograd/grad_mode.h"
 
 #include <vector>
@@ -83,12 +84,16 @@ enum class OpType {
     // Loss
     CROSS_ENTROPY,   // fused softmax + log + nll
 
+    // Normalization (inference mode only)
+    BATCHNORM1D,        // y = (x - mean) / sqrt(var + eps) * gamma + beta
+
     // Fused ops (produced by fusion pass)
     LINEAR_BIAS,        // sgemm_nt + bias_add
     LINEAR_RELU,        // sgemm_nt + bias_add + relu
     LINEAR_GELU,        // sgemm_nt + bias_add + gelu
     LINEAR_NOBIAS,      // sgemm_nt only (no bias)
     LINEAR_NOBIAS_RELU, // sgemm_nt + relu (no bias)
+    BATCHNORM1D_RELU,   // batchnorm1d + relu (fused)
 
     // Backward ops
     RELU_MASK_MUL,   // grad * (saved > 0)
@@ -281,6 +286,18 @@ struct CompiledGraph {
                 break;
             }
 
+            case OpType::SILU: {
+                // SiLU(x) = x * sigmoid(x)
+                int64_t n = op.dims[0];
+                const float* in = buffers[op.input_ids[0]];
+                float* out = buffers[op.output_id];
+                for (int64_t i = 0; i < n; ++i) {
+                    float s = 1.0f / (1.0f + std::exp(-in[i]));
+                    out[i] = in[i] * s;
+                }
+                break;
+            }
+
             case OpType::SOFTMAX: {
                 int64_t rows = op.dims[0], cols = op.dims[1];
                 at::native::hot::softmax_fused(
@@ -298,6 +315,39 @@ struct CompiledGraph {
                     &last_loss,
                     buffers[op.output_id],
                     batch, classes);
+                break;
+            }
+
+            case OpType::BATCHNORM1D: {
+                // Pre-fused: y[n,c] = x[n,c] * scale[c] + shift[c]
+                // where scale = gamma / sqrt(var + eps), shift = beta - mean * scale
+                // weight_ptr = scale, bias_ptr = shift
+                int64_t N = op.dims[0], C = op.dims[1];
+                const float* x = buffers[op.input_ids[0]];
+                float* out = buffers[op.output_id];
+                const float* scale = op.weight_ptr;
+                const float* shift = op.bias_ptr;
+                for (int64_t n = 0; n < N; ++n) {
+                    for (int64_t c = 0; c < C; ++c) {
+                        out[n * C + c] = x[n * C + c] * scale[c] + shift[c];
+                    }
+                }
+                break;
+            }
+
+            case OpType::BATCHNORM1D_RELU: {
+                // Fused: y = relu(x * scale + shift)
+                int64_t N = op.dims[0], C = op.dims[1];
+                const float* x = buffers[op.input_ids[0]];
+                float* out = buffers[op.output_id];
+                const float* scale = op.weight_ptr;
+                const float* shift = op.bias_ptr;
+                for (int64_t n = 0; n < N; ++n) {
+                    for (int64_t c = 0; c < C; ++c) {
+                        float val = x[n * C + c] * scale[c] + shift[c];
+                        out[n * C + c] = val > 0.0f ? val : 0.0f;
+                    }
+                }
                 break;
             }
 
@@ -506,6 +556,8 @@ public:
         graph_.ops.push_back(op);
     }
 
+    CompiledGraph& graph() { return graph_; }
+
     CompiledGraph finish_trace() {
         tracing_ = false;
         // Run fusion pass
@@ -574,6 +626,15 @@ private:
             if (a.type == OpType::SGEMM_NT && b.type == OpType::RELU
                 && a.output_id == b.input_ids[0]) {
                 a.type = OpType::LINEAR_NOBIAS_RELU;
+                a.output_id = b.output_id;
+                b.type = OpType::NOP;
+                continue;
+            }
+
+            // Pattern: BATCHNORM1D -> RELU  ==>  BATCHNORM1D_RELU
+            if (a.type == OpType::BATCHNORM1D && b.type == OpType::RELU
+                && a.output_id == b.input_ids[0]) {
+                a.type = OpType::BATCHNORM1D_RELU;
                 a.output_id = b.output_id;
                 b.type = OpType::NOP;
                 continue;
@@ -772,6 +833,59 @@ private:
                                     n, input.sizes().vec());
         }
 
+        auto* sigmoid = dynamic_cast<torch::nn::Sigmoid*>(&module);
+        if (sigmoid) {
+            int64_t n = input.numel();
+            int64_t dims[] = {n};
+            int inputs[] = {input_buf};
+            return tracer.record_op(OpType::SIGMOID, inputs, 1, dims, 1,
+                                    n, input.sizes().vec());
+        }
+
+        auto* tanh_mod = dynamic_cast<torch::nn::Tanh*>(&module);
+        if (tanh_mod) {
+            int64_t n = input.numel();
+            int64_t dims[] = {n};
+            int inputs[] = {input_buf};
+            return tracer.record_op(OpType::TANH, inputs, 1, dims, 1,
+                                    n, input.sizes().vec());
+        }
+
+        auto* gelu = dynamic_cast<torch::nn::GELU*>(&module);
+        if (gelu) {
+            int64_t n = input.numel();
+            int64_t dims[] = {n};
+            int inputs[] = {input_buf};
+            return tracer.record_op(OpType::GELU, inputs, 1, dims, 1,
+                                    n, input.sizes().vec());
+        }
+
+        auto* silu = dynamic_cast<torch::nn::SiLU*>(&module);
+        if (silu) {
+            int64_t n = input.numel();
+            int64_t dims[] = {n};
+            int inputs[] = {input_buf};
+            return tracer.record_op(OpType::SILU, inputs, 1, dims, 1,
+                                    n, input.sizes().vec());
+        }
+
+        auto* softmax = dynamic_cast<torch::nn::Softmax*>(&module);
+        if (softmax) {
+            // For 2D input: dims[0]=rows, dims[1]=cols (softmax along last dim)
+            int64_t rows = input.dim() >= 2 ? input.size(0) : 1;
+            int64_t cols = input.dim() >= 2 ? input.size(1) : input.size(0);
+            int64_t dims[] = {rows, cols};
+            int inputs[] = {input_buf};
+            return tracer.record_op(OpType::SOFTMAX, inputs, 1, dims, 2,
+                                    input.numel(), input.sizes().vec());
+        }
+
+        // Check if it's BatchNorm1d (inference mode: uses running stats)
+        auto* bn1d = dynamic_cast<torch::nn::BatchNorm1d*>(&module);
+        if (bn1d) {
+            return trace_batchnorm1d(tracer, *bn1d, input, input_buf);
+        }
+
         // Check for Sequential or other containers
         auto children = module.named_children();
         if (!children.empty()) {
@@ -827,6 +941,66 @@ private:
         }
     }
 
+    int trace_batchnorm1d(GraphTracer& tracer, torch::nn::BatchNorm1d& bn,
+                          const at::Tensor& input, int input_buf) {
+        int64_t N = input.size(0);
+        int64_t C = input.size(1);
+
+        // Get running mean/var pointers (inference mode)
+        auto* rm_buf = bn.get_buffer("running_mean");
+        auto* rv_buf = bn.get_buffer("running_var");
+        const float* mean_ptr = rm_buf ? rm_buf->data().data_ptr<float>() : nullptr;
+        const float* var_ptr  = rv_buf ? rv_buf->data().data_ptr<float>() : nullptr;
+
+        // Get weight/bias (gamma/beta) — direct pointers into model parameters
+        auto* w_param = bn.get_parameter("weight");
+        auto* b_param = bn.get_parameter("bias");
+        const float* gamma_ptr = w_param ? w_param->data().data_ptr<float>() : nullptr;
+        const float* beta_ptr  = b_param ? b_param->data().data_ptr<float>() : nullptr;
+
+        // Pre-compute fused scale and shift: scale[c] = gamma[c] / sqrt(var[c] + eps)
+        // shift[c] = beta[c] - mean[c] * scale[c]
+        // Then y = x * scale + shift  (single multiply+add per element)
+        bn_fused_params_.push_back({});
+        auto& fp = bn_fused_params_.back();
+        fp.scale.resize(C);
+        fp.shift.resize(C);
+        for (int64_t c = 0; c < C; ++c) {
+            float m = mean_ptr ? mean_ptr[c] : 0.0f;
+            float v = var_ptr ? var_ptr[c] : 1.0f;
+            float g = gamma_ptr ? gamma_ptr[c] : 1.0f;
+            float b = beta_ptr ? beta_ptr[c] : 0.0f;
+            float inv_std = 1.0f / std::sqrt(v + static_cast<float>(bn.eps()));
+            fp.scale[c] = g * inv_std;
+            fp.shift[c] = b - m * fp.scale[c];
+        }
+
+        // Record the op — use weight_ptr/bias_ptr for fused scale/shift
+        TracedOp op;
+        op.type = OpType::BATCHNORM1D;
+        op.input_ids[0] = input_buf;
+        op.input_ids[1] = -1;
+        op.input_ids[2] = -1;
+        op.input_ids[3] = -1;
+        op.dims[0] = N;
+        op.dims[1] = C;
+        op.params[0] = static_cast<float>(bn.eps());
+        op.weight_ptr = fp.scale.data();  // fused scale
+        op.bias_ptr   = fp.shift.data();  // fused shift
+
+        int out_id = tracer.alloc_buffer(N * C, {N, C});
+        op.output_id = out_id;
+        tracer.graph().ops.push_back(op);
+        return out_id;
+    }
+
+    // Storage for pre-computed BatchNorm fused parameters (owned by CompiledForward)
+    struct BNFusedParams {
+        std::vector<float> scale;  // gamma / sqrt(var + eps)
+        std::vector<float> shift;  // beta - mean * scale
+    };
+    std::vector<BNFusedParams> bn_fused_params_;
+
     static const char* op_name(OpType t) {
         switch (t) {
             case OpType::SGEMM: return "SGEMM";
@@ -852,6 +1026,8 @@ private:
             case OpType::LINEAR_GELU: return "LINEAR_GELU";
             case OpType::LINEAR_NOBIAS: return "LINEAR_NOBIAS";
             case OpType::LINEAR_NOBIAS_RELU: return "LINEAR_NOBIAS_RELU";
+            case OpType::BATCHNORM1D: return "BATCHNORM1D";
+            case OpType::BATCHNORM1D_RELU: return "BATCHNORM1D_RELU";
             case OpType::RELU_MASK_MUL: return "RELU_MASK_MUL";
             case OpType::COL_SUM: return "COL_SUM";
             case OpType::COPY: return "COPY";
