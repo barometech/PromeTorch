@@ -13,8 +13,10 @@
 #include <tuple>
 
 #include "aten/src/ATen/ATen.h"
+#include "aten/src/ATen/native/cpu/IndexOps.h"
 #include "torch/csrc/autograd/autograd.h"
 #include "torch/nn/nn.h"
+#include "torch/nn/utils/rnn.h"
 #include "torch/compile/promepile.h"
 
 namespace py = pybind11;
@@ -311,6 +313,19 @@ void init_tensor_bindings(py::module& m) {
         }, py::arg("gradient") = py::none(),
            py::arg("retain_graph") = false, py::arg("create_graph") = false)
 
+        // retain_grad — keep gradient for non-leaf tensors
+        .def("retain_grad", [](at::Tensor& t) {
+            if (!t.defined()) return;
+            auto* meta = t.unsafeGetTensorImpl()->autograd_meta();
+            if (meta) {
+                meta->retains_grad_ = true;
+            }
+            t.set_requires_grad(true);
+        })
+
+        // is_contiguous as method (also exists as property above)
+        .def("is_contiguous", [](const at::Tensor& t) { return t.is_contiguous(); })
+
         // Copy
         .def("copy_", [](at::Tensor& t, const at::Tensor& src) {
             t.copy_(src);
@@ -508,6 +523,28 @@ void init_tensor_bindings(py::module& m) {
             }
             return t;
         }, py::arg("min") = py::none(), py::arg("max") = py::none(), py::return_value_policy::reference)
+
+        // masked_fill_ (in-place)
+        .def("masked_fill_", [](at::Tensor& t, const at::Tensor& mask, double value) -> at::Tensor& {
+            at::native::masked_fill_(t, mask, at::Scalar(value));
+            return t;
+        }, py::arg("mask"), py::arg("value"), py::return_value_policy::reference)
+
+        // masked_fill (out-of-place)
+        .def("masked_fill", [](const at::Tensor& t, const at::Tensor& mask, double value) {
+            return at::native::masked_fill(t, mask, at::Scalar(value));
+        }, py::arg("mask"), py::arg("value"))
+
+        // gather
+        .def("gather", [](const at::Tensor& t, int64_t dim, const at::Tensor& index) {
+            return at::native::gather(t, dim, index);
+        }, py::arg("dim"), py::arg("index"))
+
+        // scatter_ (in-place)
+        .def("scatter_", [](at::Tensor& t, int64_t dim, const at::Tensor& index, const at::Tensor& src) -> at::Tensor& {
+            at::native::scatter_(t, dim, index, src);
+            return t;
+        }, py::arg("dim"), py::arg("index"), py::arg("src"), py::return_value_policy::reference)
 
         // clamp (out-of-place) as tensor method
         .def("clamp", [](const at::Tensor& t, py::object min_val, py::object max_val) {
@@ -806,6 +843,23 @@ void init_tensor_bindings(py::module& m) {
         return py::make_tuple(std::get<0>(result), std::get<1>(result));
     }, py::arg("input"), py::arg("dim") = -1, py::arg("descending") = false);
 
+    // gather (module-level)
+    m.def("gather", [](const at::Tensor& t, int64_t dim, const at::Tensor& index) {
+        return at::native::gather(t, dim, index);
+    }, py::arg("input"), py::arg("dim"), py::arg("index"));
+
+    // scatter (module-level, out-of-place)
+    m.def("scatter", [](const at::Tensor& t, int64_t dim, const at::Tensor& index, const at::Tensor& src) {
+        at::Tensor result = t.clone();
+        at::native::scatter_(result, dim, index, src);
+        return result;
+    }, py::arg("input"), py::arg("dim"), py::arg("index"), py::arg("src"));
+
+    // masked_fill (module-level)
+    m.def("masked_fill", [](const at::Tensor& t, const at::Tensor& mask, double value) {
+        return at::native::masked_fill(t, mask, at::Scalar(value));
+    }, py::arg("input"), py::arg("mask"), py::arg("value"));
+
     // zeros_like
     m.def("zeros_like", [](const at::Tensor& t) {
         return torch::zeros(t.sizes(), at::TensorOptions().dtype(t.dtype()));
@@ -1094,6 +1148,77 @@ void init_tensor_bindings(py::module& m) {
     "Compile a model for fast inference using PromePile JIT.\n"
     "Returns a CompiledModule that traces on first call and then executes\n"
     "via pre-allocated buffers with fused ops (no autograd overhead).");
+
+    // ========================================================================
+    // PackedSequence & RNN Utilities
+    // ========================================================================
+
+    using torch::nn::utils::rnn::PackedSequence;
+
+    py::class_<PackedSequence>(m, "PackedSequence")
+        .def(py::init<>())
+        .def(py::init<at::Tensor, at::Tensor, at::Tensor, at::Tensor>(),
+             py::arg("data"), py::arg("batch_sizes"),
+             py::arg("sorted_indices") = at::Tensor(),
+             py::arg("unsorted_indices") = at::Tensor())
+        .def_readwrite("data", &PackedSequence::data)
+        .def_readwrite("batch_sizes", &PackedSequence::batch_sizes)
+        .def_readwrite("sorted_indices", &PackedSequence::sorted_indices)
+        .def_readwrite("unsorted_indices", &PackedSequence::unsorted_indices)
+        .def("__repr__", [](const PackedSequence& ps) {
+            std::ostringstream oss;
+            oss << "PackedSequence(data=tensor(shape=[";
+            if (ps.data.defined()) {
+                auto s = ps.data.sizes();
+                for (size_t i = 0; i < s.size(); ++i) {
+                    if (i > 0) oss << ", ";
+                    oss << s[i];
+                }
+            }
+            oss << "]), batch_sizes=tensor(shape=[";
+            if (ps.batch_sizes.defined()) {
+                oss << ps.batch_sizes.numel();
+            }
+            oss << "]))";
+            return oss.str();
+        });
+
+    // pack_padded_sequence
+    m.def("pack_padded_sequence", [](const at::Tensor& input,
+                                      const at::Tensor& lengths,
+                                      bool batch_first,
+                                      bool enforce_sorted) {
+        return torch::nn::utils::rnn::pack_padded_sequence(
+            input, lengths, batch_first, enforce_sorted);
+    }, py::arg("input"), py::arg("lengths"),
+       py::arg("batch_first") = false, py::arg("enforce_sorted") = true);
+
+    // pad_packed_sequence
+    m.def("pad_packed_sequence", [](const PackedSequence& sequence,
+                                     bool batch_first,
+                                     float padding_value,
+                                     int64_t total_length) {
+        auto [padded, lengths] = torch::nn::utils::rnn::pad_packed_sequence(
+            sequence, batch_first, padding_value, total_length);
+        return py::make_tuple(padded, lengths);
+    }, py::arg("sequence"),
+       py::arg("batch_first") = false, py::arg("padding_value") = 0.0f,
+       py::arg("total_length") = 0);
+
+    // pad_sequence
+    m.def("pad_sequence", [](const std::vector<at::Tensor>& sequences,
+                              bool batch_first,
+                              float padding_value) {
+        return torch::nn::utils::rnn::pad_sequence(
+            sequences, batch_first, padding_value);
+    }, py::arg("sequences"),
+       py::arg("batch_first") = false, py::arg("padding_value") = 0.0f);
+
+    // pack_sequence
+    m.def("pack_sequence", [](const std::vector<at::Tensor>& sequences,
+                               bool enforce_sorted) {
+        return torch::nn::utils::rnn::pack_sequence(sequences, enforce_sorted);
+    }, py::arg("sequences"), py::arg("enforce_sorted") = true);
 
     // Note: no_grad context manager is defined in autograd_bindings.cpp
 }
