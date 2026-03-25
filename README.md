@@ -21,7 +21,7 @@
 
 ### Эльбрус E8C2
 
-Сервер МЦСТ w205p.mcst.ru — 4x Elbrus-MCST E8C2 (VLIW), 32 ядра, 1500 MHz.
+Сервер МЦСТ Эльбрус — 4x Elbrus-MCST E8C2 (VLIW), 32 ядра, 1500 MHz.
 Задача: MNIST, MLP 784->512->256->128->10 (ReLU), SGD lr=0.01, batch=64, 1 epoch.
 
 | Метрика | PromeTorch | PromeTorch + NUMA | PyTorch 2.7.1 |

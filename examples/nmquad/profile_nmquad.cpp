@@ -59,7 +59,7 @@ int main() {
             PL_CoreNo cn={co,cl}; PL_Access* a;
             if (PL_GetAccess(bds[b],&cn,&a)==0) {
                 auto tl0 = tnow();
-                int r = PL_LoadProgramFile(a, "/home/paperclipdnb/promethorch/aten/src/ATen/nmquad/nmc_programs/dispatcher_nmquad_v3.abs");
+                int r = PL_LoadProgramFile(a, "dispatcher_nmquad_v3_simd.abs");
                 auto tl1 = tnow();
                 if (r==0) {
                     Core c; c.ac=a; c.board=b; c.core_id=(cl<<2)+co;
