@@ -73,7 +73,7 @@ build_nmcard/train_mnist_nmcard.exe                 # NMCard эмулятор, M
 
 ### Запуск MNIST
 ```bash
-cd /c/Users/paper/Desktop/promethorch
+cd /path/to/promethorch
 PATH="./build_final3:$PATH" ./build_final3/examples/mnist/train_mnist_mlp.exe --device cpu --epochs 1 --lr 0.001
 ```
 

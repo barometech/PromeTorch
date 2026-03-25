@@ -9,7 +9,7 @@
 
 ## Железо
 
-- **Сервер:** МЦСТ &lt;private MCST server&gt;, предоставлен партнёром партнёрым (МЦСТ) на 6 месяцев
+- **Сервер:** МЦСТ <elbrus-server>, предоставлен МЦСТ на 6 месяцев
 - **CPU:** 4 × Elbrus-MCST E8C2 (VLIW), 32 ядра, 1500 MHz
 - **RAM:** 125 GB DDR4, 4 NUMA nodes
 - **Disk:** 915 GB (778 GB free)

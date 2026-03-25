@@ -29,7 +29,7 @@ build_examples/examples/mnist/train_mnist_mlp.exe  # 25 янв 10:04
 
 ### Запуск:
 ```bash
-cd /c/Users/paper/Desktop/promethorch
+cd /path/to/promethorch
 PATH="./build_final3:$PATH" ./build_final3/examples/mnist/train_mnist_mlp.exe --device cpu --epochs 1
 ```
 
