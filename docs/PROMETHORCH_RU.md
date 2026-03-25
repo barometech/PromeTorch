@@ -1135,7 +1135,7 @@ nmake
 ### 15.5 Запуск примеров
 
 ```bash
-cd /c/Users/paper/Desktop/promethorch
+cd /path/to/promethorch
 PATH="./build_final3:$PATH" ./build_final3/examples/mnist/train_mnist_mlp.exe --device cpu --epochs 5 --lr 0.001
 ```
 

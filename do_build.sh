@@ -6,6 +6,6 @@ export INCLUDE="C:/Program Files (x86)/Microsoft Visual Studio/2019/BuildTools/V
 export LIB="C:/Program Files (x86)/Microsoft Visual Studio/2019/BuildTools/VC/Tools/MSVC/14.29.30133/lib/x64;C:/Program Files (x86)/Windows Kits/10/Lib/10.0.19041.0/ucrt/x64;C:/Program Files (x86)/Windows Kits/10/Lib/10.0.19041.0/um/x64"
 export PATH="$MSVC_BIN:$WINSDK_BIN:/c/ProgramData/anaconda3:/c/ProgramData/anaconda3/Library/bin:$PATH"
 
-cd /c/Users/paper/Desktop/promethorch/build_pybind
+cd "$(dirname "$0")/build_pybind"
 rm -f CMakeFiles/_C.dir/python/csrc/*.obj 2>/dev/null
 nmake.exe _C 2>&1
