@@ -127,7 +127,8 @@ class DeviceSafe:
     def load_dispatcher(self, dispatcher_path=None):
         """Загрузить dispatcher на карту"""
         if dispatcher_path is None:
-            dispatcher_path = r"C:\Users\paper\Desktop\nm_card_mini_as_TRAINER\nmc_programs\dispatcher_safe.abs"
+            import os
+            dispatcher_path = os.path.join(os.path.dirname(__file__), "..", "nmc_programs", "dispatcher_safe.abs")
 
         self.reset_and_init()
         self.get_access()
