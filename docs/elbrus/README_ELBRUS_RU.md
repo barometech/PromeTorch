@@ -245,8 +245,6 @@ aten/src/ATen/native/cpu/hot_loops.h       # NUMA-aware GEMM объявлени�
 aten/src/ATen/native/cpu/hot_loops.cpp     # NUMA sgemm реализация
 
 test/cpp/test_tuda.cpp                     # 38/38 TUDA тестов
-PIR/run_elbrus_pretrain.sh                 # PIR training скрипт
-PIR/run_pretrain_elbrus.py                 # Python training для E8C2
 
 ELBRUS_REPORT.md                           # Отчёт о производительности
 ```
@@ -297,7 +295,6 @@ plink.exe -P 8199 -i <ssh-key>.ppk \
 ## Roadmap
 
 - [ ] Исправить `item()` в Python биндингах (float32 dtype dispatch)
-- [ ] PIR 250M pretraining на E8C2 (40-слойный transformer)
 - [ ] Benchmark TUDA vs EML для разных размеров матриц
 - [ ] Поддержка Эльбрус-16С (следующее поколение, 16 ядер)
 - [ ] INT8 квантизация с использованием Эльбрус целочисленных ALU
