@@ -36,9 +36,10 @@ enum class DeviceType : int8_t {
     MTIA = 19,      // Meta Training and Inference Accelerator
     PrivateUse1 = 20,  // Reserved for custom backends (NMCard)
     PrivateUse2 = 21,  // Reserved for custom backends (LinQ)
+    PrivateUse3 = 22,  // NM QUAD (4x NM6408)
 
     // Compile time constant for number of device types
-    COMPILE_TIME_MAX_DEVICE_TYPES = 22
+    COMPILE_TIME_MAX_DEVICE_TYPES = 23
 };
 
 constexpr int kNumDeviceTypes = static_cast<int>(DeviceType::COMPILE_TIME_MAX_DEVICE_TYPES);
@@ -91,6 +92,8 @@ inline const char* DeviceTypeName(DeviceType type, bool lower_case = false) {
             return lower_case ? "nmcard" : "NMCard";
         case DeviceType::PrivateUse2:
             return lower_case ? "linq" : "LinQ";
+        case DeviceType::PrivateUse3:
+            return lower_case ? "nmquad" : "NMQuad";
         default:
             return lower_case ? "unknown" : "Unknown";
     }
@@ -150,6 +153,7 @@ public:
     bool is_metal() const noexcept { return type_ == DeviceType::Metal; }
     bool is_nmcard() const noexcept { return type_ == DeviceType::PrivateUse1; }
     bool is_linq() const noexcept { return type_ == DeviceType::PrivateUse2; }
+    bool is_nmquad() const noexcept { return type_ == DeviceType::PrivateUse3; }
 
     bool has_index() const noexcept { return index_ != kNoDeviceIndex; }
 
@@ -256,6 +260,8 @@ private:
             type_ = DeviceType::PrivateUse1;
         } else if (type_lower == "linq") {
             type_ = DeviceType::PrivateUse2;
+        } else if (type_lower == "nmquad") {
+            type_ = DeviceType::PrivateUse3;
         } else {
             PT_ERROR("Unknown device type: ", type_str);
         }
