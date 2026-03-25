@@ -93,10 +93,8 @@ promethorch/
 │
 ├── examples/                     # Примеры обучения
 │   ├── mnist/                    # MNIST MLP
-│   ├── pir/                      # PIR (трансформер, генерация текста)
 │   └── nmcard/                   # MNIST на NM Card эмуляторе
 │
-├── PIR/                          # PIR Python API (PROMEPIR.py)
 └── docs/                         # Документация
 ```
 
@@ -662,7 +660,6 @@ Conv2d поддерживает: stride, padding, dilation, groups, bias.
 
 Файл: `torch/nn/modules/attention.h` -- отдельная реализация `MultiheadAttention`.
 
-### 6.10 PIR Architecture
 
 Файл: `torch/nn/modules/pir.h`, `torch/nn/modules/pir270m.h`
 
@@ -673,7 +670,6 @@ Conv2d поддерживает: stride, padding, dilation, groups, bias.
 | `RMSNorm` | Root Mean Square нормализация |
 | `RotaryEmbedding` (RoPE) | Ротационное позиционное кодирование |
 | `SwiGLUFeedForward` | SwiGLU активация в FFN |
-| `PIRLayer` | Один слой PIR (RMSNorm + MHA с RoPE + SwiGLU FFN) |
 | `PIRBlock` | Блок PIR-слоёв |
 | `PIRTransformerBlock` | Полный трансформерный блок |
 | `PIR270M` | Модель на 270M параметров |
@@ -1145,7 +1141,7 @@ PATH="./build_final3:$PATH" ./build_final3/examples/mnist/train_mnist_mlp.exe --
 |-----------|---------|
 | `build_final3/` | CPU, MNIST MLP (новейшая) |
 | `build_examples/` | CPU, MNIST MLP |
-| `build_cudnn/` | CUDA + cuDNN, PIR |
+| `build_cudnn/` | CUDA + cuDNN |
 | `build_nmcard/` | NM Card эмулятор, MNIST |
 
 ### 15.7 Важные замечания

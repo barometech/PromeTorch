@@ -510,7 +510,6 @@ nmc-g++ -std=gnu++11 -O2 \
 
 ### Долгосрочные цели
 
-- **PIR 250M** полноценное обучение на NM QUAD
 - **Distributed training** через несколько плат NM QUAD (NCCL-аналог по PCIe)
 - **Inference runtime** для развёрнутых моделей с layer streaming
 

@@ -475,7 +475,6 @@ ctest --output-on-failure
 | RNN/LSTM | `examples/rnn/train_rnn.cpp` | Рекуррентные сети |
 | Transformer | `examples/transformer/train_transformer.cpp` | Transformer encoder-decoder |
 | Vision Transformer | `examples/vit/train_vit.cpp` | ViT для классификации |
-| PIR (GPT-like) | `examples/pir/train_pir.cpp` | PIR270M — генерация текста |
 | GGUF Inference | `examples/gguf/test_gguf_inference.cpp` | Запуск GGUF-моделей |
 | NM Card Mini | `examples/nmcard/` | MNIST на нейропроцессоре |
 
