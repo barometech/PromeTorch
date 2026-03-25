@@ -730,20 +730,6 @@ if(PT_BUILD_TESTS)
 
     gtest_discover_tests(data_tests)
 
-    # PIR 270M Test executable
-    add_executable(pir_tests
-        test/cpp/test_pir.cpp
-    )
-
-    target_link_libraries(pir_tests
-        PRIVATE
-        torch_data
-        GTest::gtest
-        GTest::gtest_main
-    )
-
-    gtest_discover_tests(pir_tests)
-
     # Comprehensive All-Ops Test
     add_executable(all_ops_tests
         test/cpp/test_all_ops.cpp
@@ -919,7 +905,6 @@ endif()
 # Examples
 # ============================================================================
 
-add_subdirectory(examples/pir)
 add_subdirectory(examples/mnist)
 add_subdirectory(examples/rnn)
 add_subdirectory(examples/transformer)

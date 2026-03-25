@@ -42,10 +42,6 @@
 #include "modules/attention.h"
 #include "modules/transformer.h"
 
-// PIR (Parallel Information Routing) modules
-#include "modules/pir.h"
-#include "modules/pir270m.h"
-
 // Recurrent modules
 #include "modules/rnn.h"
 
