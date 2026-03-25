@@ -251,6 +251,13 @@ void init_nn_bindings(py::module& m) {
     // ========================================================================
     // Normalization
     // ========================================================================
+    py::class_<torch::nn::BatchNorm1d, torch::nn::Module, std::shared_ptr<torch::nn::BatchNorm1d>>(m, "BatchNorm1d")
+        .def(py::init<int64_t, double, double, bool, bool>(),
+             py::arg("num_features"), py::arg("eps") = 1e-5, py::arg("momentum") = 0.1,
+             py::arg("affine") = true, py::arg("track_running_stats") = true)
+        .def("forward", &torch::nn::BatchNorm1d::forward)
+        .def("__call__", &torch::nn::BatchNorm1d::forward);
+
     py::class_<torch::nn::BatchNorm2d, torch::nn::Module, std::shared_ptr<torch::nn::BatchNorm2d>>(m, "BatchNorm2d")
         .def(py::init<int64_t, double, double, bool, bool>(),
              py::arg("num_features"), py::arg("eps") = 1e-5, py::arg("momentum") = 0.1,

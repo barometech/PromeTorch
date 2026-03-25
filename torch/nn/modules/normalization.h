@@ -142,6 +142,9 @@ public:
         return ss.str();
     }
 
+    double eps() const { return eps_; }
+    int64_t num_features() const { return num_features_; }
+
 private:
     int64_t num_features_;
     double eps_;

@@ -5,6 +5,10 @@
 // ============================================================================
 // When GradMode is disabled, no autograd graph is created.
 // This is used for inference to prevent memory accumulation.
+//
+// IMPORTANT: get_enabled_() is defined in grad_mode.cpp, NOT here.
+// This prevents the DLL singleton bug where each DLL gets its own
+// thread_local copy (BUG-C9).
 
 namespace torch {
 namespace autograd {
@@ -20,10 +24,8 @@ public:
     }
 
 private:
-    static bool& get_enabled_() {
-        static thread_local bool enabled = true;
-        return enabled;
-    }
+    // Defined in grad_mode.cpp — single definition across all DLLs
+    static bool& get_enabled_();
 };
 
 // RAII guard for disabling grad mode

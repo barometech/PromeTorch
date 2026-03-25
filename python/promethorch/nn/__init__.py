@@ -34,6 +34,7 @@ from .._C.nn import (
     Hardswish,
 
     # Normalization
+    BatchNorm1d as _CppBatchNorm1d,
     BatchNorm2d,
     LayerNorm as _CppLayerNorm,
 
@@ -111,20 +112,21 @@ class Module:
             object.__setattr__(self, name, value)
             return
 
-        # Check if it's a Module (Python or C++)
+        # Check if it's a Module (Python or C++), including ModuleList/ModuleDict
         if isinstance(value, (Module, _CppModule)):
-            self._modules[name] = value
-            object.__setattr__(self, name, value)
-            return
-
-        # Check if it's a ModuleList
-        if isinstance(value, ModuleList):
             self._modules[name] = value
             object.__setattr__(self, name, value)
             return
 
         # Regular attribute
         object.__setattr__(self, name, value)
+
+    def register_parameter(self, name, param):
+        """Register a parameter with this module."""
+        if param is not None and not isinstance(param, Parameter):
+            raise TypeError(f"Expected Parameter or None, got {type(param)}")
+        self._parameters[name] = param
+        object.__setattr__(self, name, param)
 
     def register_buffer(self, name, tensor):
         """Register a buffer (non-parameter tensor)."""
@@ -135,6 +137,8 @@ class Module:
         """Return all parameters (recursively)."""
         params = []
         for name, p in self._parameters.items():
+            if p is None:
+                continue
             if isinstance(p, Parameter):
                 params.append(p.data)
             else:
@@ -142,14 +146,8 @@ class Module:
 
         for name, m in self._modules.items():
             if isinstance(m, Module):
+                # Module subclasses (including ModuleList, ModuleDict) have their own parameters()
                 params.extend(m.parameters())
-            elif isinstance(m, ModuleList):
-                for sub in m:
-                    if isinstance(sub, Module):
-                        params.extend(sub.parameters())
-                    elif isinstance(sub, _CppModule):
-                        for pp in sub.parameters():
-                            params.append(pp)
             elif isinstance(m, _CppModule):
                 for pp in m.parameters():
                     params.append(pp)
@@ -159,6 +157,8 @@ class Module:
         """Return all named parameters (recursively)."""
         result = []
         for name, p in self._parameters.items():
+            if p is None:
+                continue
             full_name = f"{prefix}{name}" if not prefix else f"{prefix}.{name}"
             if isinstance(p, Parameter):
                 result.append((full_name, p.data))
@@ -168,15 +168,8 @@ class Module:
         for name, m in self._modules.items():
             child_prefix = f"{prefix}{name}" if not prefix else f"{prefix}.{name}"
             if isinstance(m, Module):
+                # Module subclasses (including ModuleList, ModuleDict) have their own named_parameters()
                 result.extend(m.named_parameters(child_prefix))
-            elif isinstance(m, ModuleList):
-                for i, sub in enumerate(m):
-                    sub_prefix = f"{child_prefix}.{i}"
-                    if isinstance(sub, Module):
-                        result.extend(sub.named_parameters(sub_prefix))
-                    elif isinstance(sub, _CppModule):
-                        for np_pair in sub.named_parameters():
-                            result.append((f"{sub_prefix}.{np_pair[0]}", np_pair[1]))
             elif isinstance(m, _CppModule):
                 for np_pair in m.named_parameters():
                     result.append((f"{child_prefix}.{np_pair[0]}", np_pair[1]))
@@ -211,6 +204,23 @@ class Module:
             if hasattr(p, 'grad') and p.grad is not None and p.grad.defined():
                 p.grad.zero_()
 
+    def apply(self, fn):
+        """Apply a function recursively to every submodule (including self)."""
+        for name, m in self._modules.items():
+            if hasattr(m, 'apply'):
+                m.apply(fn)
+        fn(self)
+        return self
+
+    def num_parameters(self, only_trainable=False):
+        """Count total number of parameters."""
+        total = 0
+        for p in self.parameters():
+            if only_trainable and hasattr(p, 'requires_grad') and not p.requires_grad:
+                continue
+            total += p.numel if isinstance(p.numel, int) else p.numel()
+        return total
+
     def to(self, device_or_dtype):
         """Move all parameters and buffers to device/dtype."""
         for name, p in self._parameters.items():
@@ -230,6 +240,8 @@ class Module:
         """Return state dict."""
         state = {}
         for name, p in self._parameters.items():
+            if p is None:
+                continue
             if isinstance(p, Parameter):
                 state[name] = p.data
             else:
@@ -243,12 +255,63 @@ class Module:
                     state[f"{mod_name}.{k}"] = v
         return state
 
+    def _get_direct_parameter(self, name):
+        """Get a direct reference to a parameter tensor that supports in-place update.
+
+        For Python Parameters, returns the underlying _data tensor.
+        For C++ modules, uses load_state_dict on the C++ module directly.
+        Returns None if not found at this level.
+        """
+        if name in self._parameters:
+            p = self._parameters[name]
+            if isinstance(p, Parameter):
+                return p._data
+            return p
+        if name in self._buffers:
+            return self._buffers[name]
+        return None
+
     def load_state_dict(self, state_dict, strict=True):
-        """Load state dict."""
-        own_state = self.state_dict()
+        """Load state dict, correctly updating C++ sub-module parameters."""
+        # Split state_dict into own params and child params
+        child_states = {}  # mod_name -> {param_name -> tensor}
+        own_keys_loaded = set()
+
         for name, param in state_dict.items():
-            if name in own_state:
-                own_state[name].copy_(param)
+            # Check if this is a direct parameter/buffer of ours
+            direct = self._get_direct_parameter(name)
+            if direct is not None:
+                direct.copy_(param)
+                own_keys_loaded.add(name)
+                continue
+
+            # Otherwise it belongs to a child module: split "child.rest"
+            parts = name.split('.', 1)
+            if len(parts) == 2:
+                child_name, rest = parts
+                if child_name not in child_states:
+                    child_states[child_name] = {}
+                child_states[child_name][rest] = param
+                own_keys_loaded.add(name)
+
+        # Dispatch to child modules
+        for child_name, child_sd in child_states.items():
+            if child_name in self._modules:
+                m = self._modules[child_name]
+                if isinstance(m, Module):
+                    m.load_state_dict(child_sd, strict=strict)
+                elif isinstance(m, _CppModule):
+                    # C++ modules have their own load_state_dict
+                    m.load_state_dict(child_sd, strict)
+
+        if strict:
+            own_state = self.state_dict()
+            missing = set(own_state.keys()) - own_keys_loaded
+            unexpected = set(state_dict.keys()) - own_keys_loaded
+            if missing:
+                raise RuntimeError(f"Missing key(s) in state_dict: {missing}")
+            if unexpected:
+                raise RuntimeError(f"Unexpected key(s) in state_dict: {unexpected}")
 
     def __call__(self, *args, **kwargs):
         return self.forward(*args, **kwargs)
@@ -274,6 +337,7 @@ class Parameter:
         if requires_grad:
             data.requires_grad_(True)
         self._data = data
+        self._requires_grad = requires_grad
 
     @property
     def data(self):
@@ -283,8 +347,37 @@ class Parameter:
     def data(self, value):
         self._data = value
 
+    @property
+    def requires_grad(self):
+        return self._data.requires_grad
+
+    @property
+    def grad(self):
+        return self._data.grad
+
+    @property
+    def shape(self):
+        return self._data.shape
+
+    @property
+    def dtype(self):
+        return self._data.dtype
+
+    @property
+    def device(self):
+        return self._data.device
+
+    def numel(self):
+        return self._data.numel
+
+    def dim(self):
+        return self._data.dim
+
+    def size(self, *args, **kwargs):
+        return self._data.size(*args, **kwargs)
+
     def __repr__(self):
-        return f"Parameter containing:\n{self._data}"
+        return f"Parameter containing:\n{repr(self._data)}"
 
     # Delegate attribute access to the underlying tensor
     def __getattr__(self, name):
@@ -511,10 +604,162 @@ class ModuleList(Module):
                     state[f"{i}.{k}"] = v
         return state
 
+    def apply(self, fn):
+        """Apply a function recursively to every submodule."""
+        for m in self._module_list:
+            if hasattr(m, 'apply'):
+                m.apply(fn)
+        fn(self)
+        return self
+
+    def load_state_dict(self, state_dict, strict=True):
+        """Load state dict into child modules."""
+        child_states = {}
+        for name, param in state_dict.items():
+            parts = name.split('.', 1)
+            if len(parts) == 2:
+                idx_str, rest = parts
+            else:
+                idx_str, rest = name, None
+
+            if idx_str not in child_states:
+                child_states[idx_str] = {}
+            if rest is not None:
+                child_states[idx_str][rest] = param
+            else:
+                child_states[idx_str] = param
+
+        for idx_str, child_sd in child_states.items():
+            idx = int(idx_str)
+            if idx < len(self._module_list):
+                m = self._module_list[idx]
+                if isinstance(child_sd, dict) and hasattr(m, 'load_state_dict'):
+                    m.load_state_dict(child_sd, strict=strict)
+
     def __repr__(self):
         lines = ["ModuleList("]
         for i, m in enumerate(self._module_list):
             lines.append(f"  ({i}): {repr(m)}")
+        lines.append(")")
+        return "\n".join(lines)
+
+
+# ============================================================================
+# ModuleDict — dict-like container for modules
+# ============================================================================
+
+class ModuleDict(Module):
+    """Dict-like container that tracks child modules by string keys."""
+    def __init__(self, modules=None):
+        super().__init__()
+        if modules is not None:
+            if isinstance(modules, dict):
+                for key, mod in modules.items():
+                    self[key] = mod
+            else:
+                for key, mod in modules:
+                    self[key] = mod
+
+    def __getitem__(self, key):
+        return self._modules[key]
+
+    def __setitem__(self, key, module):
+        self._modules[key] = module
+
+    def __delitem__(self, key):
+        del self._modules[key]
+
+    def __contains__(self, key):
+        return key in self._modules
+
+    def __len__(self):
+        return len(self._modules)
+
+    def __iter__(self):
+        return iter(self._modules)
+
+    def keys(self):
+        return self._modules.keys()
+
+    def values(self):
+        return self._modules.values()
+
+    def items(self):
+        return self._modules.items()
+
+    def update(self, modules):
+        if isinstance(modules, dict):
+            for key, mod in modules.items():
+                self[key] = mod
+        else:
+            for key, mod in modules:
+                self[key] = mod
+
+    def pop(self, key, *args):
+        return self._modules.pop(key, *args)
+
+    def parameters(self):
+        params = []
+        for m in self._modules.values():
+            if hasattr(m, 'parameters'):
+                params.extend(m.parameters())
+        return params
+
+    def named_parameters(self, prefix=''):
+        result = []
+        for key, m in self._modules.items():
+            child_prefix = f"{prefix}.{key}" if prefix else key
+            if hasattr(m, 'named_parameters'):
+                result.extend(m.named_parameters(child_prefix))
+        return result
+
+    def to(self, device_or_dtype):
+        for m in self._modules.values():
+            if hasattr(m, 'to'):
+                m.to(device_or_dtype)
+        return self
+
+    def train(self, mode=True):
+        for m in self._modules.values():
+            if hasattr(m, 'train'):
+                m.train(mode)
+        return self
+
+    def eval(self):
+        return self.train(False)
+
+    def state_dict(self):
+        state = {}
+        for key, m in self._modules.items():
+            if hasattr(m, 'state_dict'):
+                child_state = m.state_dict()
+                for k, v in child_state.items():
+                    state[f"{key}.{k}"] = v
+        return state
+
+    def load_state_dict(self, state_dict, strict=True):
+        child_states = {}
+        for name, param in state_dict.items():
+            parts = name.split('.', 1)
+            if len(parts) == 2:
+                child_name, rest = parts
+            else:
+                child_name, rest = name, None
+            if child_name not in child_states:
+                child_states[child_name] = {}
+            if rest is not None:
+                child_states[child_name][rest] = param
+
+        for child_name, child_sd in child_states.items():
+            if child_name in self._modules:
+                m = self._modules[child_name]
+                if isinstance(child_sd, dict) and hasattr(m, 'load_state_dict'):
+                    m.load_state_dict(child_sd, strict=strict)
+
+    def __repr__(self):
+        lines = ["ModuleDict("]
+        for key, m in self._modules.items():
+            lines.append(f"  ({key}): {repr(m)}")
         lines.append(")")
         return "\n".join(lines)
 
@@ -630,6 +875,44 @@ class Softmax(Module):
         return []
 
 
+class BatchNorm1d(Module):
+    """BatchNorm1d wrapping C++ implementation."""
+    def __init__(self, num_features, eps=1e-5, momentum=0.1, affine=True, track_running_stats=True):
+        super().__init__()
+        self._cpp = _CppBatchNorm1d(num_features, eps, momentum, affine, track_running_stats)
+
+    def forward(self, x):
+        return self._cpp.forward(x)
+
+    def parameters(self):
+        return list(self._cpp.parameters())
+
+    def named_parameters(self, prefix=''):
+        result = []
+        for name, p in self._cpp.named_parameters():
+            full_name = f"{prefix}.{name}" if prefix else name
+            result.append((full_name, p))
+        return result
+
+    def to(self, device_or_dtype):
+        self._cpp.to(device_or_dtype)
+        return self
+
+    def train(self, mode=True):
+        self._cpp.train(mode)
+        return self
+
+    def eval(self):
+        self._cpp.eval()
+        return self
+
+    def state_dict(self):
+        return self._cpp.state_dict()
+
+    def __repr__(self):
+        return repr(self._cpp)
+
+
 # Export Sequential that works with our Python Module
 class Sequential(Module):
     def __init__(self, *modules):
@@ -674,6 +957,7 @@ __all__ = [
     'Hardtanh',
     'Hardsigmoid',
     'Hardswish',
+    'BatchNorm1d',
     'BatchNorm2d',
     'LayerNorm',
     'Dropout',
@@ -695,5 +979,6 @@ __all__ = [
     'F',
     'Parameter',
     'Identity',
+    'ModuleDict',
     'init',
 ]

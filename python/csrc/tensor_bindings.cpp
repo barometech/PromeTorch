@@ -14,6 +14,8 @@
 
 #include "aten/src/ATen/ATen.h"
 #include "torch/csrc/autograd/autograd.h"
+#include "torch/nn/nn.h"
+#include "torch/compile/promepile.h"
 
 namespace py = pybind11;
 
@@ -925,10 +927,173 @@ void init_tensor_bindings(py::module& m) {
         throw std::runtime_error("einsum: unsupported number of tensors: " + std::to_string(tensors.size()));
     }, py::arg("equation"));
 
-    // compile (no-op: just returns the model unchanged)
+    // ========================================================================
+    // CompiledModule — wrapper returned by torch.compile()
+    // ========================================================================
+    // Holds a CompiledForward graph and exposes __call__ for fast inference.
+    // Falls back to the original model for unsupported inputs.
+
+    struct PyCompiledModule {
+        std::shared_ptr<torch::nn::Module> cpp_module;  // the C++ module (or built from Python)
+        py::object py_module;                            // original Python object (fallback)
+        std::unique_ptr<torch::compile::CompiledForward> compiled;
+        std::vector<int64_t> traced_input_shape;
+        bool trace_failed = false;
+
+        // Try to extract a C++ module from a Python module wrapper.
+        // Many Python nn.Module subclasses have a _cpp attribute pointing to
+        // the underlying C++ module.
+        static std::shared_ptr<torch::nn::Module> extract_cpp_child(py::object obj) {
+            // Direct C++ module?
+            try { return obj.cast<std::shared_ptr<torch::nn::Sequential>>(); } catch (...) {}
+            try { return obj.cast<std::shared_ptr<torch::nn::Linear>>(); } catch (...) {}
+            try { return obj.cast<std::shared_ptr<torch::nn::ReLU>>(); } catch (...) {}
+            try { return obj.cast<std::shared_ptr<torch::nn::Sigmoid>>(); } catch (...) {}
+            try { return obj.cast<std::shared_ptr<torch::nn::Tanh>>(); } catch (...) {}
+            try { return obj.cast<std::shared_ptr<torch::nn::GELU>>(); } catch (...) {}
+            try { return obj.cast<std::shared_ptr<torch::nn::SiLU>>(); } catch (...) {}
+            try { return obj.cast<std::shared_ptr<torch::nn::Softmax>>(); } catch (...) {}
+            try { return obj.cast<std::shared_ptr<torch::nn::BatchNorm1d>>(); } catch (...) {}
+            try { return obj.cast<std::shared_ptr<torch::nn::BatchNorm2d>>(); } catch (...) {}
+            try { return obj.cast<std::shared_ptr<torch::nn::Module>>(); } catch (...) {}
+
+            // Python wrapper with _cpp attribute?
+            if (py::hasattr(obj, "_cpp")) {
+                py::object cpp_attr = obj.attr("_cpp");
+                try { return cpp_attr.cast<std::shared_ptr<torch::nn::Linear>>(); } catch (...) {}
+                try { return cpp_attr.cast<std::shared_ptr<torch::nn::ReLU>>(); } catch (...) {}
+                try { return cpp_attr.cast<std::shared_ptr<torch::nn::Sigmoid>>(); } catch (...) {}
+                try { return cpp_attr.cast<std::shared_ptr<torch::nn::Tanh>>(); } catch (...) {}
+                try { return cpp_attr.cast<std::shared_ptr<torch::nn::GELU>>(); } catch (...) {}
+                try { return cpp_attr.cast<std::shared_ptr<torch::nn::SiLU>>(); } catch (...) {}
+                try { return cpp_attr.cast<std::shared_ptr<torch::nn::Softmax>>(); } catch (...) {}
+                try { return cpp_attr.cast<std::shared_ptr<torch::nn::BatchNorm1d>>(); } catch (...) {}
+                try { return cpp_attr.cast<std::shared_ptr<torch::nn::Module>>(); } catch (...) {}
+            }
+            return nullptr;
+        }
+
+        // Build a C++ Sequential from a Python module with _module_list
+        static std::shared_ptr<torch::nn::Sequential> build_cpp_sequential(py::object model) {
+            if (!py::hasattr(model, "_module_list")) return nullptr;
+
+            py::list modules = model.attr("_module_list");
+            auto seq = std::make_shared<torch::nn::Sequential>();
+            for (auto& m : modules) {
+                auto cpp_child = extract_cpp_child(py::reinterpret_borrow<py::object>(m));
+                if (!cpp_child) return nullptr;  // can't convert all children
+                seq->add(cpp_child);
+            }
+            return seq;
+        }
+
+        PyCompiledModule(py::object model, py::kwargs opts) : py_module(model) {
+            // Try to extract the C++ Module pointer
+            // 1. Direct C++ module cast
+            try {
+                auto seq = model.cast<std::shared_ptr<torch::nn::Sequential>>();
+                cpp_module = seq;
+                return;
+            } catch (...) {}
+            try {
+                auto mod = model.cast<std::shared_ptr<torch::nn::Module>>();
+                cpp_module = mod;
+                return;
+            } catch (...) {}
+
+            // 2. Python Sequential with _module_list of C++ wrappers
+            auto seq = build_cpp_sequential(model);
+            if (seq) {
+                cpp_module = seq;
+                return;
+            }
+
+            // 3. Python module with _cpp attribute
+            auto child = extract_cpp_child(model);
+            if (child) {
+                cpp_module = child;
+                return;
+            }
+            // If all extraction fails, we'll use fallback mode
+        }
+
+        at::Tensor call(const at::Tensor& input) {
+            // If we have a compiled graph and input shape matches, use fast path
+            if (compiled && !trace_failed && input.sizes().vec() == traced_input_shape) {
+                return compiled->run(input);
+            }
+
+            // Try to compile on first call (or on shape change)
+            if (cpp_module && !trace_failed) {
+                try {
+                    compiled = std::make_unique<torch::compile::CompiledForward>();
+                    compiled->compile(*cpp_module, input);
+
+                    if (compiled->is_compiled() && compiled->num_ops() > 0) {
+                        traced_input_shape = input.sizes().vec();
+                        // First execution uses compiled path
+                        return compiled->run(input);
+                    } else {
+                        // Tracing produced no ops — fall back
+                        trace_failed = true;
+                        compiled.reset();
+                    }
+                } catch (...) {
+                    trace_failed = true;
+                    compiled.reset();
+                }
+            }
+
+            // Fallback: call the original Python object
+            py::object result = py_module(input);
+            return result.cast<at::Tensor>();
+        }
+
+        std::string repr() const {
+            std::ostringstream oss;
+            oss << "CompiledModule(";
+            if (compiled && compiled->is_compiled()) {
+                oss << "compiled, ops=" << compiled->num_ops()
+                    << ", buffers=" << compiled->num_buffers()
+                    << ", mem=" << (compiled->total_buffer_bytes() / 1024) << "KB"
+                    << ", compile_time=" << compiled->compile_time_us() << "us";
+            } else if (trace_failed) {
+                oss << "fallback mode — model not traceable";
+            } else {
+                oss << "not yet traced — call with input to compile";
+            }
+            oss << ")";
+            return oss.str();
+        }
+    };
+
+    py::class_<PyCompiledModule, std::shared_ptr<PyCompiledModule>>(m, "CompiledModule")
+        .def("__call__", &PyCompiledModule::call, py::arg("input"))
+        .def("forward", &PyCompiledModule::call, py::arg("input"))
+        .def("__repr__", &PyCompiledModule::repr)
+        .def_property_readonly("is_compiled", [](const PyCompiledModule& self) {
+            return self.compiled && self.compiled->is_compiled();
+        })
+        .def_property_readonly("num_ops", [](const PyCompiledModule& self) -> int64_t {
+            return self.compiled ? static_cast<int64_t>(self.compiled->num_ops()) : 0;
+        })
+        .def_property_readonly("num_buffers", [](const PyCompiledModule& self) -> int64_t {
+            return self.compiled ? static_cast<int64_t>(self.compiled->num_buffers()) : 0;
+        })
+        .def_property_readonly("compile_time_us", [](const PyCompiledModule& self) -> int64_t {
+            return self.compiled ? self.compiled->compile_time_us() : 0;
+        })
+        .def_property_readonly("total_buffer_bytes", [](const PyCompiledModule& self) -> int64_t {
+            return self.compiled ? static_cast<int64_t>(self.compiled->total_buffer_bytes()) : 0;
+        });
+
+    // compile: trace model forward and return a CompiledModule
     m.def("compile", [](py::object model, py::kwargs kwargs) {
-        return model;
-    }, py::arg("model"));
+        return std::make_shared<PyCompiledModule>(model, kwargs);
+    }, py::arg("model"),
+    "Compile a model for fast inference using PromePile JIT.\n"
+    "Returns a CompiledModule that traces on first call and then executes\n"
+    "via pre-allocated buffers with fused ops (no autograd overhead).");
 
     // Note: no_grad context manager is defined in autograd_bindings.cpp
 }
