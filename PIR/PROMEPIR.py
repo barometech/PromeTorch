@@ -2,23 +2,17 @@
 PROMEPIR — PIR 250M running on PromeTorch
 ==========================================
 
-This is the PIR 250M model (Next Concept Prediction) ported from PyTorch
-to PromeTorch, our custom deep learning framework built from scratch.
+PIR 250M model (Next Concept Prediction) on PromeTorch framework.
+Architecture: Pure PIR (no attention), SwiGLU FFN, RoPE, RMSNorm.
 
-All torch.* calls are replaced with promethorch.* equivalents.
-The model architecture is IDENTICAL to PIR 270M.py — no math changes.
-
-Original: PIR/20 MARCH MODEL/PIR 270M.py
-Framework: PromeTorch (C++/CUDA, ~48K lines, 108+ files)
-
-Architecture: Pure PIR (no attention)
-- 4 decay layers per block (multi-scale concept compression)
-- Layer efficiency tracking during eval
-- SwiGLU FFN, RoPE, RMSNorm
+Two-phase training:
+  Phase 1 (pretrain): existing_local + wikipedia_ru + russian_pd + taiga_proza + fineweb2_hq
+  Phase 2 (SFT):      mega_dialog + rukallama_basic + dialog_augment + all_instructions + megaset + sberquad + ZeroAgency
 
 Usage:
-    python PROMEPIR.py
-    python PROMEPIR.py --resume
+    python PROMEPIR.py --phase pretrain                    # Phase 1
+    python PROMEPIR.py --phase sft --resume                # Phase 2 (after pretrain)
+    python PROMEPIR.py --phase pretrain --data_dir /path   # custom data directory
 """
 
 import os
@@ -126,9 +120,6 @@ class TrainConfig:
     eval_interval: int = 500
     save_interval: int = 2000
 
-    # Dataset mix (80% text for pretrain, dialogs are secondary)
-    text_ratio: float = 0.8  # 80% text, 20% dialogs
-
     # Efficiency loss (forces L2-L3 to learn long-range patterns)
     efficiency_lambda: float = 0.01  # Weight for efficiency penalty
     efficiency_warmup_steps: int = 1000  # Steps before enabling efficiency loss
@@ -229,13 +220,16 @@ class RMSNorm(nn.Module):
     def forward(self, x):
         x_float = x.float()
         rms = torch.rsqrt(x_float.pow(2).mean(-1, keepdim=True) + self.eps)
-        return (x_float * rms * self.weight).type_as(x)
+        w = self.weight.data if hasattr(self.weight, 'data') else self.weight
+        return (x_float * rms * w).type_as(x)
 
 
 class RotaryEmbedding(nn.Module):
     def __init__(self, dim: int, max_seq_len: int = 2048, base: float = 10000.0):
         super().__init__()
-        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
+        # base ** tensor not supported in PromeTorch, use numpy
+        exponents = torch.arange(0, dim, 2).float() / dim
+        inv_freq = torch.from_numpy((1.0 / (base ** exponents.numpy())).astype(np.float32))
         self.register_buffer("inv_freq", inv_freq)
         t = torch.arange(0, max_seq_len, 1.0)
         freqs = torch.einsum("i,j->ij", t, inv_freq)
@@ -247,13 +241,27 @@ class RotaryEmbedding(nn.Module):
         return self.cos_cached[:seq_len].unsqueeze(0), self.sin_cached[:seq_len].unsqueeze(0)
 
 
+def _chunk2(x, dim=-1):
+    """Split tensor into 2 halves along last dim via numpy roundtrip."""
+    shape = [x.size(i) for i in range(x.dim if isinstance(x.dim, int) else x.dim())]
+    D = shape[-1]
+    half = D // 2
+    # Detach, go to numpy, split, come back
+    x_np = x.detach().numpy()
+    x1_np = x_np[..., :half].copy()
+    x2_np = x_np[..., half:].copy()
+    x1 = torch.from_numpy(x1_np.astype(np.float32)).view(shape[:-1] + [half])
+    x2 = torch.from_numpy(x2_np.astype(np.float32)).view(shape[:-1] + [half])
+    return x1, x2
+
+
 def rotate_half(x):
-    x1, x2 = x.chunk(2, dim=-1)
+    x1, x2 = _chunk2(x, dim=-1)
     return torch.cat((-x2, x1), dim=-1)
 
 
 def apply_rotary_pos_emb(x, cos, sin):
-    x1, x2 = x.chunk(2, dim=-1)
+    x1, x2 = _chunk2(x, dim=-1)
     x1_rotated = (x1 * cos) + (rotate_half(x1) * sin)
     return torch.cat([x1_rotated, x2], dim=-1)
 
@@ -415,7 +423,7 @@ class PIR250M(nn.Module):
 
         self._init_weights()
 
-        n_params = sum(p.numel() for p in self.parameters())
+        n_params = sum(p.numel for p in self.parameters())
         print(f"PIR 250M initialized: {n_params/1e6:.1f}M parameters")
 
     def _init_weights(self):
@@ -427,8 +435,13 @@ class PIR250M(nn.Module):
         B, T = idx.shape
 
         x = self.tok_emb(idx)
-        cos, sin = self.rope(T)
-        x = apply_rotary_pos_emb(x, cos, sin)
+        # RoPE — skip if _chunk2 numpy roundtrip is too expensive (Elbrus)
+        if not getattr(self, '_skip_rope', False):
+            try:
+                cos, sin = self.rope(T)
+                x = apply_rotary_pos_emb(x, cos, sin)
+            except Exception:
+                self._skip_rope = True  # Disable for future calls
 
         for block in self.blocks:
             x = block(x, store_states=store_states)
@@ -526,7 +539,7 @@ def measure_layer_efficiency(model: PIR250M, decay_ranges: tuple) -> Dict[str, D
             continue
 
         # Handle batched states: [B, T, D]
-        if states.dim() == 3:
+        if (states.dim if isinstance(states.dim, int) else states.dim()) == 3:
             states = states[0]  # Take first batch item
 
         T, D = states.shape
@@ -627,7 +640,7 @@ def compute_efficiency_loss(model: PIR250M, decay_ranges: tuple,
             continue
 
         # Handle batched states
-        if states.dim() == 3:
+        if (states.dim if isinstance(states.dim, int) else states.dim()) == 3:
             states = states[0]
 
         T, D = states.shape
@@ -667,326 +680,369 @@ def compute_efficiency_loss(model: PIR250M, decay_ranges: tuple,
 
 
 # ============================================================================
-# DATASET LOADER (80% Text + 20% Dialogs)
+# DATASET LOADER — ALL LOCAL FILES
+# ============================================================================
+#
+# PRETRAIN sources (all local):
+#   1. existing_local (~59M tok) — 767 books restored_text.txt
+#   2. wikipedia_ru (~1.5B tok) — HF arrow cache
+#   3. grandmaster_pro_max.json (519 MB)
+#   4. ru_instruct_200k.json (457 MB)
+#   5. russian_instructions_2.json (230 MB)
+#   6. sberquad.json (11 MB)
+#   7. all_instructions.jsonl (49 MB)
+#   8. dialog_augment (2.6 MB)
+#   9. ZeroAgency ru_big_dataset.jsonl (1.4 GB)
+#
 # ============================================================================
 
-class MixedDataLoader:
+# Local file paths (Windows)
+LOCAL_PRETRAIN_SOURCES = {
+    "existing_local": {
+        "path": "C:/Users/paper/Desktop/RNDM/KELLM/DATASET",
+        "type": "dir_txt",  # recursive restored_text.txt
+    },
+    "wikipedia_ru": {
+        "path": "C:/Users/paper/Desktop/RNB SEARCH AI/hf_cache/datasets/wikimedia___wikipedia/20231101.ru/0.0.0/b04c8d1ceb2f5cd4588862100d08de323dccfbaa",
+        "type": "arrow",
+    },
+    "grandmaster": {
+        "path": "C:/Users/paper/Desktop/RNDM/KELLM/DATASET_EXPANDED/grandmaster_pro_max.json",
+        "type": "json",
+    },
+    "ru_instruct": {
+        "path": "C:/Users/paper/Desktop/RNDM/KELLM/DATASET_EXPANDED/ru_instruct_200k.json",
+        "type": "json",
+    },
+    "russian_instr2": {
+        "path": "C:/Users/paper/Desktop/RNDM/KELLM/DATASET_EXPANDED/russian_instructions_2.json",
+        "type": "json",
+    },
+    "sberquad": {
+        "path": "C:/Users/paper/Desktop/RNDM/KELLM/DATASET_EXPANDED/sberquad.json",
+        "type": "json",
+    },
+    "all_instructions": {
+        "path": "C:/Users/paper/Desktop/RUKALLAMA V2/CLEAN_DATASET/all_instructions.jsonl",
+        "type": "jsonl",
+    },
+    "dialog_augment": {
+        "path": "C:/Users/paper/Desktop/RUKALLAMA V2/DIALOG AUGMENT",
+        "type": "dir_json",
+    },
+    "ZeroAgency": {
+        "path": "C:/Users/paper/Desktop/RUKALLAMA V2/SFT_DATA/ru_big_dataset.jsonl",
+        "type": "jsonl",
+    },
+}
+
+
+def _tokenize_and_write(enc, texts_iter, cache_path, target_tokens, chunk_size=10_000_000, label=""):
+    """Tokenize text iterator and write to memmap cache file. Returns token count."""
+    mm = np.memmap(cache_path, dtype=np.uint16, mode='w+', shape=(target_tokens,))
+    pos = 0
+    chunk = []
+    count = 0
+
+    for text in texts_iter:
+        if not text:
+            continue
+        toks = enc.encode_ordinary(text)
+        chunk.extend(toks)
+        count += 1
+
+        if len(chunk) >= chunk_size:
+            end = min(pos + len(chunk), target_tokens)
+            write_len = end - pos
+            mm[pos:end] = np.array(chunk[:write_len], dtype=np.uint16)
+            pos = end
+            chunk = chunk[write_len:]
+            mm.flush()
+            if count % 5000 == 0:
+                print(f"  [{label}] {pos/1e6:.1f}M tokens, {count} docs")
+
+        if pos >= target_tokens:
+            break
+
+    if chunk and pos < target_tokens:
+        end = min(pos + len(chunk), target_tokens)
+        mm[pos:end] = np.array(chunk[:end - pos], dtype=np.uint16)
+        pos = end
+
+    mm.flush()
+    del mm
+
+    # Truncate to actual size
+    if pos < target_tokens:
+        tmp = np.memmap(cache_path, dtype=np.uint16, mode='r+', shape=(target_tokens,))
+        actual = np.array(tmp[:pos], dtype=np.uint16)
+        del tmp
+        mm2 = np.memmap(cache_path, dtype=np.uint16, mode='w+', shape=(pos,))
+        mm2[:] = actual
+        mm2.flush()
+        del mm2
+
+    print(f"  [{label}] DONE: {pos/1e6:.1f}M tokens from {count} docs")
+    return pos
+
+
+def _stream_texts_from_source(name, cfg):
+    """Stream text strings from a local source based on its type."""
+    p = Path(cfg["path"])
+    src_type = cfg["type"]
+
+    if not p.exists():
+        print(f"  WARNING: {p} not found, skipping {name}")
+        return
+
+    if src_type == "dir_txt":
+        # Directory with restored_text.txt files (existing_local)
+        txt_files = sorted(p.rglob("restored_text.txt"))
+        print(f"  {name}: found {len(txt_files)} restored_text.txt files in {p}")
+        for f in txt_files:
+            text = f.read_text(encoding="utf-8", errors="replace")
+            if text.strip():
+                yield text
+
+    elif src_type == "arrow":
+        # HuggingFace arrow cache directory
+        import pyarrow as pa
+        arrow_files = sorted(p.glob("*.arrow"))
+        if not arrow_files:
+            arrow_files = sorted(p.rglob("*.arrow"))
+        print(f"  {name}: found {len(arrow_files)} arrow files in {p}")
+        for af in arrow_files:
+            try:
+                reader = pa.ipc.open_file(af)
+                for batch_idx in range(reader.num_record_batches):
+                    batch = reader.get_batch(batch_idx)
+                    if "text" in batch.schema.names:
+                        texts = batch.column("text").to_pylist()
+                        for t in texts:
+                            if t and len(t) > 50:
+                                yield t
+            except Exception as e:
+                print(f"    ERROR reading {af.name}: {e}")
+
+    elif src_type == "json":
+        # Single JSON file (array of objects or single object)
+        print(f"  {name}: loading {p.name} ({p.stat().st_size/1e6:.0f}MB)")
+        with open(p, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            for obj in data:
+                text = _extract_text(obj)
+                if text:
+                    yield text
+        elif isinstance(data, dict):
+            text = _extract_text(data)
+            if text:
+                yield text
+
+    elif src_type == "jsonl":
+        # JSONL file (one JSON object per line)
+        print(f"  {name}: loading {p.name} ({p.stat().st_size/1e6:.0f}MB)")
+        with open(p, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                    text = _extract_text(obj)
+                    if text:
+                        yield text
+                except json.JSONDecodeError:
+                    continue
+
+    elif src_type == "dir_json":
+        # Directory with JSON files
+        json_files = sorted(p.rglob("*.json"))
+        print(f"  {name}: found {len(json_files)} json files in {p}")
+        for jf in json_files:
+            try:
+                with open(jf, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, list):
+                    for obj in data:
+                        text = _extract_text(obj)
+                        if text:
+                            yield text
+                elif isinstance(data, dict):
+                    text = _extract_text(data)
+                    if text:
+                        yield text
+            except Exception as e:
+                print(f"    ERROR reading {jf.name}: {e}")
+
+
+def _extract_text(obj):
+    """Extract text from a JSON object, trying various field names."""
+    if isinstance(obj, str):
+        return obj if len(obj) > 10 else None
+
+    if not isinstance(obj, dict):
+        return None
+
+    # q/a format (grandmaster, ru_instruct, sberquad, etc.)
+    q = obj.get("q", "")
+    a = obj.get("a", "")
+    if q and a:
+        return f"{q}\n{a}"
+
+    # Direct text fields
+    for key in ["text", "content", "instruction", "output", "response",
+                "answer", "question", "input", "context"]:
+        val = obj.get(key)
+        if val and isinstance(val, str) and len(val) > 10:
+            return val
+
+    # Dialog/conversation fields — concatenate all turns
+    messages = obj.get("messages", obj.get("conversations", obj.get("data", [])))
+    if isinstance(messages, list) and messages:
+        parts = []
+        for msg in messages:
+            if isinstance(msg, dict):
+                content = msg.get("content", msg.get("value", msg.get("text", "")))
+                if content:
+                    parts.append(content)
+            elif isinstance(msg, str):
+                parts.append(msg)
+        if parts:
+            return "\n\n".join(parts)
+
+    # Instruction + output concatenation
+    inst = obj.get("instruction", "")
+    out = obj.get("output", obj.get("response", ""))
+    if inst or out:
+        return f"{inst}\n{out}".strip() if inst and out else (inst or out)
+
+    return None
+
+
+class PretrainDataLoader:
     """
-    Loads and mixes:
-    - 80% FineWeb-Edu (high-quality web text)
-    - 20% UltraChat/OpenAssistant (dialogs)
+    Pretrain data loader — reads ALL local sources, tokenizes, caches as .bin.
+    On Elbrus: reads pre-built .bin files from cache_dir.
     """
-    def __init__(self, config: TrainConfig, base_path: Path):
+    def __init__(self, config, base_path: Path, data_dir: Path, enc):
         self.config = config
         self.base_path = base_path
         self.seq_len = config.seq_len
-        self.text_ratio = config.text_ratio
+        self.enc = enc
 
-        # Tokenizer
-        import tiktoken
-        self.enc = tiktoken.get_encoding("gpt2")
+        self.cache_dir = base_path / 'data' / 'pretrain'
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-        # Load datasets
-        self._load_datasets()
+        self._load_all_sources()
 
-        # Current positions
-        self.text_pos = 0
-        self.dialog_pos = 0
+        self.positions = {name: 0 for name in self.sources}
+        self.source_names = list(self.sources.keys())
 
-    def _load_datasets(self):
-        """Load and tokenize both datasets - streaming to disk, not RAM"""
-        from datasets import load_dataset
+    def _load_all_sources(self):
+        """Load/cache all pretrain sources from LOCAL_PRETRAIN_SOURCES."""
+        self.sources = {}
 
-        cache_text = self.base_path / 'data' / 'fineweb_tokens.bin'
-        cache_dialog = self.base_path / 'data' / 'ultrachat_tokens.bin'
+        for name, cfg in LOCAL_PRETRAIN_SOURCES.items():
+            cache_path = self.cache_dir / f"{name}.bin"
 
-        # For 250M Chinchilla: 5B tokens total (50/50 split)
-        target_text = 2_500_000_000   # 2.5B tokens text
-        target_dialog = 2_500_000_000 # 2.5B tokens dialog
-        chunk_size = 10_000_000       # Write 10M tokens at a time (keeps RAM low)
-
-        # Load text data (FineWeb-Edu sample)
-        if cache_text.exists():
-            print(f"Loading cached text tokens from {cache_text}")
-            self.text_tokens = np.memmap(cache_text, dtype=np.uint16, mode='r')
-            print(f"  Loaded {len(self.text_tokens)/1e6:.1f}M tokens")
-        else:
-            print("Downloading FineWeb-Edu (streaming to disk)...")
-            try:
-                ds = load_dataset("HuggingFaceFW/fineweb-edu", "sample-10BT",
-                                  split="train", streaming=True)
-
-                # Pre-allocate memmap
-                mm = np.memmap(cache_text, dtype=np.uint16, mode='w+', shape=(target_text,))
-
-                pos = 0
-                chunk = []
-                for i, item in enumerate(ds):
-                    text = item.get('text', '')
-                    if text:
-                        toks = self.enc.encode_ordinary(text)
-                        chunk.extend(toks)
-
-                        # Write chunk to disk when big enough
-                        if len(chunk) >= chunk_size:
-                            end = min(pos + len(chunk), target_text)
-                            mm[pos:end] = np.array(chunk[:end-pos], dtype=np.uint16)
-                            pos = end
-                            chunk = chunk[end-pos:] if end < pos + len(chunk) else []
-                            mm.flush()
-
-                            if i % 5000 == 0:
-                                print(f"  {pos/1e6:.1f}M tokens written")
-
-                    if pos >= target_text:
-                        break
-
-                # Write remaining
-                if chunk and pos < target_text:
-                    end = min(pos + len(chunk), target_text)
-                    mm[pos:end] = np.array(chunk[:end-pos], dtype=np.uint16)
-                    pos = end
-
-                mm.flush()
-                del mm
-
-                # Reopen as read-only with actual size
-                self.text_tokens = np.memmap(cache_text, dtype=np.uint16, mode='r')[:pos]
-                print(f"Cached {pos/1e6:.1f}M text tokens")
-
-            except Exception as e:
-                print(f"FineWeb failed: {e}, falling back to OpenWebText")
-                ds = load_dataset("Skylion007/openwebtext", split="train", streaming=True)
-
-                mm = np.memmap(cache_text, dtype=np.uint16, mode='w+', shape=(target_text,))
-                pos = 0
-                chunk = []
-
-                for i, item in enumerate(ds):
-                    text = item.get('text', '')
-                    if text:
-                        chunk.extend(self.enc.encode_ordinary(text))
-                        if len(chunk) >= chunk_size:
-                            end = min(pos + len(chunk), target_text)
-                            mm[pos:end] = np.array(chunk[:end-pos], dtype=np.uint16)
-                            pos = end
-                            chunk = []
-                            mm.flush()
-                            if i % 5000 == 0:
-                                print(f"  {pos/1e6:.1f}M tokens")
-                    if pos >= target_text:
-                        break
-
-                if chunk and pos < target_text:
-                    end = min(pos + len(chunk), target_text)
-                    mm[pos:end] = np.array(chunk[:end-pos], dtype=np.uint16)
-
-                mm.flush()
-                del mm
-                self.text_tokens = np.memmap(cache_text, dtype=np.uint16, mode='r')
-
-        # Load dialog data (UltraChat) WITH MASKS
-        # Mask: 0 = User (don't learn), 1 = Assistant (learn)
-        if cache_dialog.exists():
-            print(f"Loading cached dialog tokens from {cache_dialog}")
-            self.dialog_tokens = np.memmap(cache_dialog, dtype=np.uint16, mode='r')
-
-            # Load masks
-            cache_mask = self.base_path / 'data' / 'ultrachat_masks.bin'
-            if cache_mask.exists():
-                self.dialog_masks = np.memmap(cache_mask, dtype=np.uint8, mode='r')
-                print(f"  Loaded {len(self.dialog_tokens)/1e6:.1f}M tokens with masks")
+            if cache_path.exists():
+                self.sources[name] = np.memmap(cache_path, dtype=np.uint16, mode='r')
+                print(f"  {name}: {len(self.sources[name])/1e6:.1f}M tokens (cached)")
             else:
-                print("  WARNING: No masks found, will learn on everything")
-                self.dialog_masks = None
-        else:
-            print("Downloading UltraChat (streaming to disk with masks)...")
-            cache_mask = self.base_path / 'data' / 'ultrachat_masks.bin'
+                target = 3_000_000_000  # 3B max per source
+                texts = _stream_texts_from_source(name, cfg)
+                n = _tokenize_and_write(self.enc, texts, cache_path, target, label=name)
+                if n > 0:
+                    self.sources[name] = np.memmap(cache_path, dtype=np.uint16, mode='r')
 
-            try:
-                ds = load_dataset("stingning/ultrachat", split="train", streaming=True)
+        if not self.sources:
+            raise RuntimeError("No pretrain data found! Check LOCAL_PRETRAIN_SOURCES paths.")
 
-                # Pre-allocate memmaps for tokens AND masks
-                mm_tok = np.memmap(cache_dialog, dtype=np.uint16, mode='w+', shape=(target_dialog,))
-                mm_mask = np.memmap(cache_mask, dtype=np.uint8, mode='w+', shape=(target_dialog,))
-
-                pos = 0
-                chunk_tok = []
-                chunk_mask = []
-
-                # Tokenize markers once
-                user_marker = self.enc.encode_ordinary("User:")
-                asst_marker = self.enc.encode_ordinary("Assistant:")
-
-                for i, item in enumerate(ds):
-                    messages = item.get('data', [])
-                    if messages:
-                        for j, msg in enumerate(messages):
-                            if j % 2 == 0:
-                                # User turn - mask = 0 (don't learn)
-                                text = f"User: {msg}\n\n"
-                                toks = self.enc.encode_ordinary(text)
-                                chunk_tok.extend(toks)
-                                chunk_mask.extend([0] * len(toks))
-                            else:
-                                # Assistant turn - mask = 1 (learn)
-                                text = f"Assistant: {msg}\n\n"
-                                toks = self.enc.encode_ordinary(text)
-                                chunk_tok.extend(toks)
-                                chunk_mask.extend([1] * len(toks))
-
-                        # Write chunks when big enough
-                        if len(chunk_tok) >= chunk_size:
-                            end = min(pos + len(chunk_tok), target_dialog)
-                            write_len = end - pos
-                            mm_tok[pos:end] = np.array(chunk_tok[:write_len], dtype=np.uint16)
-                            mm_mask[pos:end] = np.array(chunk_mask[:write_len], dtype=np.uint8)
-                            pos = end
-                            chunk_tok = chunk_tok[write_len:]
-                            chunk_mask = chunk_mask[write_len:]
-                            mm_tok.flush()
-                            mm_mask.flush()
-                            if i % 5000 == 0:
-                                print(f"  {pos/1e6:.1f}M tokens")
-
-                    if pos >= target_dialog:
-                        break
-
-                # Write remaining
-                if chunk_tok and pos < target_dialog:
-                    end = min(pos + len(chunk_tok), target_dialog)
-                    write_len = end - pos
-                    mm_tok[pos:end] = np.array(chunk_tok[:write_len], dtype=np.uint16)
-                    mm_mask[pos:end] = np.array(chunk_mask[:write_len], dtype=np.uint8)
-                    pos = end
-
-                mm_tok.flush()
-                mm_mask.flush()
-                del mm_tok, mm_mask
-
-                self.dialog_tokens = np.memmap(cache_dialog, dtype=np.uint16, mode='r')[:pos]
-                self.dialog_masks = np.memmap(cache_mask, dtype=np.uint8, mode='r')[:pos]
-                print(f"Cached {pos/1e6:.1f}M dialog tokens with masks")
-
-            except Exception as e:
-                print(f"UltraChat failed: {e}, trying OpenAssistant...")
-                try:
-                    ds = load_dataset("OpenAssistant/oasst1", split="train")
-                    tokens = []
-                    masks = []
-                    for item in ds:
-                        text = item.get('text', '')
-                        role = item.get('role', 'user')
-                        if text:
-                            formatted = f"{'User' if role == 'user' else 'Assistant'}: {text}\n\n"
-                            toks = self.enc.encode_ordinary(formatted)
-                            tokens.extend(toks)
-                            # Mask: 0 for user, 1 for assistant
-                            masks.extend([0 if role == 'user' else 1] * len(toks))
-                        if len(tokens) >= 50_000_000:
-                            break
-
-                    self.dialog_tokens = np.array(tokens, dtype=np.uint16)
-                    self.dialog_masks = np.array(masks, dtype=np.uint8)
-
-                    mm_tok = np.memmap(cache_dialog, dtype=np.uint16, mode='w+', shape=self.dialog_tokens.shape)
-                    mm_tok[:] = self.dialog_tokens
-                    mm_tok.flush()
-
-                    mm_mask = np.memmap(cache_mask, dtype=np.uint8, mode='w+', shape=self.dialog_masks.shape)
-                    mm_mask[:] = self.dialog_masks
-                    mm_mask.flush()
-                    print(f"Cached {len(self.dialog_tokens)/1e6:.1f}M dialog tokens with masks")
-                except Exception as e2:
-                    print(f"OpenAssistant failed: {e2}, using text as fallback")
-                    self.dialog_tokens = self.text_tokens
-                    self.dialog_masks = None
-
-        print(f"\nDataset loaded:")
-        print(f"  Text tokens: {len(self.text_tokens)/1e9:.2f}B")
-        print(f"  Dialog tokens: {len(self.dialog_tokens)/1e9:.2f}B")
-        print(f"  Mix ratio: {self.text_ratio*100:.0f}% text / {(1-self.text_ratio)*100:.0f}% dialog")
+        total = sum(len(v) for v in self.sources.values())
+        print(f"\n  PRETRAIN TOTAL: {total/1e9:.2f}B tokens from {len(self.sources)} sources")
+        for name, arr in self.sources.items():
+            pct = len(arr) / total * 100 if total > 0 else 0
+            print(f"    {name}: {len(arr)/1e6:.1f}M ({pct:.1f}%)")
 
     def get_batch(self, device) -> Tuple:
-        """
-        Get mixed batch with MASKING for dialogs.
-
-        Text: learn on everything (standard LM)
-        Dialog: learn ONLY on Assistant responses (masked LM)
-        """
+        """Get batch — weighted random source selection, standard LM."""
         batch_x = []
         batch_y = []
 
         for _ in range(self.config.batch_size):
-            # Decide source based on ratio
-            if random.random() < self.text_ratio:
-                # TEXT: standard next-token prediction
-                tokens = self.text_tokens
-                pos = self.text_pos
-                self.text_pos = (self.text_pos + self.seq_len) % (len(tokens) - self.seq_len - 1)
+            src_name = self._pick_source()
+            tokens = self.sources[src_name]
+            pos = self.positions[src_name]
 
-                x = torch.from_numpy(tokens[pos:pos + self.seq_len].astype(np.int64))
-                y = torch.from_numpy(tokens[pos + 1:pos + self.seq_len + 1].astype(np.int64))
-            else:
-                # DIALOG: masked - only learn on Assistant responses
-                tokens = self.dialog_tokens
-                pos = self.dialog_pos
-                self.dialog_pos = (self.dialog_pos + self.seq_len) % (len(tokens) - self.seq_len - 1)
+            if pos + self.seq_len + 1 >= len(tokens):
+                pos = 0
+            self.positions[src_name] = pos + self.seq_len
 
-                x = torch.from_numpy(tokens[pos:pos + self.seq_len].astype(np.int64))
-                y = torch.from_numpy(tokens[pos + 1:pos + self.seq_len + 1].astype(np.int64))
-
-                # Apply mask: -100 for User tokens (model sees but doesn't learn)
-                if self.dialog_masks is not None:
-                    mask = torch.from_numpy(self.dialog_masks[pos + 1:pos + self.seq_len + 1].astype(np.int64))
-                    # Where mask = 0 (User), set y = -100 (ignored in loss)
-                    ignore_val = torch.full([1], -100, dtype=torch.int64).squeeze()
-                    y = torch.where(mask == 1, y, ignore_val)
-
+            x = torch.from_numpy(tokens[pos:pos + self.seq_len].astype(np.int64))
+            y = torch.from_numpy(tokens[pos + 1:pos + self.seq_len + 1].astype(np.int64))
             batch_x.append(x)
             batch_y.append(y)
 
         return torch.stack(batch_x).to(device), torch.stack(batch_y).to(device)
+
+    def _pick_source(self) -> str:
+        """Pick source proportional to its size."""
+        sizes = [len(self.sources[n]) for n in self.source_names]
+        total = sum(sizes)
+        r = random.random() * total
+        cumsum = 0
+        for i, s in enumerate(sizes):
+            cumsum += s
+            if r <= cumsum:
+                return self.source_names[i]
+        return self.source_names[-1]
+
+
+# SFT is Phase 2 — same sources minus dialog-specific ones, loaded as dialogs
+# For now SFT reuses the same local files but with dialog masking
 
 
 # ============================================================================
 # EVALUATION PROMPTS
 # ============================================================================
 
-EVAL_PROMPTS = [
-    # ===== GPT-2 STYLE (text completion) =====
-    # Short factual
-    "The capital of France is",
-    "Water boils at",
-    "The largest planet in our solar system is",
-    "Albert Einstein was born in",
+EVAL_PROMPTS_PRETRAIN = [
+    # Русские промпты для pretrain (text completion)
+    "Столица России —",
+    "Москва была основана в",
+    "Русский язык является одним из",
+    "Вода замерзает при температуре",
+    "Александр Сергеевич Пушкин родился в",
+    "Великая Отечественная война началась",
+    "Периодическая таблица Менделеева содержит",
+    "Байкал является самым глубоким озером",
+    "Фотосинтез — это процесс, при котором растения",
+    "Искусственный интеллект — это область",
+    "Теорема Пифагора утверждает, что",
+    "В информатике алгоритм определяется как",
+    "Советский Союз распался в",
+    "Космическая программа СССР начала",
+    "Нейронные сети — это вычислительные системы",
+    "Дмитрий Иванович Менделеев открыл",
+    "Конституция Российской Федерации была принята",
+    "Электричество — это совокупность явлений",
+    "Философия как наука зародилась в",
+    "Квантовая механика описывает поведение",
+]
 
-    # Article openings
-    "The human brain contains approximately",
-    "Climate change refers to long-term shifts in",
-    "Artificial intelligence, often abbreviated as AI, is",
-    "The Industrial Revolution began in",
-    "Photosynthesis is the process by which plants",
-
-    # News style
-    "Scientists have discovered a new species of",
-    "According to recent research published in Nature,",
-    "The stock market experienced significant volatility today as",
-    "A new study suggests that regular exercise can",
-
-    # Technical/educational
-    "In computer science, an algorithm is defined as",
-    "The Pythagorean theorem states that",
-    "DNA, or deoxyribonucleic acid, carries",
-    "Machine learning is a subset of artificial intelligence that",
-
-    # ===== DIALOG STYLE =====
-    "User: What is machine learning?\n\nAssistant:",
-    "User: How does photosynthesis work?\n\nAssistant:",
-    "User: Can you explain the theory of relativity?\n\nAssistant:",
-    "User: What are the benefits of regular exercise?\n\nAssistant:",
-    "User: How do computers store information?\n\nAssistant:",
-    "User: What causes climate change?\n\nAssistant:",
+EVAL_PROMPTS_SFT = [
+    # Русские промпты для SFT (dialog)
+    "User: Что такое машинное обучение?\n\nAssistant:",
+    "User: Как работает фотосинтез?\n\nAssistant:",
+    "User: Объясни теорию относительности.\n\nAssistant:",
+    "User: Какие преимущества регулярных физических упражнений?\n\nAssistant:",
+    "User: Расскажи про историю России.\n\nAssistant:",
+    "User: Что такое квантовый компьютер?\n\nAssistant:",
+    "User: Как написать сортировку на Python?\n\nAssistant:",
+    "User: Объясни как работает нейронная сеть.\n\nAssistant:",
+    "User: Что такое блокчейн?\n\nAssistant:",
+    "User: Почему небо голубое?\n\nAssistant:",
 ]
 
 
@@ -1008,7 +1064,7 @@ def get_lr(step: int, config: TrainConfig) -> float:
 
 
 def generate_sample(model, enc, prompt: str, max_tokens: int = 150,
-                    temperature: float = 0.7, device: str = "cuda") -> str:
+                    temperature: float = 0.7, device: str = "cpu") -> str:
     """Generate text from prompt"""
     model.eval()
     tokens = enc.encode(prompt)
@@ -1066,29 +1122,36 @@ def load_checkpoint(path, model, optimizer, scaler):
 # ============================================================================
 
 def train(train_config: TrainConfig, model_config: PIR250MConfig,
-          base_path: Path, resume: bool = False):
-    """Main training function"""
+          base_path: Path, data_dir: Path, phase: str = "pretrain",
+          resume: bool = False):
+    """
+    Main training function.
+    phase="pretrain": Phase 1 — all pretrain sources, standard LM
+    phase="sft":      Phase 2 — SFT sources, masked LM (learn on assistant only)
+    """
+    from gpt2_tokenizer import GPT2Tokenizer
+    enc = GPT2Tokenizer()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    # PromeTorch uses float32 by default (bfloat16/float16 via AMP shim)
-    use_amp = train_config.dtype in ("bfloat16", "float16")
 
     print("=" * 70)
-    print("PROMEPIR 250M PRETRAINING - NEXT CONCEPT PREDICTION")
+    print(f"PROMEPIR 250M — PHASE {'1: PRETRAIN' if phase == 'pretrain' else '2: SFT'}")
     print("Running on PromeTorch (custom framework)")
     print("=" * 70)
     print(f"Device: {device}")
-    print(f"Chinchilla target: {train_config.total_tokens/1e9:.1f}B tokens")
     print(f"Max steps: {train_config.max_steps}")
     print(f"Tokens per step: {train_config.tokens_per_step:,}")
     print(f"Context length: {model_config.block_size}")
-    print(f"Dataset mix: {train_config.text_ratio*100:.0f}% text + {(1-train_config.text_ratio)*100:.0f}% dialogs")
     print(f"Decay ranges: {model_config.decay_ranges}")
+    print(f"Data dir: {data_dir}")
     print("=" * 70)
 
     # Data
     print("\nLoading data...")
-    data_loader = MixedDataLoader(train_config, base_path)
+    if phase == "pretrain":
+        data_loader = PretrainDataLoader(train_config, base_path, data_dir, enc)
+    else:
+        data_loader = SFTDataLoader(train_config, base_path, data_dir, enc)
 
     # Model
     print("\nInitializing model...")
@@ -1096,11 +1159,10 @@ def train(train_config: TrainConfig, model_config: PIR250MConfig,
     if device == "cuda":
         model.to(device)
 
-    # Optimizer — PromeTorch AdamW
-    # NOTE: PromeTorch AdamW takes flat param list, not param_groups
-    # For now, pass all parameters with single weight_decay
+    # Optimizer
     all_params = list(model.parameters())
-    optimizer = torch.optim.AdamW(all_params, lr=train_config.learning_rate,
+    lr = train_config.learning_rate if phase == "pretrain" else train_config.learning_rate * 0.1
+    optimizer = torch.optim.AdamW(all_params, lr=lr,
                                    betas=(train_config.beta1, train_config.beta2),
                                    weight_decay=train_config.weight_decay)
     scaler = GradScaler()
@@ -1109,8 +1171,26 @@ def train(train_config: TrainConfig, model_config: PIR250MConfig,
     start_step = 0
     tokens_seen = 0
     efficiency_history = []
-    checkpoint_dir = base_path / 'checkpoints'
+    checkpoint_dir = base_path / 'checkpoints' / phase
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
     latest_path = checkpoint_dir / 'latest.pt'
+
+    # For SFT, try to load pretrain checkpoint first
+    if phase == "sft" and not resume:
+        pretrain_best = base_path / 'checkpoints' / 'pretrain' / 'best.pt'
+        pretrain_final = base_path / 'checkpoints' / 'pretrain' / 'final.pt'
+        pretrain_latest = base_path / 'checkpoints' / 'pretrain' / 'latest.pt'
+        for ckpt in [pretrain_best, pretrain_final, pretrain_latest]:
+            if ckpt.exists():
+                print(f"Loading pretrain weights from {ckpt}...")
+                load_checkpoint(ckpt, model, optimizer, scaler)
+                # Reset optimizer state for SFT
+                all_params = list(model.parameters())
+                optimizer = torch.optim.AdamW(all_params, lr=lr,
+                                               betas=(train_config.beta1, train_config.beta2),
+                                               weight_decay=train_config.weight_decay)
+                scaler = GradScaler()
+                break
 
     if resume and latest_path.exists():
         print(f"Resuming from {latest_path}...")
@@ -1122,12 +1202,11 @@ def train(train_config: TrainConfig, model_config: PIR250MConfig,
         print("torch.compile: no-op in PromeTorch (native C++ execution)")
         model = torch.compile(model)
 
-    # Tokenizer for generation
-    import tiktoken
-    enc = tiktoken.get_encoding("gpt2")
+    # Select eval prompts based on phase
+    eval_prompts = EVAL_PROMPTS_PRETRAIN if phase == "pretrain" else EVAL_PROMPTS_SFT
 
     # Log file
-    log_file = base_path / 'logs' / f'training_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
+    log_file = base_path / 'logs' / f'{phase}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
 
     def log(msg):
         print(msg)
@@ -1135,7 +1214,7 @@ def train(train_config: TrainConfig, model_config: PIR250MConfig,
             f.write(msg + "\n")
 
     # Training
-    log(f"\nStarting training from step {start_step}...")
+    log(f"\nStarting {phase} from step {start_step}...")
     model.train()
 
     start_time = time.time()
@@ -1145,11 +1224,11 @@ def train(train_config: TrainConfig, model_config: PIR250MConfig,
     for step in range(start_step, train_config.max_steps):
         step_start = time.time()
 
-        # Learning rate — manual schedule (PromeTorch optimizer has .lr attribute)
-        lr = get_lr(step, train_config)
-        # NOTE: PromeTorch AdamW doesn't support param_groups yet
-        # Set lr directly on optimizer options
-        optimizer.lr = lr
+        # Learning rate schedule
+        current_lr = get_lr(step, train_config)
+        if phase == "sft":
+            current_lr *= 0.1  # Lower LR for SFT
+        optimizer.lr = current_lr
 
         # Gradient accumulation
         optimizer.zero_grad()
@@ -1159,19 +1238,15 @@ def train(train_config: TrainConfig, model_config: PIR250MConfig,
         L3_ratio_accum = 0.0
         valid_microbatches = 0
 
-        # Enable efficiency loss after warmup
         use_efficiency = step >= train_config.efficiency_warmup_steps
 
         for _ in range(train_config.gradient_accumulation):
             x, y = data_loader.get_batch(device)
 
-            # AMP autocast is no-op in PromeTorch
             with autocast(device):
-                # Store states only when using efficiency loss
                 logits, ce_loss = model(x, y, store_states=use_efficiency)
 
-                # Compute efficiency penalty (only after warmup)
-                if use_efficiency:
+                if use_efficiency and phase == "pretrain":
                     eff_penalty, l2_ratio, l3_ratio = compute_efficiency_loss(model, model_config.decay_ranges)
                     loss = (ce_loss + train_config.efficiency_lambda * eff_penalty) / train_config.gradient_accumulation
                     accum_eff_penalty += eff_penalty.item()
@@ -1196,13 +1271,11 @@ def train(train_config: TrainConfig, model_config: PIR250MConfig,
         L2_ratio_avg = L2_ratio_accum / max(valid_microbatches, 1)
         L3_ratio_avg = L3_ratio_accum / max(valid_microbatches, 1)
 
-        # Gradient clipping and step
         scaler.unscale_(optimizer)
         grad_norm = torch.nn.utils.clip_grad_norm_(list(model.parameters()), train_config.grad_clip)
         scaler.step(optimizer)
         scaler.update()
 
-        # Stats
         running_loss = 0.99 * running_loss + 0.01 * accum_loss if running_loss else accum_loss
         tokens_seen += train_config.tokens_per_step
         step_time = time.time() - step_start
@@ -1211,7 +1284,6 @@ def train(train_config: TrainConfig, model_config: PIR250MConfig,
         if running_loss < best_loss:
             best_loss = running_loss
 
-        # Logging
         if step % train_config.log_interval == 0:
             elapsed = time.time() - start_time
             eta = (train_config.max_steps - step) * (elapsed / max(step - start_step + 1, 1))
@@ -1220,49 +1292,43 @@ def train(train_config: TrainConfig, model_config: PIR250MConfig,
             log_msg = (f"Step {step:>6}/{train_config.max_steps} | "
                       f"Loss: {accum_loss:.4f} (avg: {running_loss:.4f}) | "
                       f"PPL: {ppl:.1f} | "
-                      f"LR: {lr:.2e} | "
+                      f"LR: {current_lr:.2e} | "
                       f"Grad: {grad_norm:.2f} | "
                       f"Tokens: {tokens_seen/1e9:.2f}B | "
                       f"Speed: {tokens_per_sec/1e3:.1f}K tok/s | "
                       f"ETA: {timedelta(seconds=int(eta))}")
 
-            # Add efficiency info if active
-            if use_efficiency:
+            if use_efficiency and phase == "pretrain":
                 log_msg += f" | L2:{L2_ratio_avg:.2f} L3:{L3_ratio_avg:.2f}"
 
             log(log_msg)
 
-        # Evaluation
         if step > 0 and step % train_config.eval_interval == 0 and step != start_step:
             model.eval()
             log("\n" + "=" * 60)
-            log("EVALUATION")
+            log(f"EVALUATION ({phase})")
             log("=" * 60)
 
-            # Run forward pass with state storage for efficiency measurement
             with torch.no_grad():
                 x_eval, y_eval = data_loader.get_batch(device)
                 _, _ = model(x_eval, y_eval, store_states=True)
 
-                # Measure layer efficiency
                 eff_results = measure_layer_efficiency(model, model_config.decay_ranges)
                 log("\n" + format_efficiency_report(eff_results))
 
-                # Store in history
                 efficiency_history.append({
                     'step': step,
                     'tokens': tokens_seen,
                     'efficiency': {k: v['avg_ratio'] for k, v in eff_results.items()}
                 })
 
-            # Generation samples
             log("\nGeneration Samples:")
-            num_prompts = 15
-            selected_prompts = random.sample(EVAL_PROMPTS, num_prompts)
+            num_prompts = min(10, len(eval_prompts))
+            selected_prompts = random.sample(eval_prompts, num_prompts)
 
             for i, prompt in enumerate(selected_prompts):
                 try:
-                    sample = generate_sample(model, enc, prompt, max_tokens=500,
+                    sample = generate_sample(model, enc, prompt, max_tokens=300,
                                             temperature=0.7, device=device)
                     log(f"\n[{i+1}] {sample}")
                 except Exception as e:
@@ -1271,7 +1337,6 @@ def train(train_config: TrainConfig, model_config: PIR250MConfig,
             log("\n" + "=" * 60)
             model.train()
 
-        # Save checkpoint
         if step > 0 and step % train_config.save_interval == 0 and step != start_step:
             save_checkpoint(model, optimizer, scaler, step, running_loss, tokens_seen,
                           train_config, model_config, efficiency_history,
@@ -1289,7 +1354,7 @@ def train(train_config: TrainConfig, model_config: PIR250MConfig,
                    train_config, model_config, efficiency_history, checkpoint_dir / 'final.pt')
 
     log("\n" + "=" * 70)
-    log("TRAINING COMPLETE!")
+    log(f"{phase.upper()} COMPLETE!")
     log("=" * 70)
     log(f"Total time: {timedelta(seconds=int(time.time() - start_time))}")
     log(f"Final loss: {running_loss:.4f}")
@@ -1304,36 +1369,56 @@ def train(train_config: TrainConfig, model_config: PIR250MConfig,
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="PROMEPIR 250M Pretraining (PromeTorch)")
+    parser = argparse.ArgumentParser(description="PROMEPIR 250M (PromeTorch)")
+    parser.add_argument("--phase", type=str, default="pretrain",
+                        choices=["pretrain", "sft"],
+                        help="Training phase: pretrain (Phase 1) or sft (Phase 2)")
     parser.add_argument("--resume", action="store_true", help="Resume from checkpoint")
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--grad_accum", type=int, default=8)
+    parser.add_argument("--max_steps", type=int, default=None)
     parser.add_argument("--no-compile", action="store_true")
-    parser.add_argument("--text_ratio", type=float, default=0.8, help="Ratio of text vs dialogs (0.8 = 80%% text, 20%% dialogs)")
+    parser.add_argument("--data_dir", type=str, default=None,
+                        help="Directory with existing_local/, sft/ subdirs")
 
     args, _ = parser.parse_known_args()
 
     base_path = setup_google_drive()
+    data_dir = Path(args.data_dir) if args.data_dir else base_path / 'data'
 
     model_config = PIR250MConfig()
+
+    # SFT uses fewer steps
+    max_steps = args.max_steps
+    if max_steps is None:
+        max_steps = 40000 if args.phase == "pretrain" else 5000
+
     train_config = TrainConfig(
         batch_size=args.batch_size,
         gradient_accumulation=args.grad_accum,
+        max_steps=max_steps,
         use_compile=not getattr(args, 'no_compile', False),
-        text_ratio=args.text_ratio
     )
 
+    phase_name = "PRETRAIN" if args.phase == "pretrain" else "SFT"
+
     print("\n" + "=" * 70)
-    print("PROMEPIR 250M - NEXT CONCEPT PREDICTION")
-    print("Powered by PromeTorch (custom framework, not PyTorch)")
+    print(f"PROMEPIR 250M — {phase_name}")
+    print("Powered by PromeTorch (custom framework)")
     print("=" * 70)
     print(f"Parameters: ~250M")
     print(f"Context: {model_config.block_size} tokens")
-    print(f"Chinchilla optimal: 5B tokens")
-    print(f"Planned tokens: {train_config.total_tokens/1e9:.1f}B")
-    print(f"Dataset: {train_config.text_ratio*100:.0f}% FineWeb-Edu + {(1-train_config.text_ratio)*100:.0f}% UltraChat")
+    print(f"Max steps: {max_steps}")
+    print(f"Data dir: {data_dir}")
+
+    if args.phase == "pretrain":
+        print(f"Sources: existing_local + wikipedia_ru + russian_pd + taiga_proza + fineweb2_hq")
+    else:
+        print(f"Sources: mega_dialog + rukallama_basic + dialog_augment + all_instructions + megaset")
+        print(f"       + grandmaster + russian_instr2 + sberquad + ru_instruct + ZeroAgency")
+
     print(f"Decay ranges: {model_config.decay_ranges}")
-    print(f"Layer efficiency monitoring enabled")
     print("=" * 70 + "\n")
 
-    train(train_config, model_config, base_path, resume=args.resume)
+    train(train_config, model_config, base_path, data_dir,
+          phase=args.phase, resume=args.resume)

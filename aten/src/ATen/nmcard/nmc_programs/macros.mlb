@@ -1,0 +1,748 @@
+//////////////////////////////////////////////
+// Used abbreviation:
+// prefix VEC - belonging to vector library
+// parameters abbreviations
+// C  - constant
+// A  - address register
+// G  - general purpose register
+// R  - any register (adress or general purpose)
+// X  - anything (constant or any register)
+
+macro VEC_ARSH32_RRRR(rSrc,rDst,rIntCount,rShift)
+	extern _nmppsRShiftC_32s:label;
+	ar5 = ar7;
+	ar7 += 4;
+    [ ar5++ ] = rShift;
+	[ ar5++ ] = rIntCount;
+	delayed call _nmppsRShiftC_32s;
+		[ ar5++ ] = rDst;
+		[ ar5++ ] = rSrc;
+	nul;
+	ar7-=4;
+end VEC_ARSH32_RRRR;
+
+//***************************************************************************/
+//*                     RC Module Inc., Moscow, Russia                      */
+//*                     NeuroMatrix(r) NM6403 Software                      */
+//*                                                                         */
+//*   Macro Library of vector-matrix routines                               */
+//*   (C-callable functions)                                                */
+//*                                                                         */
+//*   File:             VecMacro.asm                                        */
+//*   Contents:         macroses for right shifting routines                */
+//*                                                                         */
+//*   Software design:  S.Mushkaev                                          */
+//*                                                                         */
+//*   Version           1.2                                                 */
+//*   Start date:       -23.11.2000                                         */
+//*   Last Update:      -25.07.2001                                         */
+//*                                                                         */
+//*                                                                         */
+//***************************************************************************/
+macro SHIFTR32_DATA()
+
+end SHIFTR32_DATA;
+
+//////////////////////////////////////////////////////////////////
+// Macros performs simple copying
+// Copying cycle is implemented by ".repeat/.endrepeat" keywords
+//
+// On exit macros modifies registers : arSrcArray,arDstArray
+// Notations of registers : arSrcArray,arDstArray can't coincide
+macro	SHIFTR_0_RRC(
+	arSrcArray,	// Input 32-bit array			(address register parameter -pointer to long)
+	arDstArray,	// Output 32-bit array			(address register parameter -pointer to long)
+	constLen64)	// pArray size in 64bit longs	(constant parameter=[1,2,3...])
+		.repeat constLen64>>5;
+			rep 32 data=[arSrcArray++] with data;
+			rep 32 [arDstArray++]=afifo;
+		.endrepeat;
+
+		.if ((constLen64-((constLen64>>5)<<5))!=0);
+			rep (constLen64-((constLen64>>5)<<5)) data=[arSrcArray++] with data;
+			rep (constLen64-((constLen64>>5)<<5)) [arDstArray++]=afifo;
+		.endif;
+end		SHIFTR_0_RRC;
+
+macro	COPY_RRC(
+	arSrcArray,	// Input 32-bit array			(address register parameter -pointer to long)
+	arDstArray,	// Output 32-bit array			(address register parameter -pointer to long)
+	constLen64)	// pArray size in 64bit longs	(constant parameter=[1,2,3...])
+		SHIFTR_0_RRC();
+
+end		COPY_RRC;
+
+///////////////////////////////////////////////////////////////////////////////
+// Macros performs copying of blocks . 
+// Each bloack consists of 32x64-bit longs
+// Real processed size of source array is equal to (grLen64>>5)<<5  64-bit longs
+// grLen64 must be grater then 31
+//
+// On exit macros modifies registers : arSrcArray,arDstArray,gr7
+// Notations of registers : arSrcArray,arDstArray can't coincide
+macro	COPY_RRR_BY32(
+	arSrcArray,	// Source array					(address register parameter -pointer to long)
+	arDstArray,	// Destination array			(address register parameter -pointer to long)
+	grLen64)	// pArray size in 64bit longs	(general register parameter =[32,64,....])
+	own NextCopyRRR_by32:label;
+	with gr7=grLen64>>5;
+	with gr7--;
+	<NextCopyRRR_by32>
+	if <>0 delayed goto NextCopyRRR_by32 with gr7--;
+		rep 32 data=[arSrcArray++] with data;
+		rep 32 [arDstArray++]=afifo;
+end		COPY_RRR_BY32;
+
+//////////////////////////////////////////////////////////////////
+// Macros performs arithmetical shift by 31 bits to the right 
+// under each 32-bit signed element of input array
+// Shift cycle is implemented by ".repeat/.endrepeat" keywords
+//
+// On exit macros modifies registers : arSrcArray,arDstArray,f1cr
+// Notations of registers : arSrcArray,arDstArray can't coincide
+macro	SHIFTR32_31_RRC(
+	arSrcArray,	// Input 32-bit array			(address register parameter -pointer to long)
+	arDstArray,	// Output 32-bit array			(address register parameter -pointer to long)
+	constLen64)	// pArray size in 64bit longs	(constant parameter=[1,2,3...])
+
+		f1cr=80000000h;
+		.repeat constLen64>>5;
+			rep 32 data=[arSrcArray++] with activate data;
+			rep 32 [arDstArray++]=afifo;
+		.endrepeat;
+
+		.if ((constLen64-((constLen64>>5)<<5))!=0);
+			rep (constLen64-((constLen64>>5)<<5)) data=[arSrcArray++] with activate data;
+			rep (constLen64-((constLen64>>5)<<5)) [arDstArray++]=afifo;
+		.endif;
+end		SHIFTR32_31_RRC;
+
+///////////////////////////////////////////////////////////////////////////////////////////
+// Macros performs arithmetical shift by 31 bits to the right 
+// under each 32-bit signed element of input array
+// Real processed size of source array is equal to (grLen64>>5)<<5  64-bit longs
+// grLen64 must be grater then 31
+//
+// On exit macros modifies registers : arSrcArray,arDstArray,gr7,f1cr
+// Notations of registers : arSrcArray,arDstArray can't coincide
+macro	SHIFTR32_31_RRR_BY32(
+	arSrcArray,	// Input 32-bit array			(address register parameter -pointer to long)
+	arDstArray,	// Output 32-bit array			(address register parameter -pointer to long)
+	constLen64)	// pArray size in 64bit longs	(general register parameter=[32,64,......])
+		own NextShift32_31_RRR_by32:label;
+		
+		f1cr=80000000h;
+		with gr7=grShr>>5;
+		with gr7--;
+		<NextShift32_31_RRR_by32>
+		if <>0 delayed goto NextShift32_31_RRR_by32 with gr7--;
+			rep 32 data=[arSrcArray++] with activate data;
+			rep 32 [arDstArray++]=afifo;
+end		SHIFTR32_31_RRR_BY32;
+
+//////////////////////////////////////////////////////////////////
+// Macros performs arithmetical shift by ODD number of bits to the right 
+// under each 32-bit signed element of input array
+// Shift cycle is implemented by ".repeat/.endrepeat" keywords
+// To call this macros you should insert macros SHIFTR32_DATA() into data section
+//
+// On exit macros modifies registers : arSrcArray,arDstArray,nb1,sb
+// Notations of registers : arSrcArray,arDstArray can't coincide
+macro	SHIFTR32_ODD_RRCC(
+	arSrcArray,	// Input 32-bit array					(address register parameter -pointer to long)
+	arDstArray,	// Output 32-bit array					(address register parameter -pointer to long)
+	constLen64,	// pArray size in 64bit longs			(constant parameter=[1,2,3...])
+	constShr)	// odd number of bits of right shift	(constant register parameter=[1,3,5..31])
+		extern Table_sb_nb_woper_odd:long;
+
+		push ar4,gr4 with gr4=false;
+		ar4=Table_sb_nb_woper_odd+(constShr>>1)*8*2 with gr4++;
+
+		sb =[ar4++] with gr4++;
+		gr4=[ar4++gr4];
+		nb1=gr4;
+		
+		rep 6 wfifo=[ar4++],ftw,wtw;
+		//WTW_REG_DEPRICATED(gr4);
+		pop ar4,gr4;
+		.repeat constLen64>>5;
+			rep 32 data=[arSrcArray++] with vsum ,shift data,0;
+			rep 32 [arDstArray++]=afifo;
+		.endrepeat;
+
+		.if ((constLen64-((constLen64>>5)<<5))!=0);
+			rep (constLen64-((constLen64>>5)<<5)) data=[arSrcArray++] with vsum ,shift data,0;
+			rep (constLen64-((constLen64>>5)<<5)) [arDstArray++]=afifo;
+		.endif;
+end		SHIFTR32_ODD_RRCC;
+
+//////////////////////////////////////////////////////////////////
+// Macros performs arithmetical shift by ODD number of bits to the right 
+// under each 32-bit signed element of input array
+// Real processed size of input array is equal to (grLen64>>5)<<5  64-bit longs
+// grLen64 must be grater then 31
+// To call this macros you should insert macros SHIFTR32_DATA() into data section
+//
+// On exit macros modifies registers : arSrcArray,arDstArray,gr7,nb1,sb
+// Notations of registers : arSrcArray,arDstArray can't coincide
+macro	SHIFTR32_ODD_RRRC_BY32(
+	arSrcArray,	// Input 32-bit array					(address register parameter -pointer to long)
+	arDstArray,	// Output 32-bit array					(address register parameter -pointer to long)
+	grLen64,	// pArray size in 64bit longs			(general register parameter =[32,64,...])
+	constShr)	// odd number of bits of right shift	(constant register parameter=[1,3,5..31])
+		own NextShiftR32_odd_RRRC_by32:label;
+		extern Table_sb_nb_woper_odd:long;
+
+		push ar4,gr4 with gr7=grLen64;
+		with gr4=false;
+		ar4=Table_sb_nb_woper_odd+(constShr>>1)*8*2 with gr4++;
+
+		sb =[ar4++] with gr4++;
+		gr4=[ar4++gr4];
+		nb1=gr4;
+		
+		rep 6 wfifo=[ar4++],ftw,wtw;
+		with gr7>>=5;
+		with gr7--;
+		
+		//WTW_REG_DEPRICATED(gr4);
+		pop ar4,gr4;
+		
+		<NextShiftR32_odd_RRRC_by32>
+		if <>0 delayed goto NextShiftR32_odd_RRRC_by32 with gr7--;
+			rep 32 data=[arSrcArray++] with vsum ,shift data,0;
+			rep 32 [arDstArray++]=afifo;
+		
+end		SHIFTR32_ODD_RRRC_BY32;
+
+
+//////////////////////////////////////////////////////////////////
+// Macros performs arithmetical shift by ODD number of bits to the right 
+// under each 32-bit signed element of input array
+// Shift cycle is implemented by ".repeat/.endrepeat" keywords
+// To call this macros you should insert macros SHIFTR32_DATA() into data section
+//
+// On exit macros modifies registers : arSrcArray,arDstArray,nb1,sb
+// Notations of registers : arSrcArray,arDstArray can't coincide
+macro	SHIFTR32_ODD_RRCR(
+	arSrcArray,	// Input 32-bit array					(address register parameter -pointer to long)
+	arDstArray,	// Output 32-bit array					(address register parameter -pointer to long)
+	constLen64,	// pArray size in 64bit longs			(constant parameter=[1,2,3...])
+	grShr)		// odd number of bits of right shift	(general register parameter=[1,3,5..31])
+		extern Table_sb_nb_woper_odd:long;
+		push ar4,gr4 
+			with gr4=grShr>>1;
+		ar4=Table_sb_nb_woper_odd 
+			with gr4<<=4;
+		ar4+=gr4;
+		sb =[ar4++];
+		
+		push ar0,gr0;
+		ar0,gr0=[ar4++];
+		nb1=gr0 with gr4=gr0;
+		pop ar0,gr0;
+
+		rep 6 wfifo=[ar4++],ftw,wtw;
+		//WTW_REG_DEPRICATED(gr4);
+		pop ar4,gr4;
+		.repeat constLen64>>5;
+			rep 32 data=[arSrcArray++] with vsum ,shift data,0;
+			rep 32 [arDstArray++]=afifo;
+		.endrepeat;
+
+		.if ((constLen64-((constLen64>>5)<<5))!=0);
+			rep (constLen64-((constLen64>>5)<<5)) data=[arSrcArray++] with vsum ,shift data,0;
+			rep (constLen64-((constLen64>>5)<<5)) [arDstArray++]=afifo;
+		.endif;
+end		SHIFTR32_ODD_RRCR;
+
+//////////////////////////////////////////////////////////////////
+// Macros performs arithmetical shift by ODD number of bits to the right 
+// under each 32-bit signed element of input array
+// Real processed size of input array is equal to (grLen64>>5)<<5  64-bit longs
+// To call this macros you should insert macros SHIFTR32_DATA() into data section
+//
+// On exit macros modifies registers : arSrcArray,arDstArray,nb1,sb,gr7
+// Notations of registers : arSrcArray,arDstArray can't coincide
+macro	SHIFTR32_ODD_RRRR_BY32(
+	arSrcArray,	// Input 32-bit array					(address register parameter -pointer to long)
+	arDstArray,	// Output 32-bit array					(address register parameter -pointer to long)
+	grLen64,	// pArray size in 64bit longs			(general register parameter=[1,2,3...])
+	grShr)		// odd number of bits of right shift	(general register parameter=[1,3,5..31])
+		own NextShiftR32_odd_RRRR_by32:label;
+		extern Table_sb_nb_woper_odd:long;
+		
+		with gr7 = grLen64>>5;
+		push ar4,gr4 
+			with gr4=grShr>>1;
+		ar4 = Table_sb_nb_woper_odd 
+			with gr4<<=4;
+		ar4+= gr4;
+		sb  = [ar4++];
+		
+		push ar0,gr0;
+		ar0,gr0=[ar4++];
+		nb1 = gr0 with gr4=gr0;
+		pop   ar0,gr0;
+
+		rep 6 wfifo=[ar4++],ftw,wtw;
+		//WTW_REG_DEPRICATED(gr4);
+		pop ar4,gr4 	with gr7--;
+		<NextShiftR32_odd_RRRR_by32>
+		if <>0 delayed  goto NextShiftR32_odd_RRRR_by32 with gr7--;
+			rep 32 data=[arSrcArray++] with vsum ,shift data,0;
+			rep 32 [arDstArray++]=afifo;
+
+end		SHIFTR32_ODD_RRRR_BY32;
+
+//////////////////////////////////////////////////////////////////
+// Macros performs arithmetical shift by EVEN number of bits to the right 
+// under each 32-bit signed element of input array
+// Shift cycle is implemented by ".repeat/.endrepeat" keywords
+// To call this macros you should insert macros SHIFTR32_DATA() into data section
+//
+// On exit macros modifies registers : arSrcArray,arDstArray,nb1,sb
+// Notations of registers : arSrcArray,arDstArray can't coincide
+macro	SHIFTR32_EVEN_RRCC(
+	arSrcArray,	// Input 32-bit array					(address register parameter -pointer to long)
+	arDstArray,	// Output 32-bit array					(address register parameter -pointer to long)
+	constLen64,	// pArray size in 64bit longs			(constant parameter=[1,2,3...])
+	constShr)	// even number of bits of right shift	(constant parameter=[0,2,4..30])
+		extern Table_sb_nb_woper_even:long;
+		push ar4,gr4 with gr4=false;
+		ar4=Table_sb_nb_woper_even+(constShr>>1)*6*2 with gr4++;
+
+		sb=[ar4++] with gr4++;
+		gr4=[ar4++gr4];
+		nb1=gr4;
+		
+		rep 4 wfifo=[ar4++],ftw,wtw;
+		//WTW_REG_DEPRICATED(gr4);
+		pop ar4,gr4;
+		.repeat constLen64>>5;
+			rep 32 data=[arSrcArray++] with vsum ,data,0;
+			rep 32 [arDstArray++]=afifo;
+		.endrepeat;
+
+		.if ((constLen64-((constLen64>>5)<<5))!=0);
+			rep (constLen64-((constLen64>>5)<<5)) data=[arSrcArray++] with vsum ,data,0;
+			rep (constLen64-((constLen64>>5)<<5)) [arDstArray++]=afifo;
+		.endif;
+end		SHIFTR32_EVEN_RRCC;
+
+
+//////////////////////////////////////////////////////////////////
+// Macros performs arithmetical shift by EVEN number of bits to the right 
+// under each 32-bit signed element of input array
+// Real processed size of input array is equal to (grLen64>>5)<<5  64-bit longs
+// grLen64 must be grater then 31
+// To call this macros you should insert macros SHIFTR32_DATA() into data section
+//
+// On exit macros modifies registers : arSrcArray,arDstArray,gr7,nb1,sb
+// Notations of registers : arSrcArray,arDstArray can't coincide
+macro	SHIFTR32_EVEN_RRRC_BY32(
+	arSrcArray,	// Input 32-bit array					(address register parameter -pointer to long)
+	arDstArray,	// Output 32-bit array					(address register parameter -pointer to long)
+	grLen64,	// pArray size in 64bit longs			(general register parameter =[32,64,.....])
+	constShr)	// even number of bits of right shift	(constant parameter=[0,2,4..30])
+
+		own NextShiftR32_even_RRRC_by32:label;
+		extern Table_sb_nb_woper_even:long;
+	
+		push ar4,gr4 with gr7=grLen64;
+		with gr4=false;
+		ar4=Table_sb_nb_woper_even+(constShr>>1)*6*2 with gr4++;
+
+		sb=[ar4++] with gr4++;
+		gr4=[ar4++gr4];
+		nb1=gr4;
+		
+		rep 4 wfifo=[ar4++],ftw,wtw;
+		with gr7>>=5;
+		with gr7--;
+		//WTW_REG_DEPRICATED(gr4);
+		pop ar4,gr4;
+		<NextShiftR32_even_RRRC_by32>
+		if <>0 delayed goto NextShiftR32_even_RRRC_by32 with gr7--;
+			rep 32 data=[arSrcArray++] with vsum ,data,0;
+			rep 32 [arDstArray++]=afifo;
+
+end		SHIFTR32_EVEN_RRRC_BY32;
+
+//////////////////////////////////////////////////////////////////
+// Macros performs arithmetical shift by EVEN number of bits to the right 
+// under each 32-bit signed element of input array
+// Shift cycle is implemented by ".repeat/.endrepeat" keywords
+// To call this macros you should insert macros SHIFTR32_DATA() into data section
+//
+// On exit macros modifies registers : arSrcArray,arDstArray,gr7,nb1,sb
+// Notations of registers : arSrcArray,arDstArray can't coincide
+macro	SHIFTR32_EVEN_RRCR(
+	arSrcArray,	// Input 32-bit array					(address register parameter -pointer to long)
+	arDstArray,	// Output 32-bit array					(address register parameter -pointer to long)
+	constLen64,	// pArray size in 64bit longs			(constant parameter=[1,2,3...])
+	grShr)		// even number of bits of right shift	(general register parameter=[0,2,4..30])
+		extern Table_sb_nb_woper_even:long;
+	
+		push ar4,gr4 with gr4=grShr>>1;
+		ar4=Table_sb_nb_woper_even with gr7=gr4<<2;
+		with gr4<<=3;
+		with gr4+=gr7;
+		ar4+=gr4;
+		sb =[ar4++];
+		gr4=[ar4];
+		nb1=[ar4++];
+			
+		rep 4 wfifo=[ar4++],ftw,wtw;
+		//WTW_REG_DEPRICATED(gr4);
+		pop ar4,gr4;
+		.repeat constLen64>>5;
+			rep 32 data=[arSrcArray++] with vsum ,data,0;
+			rep 32 [arDstArray++]=afifo;
+		.endrepeat;
+
+		.if ((constLen64-((constLen64>>5)<<5))!=0);
+			rep (constLen64-((constLen64>>5)<<5)) data=[arSrcArray++] with vsum ,data,0;
+			rep (constLen64-((constLen64>>5)<<5)) [arDstArray++]=afifo;
+		.endif;
+end		SHIFTR32_EVEN_RRCR;
+
+//////////////////////////////////////////////////////////////////
+// Macros performs arithmetical shift by EVEN number of bits to the right 
+// under each 32-bit signed element of input array
+// To call this macros you should insert macros SHIFTR32_DATA() into data section
+// Real processed size of input array is equal to (grLen64>>5)<<5  64-bit longs
+//
+// On exit macros modifies registers : arSrcArray,arDstArray,gr7,nb1,sb
+// Notations of registers : arSrcArray,arDstArray can't coincide
+macro	SHIFTR32_EVEN_RRRR_BY32(
+	arSrcArray,	// Input 32-bit array					(address register parameter -pointer to long)
+	arDstArray,	// Output 32-bit array					(address register parameter -pointer to long)
+	grLen64,	// pArray size in 64bit longs			(general register parameter=[1,2,3...])
+	grShr)		// even number of bits of right shift	(general register parameter=[0,2,4..30])
+		own NextShiftR32_even_RRRR_by32:label;
+		extern Table_sb_nb_woper_even:long;
+		
+		push ar4,gr4 with gr4=grShr>>1;
+		ar4=Table_sb_nb_woper_even with gr7=gr4<<2;
+		with gr4<<=3;
+		with gr4+=gr7;
+		ar4+=gr4;
+		sb =[ar4++];
+		gr4=[ar4];
+		nb1=[ar4++];
+			
+		rep 4 wfifo=[ar4++],ftw,wtw;
+		//WTW_REG_DEPRICATED(gr4);
+		pop ar4,gr4;
+		gr7=grLen64>>5;
+		with gr7--;
+		<NextShiftR32_even_RRRR_by32>
+		if <>0 delayed goto NextShiftR32_even_RRRR_by32 with gr7--;
+			rep 32 data=[arSrcArray++] with vsum ,data,0;
+			rep 32 [arDstArray++]=afifo;
+		
+end		SHIFTR32_EVEN_RRRR_BY32;
+
+
+//////////////////////////////////////////////////////////////////
+// Macros performs arithmetical shift by grShr bits to the right 
+// under each 32-bit signed element of input array
+// Real processed size of input array is equal to (grLen64>>5)<<5  64-bit longs
+// To call this macros you should insert macros SHIFTR32_DATA() into data section
+//
+// On exit macros modifies registers : arSrcArray,arDstArray,gr7,nb1,sb
+// Notations of registers : arSrcArray,arDstArray can't coincide
+macro	SHIFTR32_RRRR_BY32(
+	arSrcArray,	// Input 32-bit array			 (address register parameter -pointer to long)
+	arDstArray,	// Output 32-bit array			 (address register parameter -pointer to long)
+	grLen64,	// pArray size in 64bit longs	 (general register parameter=[1,2,3...])
+	grShr)		// number of bits of right shift (general register parameter=[0..31])
+		own	ShiftR32_RRRR_Finish,ShiftR32_Even_RRRR_by32:label;
+		
+		gr7=grShr<<31;
+		if =0 goto ShiftR32_Even_RRRR_by32;	
+		SHIFTR32_ODD_RRRR_BY32(arSrcArray,arDstArray,grLen64,grShr);
+		goto ShiftR32_RRRR_Finish;
+		
+		<ShiftR32_Even_RRRR_by32>
+		SHIFTR32_EVEN_RRRR_BY32(arSrcArray,arDstArray,grLen64,grShr);
+		
+		<ShiftR32_RRRR_Finish>
+end		SHIFTR32_RRRR_BY32;
+///////////////////////////////////////////////////////////////////////////////
+// Macros performs arithmetical shift by constShr number of bits to the right 
+// under each 32-bit signed element of input array
+// Real processed size of input array is equal to (grLen64>>5)<<5  64-bit longs
+// grLen64 must be grater then 31
+// To call this macros you should insert macros SHIFTR32_DATA() into data section
+//
+// On exit macros modifies registers : arSrcArray,arDstArray,gr7,nb1(if 0<constShr<31),
+//																  sb(if 0<constShr<31),
+//																f1cr(if constShr==31)
+// Notations of registers : arSrcArray,arDstArray can't coincide
+macro	SHIFTR32_RRRC_BY32(
+	arSrcArray,	// Input 32-bit array			 (address register parameter -pointer to long)
+	arDstArray,	// Output 32-bit array			 (address register parameter -pointer to long)
+	grLen64,	// pArray size in 64bit longs	 (general register parameter=[32,64,...])
+	constShr)	// number of bits of right shift (constant register parameter=[0..31])
+		.if constShr==0;
+			COPY_RRR_BY32(arSrcArray,arDstArray,grLen64);
+		.endif;	
+
+		.if constShr==31;
+			SHIFTR32_31_RRR_BY32(arSrcArray,arDstArray,grLen64);
+		.endif;
+
+		.if ((constShr>0)and(constShr<31));
+			.if (constShr-((constShr>>1)<<1))==1;
+				SHIFTR32_ODD_RRRC_BY32(arSrcArray,arDstArray,grLen64,constShr);
+			.endif;
+
+			.if (constShr-((constShr>>1)<<1))==0;
+				SHIFTR32_EVEN_RRRC_BY32(arSrcArray,arDstArray,grLen64,constShr);
+			.endif;
+		.endif;
+end		SHIFTR32_RRRC_BY32;
+
+
+
+//////////////////////////////////////////////////////////////////
+// Macros performs arithmetical shift by constShr bits to the right 
+// under each 32-bit signed element of input array
+// Shift cycle is implemented by ".repeat/.endrepeat" keywords
+// To call this macros you should insert macros SHIFTR32_DATA() into data section
+//
+// On exit macros modifies registers : arSrcArray,arDstArray,	 nb1(if 0<constShr<31),
+//																  sb(if 0<constShr<31),
+//																f1cr(if constShr==31)
+// Notations of registers : arSrcArray,arDstArray can't coincide
+macro	VEC_ARSH32_aaCC(
+	arSrcArray,	// Input 32-bit array			 (address register parameter -pointer to long)
+	arDstArray,	// Output 32-bit array			 (address register parameter -pointer to long)
+	constLen32,	// pArray size in 32bit words	 (constant parameter=[1,2,3...])
+	constShr)	// number of bits of right shift (constant register parameter=[0..31])
+		.if constShr==0;
+			SHIFTR_0_RRC(arSrcArray,arDstArray,constLen32>>1);
+		.endif;	
+
+		.if constShr==31;
+			SHIFTR32_31_RRC(arSrcArray,arDstArray,constLen32>>1);
+		.endif;
+
+		.if ((constShr>0)and(constShr<31));
+			.if (constShr-((constShr>>1)<<1))==1;
+				SHIFTR32_ODD_RRCC(arSrcArray,arDstArray,constLen32>>1,constShr);
+			.endif;
+
+			.if (constShr-((constShr>>1)<<1))==0;
+				SHIFTR32_EVEN_RRCC(arSrcArray,arDstArray,constLen32>>1,constShr);
+			.endif;
+		.endif;
+end		VEC_ARSH32_aaCC;
+
+//////////////////////////////////////////////////////////////////
+// Macros performs arithmetical shift by grShr bits to the right 
+// under each 32-bit signed element of input array
+// Shift cycle is implemented by ".repeat/.endrepeat" keywords
+// To call this macros you should insert macros SHIFTR32_DATA() into data section
+//
+// On exit macros modifies registers : arSrcArray,arDstArray,gr7,nb1,sb
+// Notations of registers : arSrcArray,arDstArray can't coincide
+macro	VEC_ARSH32_aaCG(
+	arSrcArray,	// Input 32-bit array			 (address register parameter -pointer to long)
+	arDstArray,	// Output 32-bit array			 (address register parameter -pointer to long)
+	constLen32,	// pArray size in 64bit longs	 (constant parameter=[1,2,3...])
+	grShr)		// number of bits of right shift (general register parameter=[0..31])
+		own	ShiftR32_Finish:label;
+		own ShiftR32_Even:label;
+		gr7=grShr<<31;
+		if =0 goto ShiftR32_Even;	
+			SHIFTR32_ODD_RRCR(arSrcArray,arDstArray,constLen32>>1,grShr);
+		goto ShiftR32_Finish;
+		<ShiftR32_Even>
+			SHIFTR32_EVEN_RRCR(arSrcArray,arDstArray,constLen32>>1,grShr);
+		<ShiftR32_Finish>
+end		VEC_ARSH32_aaCG;//////////////////////////////////////////////
+// Used abbreviation:
+// prefix VEC - belonging to vector library
+// parameters abbreviations
+// C  - constant
+// A  - address register
+// G  - general purpose register
+// R  - any register (adress or general purpose)
+// X  - anything (constant or any register)
+
+
+
+
+///////////////////////////////////////////////////////////////////////////////////////////
+//    Макрос для получения масок сброса и модификации бит, определяющих кол-во повторений 
+//      в коде векторных операций
+//
+// 
+// [3210][3210][3210][3210][3210][3210][3210][3210]
+// [xxxx][xxxx][xxxx][xx**][***x][xxxx][xxxx][xxxx]
+//                      ^^^^^^^- number of iterations in rep instruction
+//
+// VEC_GET_REP_COP(grRepN,grCopClr,grCopSet)
+//============ На входе ===========================================
+// grRepN   - (регистр общ. назначения) = кол-во повторений (1..32)
+//============ На выходе ==========================================
+// grCopClr - (регистр общ. назначения) = маска для обнуления поля бит, определяющее кол-во повторений в КОП
+// grCopRep - (регистр общ. назначения) = маска для установки кол-ва повторений в КОП
+
+macro VEC_GET_REP_COP_ggg(grRepN,grCopClr,grCopSet)
+	grCopSet=grRepN-1;
+	grCopClr=0FFFC1FFFh with grCopSet<<=13;
+end VEC_GET_REP_COP_ggg;
+
+macro VEC_GET_REP_COP(grRepN,grCopClr,grCopSet)
+	grCopSet=grRepN-1;
+	grCopClr=0FFFC1FFFh with grCopSet<<=13;
+end VEC_GET_REP_COP;
+
+
+
+//////////////////////////////////////////////////////////////////
+//    Макрос модификации кода операции 
+//
+// VEC_SET_REP_COP(CopAddr,grCopClr,grCopSet,grTmp)
+//============ На входе ========================================================
+// CopAddr  - ( либо регистр общ. назначения,
+//				либо адресный регистр,
+//				либо константа)         = адрес модифируемого кода операций
+// grCopClr - (регистр общ. назначения) = маска для обнуления модифицируемого поля в КОП
+// grCopRep - (регистр общ. назначения) = маска для установки модифицируемых бит в КОП
+// grTmp    - (регистр общ. назначения) = вспомогательный регистр
+macro VEC_SET_REP_COP(CopAddr,grCopClr,grCopSet,grTmp)
+	grTmp=[CopAddr];
+	grTmp=grTmp and grCopClr;
+	grTmp=grTmp or  grCopSet;
+	[CopAddr]=grTmp;
+end VEC_SET_REP_COP;
+//***************************************************************************/
+//*                                                                         */
+//*                    Neuroprocessor NM6403 SDK v.1.2                      */
+//*                                                                         */
+//*				Signed Fixed Point 32-bit Routine                           */
+//*                                                                         */
+//*             Библиотека макросов Fixed-point 64                          */
+//*                                                                         */
+//*                1999 (c) RC Module Inc., Moscow, Russia                  */
+//***************************************************************************/
+macro PUSH_FIX64(RegHi,RegLo,WITH)
+	[sp++]=RegHi;
+	[sp++]=RegLo ;
+end PUSH_FIX64;
+
+macro POP_FIX64(RegHi,RegLo,WITH)
+	RegLo=[--sp];
+	RegHi=[--sp];
+end POP_FIX64;
+
+macro FIXADD64(Reg1Hi,Reg1Lo,Reg2Hi,Reg2Lo,RegResHi,RegResLo)
+	RegResLo=Reg1Lo+Reg2Lo;
+	RegResHi=Reg1Hi+Reg2Hi+carry;
+end FIXADD64;
+
+macro FIXSUB64(Reg1Hi,Reg1Lo,Reg2Hi,Reg2Lo,RegResHi,RegResLo)
+	RegResLo=Reg1Lo-Reg2Lo;
+	RegResHi=Reg1Hi-Reg2Hi-1+carry;
+end FIXSUB64;
+
+macro FIXINC64(RegHi,RegLo)
+	RegLo++;
+	RegHi=RegHi+carry;
+end FIXINC64;
+
+macro FIXDEC64(RegHi,RegLo)
+	RegLo--;
+	RegHi=RegHi+1-carry;
+end FIXDEC64;
+
+macro FIXSHIFTAR64(RegHi,RegLo,RegResHi,RegResLo,SHIFT)
+	.if SHIFT==0;
+		with RegResLo=RegLo;
+		with RegResHi=RegHi;
+	.endif;
+
+	.if	((SHIFT!=0) and (SHIFT<32));
+		[sp++]=RegHi with RegHi=RegHi<<32-SHIFT;
+		RegResLo=RegLo>>SHIFT;
+		RegHi=[--sp] with RegResLo=RegResLo or RegHi;
+		RegResHi=RegHi A>>SHIFT;
+	.endif;
+	
+	.if (SHIFT==32);
+		RegResLo=RegHi;
+		RegResHi=RegHi A>>31;
+	.endif;
+	
+	.if (SHIFT>32);
+		RegResLo=RegHi >> (32-SHIFT);
+		RegResHi=RegHi A>>31;
+	.endif;
+end FIXSHIFTAR64;
+
+macro FIXSHIFTAL64(RegHi,RegLo,RegResHi,RegResLo,SHIFT)
+	.if SHIFT==0;
+		with RegResLo=RegLo;
+		with RegResHi=RegHi;
+	.endif;
+	
+	.if	((SHIFT!=0) and (SHIFT<32));
+		[sp++]=RegLo with RegResHi=RegHi A<<SHIFT;
+		RegLo=RegLo >> 32-SHIFT;
+		RegLo=[--sp] with RegResHi=RegResHi or RegLo;
+		RegLo <<= SHIFT;
+	.endif;
+	
+	.if (SHIFT==32);
+		RegResLo-=RegResLo;
+		RegResHi=RegResLo;
+		nul;
+		nul;
+	.endif;
+	
+	.if (SHIFT>32);
+		RegResLo=RegHi >> (32-SHIFT);
+		RegResHi=RegHi A>>ResHi;
+		nul;
+		nul;
+	.endif;
+end FIXSHIFTAL64;
+
+macro WTW_REG_DEPRICATED( Arg )
+.wait;
+    nb1 = Arg;
+    wtw;
+.branch;
+end WTW_REG_DEPRICATED;
+
+//macro WTW_MEM( Arg )
+//.wait;
+//    nb1 = [Arg];
+//    wtw;
+//.branch;
+//end WTW_MEM;
+
+macro PUSH_REGS()
+    push ar0, gr0;
+    push ar1, gr1;
+    push ar2, gr2;
+    push ar3, gr3; 
+    push ar4, gr4;
+    push ar5, gr5;
+    push ar6, gr6;
+end PUSH_REGS;
+
+macro POP_REGS()
+    pop ar6, gr6;
+    pop ar5, gr5;
+    pop ar4, gr4;
+    pop ar3, gr3;
+    pop ar2, gr2;
+    pop ar1, gr1;
+    pop ar0, gr0;
+end POP_REGS;
