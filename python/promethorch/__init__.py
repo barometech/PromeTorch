@@ -63,7 +63,8 @@ from ._C import (
     isfinite,
     multinomial,
     einsum,
-    compile,
+    compile as _compile_raw,
+    CompiledModule,
 
     # Autograd
     no_grad as _CppNoGrad,
@@ -116,6 +117,37 @@ class no_grad:
             with self:
                 return func(*args, **kwargs)
         return wrapper
+
+def compile(model, **kwargs):
+    """Compile a model for fast inference using PromePile JIT.
+
+    Traces the model's forward pass on first call and then executes via
+    pre-allocated buffers with fused ops. No autograd overhead.
+
+    Supported layers: Linear, ReLU, Sigmoid, Tanh, GELU, SiLU, Softmax,
+    BatchNorm1d, Sequential containers.
+
+    Usage::
+
+        model = torch.nn.Sequential(
+            torch.nn.Linear(784, 256),
+            torch.nn.ReLU(),
+            torch.nn.Linear(256, 10),
+        )
+        compiled = torch.compile(model)
+        output = compiled(input_tensor)  # first call traces, subsequent calls are fast
+
+    Args:
+        model: An nn.Module to compile.
+        **kwargs: Optional compilation hints (currently unused, reserved for future).
+
+    Returns:
+        A CompiledModule wrapper. Calling it with a tensor traces on the first
+        invocation and then executes the optimized graph on subsequent calls
+        with the same input shape.
+    """
+    return _compile_raw(model, **kwargs)
+
 
 def manual_seed(seed: int):
     """Set the random seed for reproducibility."""
@@ -230,6 +262,7 @@ __all__ = [
     'multinomial',
     'einsum',
     'compile',
+    'CompiledModule',
 
     # Autograd
     'no_grad',

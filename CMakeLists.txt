@@ -520,15 +520,17 @@ set(AUTOGRAD_HEADERS
     torch/csrc/autograd/functions/ShapeBackward.h
 )
 
-# Autograd is header-only for now, create interface library
-add_library(torch_autograd INTERFACE)
+# Autograd library (grad_mode.cpp provides DLL-safe singleton for GradMode)
+add_library(torch_autograd STATIC
+    torch/csrc/autograd/grad_mode.cpp
+)
 
-target_include_directories(torch_autograd INTERFACE
+target_include_directories(torch_autograd PUBLIC
     $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}>
     $<INSTALL_INTERFACE:include>
 )
 
-target_link_libraries(torch_autograd INTERFACE aten)
+target_link_libraries(torch_autograd PUBLIC aten)
 
 # ============================================================================
 # Torch NN Library (Neural Network Modules)
