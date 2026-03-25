@@ -101,10 +101,24 @@ SIMD forward: **66.5ms** vs scalar 6675ms = **100x speedup**.
 Добавлен `--model 250m`: D=768, H=12, FF=3072, L=36, T=64 (~255M params).
 DDR: ~2GB/chip (39.8% от 5GB). Ожидаем тренировку до loss 1.5.
 
+### Текущие ограничения NM QUAD
+- **Max SIMD cores/board**: 8 (DDR DMA controller limit — 16 cores forward = 1393 tok/s в direct тесте, но backward 8+ = hang)
+- **Max stable training**: 4 boards × 4 cores = 16 ядер = 474-705 tok/s
+- **Root cause зависания >8 cores**: idle cores в DDR polling loop блокируют VPU DMA активных ядер. Фикс 10M delay помогает на 1 board (16 cores forward = OK), но multi-board backward по-прежнему лимитирован 4 cores/board
+- **Gradient accumulation (OP 34)**: работает, parallel backward безопасен при ≤4 cores/board
+- **nmpp SIMD**: MullMatrix_f.asm, nmppmMul_mm_32f, 100x vs scalar
+
+### Текущие ограничения NM Card Mini
+- **Программный эмулятор**: 32/32 тестов, MNIST 93.64%
+- **Реальная карта**: установлена, но 16-core dispatcher вешал систему (инцидент 2026-03-18)
+- **Протокол**: эмулятор → 1 core → 2 → 4 → 16 (на реальной карте)
+
 ### Целевые метрики (обновлённые)
-- ✅ > 500 tok/s (705 tok/s на 16 cores!)
-- ⬜ > 2000 tok/s (нужно 4 clusters/board fix или больше cores)
-- ⬜ Loss 1.5 на 250M модели
+- ✅ > 500 tok/s (705 tok/s на 16 cores confirmed)
+- ✅ nmpp SIMD matmul 100x speedup (481 tok/s per core)
+- ✅ Loss drops стабильно на 16 cores (4.174 → 4.172)
+- ⬜ 64 ядра training (DDR DMA contention — нужен custom tiled matmul или firmware fix)
+- ⬜ 250M model training до loss 1.5
 
 ---
 

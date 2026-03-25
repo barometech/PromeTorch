@@ -17,6 +17,7 @@ option(PT_USE_OPENMP "Enable OpenMP for CPU parallelization" OFF)
 option(PT_USE_AVX "Enable AVX instructions" ON)
 option(PT_USE_AVX2 "Enable AVX2 instructions" ON)
 option(PT_USE_NMCARD "Enable NM Card Mini support (emulator)" OFF)
+option(PT_USE_NMQUAD "Enable NM QUAD support (4x NM6408 hardware)" OFF)
 option(PT_USE_TUDA "Enable TUDA CPU arch dispatch (AVX2/NEON/E2K/Scalar)" ON)
 option(PT_USE_LINQ "Enable LinQ H1M accelerator (emulator)" OFF)
 
@@ -455,6 +456,13 @@ if(PT_USE_NMCARD)
 
     target_link_libraries(aten INTERFACE aten_nmcard)
     target_compile_definitions(aten INTERFACE PT_USE_NMCARD)
+endif()
+
+if(PT_USE_NMQUAD)
+    # NM QUAD backend — links against libnm_quad_load.so (real hardware)
+    target_compile_definitions(aten_cpu PUBLIC PT_USE_NMQUAD)
+    target_compile_definitions(c10 PUBLIC PT_USE_NMQUAD)
+    target_link_libraries(aten_cpu PUBLIC nm_quad_load)
 endif()
 
 # ============================================================================

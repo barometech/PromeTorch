@@ -7,6 +7,9 @@
 #include "aten/src/ATen/native/cpu/ShapeOps.h"
 #include "aten/src/ATen/native/cpu/PromeBLAS.h"
 #include "aten/src/ATen/native/cpu/hot_loops.h"
+#ifdef PT_USE_NMQUAD
+#include "aten/src/ATen/nmquad/NMQuadOps.h"
+#endif
 #include <cmath>
 #include <map>
 #include <algorithm>
@@ -21,6 +24,13 @@ namespace native {
 // ============================================================================
 
 inline Tensor mm(const Tensor& self, const Tensor& other) {
+#ifdef PT_USE_NMQUAD
+    // NM QUAD dispatch: if either tensor is on nmquad device
+    if (self.is_nmquad() || other.is_nmquad()) {
+        return at::nmquad::matmul_nmquad(self.contiguous(), other.contiguous(), 0);
+    }
+#endif
+
     // FAST PATH: both trusted (float32, contiguous, CPU) — skip all checks
     if (self.is_trusted() && other.is_trusted()) {
         int64_t M = self.size(0), K = self.size(1), N = other.size(1);
