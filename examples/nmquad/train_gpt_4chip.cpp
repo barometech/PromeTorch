@@ -138,7 +138,7 @@ int main(int argc, char** argv) {
     setbuf(stdout, NULL);
 
     std::string data_path = "tiny_shakespeare.txt";
-    std::string disp_path = "dispatcher_nmquad_v3.abs";
+    std::string disp_path = "dispatcher_nmquad_v3_simd.abs";
     std::string model_name = "small";
     int epochs = 10, steps = 200, B_total = 64;
     float lr = 0.001f;
