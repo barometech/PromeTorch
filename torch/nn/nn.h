@@ -45,6 +45,9 @@
 // Recurrent modules
 #include "modules/rnn.h"
 
+// Utilities
+#include "utils/rnn.h"
+
 // Loss functions
 #include "modules/loss.h"
 

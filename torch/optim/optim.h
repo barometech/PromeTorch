@@ -16,6 +16,7 @@
 //   - RAdam: Rectified Adam
 //   - NAdam: Nesterov-accelerated Adam
 //   - Adamax: Adam with infinity norm
+//   - LBFGS: Limited-memory BFGS with Strong Wolfe line search
 //
 // Learning Rate Schedulers:
 //   - StepLR: Decay by gamma every step_size epochs
@@ -63,6 +64,7 @@
 #include "torch/optim/radam.h"
 #include "torch/optim/nadam.h"
 #include "torch/optim/adamax.h"
+#include "torch/optim/lbfgs.h"
 #include "torch/optim/lr_scheduler.h"
 
 namespace torch {
@@ -138,6 +140,14 @@ inline Adamax make_adamax(std::vector<Parameter*> params, double lr = 0.002,
     AdamaxOptions opts(lr);
     opts.betas(beta1, beta2);
     return Adamax(std::move(params), opts);
+}
+
+// Create LBFGS optimizer with common options
+inline LBFGS make_lbfgs(std::vector<Parameter*> params, double lr = 1.0,
+                         int history_size = 100) {
+    LBFGSOptions opts(lr);
+    opts.history_size_(history_size);
+    return LBFGS(std::move(params), opts);
 }
 
 } // namespace optim

@@ -51,19 +51,8 @@ public:
         : Module("ReLU6"), inplace_(inplace) {}
 
     Tensor forward(const Tensor& input) override {
-#ifdef PT_USE_CUDA
-        if (input.is_cuda()) {
-            // Use CUDA clamp kernel: clamp(x, 0, 6)
-            return at::cuda_ops::clamp(input, 0.0f, 6.0f);
-        }
-#endif
-        // CPU path
-        Tensor result = input.relu();
-        float* data = result.mutable_data_ptr<float>();
-        for (int64_t i = 0; i < result.numel(); ++i) {
-            if (data[i] > 6.0f) data[i] = 6.0f;
-        }
-        return result;
+        // ReLU6 = hardtanh(x, 0, 6) — use autograd-aware hardtanh
+        return torch::autograd::hardtanh_autograd(input, 0.0, 6.0);
     }
 
 private:
@@ -83,22 +72,8 @@ public:
         , inplace_(inplace) {}
 
     Tensor forward(const Tensor& input) override {
-#ifdef PT_USE_CUDA
-        if (input.is_cuda()) {
-            return at::cuda_ops::leaky_relu(input, static_cast<float>(negative_slope_));
-        }
-#endif
-        // CPU path
-        Tensor result = inplace_ ? input : input.clone();
-        float* data = result.mutable_data_ptr<float>();
-        float slope = static_cast<float>(negative_slope_);
-
-        for (int64_t i = 0; i < result.numel(); ++i) {
-            if (data[i] < 0) {
-                data[i] *= slope;
-            }
-        }
-        return result;
+        // Use autograd-aware leaky_relu to maintain gradient flow
+        return torch::autograd::leaky_relu_autograd(input, negative_slope_);
     }
 
     std::string extra_repr() const override {
@@ -131,8 +106,14 @@ public:
     }
 
     Tensor forward(const Tensor& input) override {
-        // PReLU needs custom CUDA kernel - for now CPU implementation
-        // TODO: Add CUDA kernel for PReLU
+        // PReLU: x if x >= 0, else weight * x
+        // Use leaky_relu_autograd with learned slope for single-parameter case
+        if (num_parameters_ == 1) {
+            auto* weight = get_parameter("weight");
+            float slope = weight->data().data_ptr<float>()[0];
+            return torch::autograd::leaky_relu_autograd(input, static_cast<double>(slope));
+        }
+        // Multi-parameter PReLU: manual implementation (no autograd for now)
         Tensor result = input.clone();
         auto* weight = get_parameter("weight");
         const float* w = weight->data().data_ptr<float>();
@@ -140,7 +121,7 @@ public:
 
         for (int64_t i = 0; i < result.numel(); ++i) {
             if (data[i] < 0) {
-                int64_t w_idx = (num_parameters_ == 1) ? 0 : (i % num_parameters_);
+                int64_t w_idx = i % num_parameters_;
                 data[i] *= w[w_idx];
             }
         }
@@ -167,16 +148,8 @@ public:
         : Module("ELU"), alpha_(alpha), inplace_(inplace) {}
 
     Tensor forward(const Tensor& input) override {
-        Tensor result = inplace_ ? input : input.clone();
-        float* data = result.mutable_data_ptr<float>();
-        float alpha = static_cast<float>(alpha_);
-
-        for (int64_t i = 0; i < result.numel(); ++i) {
-            if (data[i] <= 0) {
-                data[i] = alpha * (std::exp(data[i]) - 1.0f);
-            }
-        }
-        return result;
+        // Use autograd-aware elu to maintain gradient flow
+        return torch::autograd::elu_autograd(input, alpha_);
     }
 
     std::string extra_repr() const override {
@@ -203,21 +176,8 @@ public:
         : Module("SELU"), inplace_(inplace) {}
 
     Tensor forward(const Tensor& input) override {
-        // SELU constants
-        constexpr float alpha = 1.6732632423543772848170429916717f;
-        constexpr float scale = 1.0507009873554804934193349852946f;
-
-        Tensor result = inplace_ ? input : input.clone();
-        float* data = result.mutable_data_ptr<float>();
-
-        for (int64_t i = 0; i < result.numel(); ++i) {
-            if (data[i] > 0) {
-                data[i] *= scale;
-            } else {
-                data[i] = scale * alpha * (std::exp(data[i]) - 1.0f);
-            }
-        }
-        return result;
+        // Use autograd-aware selu to maintain gradient flow
+        return torch::autograd::selu_autograd(input);
     }
 
 private:
@@ -236,29 +196,8 @@ public:
         : Module("GELU"), approximate_(approximate) {}
 
     Tensor forward(const Tensor& input) override {
-#ifdef PT_USE_CUDA
-        if (input.is_cuda()) {
-            return at::cuda_ops::gelu(input);
-        }
-#endif
-        // CPU path
-        Tensor result = input.clone();
-        float* data = result.mutable_data_ptr<float>();
-        const float* in_data = input.data_ptr<float>();
-
-        if (approximate_ == "tanh") {
-            // Fused AVX2 GELU: single pass, no intermediate tensors
-            at::native::hot::fused_gelu(in_data, data, result.numel());
-        } else {
-            // Exact (using erf)
-            constexpr float sqrt_half = 0.7071067811865476f;
-
-            for (int64_t i = 0; i < result.numel(); ++i) {
-                float x = in_data[i];
-                data[i] = 0.5f * x * (1.0f + std::erf(x * sqrt_half));
-            }
-        }
-        return result;
+        // Use autograd-aware gelu to maintain gradient flow
+        return torch::autograd::gelu_autograd(input, approximate_ == "tanh");
     }
 
     std::string extra_repr() const override {
@@ -279,7 +218,8 @@ public:
     Sigmoid() : Module("Sigmoid") {}
 
     Tensor forward(const Tensor& input) override {
-        return input.sigmoid();
+        // Use autograd-aware sigmoid to maintain gradient flow
+        return torch::autograd::sigmoid_autograd(input);
     }
 };
 
@@ -292,7 +232,8 @@ public:
     Tanh() : Module("Tanh") {}
 
     Tensor forward(const Tensor& input) override {
-        return input.tanh();
+        // Use autograd-aware tanh to maintain gradient flow
+        return torch::autograd::tanh_autograd(input);
     }
 };
 
@@ -371,22 +312,8 @@ public:
         : Module("Softplus"), beta_(beta), threshold_(threshold) {}
 
     Tensor forward(const Tensor& input) override {
-        Tensor result = input.clone();
-        float* data = result.mutable_data_ptr<float>();
-        const float* in_data = input.data_ptr<float>();
-        float beta = static_cast<float>(beta_);
-        float threshold = static_cast<float>(threshold_);
-        float inv_beta = 1.0f / beta;
-
-        for (int64_t i = 0; i < result.numel(); ++i) {
-            float x = in_data[i];
-            if (x * beta > threshold) {
-                data[i] = x;  // Linear for large values
-            } else {
-                data[i] = inv_beta * std::log(1.0f + std::exp(beta * x));
-            }
-        }
-        return result;
+        // Use autograd-aware softplus to maintain gradient flow
+        return torch::autograd::softplus_autograd(input, beta_, threshold_);
     }
 
     std::string extra_repr() const override {
@@ -436,16 +363,8 @@ public:
         , inplace_(inplace) {}
 
     Tensor forward(const Tensor& input) override {
-        Tensor result = inplace_ ? input : input.clone();
-        float* data = result.mutable_data_ptr<float>();
-        float min_v = static_cast<float>(min_val_);
-        float max_v = static_cast<float>(max_val_);
-
-        for (int64_t i = 0; i < result.numel(); ++i) {
-            if (data[i] < min_v) data[i] = min_v;
-            else if (data[i] > max_v) data[i] = max_v;
-        }
-        return result;
+        // Use autograd-aware hardtanh to maintain gradient flow
+        return torch::autograd::hardtanh_autograd(input, min_val_, max_val_);
     }
 
     std::string extra_repr() const override {
@@ -472,20 +391,8 @@ public:
         : Module("Hardsigmoid"), inplace_(inplace) {}
 
     Tensor forward(const Tensor& input) override {
-        Tensor result = inplace_ ? input : input.clone();
-        float* data = result.mutable_data_ptr<float>();
-
-        for (int64_t i = 0; i < result.numel(); ++i) {
-            float x = data[i];
-            if (x <= -3.0f) {
-                data[i] = 0.0f;
-            } else if (x >= 3.0f) {
-                data[i] = 1.0f;
-            } else {
-                data[i] = x / 6.0f + 0.5f;
-            }
-        }
-        return result;
+        // Use autograd-aware hardsigmoid to maintain gradient flow
+        return torch::autograd::hardsigmoid_autograd(input);
     }
 
 private:
@@ -503,23 +410,8 @@ public:
         : Module("Hardswish"), inplace_(inplace) {}
 
     Tensor forward(const Tensor& input) override {
-        Tensor result = inplace_ ? input : input.clone();
-        float* data = result.mutable_data_ptr<float>();
-        const float* in_data = input.data_ptr<float>();
-
-        for (int64_t i = 0; i < result.numel(); ++i) {
-            float x = in_data[i];
-            float hs;
-            if (x <= -3.0f) {
-                hs = 0.0f;
-            } else if (x >= 3.0f) {
-                hs = 1.0f;
-            } else {
-                hs = x / 6.0f + 0.5f;
-            }
-            data[i] = x * hs;
-        }
-        return result;
+        // Use autograd-aware hardswish to maintain gradient flow
+        return torch::autograd::hardswish_autograd(input);
     }
 
 private:
@@ -537,23 +429,8 @@ public:
         : Module("SiLU"), inplace_(inplace) {}
 
     Tensor forward(const Tensor& input) override {
-#ifdef PT_USE_CUDA
-        if (input.is_cuda()) {
-            Tensor sigmoid_x = input.sigmoid();
-            return input.mul(sigmoid_x);
-        }
-#endif
-        // CPU fast path: fused SiLU (sigmoid * x) in single AVX2 pass
-        if (input.dtype() == c10::ScalarType::Float && input.is_contiguous()) {
-            Tensor result = at::empty(input.sizes());
-            at::native::hot::fused_silu_scale(
-                input.data_ptr<float>(), 1.0f,
-                result.mutable_data_ptr<float>(), input.numel());
-            return result;
-        }
-        // Fallback
-        Tensor sigmoid_x = input.sigmoid();
-        return input.mul(sigmoid_x);
+        // Use autograd-aware silu to maintain gradient flow
+        return torch::autograd::silu_autograd(input);
     }
 
 private:
@@ -571,16 +448,8 @@ public:
         : Module("Mish"), inplace_(inplace) {}
 
     Tensor forward(const Tensor& input) override {
-        Tensor result = input.clone();
-        float* data = result.mutable_data_ptr<float>();
-        const float* in_data = input.data_ptr<float>();
-
-        for (int64_t i = 0; i < result.numel(); ++i) {
-            float x = in_data[i];
-            float sp = std::log(1.0f + std::exp(x));  // softplus
-            data[i] = x * std::tanh(sp);
-        }
-        return result;
+        // Use autograd-aware mish to maintain gradient flow
+        return torch::autograd::mish_autograd(input);
     }
 
 private:

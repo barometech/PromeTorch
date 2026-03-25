@@ -22,11 +22,9 @@
 
 ## КРИТИЧЕСКИЕ ПРОБЕЛЫ (блокируют реальное использование)
 
-### 1. Autograd НЕ подключён к Conv/BN/Pool/активациям
-**Влияние:** CNN тренировать НЕЛЬЗЯ. Только MLP + LSTM работают.
-**Что есть:** cuDNN backward (conv, pool, bn) уже реализован. 88 backward nodes.
-**Что нужно:** ConvBackward, BatchNormBackward, PoolBackward autograd nodes + wiring в forward.
-**Объём:** ~500 строк (nodes) + ~200 строк (wiring).
+### 1. ~~Autograd НЕ подключён к Conv/BN/Pool/активациям~~ FIXED (2026-03-25)
+**Статус:** Conv2d, BatchNorm2d, MaxPool2d, AvgPool2d + 14 activation modules wired to autograd.
+CNN training on CPU now works. New backward nodes: GeluBackward, SoftplusBackward.
 
 ### 2. cuBLAS не используется для mm/bmm
 **Влияние:** GEMM на CUDA в 5-10x медленнее cuBLAS.
@@ -58,19 +56,32 @@
 ### NN Modules без backward
 | Модуль | Forward | cuDNN Backward | Autograd Node | Статус |
 |--------|---------|---------------|---------------|--------|
-| Conv1d | CPU im2col+mm | Нет | Нет | BROKEN |
-| Conv2d | CPU im2col+mm + cuDNN | Есть | Нет | HALF-BROKEN |
+| Conv1d | CPU im2col+mm | Нет | Нет | BROKEN (no backward) |
+| Conv2d | CPU im2col+mm + cuDNN | Есть | **DONE** | **WORKING** |
 | Conv3d | STUB (zeros) | Нет | Нет | DEAD |
-| BatchNorm1d/2d | CPU raw | cuDNN есть | Нет | HALF-BROKEN |
+| BatchNorm1d | CPU raw | Нет | Нет | BROKEN (no backward) |
+| BatchNorm2d | CPU raw | cuDNN есть | **DONE** | **WORKING** |
 | LayerNorm | CPU raw | Нет | Нет | BROKEN |
 | GroupNorm | CPU raw | Нет | Нет | BROKEN |
-| MaxPool2d | CPU raw + cuDNN | cuDNN есть | Нет | HALF-BROKEN |
-| AvgPool2d | CPU raw + cuDNN | cuDNN есть | Нет | HALF-BROKEN |
-| Dropout | Mask mul raw | Нет | Нет | BROKEN (fixed: Dropout base now has autograd) |
-| LeakyReLU | CPU raw | Нет | LeakyReluBackward есть | HALF — node exists but module doesn't use it |
-| ELU/SELU/Mish | CPU raw | Нет | Backward nodes есть | HALF — same |
-| GELU | CPU raw | Нет | Нет | BROKEN |
-| Softmax (module) | CPU raw | Нет | Нет | BROKEN |
+| MaxPool2d | CPU raw + cuDNN | cuDNN есть | **DONE** | **WORKING** |
+| AvgPool2d | CPU raw + cuDNN | cuDNN есть | **DONE** | **WORKING** |
+| Dropout | Mask mul_autograd | N/A | **DONE** | **WORKING** |
+| ReLU | relu_autograd | N/A | **DONE** | **WORKING** |
+| ReLU6 | hardtanh_autograd | N/A | **DONE** | **WORKING** |
+| LeakyReLU | leaky_relu_autograd | Нет | **DONE** | **WORKING** |
+| ELU | elu_autograd | Нет | **DONE** | **WORKING** |
+| SELU | selu_autograd | Нет | **DONE** | **WORKING** |
+| GELU | gelu_autograd | Нет | **DONE** | **WORKING** |
+| SiLU | silu_autograd | Нет | **DONE** | **WORKING** |
+| Mish | mish_autograd | Нет | **DONE** | **WORKING** |
+| Sigmoid | sigmoid_autograd | Нет | **DONE** | **WORKING** |
+| Tanh | tanh_autograd | Нет | **DONE** | **WORKING** |
+| Hardtanh | hardtanh_autograd | Нет | **DONE** | **WORKING** |
+| Hardsigmoid | hardsigmoid_autograd | Нет | **DONE** | **WORKING** |
+| Hardswish | hardswish_autograd | Нет | **DONE** | **WORKING** |
+| Softplus | softplus_autograd | Нет | **DONE** | **WORKING** |
+| PReLU (1 param) | leaky_relu_autograd | Нет | **DONE** | **WORKING** |
+| Softmax (module) | Tensor ops chain | Нет | Нет | NO AUTOGRAD (use CrossEntropyLoss) |
 
 ### Оптимизаторы
 - **LBFGS** — отсутствует (IMPORTANT для scientific computing)

@@ -711,6 +711,115 @@ struct HardswishBackward : public Node {
 };
 
 // ============================================================================
+// GELU Backward
+// ============================================================================
+// GELU(x) = 0.5 * x * (1 + erf(x / sqrt(2)))
+// d/dx GELU(x) = 0.5 * (1 + erf(x/sqrt(2))) + x * exp(-x^2/2) / sqrt(2*pi)
+
+struct GeluBackward : public Node {
+    Tensor self_;
+    bool approximate_;  // true = tanh approximation, false = exact erf
+
+    GeluBackward(const Tensor& self, bool approximate)
+        : self_(self), approximate_(approximate) {}
+
+    void release_saved_tensors() override {
+        self_ = Tensor();
+    }
+
+    variable_list apply(variable_list&& grads) override {
+        auto& grad = grads[0];
+        if (!grad.defined()) return {Tensor()};
+
+        Tensor self_contig = self_.is_contiguous() ? self_ : self_.contiguous();
+        Tensor grad_contig = grad.is_contiguous() ? grad : grad.contiguous();
+        Tensor grad_input = at::empty(self_contig.sizes());
+
+        const float* g = grad_contig.data_ptr<float>();
+        const float* x = self_contig.data_ptr<float>();
+        float* out = grad_input.mutable_data_ptr<float>();
+        int64_t n = self_contig.numel();
+
+        if (approximate_) {
+            // Tanh approximation: GELU(x) = 0.5*x*(1 + tanh(sqrt(2/pi)*(x + 0.044715*x^3)))
+            // d/dx = 0.5*(1+t) + 0.5*x*(1-t^2) * sqrt(2/pi) * (1 + 3*0.044715*x^2)
+            // where t = tanh(sqrt(2/pi)*(x + 0.044715*x^3))
+            constexpr float sqrt_2_over_pi = 0.7978845608028654f;
+            for (int64_t i = 0; i < n; ++i) {
+                float xi = x[i];
+                float inner = sqrt_2_over_pi * (xi + 0.044715f * xi * xi * xi);
+                float t = std::tanh(inner);
+                float dtanh = 1.0f - t * t;
+                float dinner = sqrt_2_over_pi * (1.0f + 3.0f * 0.044715f * xi * xi);
+                out[i] = g[i] * (0.5f * (1.0f + t) + 0.5f * xi * dtanh * dinner);
+            }
+        } else {
+            // Exact: d/dx = 0.5*(1 + erf(x/sqrt(2))) + x * exp(-x^2/2) / sqrt(2*pi)
+            constexpr float sqrt_half = 0.7071067811865476f;
+            constexpr float inv_sqrt_2pi = 0.3989422804014327f;
+            for (int64_t i = 0; i < n; ++i) {
+                float xi = x[i];
+                float cdf = 0.5f * (1.0f + std::erf(xi * sqrt_half));
+                float pdf = inv_sqrt_2pi * std::exp(-0.5f * xi * xi);
+                out[i] = g[i] * (cdf + xi * pdf);
+            }
+        }
+
+        self_ = Tensor();
+        return {grad_input};
+    }
+    std::string name() const override { return "GeluBackward"; }
+};
+
+// ============================================================================
+// Softplus Backward
+// ============================================================================
+// Softplus(x) = (1/beta) * ln(1 + exp(beta*x))
+// d/dx = sigmoid(beta * x) = 1 / (1 + exp(-beta*x))
+
+struct SoftplusBackward : public Node {
+    Tensor self_;
+    double beta_;
+    double threshold_;
+
+    SoftplusBackward(const Tensor& self, double beta, double threshold)
+        : self_(self), beta_(beta), threshold_(threshold) {}
+
+    void release_saved_tensors() override {
+        self_ = Tensor();
+    }
+
+    variable_list apply(variable_list&& grads) override {
+        auto& grad = grads[0];
+        if (!grad.defined()) return {Tensor()};
+
+        Tensor self_contig = self_.is_contiguous() ? self_ : self_.contiguous();
+        Tensor grad_contig = grad.is_contiguous() ? grad : grad.contiguous();
+        Tensor grad_input = at::empty(self_contig.sizes());
+
+        const float* g = grad_contig.data_ptr<float>();
+        const float* x = self_contig.data_ptr<float>();
+        float* out = grad_input.mutable_data_ptr<float>();
+        int64_t n = self_contig.numel();
+        float beta = static_cast<float>(beta_);
+        float threshold = static_cast<float>(threshold_);
+
+        for (int64_t i = 0; i < n; ++i) {
+            if (x[i] * beta > threshold) {
+                out[i] = g[i];  // Linear region: gradient = 1
+            } else {
+                float sig = 1.0f / (1.0f + std::exp(-beta * x[i]));
+                out[i] = g[i] * sig;
+            }
+        }
+
+        self_ = Tensor();
+        return {grad_input};
+    }
+    std::string name() const override { return "SoftplusBackward"; }
+};
+
+// ============================================================================
 // Binary Operation Backward Functions
 // ============================================================================
 

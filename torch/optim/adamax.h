@@ -33,6 +33,25 @@ struct AdamaxParamState : public OptimizerParamState {
     int64_t step = 0;
     Tensor exp_avg;  // First moment (m)
     Tensor exp_inf;  // Infinity norm (u)
+
+    std::unordered_map<std::string, Tensor> save() const override {
+        std::unordered_map<std::string, Tensor> m;
+        Tensor step_t = at::zeros({});
+        step_t.mutable_data_ptr<float>()[0] = static_cast<float>(step);
+        m["step"] = step_t;
+        if (exp_avg.defined()) m["exp_avg"] = exp_avg;
+        if (exp_inf.defined()) m["exp_inf"] = exp_inf;
+        return m;
+    }
+
+    void load(const std::unordered_map<std::string, Tensor>& m) override {
+        auto it = m.find("step");
+        if (it != m.end()) step = static_cast<int64_t>(it->second.data_ptr<float>()[0]);
+        it = m.find("exp_avg");
+        if (it != m.end()) exp_avg = it->second.clone();
+        it = m.find("exp_inf");
+        if (it != m.end()) exp_inf = it->second.clone();
+    }
 };
 
 // ============================================================================
@@ -110,6 +129,11 @@ public:
 
     AdamaxOptions& options() { return options_; }
     const AdamaxOptions& options() const { return options_; }
+
+protected:
+    std::unique_ptr<OptimizerParamState> create_param_state() const override {
+        return std::make_unique<AdamaxParamState>();
+    }
 
 private:
     AdamaxOptions options_;

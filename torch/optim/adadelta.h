@@ -32,6 +32,25 @@ struct AdadeltaParamState : public OptimizerParamState {
     int64_t step = 0;
     Tensor square_avg;  // EMA of g^2
     Tensor acc_delta;   // EMA of delta^2
+
+    std::unordered_map<std::string, Tensor> save() const override {
+        std::unordered_map<std::string, Tensor> m;
+        Tensor step_t = at::zeros({});
+        step_t.mutable_data_ptr<float>()[0] = static_cast<float>(step);
+        m["step"] = step_t;
+        if (square_avg.defined()) m["square_avg"] = square_avg;
+        if (acc_delta.defined()) m["acc_delta"] = acc_delta;
+        return m;
+    }
+
+    void load(const std::unordered_map<std::string, Tensor>& m) override {
+        auto it = m.find("step");
+        if (it != m.end()) step = static_cast<int64_t>(it->second.data_ptr<float>()[0]);
+        it = m.find("square_avg");
+        if (it != m.end()) square_avg = it->second.clone();
+        it = m.find("acc_delta");
+        if (it != m.end()) acc_delta = it->second.clone();
+    }
 };
 
 // ============================================================================
@@ -102,6 +121,11 @@ public:
 
     AdadeltaOptions& options() { return options_; }
     const AdadeltaOptions& options() const { return options_; }
+
+protected:
+    std::unique_ptr<OptimizerParamState> create_param_state() const override {
+        return std::make_unique<AdadeltaParamState>();
+    }
 
 private:
     AdadeltaOptions options_;
