@@ -83,33 +83,106 @@ struct TrainConfig {
 // ============================================================================
 // Parallel Scan — O(T) via cumsum trick
 // ============================================================================
-// out[t] = sum_{s<=t} prod_{s<k<=t}(gate[k]) * x[s]
+// PARALLEL SCAN with custom backward (not autograd chain!)
+// ============================================================================
+// Forward: out[t] = sum_{s<=t} prod_{s<k<=t}(gate[k]) * x[s]
+// Backward: d_x[t] = sum_{s>=t} prod_{t<k<=s}(gate[k]) * d_out[s]  (reverse scan)
+//           d_gate[t] = sum_{s>=t} out[s-1] * d_out[s] * prod_{...}
 //
-// Uses log-space cumulative products for numerical stability:
-//   log_gates = log(clamp(gates, 1e-6))
-//   cumsum_log = cumsum(log_gates, dim=1)  clamp to [-20,20]
-//   scale = exp(-cumsum_log)
-//   result = cumsum(x * scale, dim=1) * exp(cumsum_log)
+// The autograd chain (log→cumsum→clamp→exp→mul) kills gradients because
+// clamp(-20,20) on cumsum_log zeroes gradient when clamped. Instead we
+// compute forward/backward directly with scalar loops.
 
-Tensor parallel_scan(const Tensor& gates, const Tensor& x) {
+// Forward: sequential scan (no autograd, just computation)
+Tensor parallel_scan_forward(const Tensor& gates, const Tensor& x) {
     // gates, x: [B, T, D]
-    auto log_gates = torch::autograd::log_autograd(
-        torch::autograd::clamp_autograd(gates, at::Scalar(1e-6f), at::Scalar(1e6f))
-    );
-    auto cumsum_log = torch::autograd::clamp_autograd(
-        torch::autograd::cumsum_autograd(log_gates, 1),
-        at::Scalar(-20.0f), at::Scalar(20.0f)
-    );
-    auto scale = torch::autograd::exp_autograd(
-        torch::autograd::neg_autograd(cumsum_log)
-    );
-    auto scaled = torch::autograd::mul_autograd(x, scale);
-    auto cumsum = torch::autograd::cumsum_autograd(scaled, 1);
-    auto result = torch::autograd::mul_autograd(
-        cumsum,
-        torch::autograd::exp_autograd(cumsum_log)
-    );
-    return result;
+    int64_t B = x.size(0), T = x.size(1), D = x.size(2);
+    auto out = at::zeros_like(x);
+    float* g_ptr = gates.data_ptr<float>();
+    float* x_ptr = x.data_ptr<float>();
+    float* o_ptr = out.data_ptr<float>();
+
+    for (int64_t b = 0; b < B; b++) {
+        for (int64_t d = 0; d < D; d++) {
+            float h = 0.0f;
+            for (int64_t t = 0; t < T; t++) {
+                int64_t idx = b * T * D + t * D + d;
+                h = g_ptr[idx] * h + x_ptr[idx];
+                o_ptr[idx] = h;
+            }
+        }
+    }
+    return out;
+}
+
+// Backward: reverse scan for d_x, d_gates
+std::pair<Tensor, Tensor> parallel_scan_backward(
+    const Tensor& gates, const Tensor& x, const Tensor& out, const Tensor& d_out
+) {
+    int64_t B = x.size(0), T = x.size(1), D = x.size(2);
+    auto d_x = at::zeros_like(x);
+    auto d_gates = at::zeros_like(gates);
+    float* g_ptr = gates.data_ptr<float>();
+    float* x_ptr = x.data_ptr<float>();
+    float* o_ptr = out.data_ptr<float>();
+    float* do_ptr = d_out.data_ptr<float>();
+    float* dx_ptr = d_x.data_ptr<float>();
+    float* dg_ptr = d_gates.data_ptr<float>();
+
+    for (int64_t b = 0; b < B; b++) {
+        for (int64_t d = 0; d < D; d++) {
+            float dh = 0.0f;
+            for (int64_t t = T - 1; t >= 0; t--) {
+                int64_t idx = b * T * D + t * D + d;
+                dh += do_ptr[idx];
+                dx_ptr[idx] = dh;
+                // d_gate[t] = dh * h[t-1]  (h[t] = gate[t]*h[t-1] + x[t])
+                if (t > 0) {
+                    dg_ptr[idx] = dh * o_ptr[b * T * D + (t-1) * D + d];
+                } else {
+                    dg_ptr[idx] = 0.0f;
+                }
+                dh = dh * g_ptr[idx];  // propagate through gate
+            }
+        }
+    }
+    return {d_x, d_gates};
+}
+
+// Custom autograd node for parallel scan
+struct ParallelScanBackward : public torch::autograd::Node {
+    Tensor saved_gates, saved_x, saved_out;
+
+    ParallelScanBackward(const Tensor& gates, const Tensor& x, const Tensor& out)
+        : saved_gates(gates), saved_x(x), saved_out(out) {}
+
+    torch::autograd::variable_list apply(torch::autograd::variable_list&& grads) override {
+        auto d_out = grads[0];
+        if (!d_out.defined()) return {Tensor(), Tensor()};
+        auto result = parallel_scan_backward(saved_gates, saved_x, saved_out, d_out);
+        return {result.first, result.second};  // d_gates, d_x
+    }
+
+    std::string name() const override { return "ParallelScanBackward"; }
+    void release_saved_tensors() override {
+        saved_gates = Tensor(); saved_x = Tensor(); saved_out = Tensor();
+    }
+};
+
+// Autograd-wrapped parallel scan
+Tensor parallel_scan(const Tensor& gates, const Tensor& x) {
+    auto gates_c = gates.contiguous();
+    auto x_c = x.contiguous();
+    auto out = parallel_scan_forward(gates_c, x_c);
+
+    // Wire autograd
+    if (gates.requires_grad() || x.requires_grad()) {
+        auto node = std::make_shared<ParallelScanBackward>(gates_c, x_c, out);
+        node->add_input_metadata(gates);
+        node->add_input_metadata(x);
+        torch::autograd::set_grad_fn(out, node);
+    }
+    return out;
 }
 
 // Helper: create a scalar tensor for autograd-tracked scalar multiply
