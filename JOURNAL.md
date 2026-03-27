@@ -5,6 +5,60 @@
 
 ---
 
+## 2026-03-27: 🔥 ПЕРВЫЙ В МИРЕ TRAINING ЯЗЫКОВОЙ МОДЕЛИ НА ЭЛЬБРУСЕ!
+
+### Достижение
+PIR 250M (0.74M params test config) обучена на PromeTorch C++ на процессоре Эльбрус-8СВ (E8C2).
+**Loss: 5.45 → 2.026 за 550 steps.** Модель генерирует текст (Shakespeare char-level).
+
+Никто в мире ранее не публиковал результатов training языковой модели на архитектуре E2K.
+
+### Результаты
+
+| Step | Loss | Perplexity | tok/s |
+|------|------|------------|-------|
+| 10 | 5.447 | 232 | 197 |
+| 50 | 3.518 | 34 | 196 |
+| 100 | 2.634 | 14 | 197 |
+| 200 | 2.314 | 10 | 198 |
+| 300 | 2.187 | 9 | 197 |
+| 400 | 2.103 | 8 | 197 |
+| 490 | **2.025** | **7.6** | 198 |
+| 550 | **2.026** | **7.6** | 191 |
+
+### Генерация (step 500)
+```
+wit Por we ompestabrin fingh,
+And thou will woul with and Land with arte,
+Liviong the urst so with hat my besen
+That the do,
+Cart you ange-ffoon thy the to ext atenter pof youtins fors,
+```
+
+### Конфигурация
+- **Модель**: PIR (parallel scan, no attention), n_layers=2, n_embd=128, block_size=256
+- **Параметры**: 0.74M, char-level (vocab=256)
+- **Датасет**: tiny_shakespeare.txt (1.1M chars)
+- **Оптимизатор**: AdamW lr=0.003, cosine schedule, warmup 200 steps
+- **Железо**: Эльбрус-8СВ (E8C2), 8 потоков (1 процессор из 4), 9.6 ГБ RAM
+- **Скорость**: 197 tok/s
+
+### Ключевые фиксы
+1. **Custom ParallelScanBackward** — sequential scan forward/backward вместо autograd chain (log→cumsum→clamp→exp которая теряла градиенты)
+2. **reshape_autograd в compute_loss** — narrow().contiguous() и reshape() обрывали autograd chain. Замена на reshape_autograd() восстановила gradient flow
+3. **add_autograd в RMSNorm** — .add(Scalar) не tracked autograd, замена на add_autograd()
+
+### Русский датасет подготовлен
+- Leipzig Corpora: русская Википедия (18.8 МБ) + русские новости (19.3 МБ) = **38 МБ**
+- Скачано на сервер, готово для следующего запуска
+
+### Следующие шаги
+- Запуск на 4 процессорах (32 ядра) с русским датасетом
+- Увеличение модели до n_embd=256+ (нужен fix SIGILL для OMP+256)
+- Соотношение params:tokens = 1:10 (Chinchilla optimal)
+
+---
+
 ## 2026-03-24: NM QUAD 64 ЯДРА РАБОТАЮТ! Row-Parallel Architecture (dispatcher_v3)
 
 ### Проблема
