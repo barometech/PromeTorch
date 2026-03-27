@@ -10,10 +10,13 @@
 #include "aten/src/ATen/native/cpu/tuda/TudaVec.h"
 
 // EML (Elbrus Math Library) BLAS integration
-#if defined(TUDA_E2K) && __has_include(<eml/cblas.h>)
-#define PT_USE_EML_BLAS 1
-#include <eml/cblas.h>
-#endif
+// DISABLED: EML cblas_sgemm has SIGILL bug with OMP_NUM_THREADS=32 + large matrices
+// Using TUDA 6x6 micro-kernel GEMM instead (NUMA-safe, no SIGILL)
+// To re-enable: uncomment the #define below
+// #if defined(TUDA_E2K) && __has_include(<eml/cblas.h>)
+// #define PT_USE_EML_BLAS 1
+// #include <eml/cblas.h>
+// #endif
 
 // System BLAS (MKL, OpenBLAS, etc.) for x86 — if available and not on Elbrus
 #if !defined(TUDA_E2K) && !defined(PT_USE_EML_BLAS) && defined(PT_USE_SYSTEM_BLAS)
