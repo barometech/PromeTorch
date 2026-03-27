@@ -1176,20 +1176,36 @@ int main(int argc, char** argv) {
         float lr = get_lr(step, train_cfg);
         optimizer.set_lr(lr);
 
+        // MEMORY DEBUG: track RSS at each phase (first 5 steps only)
+        bool mem_debug = (step <= 5);
+        long rss_before = mem_debug ? get_rss_mb() : 0;
+
         // Get batch
         auto [input, target] = dataset.get_batch(train_cfg.batch_size);
+        long rss_after_batch = mem_debug ? get_rss_mb() : 0;
 
         // Forward pass
-        // CRITICAL: use set_to_none=true to release gradient tensors completely
-        // instead of keeping zero-filled tensors that waste memory
         optimizer.zero_grad(/*set_to_none=*/true);
         auto logits = model->forward(input);
+        long rss_after_fwd = mem_debug ? get_rss_mb() : 0;
 
         // Compute loss
         auto loss = model->compute_loss(logits, target);
+        long rss_after_loss = mem_debug ? get_rss_mb() : 0;
 
         // Backward pass
         torch::autograd::backward({loss});
+        long rss_after_bwd = mem_debug ? get_rss_mb() : 0;
+
+        if (mem_debug) {
+            std::cout << "MEM step " << step
+                      << " | start:" << rss_before
+                      << " batch:" << rss_after_batch
+                      << " fwd:" << rss_after_fwd
+                      << " loss:" << rss_after_loss
+                      << " bwd:" << rss_after_bwd
+                      << " MB" << std::endl;
+        }
 
         // DEBUG: Check gradients on first few steps
         if (step <= 3) {
@@ -1227,20 +1243,36 @@ int main(int argc, char** argv) {
 
         // Gradient clipping
         float grad_norm = fast_clip_grad_norm_(*model, train_cfg.grad_clip);
+        long rss_after_clip = mem_debug ? get_rss_mb() : 0;
 
         // Optimizer step
         optimizer.step();
+        long rss_after_step = mem_debug ? get_rss_mb() : 0;
 
         // CRITICAL: Release autograd graph from this step
-        // Without this, every intermediate tensor (gates, x, out, tanh results,
-        // sigmoid results, etc.) from forward+backward is kept alive via
-        // shared_ptr chains: parameter -> grad_fn -> saved tensors -> ...
-        // For 5.5M params with 32 dynamic_parallel_scan calls per step,
-        // each holding ~10 tensors of 4MB = ~1.3 GB per step, accumulating forever.
         release_autograd_graph(*model);
 
+        // Also explicitly drop logits and loss tensors — they hold references
+        // to the entire forward computation graph through their grad_fn chains
+        float loss_val_save = loss.data_ptr<float>()[0];  // save before dropping
+        logits = Tensor();  // drop reference to forward graph
+        loss = Tensor();    // drop reference to loss graph
+        input = Tensor();   // drop batch tensors
+        target = Tensor();
+
+        long rss_after_release = mem_debug ? get_rss_mb() : 0;
+
+        if (mem_debug) {
+            std::cout << "MEM step " << step
+                      << " | clip:" << rss_after_clip
+                      << " step:" << rss_after_step
+                      << " release:" << rss_after_release
+                      << " MB | delta:" << (rss_after_release - rss_before) << " MB"
+                      << std::endl;
+        }
+
         // Track loss (extract value BEFORE releasing graph)
-        float loss_val = loss.data_ptr<float>()[0];
+        float loss_val = loss_val_save;  // saved before dropping tensor
         running_loss += loss_val;
         running_count++;
 
