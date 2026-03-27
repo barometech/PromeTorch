@@ -118,11 +118,13 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "e2k|elbrus")
     # Enable manually: -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON
     # set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
 
-    # EML (Elbrus Math Library) — VLIW-optimized BLAS, 230+ GFLOPS on E8C2
-    include_directories(/usr/include/eml)
-    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -leml_mt -lpthread")
-
-    add_compile_definitions(TUDA_E2K PT_USE_EML_BLAS)
+    # EML disabled: SIGILL bug with OMP_NUM_THREADS=32 + large matrices (n_embd>=256)
+    # Using TUDA 6x6 micro-kernel GEMM + NUMA-aware parallelism instead
+    # To re-enable EML: uncomment lines below and add PT_USE_EML_BLAS to definitions
+    # include_directories(/usr/include/eml)
+    # set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -leml_mt -lpthread")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -lpthread")
+    add_compile_definitions(TUDA_E2K)
 
     # NUMA support for multi-chip Elbrus (4-chip E8C2: 1840 GFLOPS with NUMA-aware GEMM)
     # libnuma enables per-node memory allocation and thread pinning.
