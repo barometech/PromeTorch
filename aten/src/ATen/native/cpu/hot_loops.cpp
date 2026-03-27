@@ -51,7 +51,7 @@ using tuda::VecF;
 // Result: 4x node-local parallel = 1840 GFLOPS (linear scaling).
 // ============================================================================
 
-#ifdef PT_USE_NUMA
+#if defined(PT_USE_NUMA) && (defined(PT_USE_EML_BLAS) || defined(PT_USE_SYSTEM_BLAS))
 
 // Minimum matrix dimension to trigger NUMA-aware path.
 // Below this, single-node EML is faster (avoids thread/alloc overhead).
@@ -64,10 +64,7 @@ void sgemm_numa(int64_t M, int64_t K, int64_t N, float alpha,
     int num_nodes = numa_max_node() + 1;
     if (num_nodes <= 1 || M < 64) {
         // Single node or tiny M: fall back to plain EML
-        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-                    (int)M, (int)N, (int)K,
-                    alpha, A, (int)lda, B, (int)ldb,
-                    beta, C, (int)ldc);
+        tuda::blas::sgemm(M, K, N, alpha, A, lda, B, ldb, beta, C, ldc);
         return;
     }
 
@@ -115,7 +112,7 @@ void sgemm_numa(int64_t M, int64_t K, int64_t N, float alpha,
             // Each node calls EML sgemm on its tile of rows
             // B is shared (read-only, acceptable cross-NUMA since it's in cache)
             // C is written directly (each node writes disjoint rows)
-            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+            tuda::blas::sgemm(
                         (int)m_tile, (int)N, (int)K,
                         alpha,
                         A_use, A_local ? (int)K : (int)lda,
@@ -204,12 +201,12 @@ void sgemm(int64_t M, int64_t K, int64_t N, float alpha, const float* A, int64_t
         return;
     }
   #endif
-    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+    tuda::blas::sgemm(
                 (int)M, (int)N, (int)K,
                 alpha, A, (int)lda, B, (int)ldb,
                 beta, C, (int)ldc);
 #elif defined(PT_USE_SYSTEM_BLAS)
-    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+    tuda::blas::sgemm(
                 (int)M, (int)N, (int)K,
                 alpha, A, (int)lda, B, (int)ldb,
                 beta, C, (int)ldc);
