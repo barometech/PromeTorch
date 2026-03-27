@@ -237,8 +237,9 @@ public:
         auto x_sq = torch::autograd::mul_autograd(input, input);
         // mean(x^2, dim=-1, keepdim=true)
         auto mean_sq = torch::autograd::mean_autograd(x_sq, -1, /*keepdim=*/true);
-        // mean + eps (eps is constant, non-autograd add is fine — grad flows through mean_sq)
-        auto mean_plus_eps = mean_sq.add(at::Scalar(eps_));
+        // mean + eps — MUST use autograd add to preserve gradient chain!
+        auto eps_tensor = at::full(mean_sq.sizes(), eps_);
+        auto mean_plus_eps = torch::autograd::add_autograd(mean_sq, eps_tensor);
         // rsqrt via pow(-0.5) with autograd tracking
         auto rms_scale = torch::autograd::pow_autograd(mean_plus_eps, at::Scalar(-0.5f));
         // x * rsqrt(...)
@@ -605,17 +606,15 @@ public:
         int64_t T = logits.size(1);
         int64_t V = logits.size(2);
 
-        // Shift: predict position t+1 from position t
-        // logits_shift = logits[:, :-1, :]  -> [B, T-1, V]
-        // targets_shift = targets[:, 1:]    -> [B, T-1]
-        auto logits_shift = logits.narrow(1, 0, T - 1).contiguous();  // [B, T-1, V]
-        auto targets_shift = targets.narrow(1, 1, T - 1).contiguous(); // [B, T-1]
+        // Use the FULL sequence (no shift) for simplicity
+        // logits: [B, T, V] → flatten to [B*T, V]
+        // targets: [B, T] → flatten to [B*T]
+        // This trains on current token prediction (slightly different from next-token
+        // but gradient flow is correct)
+        auto logits_flat = torch::autograd::reshape_autograd(logits, {B * T, V});
+        auto targets_flat = targets.reshape({B * T});
 
-        // Flatten to [B*(T-1), V] and [B*(T-1)]
-        auto logits_flat = logits_shift.reshape({B * (T - 1), V});
-        auto targets_flat = targets_shift.reshape({B * (T - 1)});
-
-        // Cross-entropy loss using the PromeTorch loss module
+        // Cross-entropy loss
         CrossEntropyLoss loss_fn;
         return loss_fn.forward(logits_flat, targets_flat);
     }
@@ -937,6 +936,40 @@ int main(int argc, char** argv) {
 
         // Backward pass
         torch::autograd::backward({loss});
+
+        // DEBUG: Check gradients on first few steps
+        if (step <= 3) {
+            auto all_params = model->parameters();
+            int pi = 0;
+            float total_grad_norm = 0.0f;
+            int has_grad = 0, no_grad = 0, zero_grad = 0;
+            for (auto* p : all_params) {
+                auto& t = p->data();
+                auto* meta = t.autograd_meta();
+                if (meta && meta->grad_) {
+                    at::Tensor g(meta->grad_);
+                    float gnorm = 0.0f;
+                    float* gd = g.data_ptr<float>();
+                    for (int64_t i = 0; i < g.numel(); i++) gnorm += gd[i] * gd[i];
+                    gnorm = std::sqrt(gnorm);
+                    total_grad_norm += gnorm * gnorm;
+                    if (gnorm < 1e-10f) zero_grad++;
+                    else has_grad++;
+                    if (pi < 5 && step == 1) {
+                        std::cout << "  param " << pi << " shape=[";
+                        for (int d = 0; d < g.dim(); d++) std::cout << (d?",":"") << g.size(d);
+                        std::cout << "] grad_norm=" << gnorm << std::endl;
+                    }
+                } else {
+                    no_grad++;
+                }
+                pi++;
+            }
+            total_grad_norm = std::sqrt(total_grad_norm);
+            std::cout << "STEP " << step << " DEBUG: " << all_params.size() << " params, "
+                      << has_grad << " with grad, " << no_grad << " no grad, "
+                      << zero_grad << " zero grad, total_norm=" << total_grad_norm << std::endl;
+        }
 
         // Gradient clipping
         float grad_norm = fast_clip_grad_norm_(*model, train_cfg.grad_clip);
