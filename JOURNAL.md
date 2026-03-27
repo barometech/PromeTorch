@@ -52,10 +52,29 @@ Cart you ange-ffoon thy the to ext atenter pof youtins fors,
 - Leipzig Corpora: русская Википедия (18.8 МБ) + русские новости (19.3 МБ) = **38 МБ**
 - Скачано на сервер, готово для следующего запуска
 
-### Следующие шаги
-- Запуск на 4 процессорах (32 ядра) с русским датасетом
-- Увеличение модели до n_embd=256+ (нужен fix SIGILL для OMP+256)
-- Соотношение params:tokens = 1:10 (Chinchilla optimal)
+### 5.5M PIR на русском тексте — 32 ядра Эльбрус (2026-03-27)
+
+| Step | Loss | PPL | tok/s |
+|------|------|-----|-------|
+| 10 | 5.593 | 269 | 57 |
+| 50 | 3.745 | 42 | 56 |
+| 100 | 2.362 | 11 | 56 |
+| 150 | 1.886 | 6.6 | 52 |
+| 190 | **1.717** | **5.6** | 52 |
+
+- **5.51M params**, n_embd=256, 4 layers, batch=16, lr=3e-4
+- **Русский датасет**: 38 МБ Leipzig Corpora (Википедия + новости)
+- **32 ядра** (4 процессора E8C2), OMP_NUM_THREADS=32
+- **EML отключён** (SIGILL bug), используется TUDA 6×6 micro-kernel
+- **OOM на step 190**: autograd граф съел 110+ ГБ из 125 ГБ RAM
+- 62/95 параметров с градиентами, gnorm стабильный
+
+### Следующие шаги (КРИТИЧНО)
+- **10x ускорение**: 52 tok/s → 500+ tok/s
+- **10x оптимизация памяти**: 110 ГБ → 10 ГБ (gradient checkpointing, in-place ops)
+- **Починить EML**: SIGILL при OMP=32+n_embd≥256 → 230 GFLOPS вместо 10 GFLOPS TUDA
+- **Checkpoint save**: сохранение весов каждые N steps
+- **Fused operations**: объединить RMSNorm+Linear, parallel_scan без промежуточных тензоров
 
 ---
 
