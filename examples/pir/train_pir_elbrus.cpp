@@ -114,6 +114,7 @@ struct TrainConfig {
 
     std::string data_path = "tiny_shakespeare.txt";
     std::string save_dir  = "checkpoints";
+    std::string load_path = "";  // --load checkpoint.ptor
 };
 
 // ============================================================================
@@ -605,13 +606,13 @@ Tensor apply_rotary_pos_emb(const Tensor& x, const Tensor& cos_t, const Tensor& 
     auto x1_chunks = x1.chunk(2, -1);
     Tensor x1a = x1_chunks[0];
     Tensor x1b = x1_chunks[1];
-    auto rotated = at::native::cat({torch::autograd::neg_autograd(x1b), x1a}, -1);
+    auto rotated = torch::autograd::cat_autograd({torch::autograd::neg_autograd(x1b), x1a}, -1);
 
     auto x1_cos = torch::autograd::mul_autograd(x1, cos_half);
     auto rot_sin = torch::autograd::mul_autograd(rotated, sin_half);
     auto x1_rotated = torch::autograd::add_autograd(x1_cos, rot_sin);
 
-    return at::native::cat({x1_rotated, x2}, -1);
+    return torch::autograd::cat_autograd({x1_rotated, x2}, -1);
 }
 
 // ============================================================================
@@ -645,14 +646,15 @@ public:
     }
 
     void init_weights() {
+        // Match Python: nn.init.orthogonal_ with specific gains
         auto& gw = gate_proj_->get_parameter("weight")->data();
-        init::normal_(gw, 0.0, 0.1 / std::sqrt((double)n_embd_));
+        init::orthogonal_(gw, 0.1);
 
         auto& vw = value_proj_->get_parameter("weight")->data();
-        init::normal_(vw, 0.0, 1.0 / std::sqrt((double)n_embd_));
+        init::orthogonal_(vw, 1.0);
 
         auto& ow = out_proj_->get_parameter("weight")->data();
-        init::normal_(ow, 0.0, 0.5 / std::sqrt((double)n_embd_));
+        init::orthogonal_(ow, 0.5);
     }
 
     Tensor forward(const Tensor& input) override {
@@ -699,8 +701,9 @@ public:
         register_module("mix_proj", mix_proj_);
         register_module("norm", norm_);
 
+        // Match Python: nn.init.orthogonal_(self.mix_proj.weight, gain=0.5)
         auto& mw = mix_proj_->get_parameter("weight")->data();
-        init::normal_(mw, 0.0, 0.5 / std::sqrt((double)n_embd));
+        init::orthogonal_(mw, 0.5);
     }
 
     Tensor forward(const Tensor& input) override {
@@ -735,12 +738,13 @@ public:
         register_module("w2", w2_);
         register_module("w3", w3_);
 
+        // Match Python: orthogonal_ init with specific gains
         auto& w1d = w1_->get_parameter("weight")->data();
-        init::normal_(w1d, 0.0, 1.0 / std::sqrt((double)n_embd));
+        init::orthogonal_(w1d, 1.0);
         auto& w2d = w2_->get_parameter("weight")->data();
-        init::normal_(w2d, 0.0, 0.5 / std::sqrt((double)hidden));
+        init::orthogonal_(w2d, 0.5);
         auto& w3d = w3_->get_parameter("weight")->data();
-        init::normal_(w3d, 0.0, 1.0 / std::sqrt((double)n_embd));
+        init::orthogonal_(w3d, 1.0);
     }
 
     Tensor forward(const Tensor& input) override {
@@ -826,7 +830,8 @@ public:
         register_module("lm_head", lm_head_);
 
         auto& lm_w = lm_head_->get_parameter("weight")->data();
-        init::normal_(lm_w, 0.0, 0.02);
+        // Match Python: std = 0.02 / sqrt(2 * n_layers)
+        init::normal_(lm_w, 0.0, 0.02 / std::sqrt(2.0 * cfg.n_layers));
 
         int64_t total = count_parameters(*this);
         std::cout << "PIR model initialized: " << (total / 1e6) << "M parameters"
@@ -839,9 +844,8 @@ public:
     Tensor forward(const Tensor& input) override {
         int64_t T = input.size(1);
         auto x = tok_emb_->forward(input);
-
-        auto [cos_t, sin_t] = rope_.get(T);
-        x = apply_rotary_pos_emb(x, cos_t, sin_t);
+        // RoPE disabled: chunk/narrow/cat break autograd in PromeTorch
+        // PIR parallel scan is inherently position-aware (sequential recurrence)
 
         for (auto& block : blocks_) {
             x = block->forward(x);
@@ -872,6 +876,11 @@ public:
         std::vector<float> input_data;
         for (char c : prompt) {
             input_data.push_back(static_cast<float>(static_cast<unsigned char>(c)));
+        }
+
+        // Disable autograd for generation (saves memory, faster)
+        for (auto* p : this->parameters()) {
+            p->data().set_requires_grad(false);
         }
 
         for (int64_t i = 0; i < max_tokens; i++) {
@@ -912,6 +921,10 @@ public:
             input_data.push_back(static_cast<float>(next_token));
         }
 
+        // Re-enable autograd for training
+        for (auto* p : this->parameters()) {
+            p->data().set_requires_grad(true);
+        }
         return result;
     }
 };
@@ -1059,6 +1072,8 @@ void parse_args(int argc, char** argv, PIRConfig& model_cfg, TrainConfig& train_
             train_cfg.save_interval = std::atoi(argv[++i]);
         } else if (arg == "--save_dir" && i + 1 < argc) {
             train_cfg.save_dir = argv[++i];
+        } else if (arg == "--load" && i + 1 < argc) {
+            train_cfg.load_path = argv[++i];
         } else if (arg == "--threads" && i + 1 < argc) {
             setup_numa_threads(std::atoi(argv[++i]));
         } else if (arg == "--full") {
@@ -1144,6 +1159,18 @@ int main(int argc, char** argv) {
 
     // Create model
     auto model = std::make_shared<PIR250M>(model_cfg);
+
+    // Load checkpoint if specified
+    if (!train_cfg.load_path.empty()) {
+        std::cout << "Loading checkpoint: " << train_cfg.load_path << std::endl;
+        try {
+            auto sd = torch::load_state_dict(train_cfg.load_path);
+            model->load_state_dict(sd);
+            std::cout << "Checkpoint loaded successfully!" << std::endl;
+        } catch (const std::exception& e) {
+            std::cerr << "Failed to load checkpoint: " << e.what() << std::endl;
+        }
+    }
 
     rss = get_rss_mb();
     if (rss > 0) std::cout << "RSS after model: " << rss << " MB" << std::endl;
@@ -1326,7 +1353,7 @@ int main(int argc, char** argv) {
 
             std::cout << ">>> ";
             for (char c : generated) {
-                if (c >= 32 && c < 127) {
+                if ((unsigned char)c >= 32) {
                     std::cout << c;
                 } else if (c == '\n') {
                     std::cout << '\n';
@@ -1374,7 +1401,7 @@ int main(int argc, char** argv) {
     model->eval();
     std::string final_text = model->generate("To be or not to be, ", 500, 0.7f);
     for (char c : final_text) {
-        if (c >= 32 && c < 127) std::cout << c;
+        if ((unsigned char)c >= 32) std::cout << c;
         else if (c == '\n') std::cout << '\n';
         else std::cout << '?';
     }
