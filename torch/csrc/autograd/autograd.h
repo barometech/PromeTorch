@@ -1308,5 +1308,29 @@ inline Tensor repeat_interleave_autograd(const Tensor& self, int64_t repeats, in
     return result;
 }
 
+// cat_autograd: concatenate tensors with gradient tracking
+inline Tensor cat_autograd(const std::vector<Tensor>& tensors, int64_t dim) {
+    Tensor result = at::native::cat(tensors, dim);
+
+    bool any_requires_grad = false;
+    for (auto& t : tensors) {
+        if (t.requires_grad()) { any_requires_grad = true; break; }
+    }
+
+    if (any_requires_grad) {
+        std::vector<int64_t> split_sizes;
+        for (auto& t : tensors) {
+            split_sizes.push_back(t.size(dim < 0 ? t.dim() + dim : dim));
+        }
+        auto grad_fn = std::make_shared<CatBackward>(split_sizes, dim < 0 ? result.dim() + dim : dim);
+        for (auto& t : tensors) {
+            grad_fn->add_input_metadata(t);
+        }
+        set_grad_fn(result, grad_fn);
+        result.set_requires_grad(true);
+    }
+    return result;
+}
+
 } // namespace autograd
 } // namespace torch
