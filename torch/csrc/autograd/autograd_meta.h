@@ -111,12 +111,17 @@ inline AutogradMetaImpl* get_autograd_meta(const at::Tensor& tensor) {
 }
 
 // Set grad_fn for a tensor
+// IMPORTANT: This also sets requires_grad=true, because a tensor with grad_fn
+// is part of the autograd graph and must be tracked for gradient computation.
+// Without this, downstream ops (add_input_metadata, gradient_edge) would create
+// null edges, silently cutting off gradient flow.
 inline void set_grad_fn(at::Tensor& tensor, std::shared_ptr<Node> grad_fn, uint32_t output_nr = 0) {
     // Ensure we have AutogradMetaImpl (upgrades if necessary)
     auto* meta = ensure_autograd_meta_impl(tensor);
     meta->grad_fn = std::move(grad_fn);
     meta->output_nr_ = output_nr;
     meta->is_leaf_ = false;  // Tensors with grad_fn are not leaves
+    meta->requires_grad_ = true;  // CRITICAL: tensor with grad_fn must require grad
 }
 
 // Get grad_fn from a tensor

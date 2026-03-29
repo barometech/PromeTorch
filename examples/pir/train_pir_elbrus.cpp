@@ -253,6 +253,7 @@ Tensor parallel_scan(const Tensor& gates, const Tensor& x) {
         node->add_input_metadata(gates);
         node->add_input_metadata(x);
         torch::autograd::set_grad_fn(out, node);
+        out.set_requires_grad(true);
     }
     return out;
 }
@@ -375,6 +376,7 @@ Tensor dynamic_parallel_scan(const Tensor& x, const Tensor& gate_logits,
         node->add_input_metadata(gate_logits);
         node->add_input_metadata(base_decay);
         torch::autograd::set_grad_fn(scan_out, node);
+        scan_out.set_requires_grad(true);
     }
 
     return scan_out;
