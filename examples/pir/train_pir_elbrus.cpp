@@ -1234,13 +1234,13 @@ int main(int argc, char** argv) {
                       << " MB" << std::endl;
         }
 
-        // DEBUG: Check gradients on first few steps
-        if (step <= 3) {
-            auto all_params = model->parameters();
+        // DEBUG: Check gradients on first step — show WHICH params have no grad
+        if (step <= 1) {
+            auto named = model->named_parameters();
             int pi = 0;
             float total_grad_norm = 0.0f;
             int has_grad = 0, no_grad = 0, zero_grad = 0;
-            for (auto* p : all_params) {
+            for (auto& [name, p] : named) {
                 auto& t = p->data();
                 auto* meta = t.autograd_meta();
                 if (meta && meta->grad_) {
@@ -1259,11 +1259,14 @@ int main(int argc, char** argv) {
                     }
                 } else {
                     no_grad++;
+                    std::cout << "  NO GRAD: " << name << " shape=[";
+                    for (int d = 0; d < t.dim(); d++) std::cout << (d?",":"") << t.size(d);
+                    std::cout << "] requires_grad=" << t.requires_grad() << std::endl;
                 }
                 pi++;
             }
             total_grad_norm = std::sqrt(total_grad_norm);
-            std::cout << "STEP " << step << " DEBUG: " << all_params.size() << " params, "
+            std::cout << "STEP " << step << " DEBUG: " << named.size() << " params, "
                       << has_grad << " with grad, " << no_grad << " no grad, "
                       << zero_grad << " zero grad, total_norm=" << total_grad_norm << std::endl;
         }
