@@ -63,9 +63,6 @@ from ._C import (
     isfinite,
     multinomial,
     einsum,
-    compile as _compile_raw,
-    CompiledModule,
-
     # Autograd
     no_grad as _CppNoGrad,
     enable_grad,
@@ -118,7 +115,7 @@ class no_grad:
                 return func(*args, **kwargs)
         return wrapper
 
-def compile(model, **kwargs):
+def compile(model, **kwargs):  # no-op if _C doesn't support it
     """Compile a model for fast inference using PromePile JIT.
 
     Traces the model's forward pass on first call and then executes via
@@ -146,7 +143,11 @@ def compile(model, **kwargs):
         invocation and then executes the optimized graph on subsequent calls
         with the same input shape.
     """
-    return _compile_raw(model, **kwargs)
+    try:
+        from ._C import compile as _compile_raw
+        return _compile_raw(model, **kwargs)
+    except ImportError:
+        return model  # no-op fallback
 
 
 def manual_seed(seed: int):
@@ -262,7 +263,7 @@ __all__ = [
     'multinomial',
     'einsum',
     'compile',
-    'CompiledModule',
+    # 'CompiledModule',  # requires rebuilt _C.so
 
     # Autograd
     'no_grad',

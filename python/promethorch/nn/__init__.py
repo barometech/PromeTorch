@@ -34,7 +34,7 @@ from .._C.nn import (
     Hardswish,
 
     # Normalization
-    BatchNorm1d as _CppBatchNorm1d,
+    # BatchNorm1d as _CppBatchNorm1d,  # requires rebuilt _C.so
     BatchNorm2d,
     LayerNorm as _CppLayerNorm,
 
