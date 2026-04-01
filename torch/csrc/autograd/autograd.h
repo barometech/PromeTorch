@@ -924,6 +924,32 @@ inline Tensor narrow_autograd(const Tensor& self, int64_t dim, int64_t start, in
     return result;
 }
 
+// ============================================================================
+// Chunk with Autograd - uses narrow_autograd internally to preserve gradient chain
+// chunk(x, N, dim) = [narrow(x, dim, 0, sz), narrow(x, dim, sz, sz), ...]
+// ============================================================================
+inline std::vector<Tensor> chunk_autograd(const Tensor& self, int64_t chunks, int64_t dim = 0) {
+    int64_t ndim = self.dim();
+    if (dim < 0) dim += ndim;
+    PT_CHECK(dim >= 0 && dim < ndim);
+    PT_CHECK(chunks > 0);
+
+    int64_t dim_size = self.size(dim);
+    int64_t split_size = (dim_size + chunks - 1) / chunks;
+
+    std::vector<Tensor> result;
+    result.reserve(chunks);
+
+    int64_t start = 0;
+    while (start < dim_size) {
+        int64_t length = std::min(split_size, dim_size - start);
+        result.push_back(narrow_autograd(self, dim, start, length));
+        start += length;
+    }
+
+    return result;
+}
+
 inline Tensor select_autograd(const Tensor& self, int64_t dim, int64_t index) {
     Tensor result = at::native::select(self, dim, index);
     if (compute_requires_grad(self)) {

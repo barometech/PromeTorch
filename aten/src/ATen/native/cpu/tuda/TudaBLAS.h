@@ -10,13 +10,16 @@
 #include "aten/src/ATen/native/cpu/tuda/TudaVec.h"
 
 // EML (Elbrus Math Library) BLAS integration
-// Fix for SIGILL: call eml_SetNumThreads(1) so EML runs single-threaded per call.
-// OMP parallelizes at batch/layer level instead.
+// SIGILL FIX: EML uses OMP internally. When cblas_sgemm is called from within
+// an OMP parallel region or from multiple std::threads simultaneously, EML's
+// internal OMP fork conflicts with the outer threading → SIGILL on E2K.
+// Solution: force EML single-threaded per call via omp_set_num_threads(1) in
+// NUMA worker threads, and set omp_set_max_active_levels(1) globally at init.
+// Our own parallelism (NUMA tiling via std::thread) handles the outer level.
 #if defined(TUDA_E2K) && __has_include(<eml/cblas.h>)
 #define PT_USE_EML_BLAS 1
 #include <eml/cblas.h>
-extern "C" void eml_SetNumThreads(int n);
-static struct _EMLInit { _EMLInit() { eml_SetNumThreads(1); } } _eml_init;
+#include <omp.h>
 #endif
 
 // System BLAS (MKL, OpenBLAS, etc.) for x86 — if available and not on Elbrus

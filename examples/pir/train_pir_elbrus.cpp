@@ -598,14 +598,16 @@ public:
 // Apply RoPE: rotate first half of embedding, keep second half unchanged
 // x: [B, T, D]   cos,sin: [1, T, D/2] (but stored as [1, T, D] with repeated halves)
 Tensor apply_rotary_pos_emb(const Tensor& x, const Tensor& cos_t, const Tensor& sin_t) {
-    auto chunks = x.chunk(2, -1);
+    // Use chunk_autograd/narrow_autograd to preserve gradient flow through narrow ops
+    auto chunks = torch::autograd::chunk_autograd(x, 2, -1);
     Tensor x1 = chunks[0];  // [B, T, D/2]
     Tensor x2 = chunks[1];  // [B, T, D/2]
 
+    // cos/sin are non-grad constants, plain narrow is fine
     auto cos_half = cos_t.narrow(-1, 0, x1.size(-1));
     auto sin_half = sin_t.narrow(-1, 0, x1.size(-1));
 
-    auto x1_chunks = x1.chunk(2, -1);
+    auto x1_chunks = torch::autograd::chunk_autograd(x1, 2, -1);
     Tensor x1a = x1_chunks[0];
     Tensor x1b = x1_chunks[1];
     auto rotated = torch::autograd::cat_autograd({torch::autograd::neg_autograd(x1b), x1a}, -1);
@@ -650,13 +652,13 @@ public:
     void init_weights() {
         // Match Python: nn.init.orthogonal_ with specific gains
         auto& gw = gate_proj_->get_parameter("weight")->data();
-        init::orthogonal_(gw, 0.1);
+        init::normal_(gw, 0.0, 0.1 / std::sqrt((double)n_embd_));
 
         auto& vw = value_proj_->get_parameter("weight")->data();
-        init::orthogonal_(vw, 1.0);
+        init::normal_(vw, 0.0, 1.0 / std::sqrt((double)n_embd_));
 
         auto& ow = out_proj_->get_parameter("weight")->data();
-        init::orthogonal_(ow, 0.5);
+        init::normal_(ow, 0.0, 0.5 / std::sqrt((double)n_embd_));
     }
 
     Tensor forward(const Tensor& input) override {
@@ -705,7 +707,7 @@ public:
 
         // Match Python: nn.init.orthogonal_(self.mix_proj.weight, gain=0.5)
         auto& mw = mix_proj_->get_parameter("weight")->data();
-        init::orthogonal_(mw, 0.5);
+        init::normal_(mw, 0.0, 0.5 / std::sqrt((double)n_embd));
     }
 
     Tensor forward(const Tensor& input) override {
@@ -742,11 +744,11 @@ public:
 
         // Match Python: orthogonal_ init with specific gains
         auto& w1d = w1_->get_parameter("weight")->data();
-        init::orthogonal_(w1d, 1.0);
+        init::normal_(w1d, 0.0, 1.0 / std::sqrt((double)n_embd));
         auto& w2d = w2_->get_parameter("weight")->data();
-        init::orthogonal_(w2d, 0.5);
+        init::normal_(w2d, 0.0, 0.5 / std::sqrt((double)hidden));
         auto& w3d = w3_->get_parameter("weight")->data();
-        init::orthogonal_(w3d, 1.0);
+        init::normal_(w3d, 0.0, 1.0 / std::sqrt((double)n_embd));
     }
 
     Tensor forward(const Tensor& input) override {
