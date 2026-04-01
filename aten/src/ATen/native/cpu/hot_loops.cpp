@@ -20,6 +20,7 @@
 #ifdef PT_USE_EML_BLAS
 #include <eml/cblas.h>
 #include <eml/eml_vector.h>
+#include <omp.h>
 #endif
 
 #if !defined(PT_USE_EML_BLAS) && defined(PT_USE_SYSTEM_BLAS)
@@ -33,6 +34,39 @@
 #ifdef PT_USE_NUMA
 #include <numa.h>
 #include <thread>
+#endif
+
+// ============================================================================
+// EML SIGILL FIX: Prevent nested OpenMP on Elbrus E2K
+// ============================================================================
+// EML (cblas_sgemm) uses OMP internally. If called from within an OMP parallel
+// region or from multiple std::threads that each trigger OMP, we get nested OMP
+// fork on E2K → SIGILL (illegal instruction) for matrices >= 256.
+//
+// Fix: at static init time, disable nested OMP parallelism. This means:
+//   - Our outer OMP parallel regions work normally (parallel_scan, etc.)
+//   - EML's INTERNAL OMP calls become single-threaded (no nested fork)
+//   - NUMA tiling via std::thread still gives multi-node parallelism
+//   - Each NUMA thread calls EML single-threaded on its tile
+//
+// omp_set_max_active_levels(1) is the modern (OpenMP 5.0) replacement for
+// the deprecated omp_set_nested(0). It limits active parallel regions to 1 level.
+// ============================================================================
+#if defined(PT_USE_EML_BLAS) || defined(_OPENMP)
+#include <omp.h>
+namespace {
+struct OmpNestedGuard {
+    OmpNestedGuard() {
+        // Prevent nested OMP: only one level of parallelism allowed.
+        // This stops EML from forking threads when called from within
+        // an OMP parallel region or from NUMA std::threads.
+        omp_set_max_active_levels(1);
+        // Also use deprecated API for older OpenMP implementations (LCC 1.29)
+        omp_set_nested(0);
+    }
+};
+static OmpNestedGuard g_omp_nested_guard;
+} // anonymous namespace
 #endif
 
 namespace at {
@@ -112,6 +146,12 @@ void sgemm_numa(int64_t M, int64_t K, int64_t N, float alpha,
             // Each node calls EML sgemm on its tile of rows
             // B is shared (read-only, acceptable cross-NUMA since it's in cache)
             // C is written directly (each node writes disjoint rows)
+            // SIGILL FIX: Force EML single-threaded in this worker thread.
+            // Without this, EML's internal OMP fork from multiple std::threads
+            // causes SIGILL on E2K for matrices >= 256.
+#ifdef _OPENMP
+            omp_set_num_threads(1);
+#endif
             tuda::blas::sgemm(
                         (int)m_tile, (int)N, (int)K,
                         alpha,
@@ -172,6 +212,10 @@ void sgemm_nt_numa(int64_t M, int64_t K, int64_t N, float alpha,
             }
 
             // B^T: B is [N,K], shared read-only across all nodes
+            // SIGILL FIX: Force EML single-threaded in NUMA worker thread
+#ifdef _OPENMP
+            omp_set_num_threads(1);
+#endif
             cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
                         (int)m_tile, (int)N, (int)K,
                         alpha,
@@ -634,6 +678,10 @@ void sgemm_tn(int64_t M, int64_t K, int64_t N, float alpha, const float* A, int6
                     // A is [M, K] row-major. A^T rows [k_start..k_end] =
                     // columns [k_start..k_end] of A.
                     // Pointer: A + k_start, lda unchanged (full K width).
+                    // SIGILL FIX: Force EML single-threaded in NUMA worker thread
+#ifdef _OPENMP
+                    omp_set_num_threads(1);
+#endif
                     cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
                                 (int)k_tile, (int)N, (int)M,
                                 alpha,

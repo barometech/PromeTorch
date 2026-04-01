@@ -95,7 +95,7 @@ if(PT_USE_TUDA)
         endif()
     elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "e2k|elbrus")
         message(STATUS "TUDA: Elbrus E2K detected — E2K path will be used")
-        add_compile_definitions(TUDA_E2K)
+        add_compile_definitions(TUDA_E2K PT_USE_EML_BLAS)
     elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|x86")
         message(STATUS "TUDA: x86_64 detected — AVX2 path will be used")
     else()
@@ -118,8 +118,9 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "e2k|elbrus")
     # Enable manually: -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON
     # set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
 
-    # EML re-enabled with eml_SetNumThreads(1) fix for SIGILL
-    # EML runs single-threaded per call, OMP parallelizes at batch level
+    # EML re-enabled with nested OMP fix bug on E8C2 with ANY OMP + n_embd>=256
+    # eml_SetNumThreads(1) does not fix it
+    # omp_set_max_active_levels(1) prevents nested OMP SIGILL
     include_directories(/usr/include/eml)
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -leml_mt -lpthread")
     add_compile_definitions(TUDA_E2K PT_USE_EML_BLAS)
