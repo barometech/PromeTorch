@@ -3,6 +3,41 @@
 Полная история разработки проекта. Актуальные инструкции — в `CLAUDE.md`.
 Полный аудит инфраструктуры — в `INFRASTRUCTURE_AUDIT.md`.
 
+## 2026-04-02: EML SIGILL ROOT CAUSE НАЙДЕН И ИСПРАВЛЕН
+
+### Проблема
+`cblas_sgemm` из EML (Elbrus Math Library) вызывал SIGILL (Illegal Instruction) в PromeTorch на Elbrus E8C2. Standalone тест показывал что EML работает идеально.
+
+### Диагностика
+Написал `test_eml_diag.c` с 8 изолированными тестами:
+- TEST 1-4: cblas_sgemm из main thread, с/без omp_set_max_active_levels, NT variant, from OMP parallel → **ВСЕ OK**
+- TEST 5: cblas_sgemm из pthread → **SIGILL на ВСЕХ потоках**
+- TEST 6-8: после OMP scan, repeated calls, sgemv → **ВСЕ OK**
+
+Дополнительно `test_eml_diag3.c`:
+- 1 pthread → SIGILL
+- 4 sequential pthreads → SIGILL
+- 4 concurrent pthreads 64x64 → SIGILL
+- Даже с OMP_NUM_THREADS=1 → SIGILL
+
+### Root Cause
+**EML cblas_sgemm НЕЛЬЗЯ вызывать из pthread/std::thread на E2K.** Только из main thread. Даже single-threaded, даже 64x64 матрицы. E2K VLIW архитектура — EML код зависит от состояния VLIW pipeline main thread.
+
+### Исправление
+Удалены все `std::thread` обёртки для BLAS в `hot_loops.cpp`:
+- `sgemm_numa()` — pthread NUMA tiling
+- `sgemm_nt_numa()` — pthread NUMA tiling (NT variant)
+- `sgemm_tn` NUMA path — pthread NUMA tiling (TN variant)
+
+EML вызывается напрямую из main thread. EML сам управляет NUMA через свой внутренний OMP.
+
+### Результат
+- **EML работает!** 154 GFLOPS на 768×768, 54.6 GFLOPS на 128×768
+- **142M PIR training:** 72s (EML) vs 90s+ timeout (TUDA) для 3 шагов
+- **Добавлен PT_USE_EML_BLAS в CMakeLists.txt** как compile definition
+- **Файлы:** `aten/src/ATen/native/cpu/hot_loops.cpp`, `CMakeLists.txt`
+
+
 ---
 
 ## 2026-03-27: 🔥 ПЕРВЫЙ В МИРЕ TRAINING ЯЗЫКОВОЙ МОДЕЛИ НА ЭЛЬБРУСЕ!

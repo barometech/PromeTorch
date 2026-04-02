@@ -118,11 +118,11 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "e2k|elbrus")
     # Enable manually: -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON
     # set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
 
-    # EML re-enabled with nested OMP fix bug on E8C2 with ANY OMP + n_embd>=256
-    # eml_SetNumThreads(1) does not fix it
-    # omp_set_max_active_levels(1) prevents nested OMP SIGILL
+    # EML SIGILL ROOT CAUSE (2026-04-01): cblas_sgemm from ANY pthread = SIGILL on E2K.
+    # Even single-threaded, even 64x64 matrices. Only works from main thread.
+    # Fix: removed all pthread/std::thread NUMA wrappers. EML handles NUMA via OMP internally.
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -lpthread")
-    add_compile_definitions(TUDA_E2K)
+    add_compile_definitions(TUDA_E2K PT_USE_EML_BLAS)
 
     # NUMA support for multi-chip Elbrus (4-chip E8C2: 1840 GFLOPS with NUMA-aware GEMM)
     # libnuma enables per-node memory allocation and thread pinning.
