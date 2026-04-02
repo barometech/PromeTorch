@@ -236,21 +236,18 @@ void sgemm_nt_numa(int64_t M, int64_t K, int64_t N, float alpha,
 #endif // PT_USE_NUMA
 
 // BLAS wrappers — direct EML/System BLAS dispatch (avoid TudaBLAS indirection)
+// NOTE: EML cblas_sgemm MUST be called from the main thread on E2K.
+// Calling from pthread/std::thread causes SIGILL (even with OMP_NUM_THREADS=1).
+// EML handles NUMA-aware scheduling internally via OMP — do NOT wrap in pthreads.
 void sgemm(int64_t M, int64_t K, int64_t N, float alpha, const float* A, int64_t lda, const float* B, int64_t ldb, float beta, float* C, int64_t ldc) {
 #if defined(PT_USE_EML_BLAS)
-  #ifdef PT_USE_NUMA
-    // Large matrix on multi-chip Elbrus: NUMA-aware tiled GEMM
-    if (M >= NUMA_GEMM_THRESHOLD && K >= NUMA_GEMM_THRESHOLD && N >= NUMA_GEMM_THRESHOLD) {
-        sgemm_numa(M, K, N, alpha, A, lda, B, ldb, beta, C, ldc);
-        return;
-    }
-  #endif
-    tuda::blas::sgemm(
+    // Call EML directly from main thread — EML handles multi-core via OMP internally
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
                 (int)M, (int)N, (int)K,
                 alpha, A, (int)lda, B, (int)ldb,
                 beta, C, (int)ldc);
 #elif defined(PT_USE_SYSTEM_BLAS)
-    tuda::blas::sgemm(
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
                 (int)M, (int)N, (int)K,
                 alpha, A, (int)lda, B, (int)ldb,
                 beta, C, (int)ldc);
@@ -260,12 +257,6 @@ void sgemm(int64_t M, int64_t K, int64_t N, float alpha, const float* A, int64_t
 }
 void sgemm_nt(int64_t M, int64_t K, int64_t N, float alpha, const float* A, int64_t lda, const float* B, int64_t ldb, float beta, float* C, int64_t ldc) {
 #if defined(PT_USE_EML_BLAS)
-  #ifdef PT_USE_NUMA
-    if (M >= NUMA_GEMM_THRESHOLD && K >= NUMA_GEMM_THRESHOLD && N >= NUMA_GEMM_THRESHOLD) {
-        sgemm_nt_numa(M, K, N, alpha, A, lda, B, ldb, beta, C, ldc);
-        return;
-    }
-  #endif
     cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
                 (int)M, (int)N, (int)K,
                 alpha, A, (int)lda, B, (int)ldb,
@@ -656,50 +647,8 @@ void sgd_step_loop(float* param, const float* grad, float* momentum_buf,
 // A is [M, K] in row-major, A^T is [K, M]
 void sgemm_tn(int64_t M, int64_t K, int64_t N, float alpha, const float* A, int64_t lda, const float* B, int64_t ldb, float beta, float* C, int64_t ldc) {
 #if defined(PT_USE_EML_BLAS)
-  #ifdef PT_USE_NUMA
-    // sgemm_tn: C[K,N] = alpha * A^T[K,M] @ B[M,N] + beta * C
-    // Output has K rows — split across NUMA nodes.
-    // Each node handles a slice of output rows, reading corresponding A columns.
-    if (K >= NUMA_GEMM_THRESHOLD && M >= NUMA_GEMM_THRESHOLD && N >= NUMA_GEMM_THRESHOLD) {
-        int num_nodes = numa_max_node() + 1;
-        if (num_nodes > 1) {
-            int64_t rows_per_node = (K + num_nodes - 1) / num_nodes;
-            std::vector<std::thread> threads(num_nodes);
-
-            for (int nd = 0; nd < num_nodes; nd++) {
-                threads[nd] = std::thread([&, nd]() {
-                    numa_run_on_node(nd);
-
-                    int64_t k_start = nd * rows_per_node;
-                    int64_t k_end = std::min(k_start + rows_per_node, K);
-                    if (k_start >= K) return;
-                    int64_t k_tile = k_end - k_start;
-
-                    // A is [M, K] row-major. A^T rows [k_start..k_end] =
-                    // columns [k_start..k_end] of A.
-                    // Pointer: A + k_start, lda unchanged (full K width).
-                    // SIGILL FIX: Force EML single-threaded in NUMA worker thread
-#ifdef _OPENMP
-                    omp_set_num_threads(1);
-#endif
-                    cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
-                                (int)k_tile, (int)N, (int)M,
-                                alpha,
-                                A + k_start, (int)lda,
-                                B, (int)ldb,
-                                beta,
-                                C + k_start * ldc, (int)ldc);
-                });
-            }
-
-            for (auto& t : threads) {
-                if (t.joinable()) t.join();
-            }
-            return;
-        }
-    }
-  #endif
-    // Direct EML cblas with CblasTrans — no transpose buffer needed
+    // Direct EML cblas with CblasTrans — EML handles multi-core via OMP internally
+    // NOTE: Do NOT use pthread/std::thread wrappers — EML SIGILL from non-main threads on E2K
     cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
                 (int)K, (int)N, (int)M,
                 alpha, A, (int)lda, B, (int)ldb,
