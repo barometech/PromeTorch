@@ -362,10 +362,13 @@ target_include_directories(aten_cpu PUBLIC
 
 target_link_libraries(aten_cpu PUBLIC c10)
 
-# On Elbrus: link EML BLAS and pthreads for multi-threaded GEMM
+# On Elbrus: link single-threaded EML (-leml) + pthreads for NUMA tiled GEMM
+# CRITICAL: eml_mt from pthreads = SIGILL. eml (ST) from pthreads works.
+# We use persistent pthread pool (32 threads pinned to cores) + ST EML per core.
+# Result: 600-900 GFLOPS vs 187 GFLOPS with eml_mt(32).
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "e2k|elbrus")
-    target_compile_options(aten_cpu PRIVATE -O3 -ffast-math)
-    target_link_libraries(aten_cpu PUBLIC eml_mt pthread)
+    target_compile_options(aten_cpu PRIVATE -O3 -ffast-math -D_GNU_SOURCE)
+    target_link_libraries(aten_cpu PUBLIC eml pthread)
     # NUMA: link libnuma for NUMA-aware tiled GEMM on multi-chip systems
     if(NUMA_LIB)
         target_link_libraries(aten_cpu PUBLIC ${NUMA_LIB})
