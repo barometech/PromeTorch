@@ -3,6 +3,56 @@
 Полная история разработки проекта. Актуальные инструкции — в `CLAUDE.md`.
 Полный аудит инфраструктуры — в `INFRASTRUCTURE_AUDIT.md`.
 
+## 2026-04-03: NUMA THREAD POOL + ДОКУМЕНТАЦИЯ МЦСТ
+
+### Документация
+Скачано **25 PDF** с mcst.ru — официальная документация МЦСТ:
+- `elbrus_prog_guide_v1.2.pdf` — Руководство по эффективному программированию (2024)
+- `book_elbrus.pdf` — Полная книга про процессоры Эльбрус (6.3 MB)
+- `eml_acceleration_paper.pdf` — Ускорение вычислений с EML
+- `lcc_auto_parallelization.pdf` — Автопараллелизация в LCC
+- И ещё 21 PDF (архитектура, кэш, отладка, виртуализация и т.д.)
+- Всё в `docs/elbrus/`
+
+### Критические открытия из документации
+
+1. **Nested OMP НЕ ПОДДЕРЖАН** на Эльбрусе (OpenMP 3.1 only). Это КОРЕНЬ ВСЕХ SIGILL.
+2. **`eml_SetNumThreads()`** — EML имеет СВОЙ API потоков, независимый от `omp_set_num_threads()`.
+   Найдено в `/usr/include/eml/eml_core.h` на сервере.
+3. **EML GEMM микроядро** = 8×6 unroll, 48 fmul_add за итерацию, 12 flop/cycle (~66 GFLOPS/ядро).
+4. **eml_mt из pthread = SIGILL** (nested OMP). **eml (ST) из pthread = OK**.
+
+### NUMA Thread Pool
+
+Заменил прямые вызовы `eml_mt` на persistent pthread pool:
+- 32 потока, каждый припинен к своему ядру + NUMA ноде
+- Каждый вызывает однопоточную EML (`-leml`) на своём тайле
+- Barrier sync вместо pthread_create/join
+- B матрица реплицирована на каждой NUMA ноде
+- Линковка: `-leml` вместо `-leml_mt`
+
+**Бенчмарк GEMM:**
+| Матрица | eml_mt(32) | NUMA pool 32×ST | Speedup |
+|---------|-----------|-----------------|---------|
+| 2048×2048×2048 | 259 GFLOPS | 591 GFLOPS | **2.3x** |
+| 8192×768×768 | 192 GFLOPS | 618 GFLOPS | **3.2x** |
+| 8192×768×1792 (FFN) | ~200 GFLOPS | 895 GFLOPS | **4.5x** |
+
+**189M PIR training:** 33 tok/s (было 31). GEMM ускорился 3-5x, но autograd overhead доминирует (97% времени step).
+
+### Bottleneck определён
+GEMM = 3% времени step. Остальные 97%:
+- Тысячи `malloc` для промежуточных тензоров
+- Построение autograd графа (сотни узлов)
+- Обход графа backward (topological sort + accumulate_grad)
+
+**Следующий шаг:** fused forward+backward без autograd.
+
+### Файлы
+- `aten/src/ATen/native/cpu/hot_loops.cpp` — NUMA thread pool
+- `CMakeLists.txt` — `-leml` вместо `-leml_mt`, `-D_GNU_SOURCE`
+- `docs/elbrus/` — 25 PDF + 4 MD документации
+
 ## 2026-04-02: EML SIGILL ROOT CAUSE НАЙДЕН И ИСПРАВЛЕН
 
 ### Проблема
