@@ -1207,35 +1207,38 @@ int main(int argc, char** argv) {
         float lr = get_lr(step, train_cfg);
         optimizer.set_lr(lr);
 
-        // MEMORY DEBUG: track RSS at each phase (first 5 steps only)
-        bool mem_debug = (step <= 5);
-        long rss_before = mem_debug ? get_rss_mb() : 0;
+        // TIMING + MEMORY DEBUG (first 10 steps)
+        bool debug = (step <= 10);
+        auto t_start = std::chrono::high_resolution_clock::now();
+        long rss_before = debug ? get_rss_mb() : 0;
 
         // Get batch
         auto [input, target] = dataset.get_batch(train_cfg.batch_size);
-        long rss_after_batch = mem_debug ? get_rss_mb() : 0;
+        auto t_batch = std::chrono::high_resolution_clock::now();
 
         // Forward pass
         optimizer.zero_grad(/*set_to_none=*/true);
         auto logits = model->forward(input);
-        long rss_after_fwd = mem_debug ? get_rss_mb() : 0;
+        auto t_fwd = std::chrono::high_resolution_clock::now();
 
         // Compute loss
         auto loss = model->compute_loss(logits, target);
-        long rss_after_loss = mem_debug ? get_rss_mb() : 0;
+        auto t_loss = std::chrono::high_resolution_clock::now();
 
         // Backward pass
         torch::autograd::backward({loss});
-        long rss_after_bwd = mem_debug ? get_rss_mb() : 0;
+        auto t_bwd = std::chrono::high_resolution_clock::now();
 
-        if (mem_debug) {
-            std::cout << "MEM step " << step
-                      << " | start:" << rss_before
-                      << " batch:" << rss_after_batch
-                      << " fwd:" << rss_after_fwd
-                      << " loss:" << rss_after_loss
-                      << " bwd:" << rss_after_bwd
-                      << " MB" << std::endl;
+        if (debug) {
+            auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+            long rss_now = get_rss_mb();
+            std::cout << "TIMING step " << step
+                      << " | batch:" << (int)ms(t_start, t_batch)
+                      << " fwd:" << (int)ms(t_batch, t_fwd)
+                      << " loss:" << (int)ms(t_fwd, t_loss)
+                      << " bwd:" << (int)ms(t_loss, t_bwd)
+                      << " ms | total:" << (int)ms(t_start, t_bwd)
+                      << " ms | " << rss_now << " MB" << std::endl;
         }
 
         // DEBUG: Check gradients on first step — show WHICH params have no grad
@@ -1277,11 +1280,11 @@ int main(int argc, char** argv) {
 
         // Gradient clipping
         float grad_norm = fast_clip_grad_norm_(*model, train_cfg.grad_clip);
-        long rss_after_clip = mem_debug ? get_rss_mb() : 0;
+        long rss_after_clip = false ? get_rss_mb() : 0;
 
         // Optimizer step
         optimizer.step();
-        long rss_after_step = mem_debug ? get_rss_mb() : 0;
+        long rss_after_step = false ? get_rss_mb() : 0;
 
         // CRITICAL: Release autograd graph from this step
         release_autograd_graph(*model);
@@ -1294,9 +1297,9 @@ int main(int argc, char** argv) {
         input = Tensor();   // drop batch tensors
         target = Tensor();
 
-        long rss_after_release = mem_debug ? get_rss_mb() : 0;
+        long rss_after_release = false ? get_rss_mb() : 0;
 
-        if (mem_debug) {
+        if (false) {
             std::cout << "MEM step " << step
                       << " | clip:" << rss_after_clip
                       << " step:" << rss_after_step
