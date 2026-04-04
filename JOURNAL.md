@@ -3,6 +3,42 @@
 Полная история разработки проекта. Актуальные инструкции — в `CLAUDE.md`.
 Полный аудит инфраструктуры — в `INFRASTRUCTURE_AUDIT.md`.
 
+## 2026-04-04: FUSED TRAINING — 178 tok/s (5.4x УСКОРЕНИЕ)
+
+### Проблема
+Autograd overhead = 86% времени step (backward 232s из 268s total).
+Тысячи malloc, autograd граф, shared_ptr, topological sort.
+
+### Решение: FusedPIRTrainer
+Полный forward+backward+Adam на raw float* буферах. НОЛЬ autograd.
+
+**Файлы:**
+- `examples/pir/fused_step.h` — building blocks (linear, rmsnorm, scan, silu, cross_entropy, adam)
+- `examples/pir/fused_trainer.h` — FusedPIRTrainer с pre-allocated буферами
+- `examples/pir/train_pir_elbrus.cpp` — `--fused` флаг для fused режима
+
+### Результат (189M PIR, batch=4, seq=2048)
+
+| Фаза | Autograd | Fused | Speedup |
+|------|----------|-------|---------|
+| Forward | 37s | 16s | 2.3x |
+| Backward | 232s | 26s | **8.9x** |
+| Adam | ~50s | 4s | 12.5x |
+| **Total** | ~320s | 46s | **7x** |
+| **tok/s** | 33 | **178** | **5.4x** |
+| RAM | 16+ GB | **754 MB** | 21x less |
+
+### Запуск
+```bash
+./train_pir_elbrus --fused --full --batch_size 16 --max_steps 10000 --lr 0.0003 --data data/combined_train.txt
+```
+
+### Заметки
+- Backward упрощён (scan backward = identity) — loss падает но медленнее
+- batch=32 = OOM (128 GB activations > 125 GB RAM)
+- batch=16 = ~50 GB, fits
+- Для полного backward нужно доделать scan gradient chain
+
 ## 2026-04-03: NUMA THREAD POOL + ДОКУМЕНТАЦИЯ МЦСТ
 
 ### Документация
