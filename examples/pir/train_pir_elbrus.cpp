@@ -106,6 +106,7 @@ struct TrainConfig {
     float   beta1         = 0.9f;
     float   beta2         = 0.95f;
 
+    bool    use_fused      = false;
     int64_t log_interval  = 10;
     int64_t eval_interval = 200;
     int64_t gen_interval  = 500;
@@ -116,6 +117,9 @@ struct TrainConfig {
     std::string save_dir  = "checkpoints";
     std::string load_path = "";  // --load checkpoint.ptor
 };
+
+// Include fused trainer AFTER config structs are defined
+#include "fused_trainer.h"
 
 // ============================================================================
 // CRITICAL: Release autograd graph after optimizer step
@@ -1080,6 +1084,8 @@ void parse_args(int argc, char** argv, PIRConfig& model_cfg, TrainConfig& train_
             train_cfg.load_path = argv[++i];
         } else if (arg == "--threads" && i + 1 < argc) {
             setup_numa_threads(std::atoi(argv[++i]));
+        } else if (arg == "--fused") {
+            train_cfg.use_fused = true;
         } else if (arg == "--full") {
             // Full 250M config
             model_cfg.vocab_size = 256;
@@ -1145,6 +1151,10 @@ int main(int argc, char** argv) {
               << " save_interval=" << train_cfg.save_interval
               << std::endl;
 
+    if (train_cfg.use_fused) {
+        std::cout << "\n*** FUSED MODE: Zero-autograd training ***\n" << std::endl;
+    }
+
     // Load data
     TextDataset dataset(train_cfg.data_path, model_cfg.block_size);
     if (dataset.empty()) {
@@ -1160,6 +1170,79 @@ int main(int argc, char** argv) {
     // Print initial memory
     long rss = get_rss_mb();
     if (rss > 0) std::cout << "RSS before model: " << rss << " MB" << std::endl;
+
+    // ================================================================
+    // FUSED TRAINING PATH — zero autograd, pre-allocated buffers
+    // ================================================================
+    if (train_cfg.use_fused) {
+        FusedPIRTrainer trainer;
+        trainer.allocate(model_cfg, train_cfg.batch_size);
+        trainer.init_random(model_cfg);
+
+        rss = get_rss_mb();
+        std::cout << "RSS after fused alloc: " << rss << " MB" << std::endl;
+
+        std::cout << "\n--- Fused Training ---\n" << std::endl;
+
+        auto total_start = std::chrono::high_resolution_clock::now();
+        auto step_start = total_start;
+        float running_loss = 0.0f;
+        int running_count = 0;
+
+        // Input/target buffers (reused)
+        std::vector<float> inp_buf(tokens_per_step);
+        std::vector<float> tgt_buf(tokens_per_step);
+
+        for (int64_t step = 1; step <= train_cfg.max_steps; step++) {
+            float lr = get_lr(step, train_cfg);
+
+            // Get batch
+            auto [input, target] = dataset.get_batch(train_cfg.batch_size);
+            memcpy(inp_buf.data(), input.data_ptr<float>(), tokens_per_step * sizeof(float));
+            memcpy(tgt_buf.data(), target.data_ptr<float>(), tokens_per_step * sizeof(float));
+
+            // Train step
+            float loss = trainer.train_step(inp_buf.data(), tgt_buf.data(), lr, train_cfg.weight_decay);
+
+            running_loss += loss;
+            running_count++;
+
+            if (step % train_cfg.log_interval == 0) {
+                auto now = std::chrono::high_resolution_clock::now();
+                double elapsed_ms = std::chrono::duration<double, std::milli>(now - step_start).count();
+                double tok_per_sec = (tokens_per_step * train_cfg.log_interval) / (elapsed_ms / 1000.0);
+                float avg_loss = running_loss / running_count;
+                float perplexity = std::exp(std::min(avg_loss, 20.0f));
+
+                rss = get_rss_mb();
+                std::cout << std::fixed << std::setprecision(4)
+                          << "step " << std::setw(6) << step
+                          << " | loss " << std::setw(7) << avg_loss
+                          << " | ppl " << std::setw(10) << std::setprecision(1) << perplexity
+                          << " | lr " << std::setprecision(6) << lr
+                          << " | " << std::setprecision(0) << tok_per_sec << " tok/s";
+                if (rss > 0) std::cout << " | " << rss << " MB";
+                std::cout << std::endl;
+
+                running_loss = 0.0f;
+                running_count = 0;
+                step_start = now;
+            }
+        }
+
+        auto total_end = std::chrono::high_resolution_clock::now();
+        double total_s = std::chrono::duration<double>(total_end - total_start).count();
+        std::cout << "\n============================================\n"
+                  << "Fused training complete!\n"
+                  << "Total time: " << std::fixed << std::setprecision(1) << total_s << " seconds\n"
+                  << "Avg throughput: " << (int)(tokens_per_step * train_cfg.max_steps / total_s) << " tok/s\n"
+                  << "============================================" << std::endl;
+        return 0;
+    }
+
+    // ================================================================
+    // AUTOGRAD TRAINING PATH (original)
+    // ================================================================
 
     // Create model
     auto model = std::make_shared<PIR250M>(model_cfg);
