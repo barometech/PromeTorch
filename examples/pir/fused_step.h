@@ -34,70 +34,104 @@ namespace fused {
 // Element-wise ops (OMP parallelized)
 // ============================================================================
 
-static void sigmoid_fwd(const float* x, float* out, int64_t n) {
+static void sigmoid_fwd(const float* __restrict x, float* __restrict out, int64_t n) {
     #pragma omp parallel for schedule(static)
-    for (int64_t i = 0; i < n; i++)
-        out[i] = 1.0f / (1.0f + std::exp(-x[i]));
-}
-
-static void sigmoid_bwd(const float* grad, const float* sig_out, float* dx, int64_t n) {
-    #pragma omp parallel for schedule(static)
-    for (int64_t i = 0; i < n; i++)
-        dx[i] = grad[i] * sig_out[i] * (1.0f - sig_out[i]);
-}
-
-static void silu_fwd(const float* x, float* out, int64_t n) {
-    #pragma omp parallel for schedule(static)
-    for (int64_t i = 0; i < n; i++) {
-        float s = 1.0f / (1.0f + std::exp(-x[i]));
-        out[i] = x[i] * s;
+    for (int64_t i = 0; i < n; i += 6) {
+        out[i]   = 1.0f / (1.0f + std::exp(-x[i]));
+        out[i+1] = 1.0f / (1.0f + std::exp(-x[i+1]));
+        out[i+2] = 1.0f / (1.0f + std::exp(-x[i+2]));
+        out[i+3] = 1.0f / (1.0f + std::exp(-x[i+3]));
+        out[i+4] = 1.0f / (1.0f + std::exp(-x[i+4]));
+        out[i+5] = 1.0f / (1.0f + std::exp(-x[i+5]));
     }
 }
 
-static void silu_bwd(const float* grad, const float* x, float* dx, int64_t n) {
+static void sigmoid_bwd(const float* __restrict grad, const float* __restrict sig_out, float* __restrict dx, int64_t n) {
     #pragma omp parallel for schedule(static)
-    for (int64_t i = 0; i < n; i++) {
-        float s = 1.0f / (1.0f + std::exp(-x[i]));
-        dx[i] = grad[i] * (s + x[i] * s * (1.0f - s));
+    for (int64_t i = 0; i < n; i += 6) {
+        dx[i]   = grad[i]   * sig_out[i]   * (1.0f - sig_out[i]);
+        dx[i+1] = grad[i+1] * sig_out[i+1] * (1.0f - sig_out[i+1]);
+        dx[i+2] = grad[i+2] * sig_out[i+2] * (1.0f - sig_out[i+2]);
+        dx[i+3] = grad[i+3] * sig_out[i+3] * (1.0f - sig_out[i+3]);
+        dx[i+4] = grad[i+4] * sig_out[i+4] * (1.0f - sig_out[i+4]);
+        dx[i+5] = grad[i+5] * sig_out[i+5] * (1.0f - sig_out[i+5]);
     }
 }
 
-static void mul_fwd(const float* a, const float* b, float* out, int64_t n) {
+static void silu_fwd(const float* __restrict x, float* __restrict out, int64_t n) {
     #pragma omp parallel for schedule(static)
-    for (int64_t i = 0; i < n; i++)
-        out[i] = a[i] * b[i];
-}
-
-static void mul_bwd(const float* grad, const float* a, const float* b,
-                    float* da, float* db, int64_t n) {
-    #pragma omp parallel for schedule(static)
-    for (int64_t i = 0; i < n; i++) {
-        da[i] = grad[i] * b[i];
-        db[i] = grad[i] * a[i];
+    for (int64_t i = 0; i < n; i += 6) {
+        float s0 = 1.0f/(1.0f+std::exp(-x[i]));   out[i]   = x[i]*s0;
+        float s1 = 1.0f/(1.0f+std::exp(-x[i+1])); out[i+1] = x[i+1]*s1;
+        float s2 = 1.0f/(1.0f+std::exp(-x[i+2])); out[i+2] = x[i+2]*s2;
+        float s3 = 1.0f/(1.0f+std::exp(-x[i+3])); out[i+3] = x[i+3]*s3;
+        float s4 = 1.0f/(1.0f+std::exp(-x[i+4])); out[i+4] = x[i+4]*s4;
+        float s5 = 1.0f/(1.0f+std::exp(-x[i+5])); out[i+5] = x[i+5]*s5;
     }
 }
 
-static void add_fwd(const float* a, const float* b, float* out, int64_t n) {
+static void silu_bwd(const float* __restrict grad, const float* __restrict x, float* __restrict dx, int64_t n) {
     #pragma omp parallel for schedule(static)
-    for (int64_t i = 0; i < n; i++)
-        out[i] = a[i] + b[i];
+    for (int64_t i = 0; i < n; i += 6) {
+        for (int64_t j = 0; j < 6; j++) {
+            float s = 1.0f / (1.0f + std::exp(-x[i+j]));
+            dx[i+j] = grad[i+j] * (s + x[i+j] * s * (1.0f - s));
+        }
+    }
+}
+
+static void mul_fwd(const float* __restrict a, const float* __restrict b, float* __restrict out, int64_t n) {
+    #pragma omp parallel for schedule(static)
+    for (int64_t i = 0; i < n; i += 6) {
+        out[i]=a[i]*b[i]; out[i+1]=a[i+1]*b[i+1]; out[i+2]=a[i+2]*b[i+2];
+        out[i+3]=a[i+3]*b[i+3]; out[i+4]=a[i+4]*b[i+4]; out[i+5]=a[i+5]*b[i+5];
+    }
+}
+
+static void mul_bwd(const float* __restrict grad, const float* __restrict a, const float* __restrict b,
+                    float* __restrict da, float* __restrict db, int64_t n) {
+    #pragma omp parallel for schedule(static)
+    for (int64_t i = 0; i < n; i += 6) {
+        da[i]=grad[i]*b[i]; db[i]=grad[i]*a[i];
+        da[i+1]=grad[i+1]*b[i+1]; db[i+1]=grad[i+1]*a[i+1];
+        da[i+2]=grad[i+2]*b[i+2]; db[i+2]=grad[i+2]*a[i+2];
+        da[i+3]=grad[i+3]*b[i+3]; db[i+3]=grad[i+3]*a[i+3];
+        da[i+4]=grad[i+4]*b[i+4]; db[i+4]=grad[i+4]*a[i+4];
+        da[i+5]=grad[i+5]*b[i+5]; db[i+5]=grad[i+5]*a[i+5];
+    }
+}
+
+static void add_fwd(const float* __restrict a, const float* __restrict b, float* __restrict out, int64_t n) {
+    #pragma omp parallel for schedule(static)
+    for (int64_t i = 0; i < n; i += 6) {
+        out[i]=a[i]+b[i]; out[i+1]=a[i+1]+b[i+1]; out[i+2]=a[i+2]+b[i+2];
+        out[i+3]=a[i+3]+b[i+3]; out[i+4]=a[i+4]+b[i+4]; out[i+5]=a[i+5]+b[i+5];
+    }
 }
 
 // RMSNorm: out = x * rsqrt(mean(x²) + eps) * weight
-static void rmsnorm_fwd(const float* x, const float* weight, float* out,
-                        float* rms_cache, // [B*T] — save 1/rms for backward
+static void rmsnorm_fwd(const float* __restrict x, const float* __restrict weight, float* __restrict out,
+                        float* __restrict rms_cache,
                         int64_t BT, int64_t D, float eps = 1e-6f) {
     #pragma omp parallel for schedule(static)
     for (int64_t i = 0; i < BT; i++) {
-        float sum_sq = 0.0f;
-        const float* xi = x + i * D;
-        for (int64_t d = 0; d < D; d++)
-            sum_sq += xi[d] * xi[d];
-        float inv_rms = 1.0f / std::sqrt(sum_sq / D + eps);
+        const float* __restrict xi = x + i * D;
+        float* __restrict oi = out + i * D;
+        // 6-wide accumulation for VLIW (6 FPU channels)
+        float s0=0,s1=0,s2=0,s3=0,s4=0,s5=0;
+        #pragma loop count(768)
+        for (int64_t d = 0; d < D; d += 6) {
+            s0 += xi[d]*xi[d]; s1 += xi[d+1]*xi[d+1]; s2 += xi[d+2]*xi[d+2];
+            s3 += xi[d+3]*xi[d+3]; s4 += xi[d+4]*xi[d+4]; s5 += xi[d+5]*xi[d+5];
+        }
+        float inv_rms = 1.0f / std::sqrt((s0+s1+s2+s3+s4+s5) / D + eps);
         rms_cache[i] = inv_rms;
-        float* oi = out + i * D;
-        for (int64_t d = 0; d < D; d++)
-            oi[d] = xi[d] * inv_rms * weight[d];
+        #pragma loop count(768)
+        for (int64_t d = 0; d < D; d += 6) {
+            oi[d]=xi[d]*inv_rms*weight[d]; oi[d+1]=xi[d+1]*inv_rms*weight[d+1];
+            oi[d+2]=xi[d+2]*inv_rms*weight[d+2]; oi[d+3]=xi[d+3]*inv_rms*weight[d+3];
+            oi[d+4]=xi[d+4]*inv_rms*weight[d+4]; oi[d+5]=xi[d+5]*inv_rms*weight[d+5];
+        }
     }
 }
 
@@ -198,10 +232,12 @@ static void linear_bwd_weight(const float* dY, const float* X, float* dW,
 }
 
 // Accumulate: dst += src
-static void accum(float* dst, const float* src, int64_t n) {
+static void accum(float* __restrict dst, const float* __restrict src, int64_t n) {
     #pragma omp parallel for schedule(static)
-    for (int64_t i = 0; i < n; i++)
-        dst[i] += src[i];
+    for (int64_t i = 0; i < n; i += 6) {
+        dst[i]+=src[i]; dst[i+1]+=src[i+1]; dst[i+2]+=src[i+2];
+        dst[i+3]+=src[i+3]; dst[i+4]+=src[i+4]; dst[i+5]+=src[i+5];
+    }
 }
 
 // ============================================================================
