@@ -47,9 +47,12 @@
 #include <omp.h>
 #endif
 
-// For memory monitoring on Linux (Elbrus)
+// For memory monitoring + mmap on Linux (Elbrus)
 #ifdef __linux__
 #include <unistd.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 #endif
 
 using namespace torch;
@@ -116,6 +119,7 @@ struct TrainConfig {
     std::string data_path = "tiny_shakespeare.txt";
     std::string save_dir  = "checkpoints";
     std::string load_path = "";  // --load checkpoint.ptor
+    int seed = 42;  // Random seed (different per NUMA process)
 };
 
 // Include fused trainer AFTER config structs are defined
@@ -942,27 +946,62 @@ public:
 // ============================================================================
 
 class TextDataset {
-    std::vector<uint8_t> data_;
+    // mmap for large files — avoids 2GB allocation on NUMA node
+    uint8_t* mmap_ptr_ = nullptr;
+    size_t mmap_size_ = 0;
+    std::vector<uint8_t> data_small_;  // fallback for small files
+    const uint8_t* data_ptr_ = nullptr;
+    size_t data_size_ = 0;
     int64_t block_size_;
     std::mt19937 rng_;
 
 public:
-    TextDataset(const std::string& path, int64_t block_size)
-        : block_size_(block_size), rng_(42) {
+    TextDataset(const std::string& path, int64_t block_size, int seed = 42)
+        : block_size_(block_size), rng_(seed) {
+#ifdef __linux__
+        // Use mmap — no memory copy, pages loaded on demand from any NUMA node
+        int fd = open(path.c_str(), O_RDONLY);
+        if (fd < 0) {
+            std::cerr << "ERROR: Cannot open data file: " << path << std::endl;
+            return;
+        }
+        struct stat st;
+        fstat(fd, &st);
+        mmap_size_ = st.st_size;
+        mmap_ptr_ = (uint8_t*)mmap(nullptr, mmap_size_, PROT_READ, MAP_PRIVATE | MAP_POPULATE, fd, 0);
+        close(fd);
+        if (mmap_ptr_ == MAP_FAILED) {
+            mmap_ptr_ = nullptr;
+            std::cerr << "ERROR: mmap failed for " << path << std::endl;
+            return;
+        }
+        data_ptr_ = mmap_ptr_;
+        data_size_ = mmap_size_;
+        std::cout << "mmap'd " << data_size_ << " bytes from " << path << std::endl;
+#else
         std::ifstream file(path, std::ios::binary);
         if (!file) {
             std::cerr << "ERROR: Cannot open data file: " << path << std::endl;
             return;
         }
-        data_ = std::vector<uint8_t>(
+        data_small_ = std::vector<uint8_t>(
             (std::istreambuf_iterator<char>(file)),
             std::istreambuf_iterator<char>()
         );
-        std::cout << "Loaded " << data_.size() << " bytes from " << path << std::endl;
+        data_ptr_ = data_small_.data();
+        data_size_ = data_small_.size();
+        std::cout << "Loaded " << data_size_ << " bytes from " << path << std::endl;
+#endif
     }
 
-    bool empty() const { return data_.empty(); }
-    size_t size() const { return data_.size(); }
+    ~TextDataset() {
+#ifdef __linux__
+        if (mmap_ptr_) munmap(mmap_ptr_, mmap_size_);
+#endif
+    }
+
+    bool empty() const { return data_size_ == 0; }
+    size_t size() const { return data_size_; }
 
     std::pair<Tensor, Tensor> get_batch(int64_t batch_size) {
         int64_t T = block_size_;
@@ -971,7 +1010,7 @@ public:
         float* inp = input.mutable_data_ptr<float>();
         float* tgt = target.mutable_data_ptr<float>();
 
-        int64_t max_start = static_cast<int64_t>(data_.size()) - T - 1;
+        int64_t max_start = static_cast<int64_t>(data_size_) - T - 1;
         if (max_start <= 0) {
             std::cerr << "Data too short for block_size=" << T << std::endl;
             return {input, target};
@@ -990,8 +1029,8 @@ public:
         for (int64_t b = 0; b < batch_size; b++) {
             int64_t start = starts[b];
             for (int64_t t = 0; t < T; t++) {
-                inp[b * T + t] = static_cast<float>(data_[start + t]);
-                tgt[b * T + t] = static_cast<float>(data_[start + t + 1]);
+                inp[b * T + t] = static_cast<float>(data_ptr_[start + t]);
+                tgt[b * T + t] = static_cast<float>(data_ptr_[start + t + 1]);
             }
         }
 
@@ -1084,6 +1123,8 @@ void parse_args(int argc, char** argv, PIRConfig& model_cfg, TrainConfig& train_
             train_cfg.load_path = argv[++i];
         } else if (arg == "--threads" && i + 1 < argc) {
             setup_numa_threads(std::atoi(argv[++i]));
+        } else if (arg == "--seed" && i + 1 < argc) {
+            train_cfg.seed = std::atoi(argv[++i]);
         } else if (arg == "--fused") {
             train_cfg.use_fused = true;
         } else if (arg == "--full") {
@@ -1156,7 +1197,7 @@ int main(int argc, char** argv) {
     }
 
     // Load data
-    TextDataset dataset(train_cfg.data_path, model_cfg.block_size);
+    TextDataset dataset(train_cfg.data_path, model_cfg.block_size, train_cfg.seed);
     if (dataset.empty()) {
         std::cerr << "No data loaded. Exiting." << std::endl;
         return 1;
