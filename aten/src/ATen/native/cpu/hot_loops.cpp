@@ -384,15 +384,17 @@ void sgemm_nt_numa(int64_t M, int64_t K, int64_t N, float alpha,
 #endif // PT_USE_NUMA
 
 // BLAS wrappers — NUMA-aware dispatch for Elbrus E8C2
-// Uses persistent pthread pool with single-threaded EML (-leml) for NUMA tiling.
-// eml_mt from pthreads = SIGILL, but eml (ST) from pthreads works.
-// Nested OMP not supported on Elbrus (OpenMP 3.1 only).
+// PT_NO_NUMA_POOL=1: bypass pthread pool, call EML directly from main thread.
+//   Use with libeml_mt + numactl --cpunodebind=N for 245 GFLOPS/node.
+// Without env var: uses 32-pthread pool + ST EML (180 GFLOPS total).
+#if defined(PT_USE_NUMA)
+static bool g_numa_pool_disabled = (getenv("PT_NO_NUMA_POOL") != nullptr);
+#endif
+
 void sgemm(int64_t M, int64_t K, int64_t N, float alpha, const float* A, int64_t lda, const float* B, int64_t ldb, float beta, float* C, int64_t ldc) {
 #if defined(PT_USE_EML_BLAS)
   #if defined(PT_USE_NUMA)
-    if (M >= NUMA_GEMM_THRESHOLD) {
-        // NUMA-tiled: 32 pthreads × ST EML, pinned per core
-        // beta=0 always in our GEMM calls (fresh output)
+    if (!g_numa_pool_disabled && M >= NUMA_GEMM_THRESHOLD) {
         numa_tiled_sgemm(M, K, N, A, lda, B, ldb, C, ldc, 0, 0);
         return;
     }
@@ -413,7 +415,7 @@ void sgemm(int64_t M, int64_t K, int64_t N, float alpha, const float* A, int64_t
 void sgemm_nt(int64_t M, int64_t K, int64_t N, float alpha, const float* A, int64_t lda, const float* B, int64_t ldb, float beta, float* C, int64_t ldc) {
 #if defined(PT_USE_EML_BLAS)
   #if defined(PT_USE_NUMA)
-    if (M >= NUMA_GEMM_THRESHOLD) {
+    if (!g_numa_pool_disabled && M >= NUMA_GEMM_THRESHOLD) {
         numa_tiled_sgemm(M, K, N, A, lda, B, ldb, C, ldc, 0, 1);
         return;
     }
@@ -809,8 +811,7 @@ void sgd_step_loop(float* param, const float* grad, float* momentum_buf,
 void sgemm_tn(int64_t M, int64_t K, int64_t N, float alpha, const float* A, int64_t lda, const float* B, int64_t ldb, float beta, float* C, int64_t ldc) {
 #if defined(PT_USE_EML_BLAS)
   #if defined(PT_USE_NUMA)
-    if (K >= NUMA_GEMM_THRESHOLD) {
-        // C[K,N] = A^T[K,M] @ B[M,N]  — split K output rows
+    if (!g_numa_pool_disabled && K >= NUMA_GEMM_THRESHOLD) {
         numa_tiled_sgemm(K, M, N, A, lda, B, ldb, C, ldc, 1, 0);
         return;
     }
