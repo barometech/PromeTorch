@@ -195,9 +195,19 @@ inline Tensor index_select(const Tensor& self, int64_t dim, const Tensor& index)
                 PT_CHECK_MSG(src_idx >= 0 && src_idx < self.size(dim),
                     "index_select: index out of bounds");
 
+                // FIX 1.3: convert linear outer index to multi-dim offset (was wrong for dim>1)
+                int64_t src_outer_off = 0, dst_outer_off = 0;
+                {
+                    int64_t t = outer;
+                    for (int64_t d = dim - 1; d >= 0; --d) {
+                        src_outer_off += (t % self.size(d)) * self.stride(d);
+                        dst_outer_off += (t % result.size(d)) * result.stride(d);
+                        t /= self.size(d);
+                    }
+                }
                 for (int64_t inner = 0; inner < inner_size; ++inner) {
-                    int64_t src_offset = outer * self.stride(0) + src_idx * src_dim_stride + inner;
-                    int64_t dst_offset = outer * result.stride(0) + idx * dst_dim_stride + inner;
+                    int64_t src_offset = src_outer_off + src_idx * src_dim_stride + inner;
+                    int64_t dst_offset = dst_outer_off + idx * dst_dim_stride + inner;
 
                     // Simplified - assumes contiguous in inner dimensions
                     dst[dst_offset] = src[src_offset];
