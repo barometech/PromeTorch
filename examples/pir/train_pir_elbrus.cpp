@@ -120,10 +120,13 @@ struct TrainConfig {
     std::string save_dir  = "checkpoints";
     std::string load_path = "";  // --load checkpoint.ptor
     int seed = 42;  // Random seed (different per NUMA process)
+    int rank = -1;   // -1 = no sync, 0-3 = data-parallel rank
+    int nprocs = 4;  // Number of data-parallel processes
 };
 
 // Include fused trainer AFTER config structs are defined
 #include "fused_trainer.h"
+#include "grad_sync.h"
 
 // ============================================================================
 // CRITICAL: Release autograd graph after optimizer step
@@ -1125,6 +1128,10 @@ void parse_args(int argc, char** argv, PIRConfig& model_cfg, TrainConfig& train_
             setup_numa_threads(std::atoi(argv[++i]));
         } else if (arg == "--seed" && i + 1 < argc) {
             train_cfg.seed = std::atoi(argv[++i]);
+        } else if (arg == "--rank" && i + 1 < argc) {
+            train_cfg.rank = std::atoi(argv[++i]);
+        } else if (arg == "--nprocs" && i + 1 < argc) {
+            train_cfg.nprocs = std::atoi(argv[++i]);
         } else if (arg == "--fused") {
             train_cfg.use_fused = true;
         } else if (arg == "--full") {
@@ -1220,6 +1227,40 @@ int main(int argc, char** argv) {
         trainer.allocate(model_cfg, train_cfg.batch_size);
         trainer.init_random(model_cfg);
 
+        // Data-parallel gradient sync (--rank 0..3)
+        GradSync grad_sync;
+        bool use_sync = (train_cfg.rank >= 0);
+        std::vector<float> flat_grads, flat_params;
+        if (use_sync) {
+            int64_t total_p = 0;
+            for (size_t i = 0; i < trainer.all_sizes.size(); i++) total_p += trainer.all_sizes[i];
+            if (!grad_sync.init(train_cfg.rank, train_cfg.nprocs, total_p)) {
+                std::cerr << "GradSync init FAILED" << std::endl;
+                return 1;
+            }
+            flat_grads.resize(total_p);
+            flat_params.resize(total_p);
+            std::cout << "GradSync: rank=" << train_cfg.rank
+                      << " nprocs=" << train_cfg.nprocs
+                      << " params=" << total_p << std::endl;
+
+            // Sync initial weights from rank 0
+            {
+                int64_t off = 0;
+                for (size_t i = 0; i < trainer.all_params.size(); i++) {
+                    memcpy(flat_params.data() + off, trainer.all_params[i], trainer.all_sizes[i] * sizeof(float));
+                    off += trainer.all_sizes[i];
+                }
+                grad_sync.sync_weights(flat_params.data());
+                // Scatter back to trainer
+                off = 0;
+                for (size_t i = 0; i < trainer.all_params.size(); i++) {
+                    memcpy(trainer.all_params[i], flat_params.data() + off, trainer.all_sizes[i] * sizeof(float));
+                    off += trainer.all_sizes[i];
+                }
+            }
+        }
+
         rss = get_rss_mb();
         std::cout << "RSS after fused alloc: " << rss << " MB" << std::endl;
 
@@ -1242,8 +1283,56 @@ int main(int argc, char** argv) {
             memcpy(inp_buf.data(), input.data_ptr<float>(), tokens_per_step * sizeof(float));
             memcpy(tgt_buf.data(), target.data_ptr<float>(), tokens_per_step * sizeof(float));
 
-            // Train step
-            float loss = trainer.train_step(inp_buf.data(), tgt_buf.data(), lr, train_cfg.weight_decay);
+            float loss;
+            if (use_sync) {
+                // Data-parallel: forward + backward, then sync, then adam
+                trainer.step_count++;
+                trainer.zero_grad();
+                loss = trainer.forward(inp_buf.data(), tgt_buf.data());
+                trainer.backward();
+
+                // Flatten gradients → shared memory → average → scatter
+                int64_t off = 0;
+                for (size_t i = 0; i < trainer.all_grads.size(); i++) {
+                    memcpy(flat_grads.data() + off, trainer.all_grads[i], trainer.all_sizes[i] * sizeof(float));
+                    off += trainer.all_sizes[i];
+                }
+                grad_sync.sync(flat_grads.data(), nullptr);
+                // Scatter averaged gradients back
+                off = 0;
+                for (size_t i = 0; i < trainer.all_grads.size(); i++) {
+                    memcpy(trainer.all_grads[i], flat_grads.data() + off, trainer.all_sizes[i] * sizeof(float));
+                    off += trainer.all_sizes[i];
+                }
+
+                // Gradient clipping
+                float grad_norm = 0.0f;
+                for (size_t i = 0; i < trainer.all_grads.size(); i++) {
+                    float* g = trainer.all_grads[i];
+                    for (int64_t j = 0; j < trainer.all_sizes[i]; j++)
+                        grad_norm += g[j] * g[j];
+                }
+                grad_norm = std::sqrt(grad_norm);
+                if (grad_norm > 1.0f) {
+                    float scale = 1.0f / grad_norm;
+                    for (size_t i = 0; i < trainer.all_grads.size(); i++) {
+                        float* g = trainer.all_grads[i];
+                        for (int64_t j = 0; j < trainer.all_sizes[i]; j++)
+                            g[j] *= scale;
+                    }
+                }
+
+                // Adam update (each process independently, same grads → same weights)
+                for (size_t i = 0; i < trainer.all_params.size(); i++) {
+                    fused::adam_update(trainer.all_params[i], trainer.all_grads[i],
+                                      trainer.adam_m[i], trainer.adam_v[i],
+                                      trainer.all_sizes[i], trainer.step_count,
+                                      lr, 0.9f, 0.95f, 1e-8f, train_cfg.weight_decay);
+                }
+            } else {
+                // Single-process: original train_step
+                loss = trainer.train_step(inp_buf.data(), tgt_buf.data(), lr, train_cfg.weight_decay);
+            }
 
             running_loss += loss;
             running_count++;
@@ -1278,6 +1367,7 @@ int main(int argc, char** argv) {
                   << "Total time: " << std::fixed << std::setprecision(1) << total_s << " seconds\n"
                   << "Avg throughput: " << (int)(tokens_per_step * train_cfg.max_steps / total_s) << " tok/s\n"
                   << "============================================" << std::endl;
+        if (use_sync) grad_sync.cleanup();
         return 0;
     }
 
