@@ -328,9 +328,8 @@ inline variable_list Engine::execute(
 ) {
     validate_inputs(roots, grad_outputs);
 
-    // FIX 1.2: thread_local cached GraphTask (was class member = data race)
-    thread_local GraphTask cached_task;
-    GraphTask& task = cached_task;
+    // FIX: stack-local GraphTask (thread_local broke re-entrancy for double backward)
+    GraphTask task;
     task.reset();
     task.retain_graph = retain_graph;
     task.create_graph = create_graph;
