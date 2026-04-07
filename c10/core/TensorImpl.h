@@ -6,6 +6,7 @@
 #include <numeric>
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include "c10/macros/Macros.h"
 #include "c10/core/ScalarType.h"
 #include "c10/core/Device.h"
@@ -777,6 +778,10 @@ protected:
     void refresh_numel() {
         numel_ = 1;
         for (size_t i = 0; i < sizes_.size(); ++i) {
+            // FIX 5.2: overflow check
+            if (sizes_[i] != 0 && numel_ > std::numeric_limits<int64_t>::max() / sizes_[i]) {
+                PT_ERROR("Tensor numel overflow: product of sizes exceeds int64_t max");
+            }
             numel_ *= sizes_[i];
         }
     }

@@ -514,8 +514,8 @@ inline Tensor contiguous(const Tensor& self) {
             self.data_ptr<float>(), result.mutable_data_ptr<float>(),
             static_cast<int>(phys_rows), static_cast<int>(phys_cols), nullptr);
 
-        // Synchronize to ensure transpose completes before result is used
-        c10::cuda::cuda_synchronize();
+        // FIX 3.1: removed cuda_synchronize() — CUDA kernels on same stream
+        // are implicitly ordered. Sync here killed async pipeline.
 
         if (self.requires_grad()) {
             result.set_requires_grad(true);

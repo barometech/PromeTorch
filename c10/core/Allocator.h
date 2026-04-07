@@ -324,7 +324,8 @@ private:
     // Lock-free bump-pointer arena allocation (aligned to kAlignment)
     void* arena_alloc(size_t nbytes) {
         if (!arena_) return nullptr;
-        // Align up to kAlignment
+        // FIX 5.1: overflow check before alignment
+        if (nbytes > SIZE_MAX - kAlignment) return nullptr;
         size_t aligned_nbytes = (nbytes + kAlignment - 1) & ~(kAlignment - 1);
         // Atomic bump
         size_t old_offset = arena_offset_.load(std::memory_order_relaxed);

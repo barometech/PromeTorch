@@ -103,17 +103,21 @@ public:
             for (int i = 0; i < actual_chunks; i++) {
                 int64_t start = begin + i * chunk_size;
                 int64_t chunk_end = (std::min)(start + chunk_size, end);
-                tasks_.push([&fn, start, chunk_end, &tasks_done] {
+                tasks_.push([&fn, start, chunk_end, &tasks_done, this] {
                     fn(start, chunk_end);
                     tasks_done.fetch_add(1, std::memory_order_release);
+                    // FIX 3.3: wake main thread via condition_variable
+                    { std::lock_guard<std::mutex> lk(done_mutex_); }
+                    done_cv_.notify_one();
                 });
             }
         }
         cv_.notify_all();
 
-        // Busy-wait for completion (low latency, good for Elbrus VLIW)
-        while (tasks_done.load(std::memory_order_acquire) < actual_chunks) {
-            std::this_thread::yield();
+        // FIX 3.3: sleep instead of burn CPU (was yield() spinlock)
+        {
+            std::unique_lock<std::mutex> lk(done_mutex_);
+            done_cv_.wait(lk, [&] { return tasks_done.load(std::memory_order_acquire) >= actual_chunks; });
         }
     }
 
@@ -143,6 +147,8 @@ private:
     std::queue<std::function<void()>> tasks_;
     std::mutex mutex_;
     std::condition_variable cv_;
+    std::mutex done_mutex_;              // FIX 3.3: for parallel_for completion
+    std::condition_variable done_cv_;    // FIX 3.3: wake main thread
     bool stop_ = false;
     int num_threads_;
 };

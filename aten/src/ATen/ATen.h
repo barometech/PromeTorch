@@ -117,6 +117,7 @@ inline Tensor Tensor::to(c10::MemoryFormat memory_format) const {
 inline Tensor& Tensor::copy_(const Tensor& src) {
     PT_CHECK(defined() && src.defined());
     PT_CHECK_MSG(sizes() == src.sizes(), "copy_: sizes must match");
+    PT_CHECK_MSG(dtype() == src.dtype(), "copy_: dtype mismatch");  // FIX 1.4
 
     if (src.is_contiguous() && is_contiguous()) {
         std::memcpy(data_ptr(), src.data_ptr(), nbytes());

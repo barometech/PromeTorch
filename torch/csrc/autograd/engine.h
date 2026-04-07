@@ -131,10 +131,8 @@ public:
 private:
     Engine() = default;
 
-    // Cached GraphTask — reused across backward() calls to avoid
-    // re-allocating hash map buckets on every backward pass.
-    // On Elbrus E2K, unordered_map construction = multiple mallocs for bucket array.
-    GraphTask cached_task_;
+    // FIX 1.2: removed cached_task_ member — data race when multiple threads
+    // call backward() on the singleton Engine. Now thread_local in execute().
 
     // Count dependencies for all nodes
     void compute_dependencies(
@@ -322,10 +320,10 @@ inline variable_list Engine::execute(
 ) {
     validate_inputs(roots, grad_outputs);
 
-    // Reuse cached GraphTask to avoid re-allocating hash map buckets.
-    // On Elbrus E2K, unordered_map/set construction allocates bucket arrays
-    // via malloc. By reusing (clear + reuse), we keep the allocated buckets.
-    GraphTask& task = cached_task_;
+    // Thread-local cached GraphTask — reused across backward() calls per thread.
+    // FIX 1.2: was class member (data race on singleton). Now thread_local.
+    thread_local GraphTask cached_task;
+    GraphTask& task = cached_task;
     task.reset();
     task.retain_graph = retain_graph;
     task.create_graph = create_graph;
