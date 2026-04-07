@@ -3,6 +3,33 @@
 Полная история разработки проекта. Актуальные инструкции — в `CLAUDE.md`.
 Полный аудит инфраструктуры — в `INFRASTRUCTURE_AUDIT.md`.
 
+## 2026-04-07: ПОЛНЫЙ АУДИТ (4 раунда Gemini 3.1 Pro + Opus 4.6)
+
+### Итого за день
+- **4 раунда аудитов**: Gemini находит → Opus верифицирует → фикс → повтор
+- **18 багов найдено и пофикшено** (3 CRITICAL, 8 HIGH, 7 MEDIUM)
+- **Оценка Gemini: 9/10**
+- **4-NUMA training**: 342 → 936 tok/s (2.7× ускорение на Эльбрусе)
+- **Gradient sync**: 1 модель на 32 ядрах через POSIX shared memory
+
+### Раунд 4: Финальный аудит (usability + AMD/Intel + PyTorch comparison + A100)
+
+**Gemini нашёл:**
+1. README vs CLAUDE.md противоречие по сборке — нужна документация
+2. Нет простого Python примера (train_mnist.py)
+3. Нет pre-built wheels
+4. AMD/Intel план: MKL find_package устарел, AVX-512 без masked ops, WARP_SIZE=32 ломает AMD
+5. CUDAQuantGemv использует __dp4a вместо Tensor Cores (wmma::) на A100 — x10 потенциал
+6. FlashAttention нерабочий — нужна починка с cp.async
+7. AWQ (MIT лицензия) совместим для интеграции
+
+**Opus 4.6 верифицировал:** 16/16 пунктов подтверждены (1 частично)
+
+### Следующие шаги (TOP-3 от Gemini)
+1. **A100 Tensor Core INT4 GEMM** → файл `TensorCoreQuant.cu`, wmma:: API
+2. **AWQ квантизация** → файл `CUDAAWQ.cu` + `torch/quantization/awq.py`
+3. **FlashAttention v2** → переписать с cp.async для A100
+
 ## 2026-04-07: GEMINI 3.1 PRO АУДИТ → 15 БАГОВ ПОФИКШЕНО
 
 ### Процесс
