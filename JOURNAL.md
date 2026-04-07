@@ -3,6 +3,62 @@
 Полная история разработки проекта. Актуальные инструкции — в `CLAUDE.md`.
 Полный аудит инфраструктуры — в `INFRASTRUCTURE_AUDIT.md`.
 
+## 2026-04-07: 4-NUMA DATA PARALLEL — 936 tok/s на 32 ядрах Эльбруса
+
+### Проблема
+Предыдущий подход: 32 pthreads × single-threaded EML = 342 tok/s, 48% CPU.
+Причина: libeml_mt (multi-threaded EML) из pthreads = SIGILL на E2K VLIW.
+
+### Решение: 4 процесса × numactl × libeml_mt
+
+**Открытие:** libeml_mt работает из main thread если привязать к 1 NUMA-узлу через numactl.
+Бенчмарк sgemm(4096×768×768):
+- libeml ST (1 ядро): 50.8 GFLOPS
+- libeml_mt (8 ядер, 1 NUMA): **245 GFLOPS**
+- 4× node-local: **~630 GFLOPS**
+
+**Шаг 1: libeml_mt + NUMA bypass**
+- CMakeLists.txt: link `libeml_mt` вместо `libeml`
+- hot_loops.cpp: `PT_NO_NUMA_POOL=1` env var — bypass pthread pool
+- train_pir_elbrus.cpp: `mmap()` для данных (2GB файл крашил --membind)
+
+**Результат:** 4 процесса × 242 tok/s = **968 tok/s**, 91% CPU
+
+**Шаг 2: Shared memory gradient sync (Data Parallel)**
+- Новый `grad_sync.h`: POSIX shm_open + mmap(MAP_SHARED) + pthread_barrier
+- Reduce-scatter + allgather для 189M params
+- `--rank 0..3 --nprocs 4` — включает sync между процессами
+- Overhead: ~5% (231 vs 243 tok/s)
+
+**Результат:** **936 tok/s**, 1 модель на 32 ядрах, effective batch=16
+
+### Файлы
+- `examples/pir/grad_sync.h` — SharedGradSync (POSIX shared memory allreduce)
+- `examples/pir/train_pir_elbrus.cpp` — mmap, --rank/--nprocs, grad sync integration
+- `aten/src/ATen/native/cpu/hot_loops.cpp` — PT_NO_NUMA_POOL bypass
+- `CMakeLists.txt` — libeml_mt linkage
+- `examples/pir/CMakeLists.txt` — -lrt -lpthread
+
+### Запуск
+```bash
+# 1 модель на 32 ядрах с gradient sync:
+for node in 0 1 2 3; do
+  PT_NO_NUMA_POOL=1 OMP_NUM_THREADS=8 OMP_PLACES=cores OMP_PROC_BIND=close \
+  numactl --cpunodebind=$node --preferred=$node \
+  ./build_mt/examples/pir/train_pir_elbrus \
+    --fused --full --batch_size 4 --rank $node --nprocs 4 \
+    --data data/russian_mega.txt &
+done
+```
+
+### Ключевые находки (бенчмарки)
+| Конфигурация | GFLOPS | tok/s |
+|---|---|---|
+| 32 pthreads × ST EML (было) | 180 | 342 |
+| 4 процесса × libeml_mt | 630 | 968 |
+| + gradient sync | 600 | 936 |
+| **Ускорение** | **3.3×** | **2.7×** |
+
 ## 2026-04-04: FUSED TRAINING — 178 tok/s (5.4x УСКОРЕНИЕ)
 
 ### Проблема
