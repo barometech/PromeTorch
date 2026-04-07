@@ -95,52 +95,30 @@ struct GradSync {
         return true;
     }
 
-    // Sync gradients: average across all processes
-    // grads: flat array of all gradient buffers concatenated
-    // params: flat array of all parameter buffers (for weight sync)
+    // Sync gradients: simple all-average (each process reads all, computes full mean)
+    // No complex reduce-scatter/allgather — simpler = correct.
+    // Cost: 189M × 4 reads = ~3GB → ~100ms on DDR4 (0.3% of 34s step)
     void sync(float* flat_grads, float* flat_params) {
-        // Step 1: Write my gradients to shared memory
+        // Step 1: Write my gradients to shared memory (my row)
         memcpy(shm_grad_ + (size_t)rank_ * total_params_,
                flat_grads, total_params_ * sizeof(float));
 
         // Step 2: Wait for all processes to write
         pthread_barrier_wait(&ctrl_->bar_grads_ready);
 
-        // Step 3: Each process reduces its CHUNK (reduce-scatter pattern)
-        // rank i reduces params [i*chunk .. (i+1)*chunk)
-        int64_t my_start = rank_ * chunk_size_;
-        int64_t my_end = (rank_ == nprocs_ - 1) ? total_params_ : my_start + chunk_size_;
-        int64_t my_count = my_end - my_start;
-
-        // Average gradients from all processes for my chunk
+        // Step 3: Every process computes the FULL average (no allgather needed)
         float inv_n = 1.0f / nprocs_;
         #pragma omp parallel for schedule(static)
-        for (int64_t i = 0; i < my_count; i++) {
+        for (int64_t i = 0; i < total_params_; i++) {
             float sum = 0.0f;
             for (int p = 0; p < nprocs_; p++) {
-                sum += shm_grad_[(size_t)p * total_params_ + my_start + i];
+                sum += shm_grad_[(size_t)p * total_params_ + i];
             }
-            flat_grads[my_start + i] = sum * inv_n;
+            flat_grads[i] = sum * inv_n;
         }
 
-        // Step 4: Wait for all to finish reduce
+        // Step 4: Wait for all to finish reading (prevents next iter overwriting)
         pthread_barrier_wait(&ctrl_->bar_reduce_done);
-
-        // Step 5: Allgather — write my averaged chunk to a SHARED region (offset 0)
-        // FIX: use shm_grad_ directly as single flat buffer for allgather
-        memcpy(shm_grad_ + my_start, flat_grads + my_start, my_count * sizeof(float));
-
-        // Wait for all to write their chunks
-        pthread_barrier_wait(&ctrl_->bar_reduce_done);
-
-        // Read other chunks from shared flat buffer
-        for (int r = 0; r < nprocs_; r++) {
-            if (r == rank_) continue;
-            int64_t r_start = r * chunk_size_;
-            int64_t r_end = (r == nprocs_ - 1) ? total_params_ : r_start + chunk_size_;
-            int64_t r_count = r_end - r_start;
-            memcpy(flat_grads + r_start, shm_grad_ + r_start, r_count * sizeof(float));
-        }
     }
 
     // After Adam: sync weights so all processes have identical params
