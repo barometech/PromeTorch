@@ -100,7 +100,7 @@ public:
                 for (int64_t c = 0; c < channels; ++c) {
                     rm[c] = (1.0f - mom) * rm[c] + mom * mean[c];
                     // PyTorch stores UNbiased variance in running_var
-                    float var_unbiased = (count > 1) ? var[c] * static_cast<float>(count) / static_cast<float>(count - 1) : var[c];  // FIX 4.2: div/0 guard
+                    float var_unbiased = (count > 1) ? var[c] * static_cast<float>(count) / static_cast<float>(count - 1) : var[c];
                     rv[c] = (1.0f - mom) * rv[c] + mom * var_unbiased;
                 }
             }
@@ -261,7 +261,7 @@ public:
                 for (int64_t c = 0; c < channels; ++c) {
                     rm[c] = (1.0f - mom) * rm[c] + mom * mean[c];
                     // PyTorch stores UNbiased variance in running_var
-                    float var_unbiased = (count > 1) ? var[c] * static_cast<float>(count) / static_cast<float>(count - 1) : var[c];  // FIX 4.2: div/0 guard
+                    float var_unbiased = (count > 1) ? var[c] * static_cast<float>(count) / static_cast<float>(count - 1) : var[c];
                     rv[c] = (1.0f - mom) * rv[c] + mom * var_unbiased;
                 }
             }
@@ -415,6 +415,29 @@ public:
             }
         }
 
+        // Wire autograd backward
+        if (autograd::GradMode::is_enabled()) {
+            bool needs_grad = input.requires_grad();
+            if (elementwise_affine_) {
+                needs_grad = needs_grad ||
+                    get_parameter("weight")->data().requires_grad() ||
+                    get_parameter("bias")->data().requires_grad();
+            }
+            if (needs_grad) {
+                Tensor weight_tensor = elementwise_affine_ ? get_parameter("weight")->data() : Tensor();
+                auto grad_fn = std::make_shared<autograd::LayerNormBackward>(
+                    input, weight_tensor, norm_size, eps_, elementwise_affine_
+                );
+                grad_fn->add_input_metadata(input);
+                if (elementwise_affine_) {
+                    grad_fn->add_input_metadata(get_parameter("weight")->data());
+                    grad_fn->add_input_metadata(get_parameter("bias")->data());
+                }
+                autograd::set_grad_fn(output, grad_fn);
+                output.set_requires_grad(true);
+            }
+        }
+
         return output;
     }
 
@@ -519,6 +542,29 @@ public:
                         out_data[idx] = (in_data[idx] - mean) * inv_std * gi + bi;
                     }
                 }
+            }
+        }
+
+        // Wire autograd backward
+        if (autograd::GradMode::is_enabled()) {
+            bool needs_grad = input.requires_grad();
+            if (affine_) {
+                needs_grad = needs_grad ||
+                    get_parameter("weight")->data().requires_grad() ||
+                    get_parameter("bias")->data().requires_grad();
+            }
+            if (needs_grad) {
+                Tensor weight_tensor = affine_ ? get_parameter("weight")->data() : Tensor();
+                auto grad_fn = std::make_shared<autograd::GroupNormBackward>(
+                    input, weight_tensor, num_groups_, eps_, affine_
+                );
+                grad_fn->add_input_metadata(input);
+                if (affine_) {
+                    grad_fn->add_input_metadata(get_parameter("weight")->data());
+                    grad_fn->add_input_metadata(get_parameter("bias")->data());
+                }
+                autograd::set_grad_fn(output, grad_fn);
+                output.set_requires_grad(true);
             }
         }
 
