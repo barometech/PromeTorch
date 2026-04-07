@@ -235,15 +235,8 @@ inline Tensor unsqueeze(const Tensor& self, int64_t dim) {
     for (int64_t i = 0; i <= ndim; ++i) {
         if (i == dim) {
             new_sizes.push_back(1);
-            // Calculate stride: product of sizes after this dim
-            int64_t stride = 1;
-            for (int64_t j = i; j < ndim; ++j) {
-                stride *= self.size(j);
-            }
-            // For unsqueezed dim at the end, stride is 1
-            if (i == ndim) stride = 1;
-            else if (i < ndim) stride = self.stride(i) * self.size(i);
-
+            // FIX: stride for size-1 dim = stride of next dim (works for non-contiguous)
+            int64_t stride = (i < ndim) ? self.stride(i) : 1;
             new_strides.push_back(stride > 0 ? stride : 1);
         }
         if (i < ndim) {
