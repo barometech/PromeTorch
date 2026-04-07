@@ -367,6 +367,8 @@ public:
     Tensor forward(const Tensor& input) override {
         // Normalize over the last D dimensions
         int64_t norm_dims = static_cast<int64_t>(normalized_shape_.size());
+        PT_CHECK_MSG(input.dim() >= norm_dims,
+            "LayerNorm: input dim (", input.dim(), ") < normalized_shape dims (", norm_dims, ")");
         int64_t batch_dims = input.dim() - norm_dims;
 
         // Compute number of elements in batch and norm dimensions
