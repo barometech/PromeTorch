@@ -245,7 +245,10 @@ inline void Engine::accumulate_grad(
         // On Elbrus E2K, each tensor allocation = malloc syscall.
         auto& existing = grads[input_nr];
         const int64_t n = existing.numel();
-        if (n == grad.numel() && existing.is_contiguous() && grad.is_contiguous()) {
+        if (n == grad.numel() && existing.is_contiguous() && grad.is_contiguous()
+            && existing.dtype() == c10::ScalarType::Float
+            && grad.dtype() == c10::ScalarType::Float) {
+            // FIX Bug3: only float32 fast-path
             at::native::hot::add_inplace(
                 existing.mutable_data_ptr<float>(),
                 grad.data_ptr<float>(), n);

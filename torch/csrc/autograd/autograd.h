@@ -103,7 +103,10 @@ inline variable_list AccumulateGrad::apply(variable_list&& grads) {
         // On Elbrus E2K, each avoided Tensor op = ~3 malloc syscalls saved.
         Tensor existing_grad(raw_meta->grad_);
         const int64_t n = existing_grad.numel();
-        if (n == grad_contig.numel() && existing_grad.is_contiguous()) {
+        if (n == grad_contig.numel() && existing_grad.is_contiguous()
+            && existing_grad.dtype() == c10::ScalarType::Float
+            && grad_contig.dtype() == c10::ScalarType::Float) {
+            // FIX Bug3: only use float fast-path when both are float32
             at::native::hot::add_inplace(
                 existing_grad.mutable_data_ptr<float>(),
                 grad_contig.data_ptr<float>(), n);

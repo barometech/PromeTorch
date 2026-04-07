@@ -115,40 +115,48 @@ private:
     }
 };
 
-struct TensorMulBackward : public Node {
+struct TensorMulBackward : public TensorAddBackward {
+    // Inherits reduce_grad from TensorAddBackward
     at::Tensor saved_self_;
     at::Tensor saved_other_;
 
     TensorMulBackward(const at::Tensor& self, const at::Tensor& other)
-        : saved_self_(self), saved_other_(other) {}
+        : saved_self_(self), saved_other_(other) {
+        self_sizes_ = self.sizes().vec();
+        other_sizes_ = other.sizes().vec();
+    }
 
     variable_list apply(variable_list&& grads) override {
         auto& grad = grads[0];
         if (!grad.defined()) return {at::Tensor(), at::Tensor()};
-        at::Tensor grad_self = at::native::mul(grad, saved_other_);
-        at::Tensor grad_other = at::native::mul(grad, saved_self_);
+        // FIX Bug4: reduce_grad for broadcasting
+        at::Tensor grad_self = reduce_grad(at::native::mul(grad, saved_other_), self_sizes_);
+        at::Tensor grad_other = reduce_grad(at::native::mul(grad, saved_self_), other_sizes_);
         return {grad_self, grad_other};
     }
 
     std::string name() const override { return "TensorMulBackward"; }
 };
 
-struct TensorDivBackward : public Node {
+struct TensorDivBackward : public TensorAddBackward {
     at::Tensor saved_self_;
     at::Tensor saved_other_;
 
     TensorDivBackward(const at::Tensor& self, const at::Tensor& other)
-        : saved_self_(self), saved_other_(other) {}
+        : saved_self_(self), saved_other_(other) {
+        self_sizes_ = self.sizes().vec();
+        other_sizes_ = other.sizes().vec();
+    }
 
     variable_list apply(variable_list&& grads) override {
         auto& grad = grads[0];
         if (!grad.defined()) return {at::Tensor(), at::Tensor()};
-        // d(a/b)/da = 1/b, d(a/b)/db = -a/b^2
-        at::Tensor grad_self = at::native::div(grad, saved_other_);
+        // FIX Bug4: reduce_grad for broadcasting
+        at::Tensor grad_self = reduce_grad(at::native::div(grad, saved_other_), self_sizes_);
         at::Tensor other_sq = at::native::mul(saved_other_, saved_other_);
-        at::Tensor grad_other = at::native::mul(
+        at::Tensor grad_other = reduce_grad(at::native::mul(
             at::native::div(at::native::mul(grad, saved_self_), other_sq),
-            at::Scalar(-1.0));
+            at::Scalar(-1.0)), other_sizes_);
         return {grad_self, grad_other};
     }
 
@@ -244,6 +252,7 @@ inline Tensor Tensor::to(c10::MemoryFormat memory_format) const {
 inline Tensor& Tensor::copy_(const Tensor& src) {
     PT_CHECK(defined() && src.defined());
     PT_CHECK_MSG(sizes() == src.sizes(), "copy_: sizes must match");
+    PT_CHECK_MSG(dtype() == src.dtype(), "copy_: dtype mismatch");  // FIX 1.4
 
     if (src.is_contiguous() && is_contiguous()) {
         std::memcpy(data_ptr(), src.data_ptr(), nbytes());
