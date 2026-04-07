@@ -126,18 +126,14 @@ struct GradSync {
         // Step 4: Wait for all to finish reduce
         pthread_barrier_wait(&ctrl_->bar_reduce_done);
 
-        // Step 5: Allgather — read averaged chunks from other ranks
-        for (int r = 0; r < nprocs_; r++) {
-            if (r == rank_) {
-                // Write my averaged chunk back to shared memory for others
-                memcpy(shm_grad_ + my_start, flat_grads + my_start, my_count * sizeof(float));
-            }
-        }
+        // Step 5: Allgather — write my averaged chunk to a SHARED region (offset 0)
+        // FIX: use shm_grad_ directly as single flat buffer for allgather
+        memcpy(shm_grad_ + my_start, flat_grads + my_start, my_count * sizeof(float));
 
         // Wait for all to write their chunks
-        pthread_barrier_wait(&ctrl_->bar_grads_ready);
+        pthread_barrier_wait(&ctrl_->bar_reduce_done);
 
-        // Read other chunks
+        // Read other chunks from shared flat buffer
         for (int r = 0; r < nprocs_; r++) {
             if (r == rank_) continue;
             int64_t r_start = r * chunk_size_;
@@ -145,8 +141,6 @@ struct GradSync {
             int64_t r_count = r_end - r_start;
             memcpy(flat_grads + r_start, shm_grad_ + r_start, r_count * sizeof(float));
         }
-
-        pthread_barrier_wait(&ctrl_->bar_reduce_done);
     }
 
     // After Adam: sync weights so all processes have identical params
@@ -158,7 +152,8 @@ struct GradSync {
         if (rank_ != 0) {
             memcpy(flat_params, shm_weights_, total_params_ * sizeof(float));
         }
-        pthread_barrier_wait(&ctrl_->bar_grads_ready);  // reuse barrier
+        // FIX Bug2: second barrier ensures all reads complete before next phase
+        pthread_barrier_wait(&ctrl_->bar_weights_done);
     }
 
     void cleanup() {
