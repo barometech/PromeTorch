@@ -293,7 +293,8 @@ static float cross_entropy_fwd_bwd(const float* logits, const float* targets,
         for (int64_t v = 0; v < V; v++)
             di[v] /= sum_exp;
 
-        total_loss += -std::log(di[target] + 1e-10f);
+        // FIX 4.1: log-sum-exp trick — more numerically stable than -log(softmax+eps)
+        total_loss += (max_val - li[target] + std::log(sum_exp));
 
         // Gradient: softmax - one_hot
         di[target] -= 1.0f;
