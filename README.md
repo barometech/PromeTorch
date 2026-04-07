@@ -98,10 +98,14 @@ cmake .. -DCMAKE_BUILD_TYPE=Release -DPT_USE_TUDA=ON
 cmake --build . -j$(nproc)
 ```
 
-### Сборка на x86 (Windows, Developer Command Prompt)
+### Сборка на x86 (Windows)
+
+> **ВАЖНО:** Сборка на Windows работает ТОЛЬКО из Developer Command Prompt (не из Git Bash, PowerShell или WSL). `rc.exe` не найдётся без `vcvarsall.bat`.
 
 ```batch
+REM Открыть Developer Command Prompt for VS 2019 (или запустить вручную):
 call "C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64
+cd /d C:\path\to\promethorch
 mkdir build && cd build
 cmake .. -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release
 nmake

@@ -11,6 +11,13 @@
 #include "aten/src/ATen/cuda/CUDAOps.h"
 #include "aten/src/ATen/cuda/CuBLASHandle.h"
 
+// AMD HIP compatibility
+#ifdef __HIP_PLATFORM_AMD__
+constexpr unsigned WARP_MASK = 0xFFFFFFFFFFFFFFFFULL;
+#else
+constexpr unsigned WARP_MASK = 0xFFFFFFFF;
+#endif
+
 namespace at {
 namespace cuda {
 
@@ -121,7 +128,7 @@ __global__ void q4km_gemv_kernel(
     // Warp shuffle reduction
     #pragma unroll
     for (int offset = 16; offset > 0; offset >>= 1) {
-        sum += __shfl_down_sync(0xffffffff, sum, offset);
+        sum += __shfl_down_sync(WARP_MASK, sum, offset);
     }
     if (lane == 0) y[n] = sum;
 }
@@ -203,7 +210,7 @@ __global__ void q4km_persistent_gemv_kernel(
         // Warp shuffle reduction
         #pragma unroll
         for (int offset = 16; offset > 0; offset >>= 1) {
-            sum += __shfl_down_sync(0xffffffff, sum, offset);
+            sum += __shfl_down_sync(WARP_MASK, sum, offset);
         }
         if (lane == 0) y[n] = sum;
     }
@@ -360,7 +367,7 @@ __global__ void q4km_fused_gate_up_kernel(
         // Warp shuffle reduction
         #pragma unroll
         for (int offset = 16; offset > 0; offset >>= 1) {
-            sum += __shfl_down_sync(0xffffffff, sum, offset);
+            sum += __shfl_down_sync(WARP_MASK, sum, offset);
         }
         if (lane == 0) y_out[row_idx] = sum;
     }
@@ -417,7 +424,7 @@ __global__ void quantize_q8_1_kernel(
     float amax = fabsf(xi);
     #pragma unroll
     for (int offset = 16; offset > 0; offset >>= 1)
-        amax = fmaxf(amax, __shfl_xor_sync(0xffffffff, amax, offset));
+        amax = fmaxf(amax, __shfl_xor_sync(WARP_MASK, amax, offset));
 
     // Quantize to int8
     float d = amax / 127.0f;
@@ -555,7 +562,7 @@ __global__ void q4km_q8_gemv_kernel(
     // Intra-warp reduction
     #pragma unroll
     for (int offset = 16; offset > 0; offset >>= 1)
-        sum += __shfl_down_sync(0xffffffff, sum, offset);
+        sum += __shfl_down_sync(WARP_MASK, sum, offset);
 
     // Inter-warp reduction via shared memory
     __shared__ float warp_sums[4];
@@ -665,7 +672,7 @@ __global__ void q6k_gemv_kernel(
     // Warp shuffle reduction
     #pragma unroll
     for (int offset = 16; offset > 0; offset >>= 1) {
-        sum += __shfl_down_sync(0xffffffff, sum, offset);
+        sum += __shfl_down_sync(WARP_MASK, sum, offset);
     }
     if (lane == 0) y[n] = sum;
 }
@@ -800,7 +807,7 @@ __global__ void q5k_gemv_kernel(
     // Warp shuffle reduction
     #pragma unroll
     for (int offset = 16; offset > 0; offset >>= 1) {
-        sum += __shfl_down_sync(0xffffffff, sum, offset);
+        sum += __shfl_down_sync(WARP_MASK, sum, offset);
     }
     if (lane == 0) y[n] = sum;
 }
@@ -1079,7 +1086,7 @@ __global__ void q4km_fused_qkv_gemv_kernel(
         // Warp shuffle reduction
         #pragma unroll
         for (int offset = 16; offset > 0; offset >>= 1) {
-            sum += __shfl_down_sync(0xffffffff, sum, offset);
+            sum += __shfl_down_sync(WARP_MASK, sum, offset);
         }
         if (lane == 0) y_out[row_idx] = sum;
     }
@@ -1223,7 +1230,7 @@ __global__ void q4km_fused_rmsnorm_gemv_kernel(
 
         #pragma unroll
         for (int offset = 16; offset > 0; offset >>= 1) {
-            sum += __shfl_down_sync(0xffffffff, sum, offset);
+            sum += __shfl_down_sync(WARP_MASK, sum, offset);
         }
         if (lane == 0) y[n] = sum;
     }
@@ -1378,7 +1385,7 @@ __global__ void q4km_fused_rmsnorm_qkv_gemv_kernel(
 
         #pragma unroll
         for (int offset = 16; offset > 0; offset >>= 1) {
-            sum += __shfl_down_sync(0xffffffff, sum, offset);
+            sum += __shfl_down_sync(WARP_MASK, sum, offset);
         }
         if (lane == 0) y_out[row_idx] = sum;
     }
@@ -1494,7 +1501,7 @@ __global__ void q4km_persistent_gemv_accumulate_kernel(
 
         #pragma unroll
         for (int offset = 16; offset > 0; offset >>= 1) {
-            sum += __shfl_down_sync(0xffffffff, sum, offset);
+            sum += __shfl_down_sync(WARP_MASK, sum, offset);
         }
         if (lane == 0) y[n] += sum;  // ACCUMULATE, not overwrite
     }
@@ -1639,7 +1646,7 @@ __global__ void q4km_fused_rmsnorm_gate_up_kernel(
 
         #pragma unroll
         for (int offset = 16; offset > 0; offset >>= 1) {
-            sum += __shfl_down_sync(0xffffffff, sum, offset);
+            sum += __shfl_down_sync(WARP_MASK, sum, offset);
         }
         if (lane == 0) y_out[row_idx] = sum;
     }

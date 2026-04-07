@@ -13,7 +13,13 @@ namespace at {
 namespace cuda {
 
 constexpr int REDUCE_BLOCK_SIZE = 256;
+#ifdef __HIP_PLATFORM_AMD__
+constexpr int WARP_SIZE = 64;
+constexpr unsigned WARP_MASK = 0xFFFFFFFFFFFFFFFFULL;
+#else
 constexpr int WARP_SIZE = 32;
+constexpr unsigned WARP_MASK = 0xFFFFFFFF;
+#endif
 
 // ============================================================================
 // Warp-level reduction utilities
@@ -22,7 +28,7 @@ constexpr int WARP_SIZE = 32;
 __device__ __forceinline__ float warp_reduce_sum(float val) {
     #pragma unroll
     for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
-        val += __shfl_down_sync(0xffffffff, val, offset);
+        val += __shfl_down_sync(WARP_MASK, val, offset);
     }
     return val;
 }
@@ -30,7 +36,7 @@ __device__ __forceinline__ float warp_reduce_sum(float val) {
 __device__ __forceinline__ float warp_reduce_max(float val) {
     #pragma unroll
     for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
-        val = max(val, __shfl_down_sync(0xffffffff, val, offset));
+        val = max(val, __shfl_down_sync(WARP_MASK, val, offset));
     }
     return val;
 }
@@ -38,7 +44,7 @@ __device__ __forceinline__ float warp_reduce_max(float val) {
 __device__ __forceinline__ float warp_reduce_min(float val) {
     #pragma unroll
     for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
-        val = min(val, __shfl_down_sync(0xffffffff, val, offset));
+        val = min(val, __shfl_down_sync(WARP_MASK, val, offset));
     }
     return val;
 }
@@ -326,7 +332,7 @@ __global__ void prod_kernel(const float* input, float* output, int64_t n) {
 
     // Warp reduce
     for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
-        prod *= __shfl_down_sync(0xffffffff, prod, offset);
+        prod *= __shfl_down_sync(WARP_MASK, prod, offset);
     }
 
     if (lane == 0) shared[wid] = prod;
@@ -336,7 +342,7 @@ __global__ void prod_kernel(const float* input, float* output, int64_t n) {
 
     if (wid == 0) {
         for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
-            prod *= __shfl_down_sync(0xffffffff, prod, offset);
+            prod *= __shfl_down_sync(WARP_MASK, prod, offset);
         }
     }
 
