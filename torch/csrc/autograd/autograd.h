@@ -609,9 +609,16 @@ inline Tensor softplus_autograd(const Tensor& self, double beta = 1.0, double th
 // Binary Operations with Autograd
 // ============================================================================
 
-// Binary ops use Tensor methods which have CUDA dispatch
+// Binary ops — now Tensor::add/sub/mul/div have built-in autograd, so these
+// wrappers use NoGradGuard to avoid double-wiring backward nodes and then
+// attach their own backward. Kept for backward compatibility with existing
+// call sites (tests, benchmarks).
 inline Tensor add_autograd(const Tensor& self, const Tensor& other, Scalar alpha = 1) {
-    Tensor result = self.add(other, alpha);  // Has CUDA dispatch
+    Tensor result;
+    {
+        NoGradGuard no_grad;
+        result = self.add(other, alpha);  // raw compute, no autograd
+    }
     if (compute_requires_grad(self, other)) {
         auto grad_fn = NodePool<AddBackward>::make_shared(alpha, self.sizes(), other.sizes());
         grad_fn->add_input_metadata(self);
@@ -623,7 +630,11 @@ inline Tensor add_autograd(const Tensor& self, const Tensor& other, Scalar alpha
 }
 
 inline Tensor sub_autograd(const Tensor& self, const Tensor& other, Scalar alpha = 1) {
-    Tensor result = self.sub(other, alpha);  // Has CUDA dispatch
+    Tensor result;
+    {
+        NoGradGuard no_grad;
+        result = self.sub(other, alpha);  // raw compute, no autograd
+    }
     if (compute_requires_grad(self, other)) {
         auto grad_fn = NodePool<SubBackward>::make_shared(alpha, self.sizes(), other.sizes());
         grad_fn->add_input_metadata(self);
@@ -635,12 +646,20 @@ inline Tensor sub_autograd(const Tensor& self, const Tensor& other, Scalar alpha
 }
 
 inline Tensor mul_autograd(const Tensor& self, const Tensor& other) {
-    Tensor result = self.mul(other);  // Has CUDA dispatch
+    Tensor result;
+    {
+        NoGradGuard no_grad;
+        result = self.mul(other);  // raw compute, no autograd
+    }
     return make_result_with_grad2<MulBackward>(result, self, other, self, other);
 }
 
 inline Tensor div_autograd(const Tensor& self, const Tensor& other) {
-    Tensor result = self.div(other);  // Has CUDA dispatch
+    Tensor result;
+    {
+        NoGradGuard no_grad;
+        result = self.div(other);  // raw compute, no autograd
+    }
     return make_result_with_grad2<DivBackward>(result, self, other, self, other);
 }
 

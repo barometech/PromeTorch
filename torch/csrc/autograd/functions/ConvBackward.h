@@ -531,5 +531,253 @@ struct AvgPool2dBackward : public Node {
     std::string name() const override { return "AvgPool2dBackward"; }
 };
 
+// ============================================================================
+// LayerNorm Backward
+// ============================================================================
+// y = (x - mean) / sqrt(var + eps) * gamma + beta
+// grad_input, grad_weight, grad_bias
+
+struct LayerNormBackward : public Node {
+    Tensor saved_input_;
+    Tensor saved_weight_;  // gamma, may be empty if !elementwise_affine
+    int64_t norm_size_;
+    double eps_;
+    bool elementwise_affine_;
+
+    LayerNormBackward(const Tensor& input, const Tensor& weight,
+                      int64_t norm_size, double eps, bool elementwise_affine)
+        : saved_input_(input), saved_weight_(weight)
+        , norm_size_(norm_size), eps_(eps)
+        , elementwise_affine_(elementwise_affine)
+    {}
+
+    void release_saved_tensors() override {
+        saved_input_ = Tensor();
+        saved_weight_ = Tensor();
+    }
+
+    variable_list apply(variable_list&& grads) override {
+        auto& grad_output = grads[0];
+        if (!grad_output.defined()) {
+            return {Tensor(), Tensor(), Tensor()};
+        }
+
+        Tensor go = grad_output.is_contiguous() ? grad_output : grad_output.contiguous();
+        Tensor input = saved_input_.is_contiguous() ? saved_input_ : saved_input_.contiguous();
+
+        int64_t total = input.numel();
+        int64_t batch_size = total / norm_size_;
+
+        const float* go_data = go.data_ptr<float>();
+        const float* in_data = input.data_ptr<float>();
+        const float* gamma = nullptr;
+        if (elementwise_affine_ && saved_weight_.defined()) {
+            gamma = saved_weight_.data_ptr<float>();
+        }
+
+        Tensor grad_input = at::zeros(input.sizes().vec());
+        float* gi_data = grad_input.mutable_data_ptr<float>();
+
+        Tensor grad_weight, grad_bias;
+        float* gw_data = nullptr;
+        float* gb_data = nullptr;
+        if (elementwise_affine_) {
+            grad_weight = at::zeros({norm_size_});
+            grad_bias = at::zeros({norm_size_});
+            gw_data = grad_weight.mutable_data_ptr<float>();
+            gb_data = grad_bias.mutable_data_ptr<float>();
+        }
+
+        float inv_norm = 1.0f / static_cast<float>(norm_size_);
+
+        for (int64_t b = 0; b < batch_size; ++b) {
+            int64_t offset = b * norm_size_;
+
+            // Recompute mean and variance for this batch element
+            float mean = 0.0f;
+            for (int64_t i = 0; i < norm_size_; ++i) {
+                mean += in_data[offset + i];
+            }
+            mean *= inv_norm;
+
+            float var = 0.0f;
+            for (int64_t i = 0; i < norm_size_; ++i) {
+                float diff = in_data[offset + i] - mean;
+                var += diff * diff;
+            }
+            var *= inv_norm;
+            float inv_std = 1.0f / std::sqrt(var + static_cast<float>(eps_));
+
+            // Accumulate grad_weight, grad_bias and intermediate sums
+            float sum_dout_gamma = 0.0f;
+            float sum_dout_gamma_xhat = 0.0f;
+
+            for (int64_t i = 0; i < norm_size_; ++i) {
+                float dout = go_data[offset + i];
+                float x_hat = (in_data[offset + i] - mean) * inv_std;
+                float g = (elementwise_affine_ && gamma) ? gamma[i] : 1.0f;
+
+                sum_dout_gamma += dout * g;
+                sum_dout_gamma_xhat += dout * g * x_hat;
+
+                if (elementwise_affine_) {
+                    gw_data[i] += dout * x_hat;
+                    gb_data[i] += dout;
+                }
+            }
+
+            // grad_input = gamma * inv_std * (dout - mean(dout*gamma) - x_hat * mean(dout*gamma*x_hat))
+            float mean_dg = sum_dout_gamma * inv_norm;
+            float mean_dg_xhat = sum_dout_gamma_xhat * inv_norm;
+
+            for (int64_t i = 0; i < norm_size_; ++i) {
+                float dout = go_data[offset + i];
+                float x_hat = (in_data[offset + i] - mean) * inv_std;
+                float g = (elementwise_affine_ && gamma) ? gamma[i] : 1.0f;
+                gi_data[offset + i] = inv_std * (dout * g - mean_dg - x_hat * mean_dg_xhat);
+            }
+        }
+
+        saved_input_ = Tensor();
+        saved_weight_ = Tensor();
+
+        return {grad_input, grad_weight, grad_bias};
+    }
+
+    std::string name() const override { return "LayerNormBackward"; }
+};
+
+// ============================================================================
+// GroupNorm Backward
+// ============================================================================
+// y = (x - mean_g) / sqrt(var_g + eps) * gamma + beta
+// where mean_g, var_g are computed per (N, group)
+
+struct GroupNormBackward : public Node {
+    Tensor saved_input_;
+    Tensor saved_weight_;  // gamma [C], may be empty
+    int64_t num_groups_;
+    double eps_;
+    bool affine_;
+
+    GroupNormBackward(const Tensor& input, const Tensor& weight,
+                     int64_t num_groups, double eps, bool affine)
+        : saved_input_(input), saved_weight_(weight)
+        , num_groups_(num_groups), eps_(eps), affine_(affine)
+    {}
+
+    void release_saved_tensors() override {
+        saved_input_ = Tensor();
+        saved_weight_ = Tensor();
+    }
+
+    variable_list apply(variable_list&& grads) override {
+        auto& grad_output = grads[0];
+        if (!grad_output.defined()) {
+            return {Tensor(), Tensor(), Tensor()};
+        }
+
+        Tensor go = grad_output.is_contiguous() ? grad_output : grad_output.contiguous();
+        Tensor input = saved_input_.is_contiguous() ? saved_input_ : saved_input_.contiguous();
+
+        int64_t N = input.size(0);
+        int64_t C = input.size(1);
+        int64_t spatial = input.numel() / (N * C);
+        int64_t channels_per_group = C / num_groups_;
+        int64_t group_size = channels_per_group * spatial;
+
+        const float* go_data = go.data_ptr<float>();
+        const float* in_data = input.data_ptr<float>();
+        const float* gamma = nullptr;
+        if (affine_ && saved_weight_.defined()) {
+            gamma = saved_weight_.data_ptr<float>();
+        }
+
+        Tensor grad_input = at::zeros(input.sizes().vec());
+        float* gi_data = grad_input.mutable_data_ptr<float>();
+
+        Tensor grad_weight, grad_bias;
+        float* gw_data = nullptr;
+        float* gb_data = nullptr;
+        if (affine_) {
+            grad_weight = at::zeros({C});
+            grad_bias = at::zeros({C});
+            gw_data = grad_weight.mutable_data_ptr<float>();
+            gb_data = grad_bias.mutable_data_ptr<float>();
+        }
+
+        float inv_group_size = 1.0f / static_cast<float>(group_size);
+
+        for (int64_t n = 0; n < N; ++n) {
+            for (int64_t g = 0; g < num_groups_; ++g) {
+                // Recompute mean and variance for this group
+                float mean = 0.0f;
+                for (int64_t c = 0; c < channels_per_group; ++c) {
+                    int64_t ch = g * channels_per_group + c;
+                    for (int64_t s = 0; s < spatial; ++s) {
+                        int64_t idx = n * C * spatial + ch * spatial + s;
+                        mean += in_data[idx];
+                    }
+                }
+                mean *= inv_group_size;
+
+                float var = 0.0f;
+                for (int64_t c = 0; c < channels_per_group; ++c) {
+                    int64_t ch = g * channels_per_group + c;
+                    for (int64_t s = 0; s < spatial; ++s) {
+                        int64_t idx = n * C * spatial + ch * spatial + s;
+                        float diff = in_data[idx] - mean;
+                        var += diff * diff;
+                    }
+                }
+                var *= inv_group_size;
+                float inv_std = 1.0f / std::sqrt(var + static_cast<float>(eps_));
+
+                // Intermediate sums
+                float sum_dout_gamma = 0.0f;
+                float sum_dout_gamma_xhat = 0.0f;
+
+                for (int64_t c = 0; c < channels_per_group; ++c) {
+                    int64_t ch = g * channels_per_group + c;
+                    float gi = (affine_ && gamma) ? gamma[ch] : 1.0f;
+                    for (int64_t s = 0; s < spatial; ++s) {
+                        int64_t idx = n * C * spatial + ch * spatial + s;
+                        float dout = go_data[idx];
+                        float x_hat = (in_data[idx] - mean) * inv_std;
+                        sum_dout_gamma += dout * gi;
+                        sum_dout_gamma_xhat += dout * gi * x_hat;
+
+                        if (affine_) {
+                            gw_data[ch] += dout * x_hat;
+                            gb_data[ch] += dout;
+                        }
+                    }
+                }
+
+                float mean_dg = sum_dout_gamma * inv_group_size;
+                float mean_dg_xhat = sum_dout_gamma_xhat * inv_group_size;
+
+                for (int64_t c = 0; c < channels_per_group; ++c) {
+                    int64_t ch = g * channels_per_group + c;
+                    float gi = (affine_ && gamma) ? gamma[ch] : 1.0f;
+                    for (int64_t s = 0; s < spatial; ++s) {
+                        int64_t idx = n * C * spatial + ch * spatial + s;
+                        float dout = go_data[idx];
+                        float x_hat = (in_data[idx] - mean) * inv_std;
+                        gi_data[idx] = inv_std * (dout * gi - mean_dg - x_hat * mean_dg_xhat);
+                    }
+                }
+            }
+        }
+
+        saved_input_ = Tensor();
+        saved_weight_ = Tensor();
+
+        return {grad_input, grad_weight, grad_bias};
+    }
+
+    std::string name() const override { return "GroupNormBackward"; }
+};
+
 } // namespace autograd
 } // namespace torch

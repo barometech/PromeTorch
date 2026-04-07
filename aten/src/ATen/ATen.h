@@ -31,6 +31,133 @@
 #include "aten/src/ATen/native/cpu/IndexOps.h"
 #include "aten/src/ATen/native/cpu/FFTOps.h"
 
+// Autograd support for Tensor binary ops (add/sub/mul/div)
+#include "torch/csrc/autograd/grad_mode.h"
+#include "torch/csrc/autograd/node.h"
+#include "torch/csrc/autograd/node_pool.h"
+#include "torch/csrc/autograd/autograd_meta.h"
+
+// ---------------------------------------------------------------------------
+// Lightweight backward nodes for Tensor::add/sub/mul/div
+// Defined here (not in MathBackward.h) to avoid circular includes.
+// These use native:: functions for the backward compute, avoiding dependency
+// on Tensor inline methods that are defined later in this file.
+// ---------------------------------------------------------------------------
+namespace torch {
+namespace autograd {
+
+struct TensorAddBackward : public Node {
+    at::Scalar alpha_;
+    std::vector<int64_t> self_sizes_;
+    std::vector<int64_t> other_sizes_;
+
+    TensorAddBackward(at::Scalar alpha, c10::IntArrayRef self_sizes, c10::IntArrayRef other_sizes)
+        : alpha_(alpha), self_sizes_(self_sizes.vec()), other_sizes_(other_sizes.vec()) {}
+
+    variable_list apply(variable_list&& grads) override {
+        auto& grad = grads[0];
+        if (!grad.defined()) return {at::Tensor(), at::Tensor()};
+        at::Tensor grad_self = grad;
+        at::Tensor grad_other = at::native::mul(grad, alpha_);
+        grad_self = reduce_grad(grad_self, self_sizes_);
+        grad_other = reduce_grad(grad_other, other_sizes_);
+        return {grad_self, grad_other};
+    }
+
+    std::string name() const override { return "TensorAddBackward"; }
+
+private:
+    at::Tensor reduce_grad(const at::Tensor& grad, const std::vector<int64_t>& shape) {
+        if (grad.sizes().vec() == shape) return grad;
+        at::Tensor result = grad;
+        int64_t orig_dim = static_cast<int64_t>(shape.size());
+        while (result.dim() > orig_dim) result = at::native::sum(result, 0, false);
+        for (int64_t i = 0; i < orig_dim; ++i) {
+            if (shape[i] == 1 && result.size(i) != 1)
+                result = at::native::sum(result, i, true);
+        }
+        return result;
+    }
+};
+
+struct TensorSubBackward : public Node {
+    at::Scalar alpha_;
+    std::vector<int64_t> self_sizes_;
+    std::vector<int64_t> other_sizes_;
+
+    TensorSubBackward(at::Scalar alpha, c10::IntArrayRef self_sizes, c10::IntArrayRef other_sizes)
+        : alpha_(alpha), self_sizes_(self_sizes.vec()), other_sizes_(other_sizes.vec()) {}
+
+    variable_list apply(variable_list&& grads) override {
+        auto& grad = grads[0];
+        if (!grad.defined()) return {at::Tensor(), at::Tensor()};
+        at::Tensor grad_self = grad;
+        at::Tensor neg_alpha = at::native::mul(grad, at::Scalar(-alpha_.toDouble()));
+        at::Tensor grad_other = neg_alpha;
+        grad_self = reduce_grad(grad_self, self_sizes_);
+        grad_other = reduce_grad(grad_other, other_sizes_);
+        return {grad_self, grad_other};
+    }
+
+    std::string name() const override { return "TensorSubBackward"; }
+
+private:
+    at::Tensor reduce_grad(const at::Tensor& grad, const std::vector<int64_t>& shape) {
+        if (grad.sizes().vec() == shape) return grad;
+        at::Tensor result = grad;
+        int64_t orig_dim = static_cast<int64_t>(shape.size());
+        while (result.dim() > orig_dim) result = at::native::sum(result, 0, false);
+        for (int64_t i = 0; i < orig_dim; ++i) {
+            if (shape[i] == 1 && result.size(i) != 1)
+                result = at::native::sum(result, i, true);
+        }
+        return result;
+    }
+};
+
+struct TensorMulBackward : public Node {
+    at::Tensor saved_self_;
+    at::Tensor saved_other_;
+
+    TensorMulBackward(const at::Tensor& self, const at::Tensor& other)
+        : saved_self_(self), saved_other_(other) {}
+
+    variable_list apply(variable_list&& grads) override {
+        auto& grad = grads[0];
+        if (!grad.defined()) return {at::Tensor(), at::Tensor()};
+        at::Tensor grad_self = at::native::mul(grad, saved_other_);
+        at::Tensor grad_other = at::native::mul(grad, saved_self_);
+        return {grad_self, grad_other};
+    }
+
+    std::string name() const override { return "TensorMulBackward"; }
+};
+
+struct TensorDivBackward : public Node {
+    at::Tensor saved_self_;
+    at::Tensor saved_other_;
+
+    TensorDivBackward(const at::Tensor& self, const at::Tensor& other)
+        : saved_self_(self), saved_other_(other) {}
+
+    variable_list apply(variable_list&& grads) override {
+        auto& grad = grads[0];
+        if (!grad.defined()) return {at::Tensor(), at::Tensor()};
+        // d(a/b)/da = 1/b, d(a/b)/db = -a/b^2
+        at::Tensor grad_self = at::native::div(grad, saved_other_);
+        at::Tensor other_sq = at::native::mul(saved_other_, saved_other_);
+        at::Tensor grad_other = at::native::mul(
+            at::native::div(at::native::mul(grad, saved_self_), other_sq),
+            at::Scalar(-1.0));
+        return {grad_self, grad_other};
+    }
+
+    std::string name() const override { return "TensorDivBackward"; }
+};
+
+} // namespace autograd
+} // namespace torch
+
 namespace at {
 
 // ============================================================================
@@ -117,7 +244,6 @@ inline Tensor Tensor::to(c10::MemoryFormat memory_format) const {
 inline Tensor& Tensor::copy_(const Tensor& src) {
     PT_CHECK(defined() && src.defined());
     PT_CHECK_MSG(sizes() == src.sizes(), "copy_: sizes must match");
-    PT_CHECK_MSG(dtype() == src.dtype(), "copy_: dtype mismatch");  // FIX 1.4
 
     if (src.is_contiguous() && is_contiguous()) {
         std::memcpy(data_ptr(), src.data_ptr(), nbytes());
@@ -580,52 +706,99 @@ inline Tensor& Tensor::fill_(Scalar value) {
     return native::fill_(*this, value);
 }
 
-// Binary operations with device dispatch
+// Binary operations with device dispatch + autograd
 inline Tensor Tensor::add(const Tensor& other, Scalar alpha) const {
+    Tensor result;
 #ifdef PT_USE_LINQ
-    if (device().is_linq()) { return linq_dispatch::add(*this, other); }
+    if (device().is_linq()) { result = linq_dispatch::add(*this, other); }
+    else
 #endif
 #ifdef PT_USE_NMCARD
     if (is_nmcard()) {
         if (numel() != other.numel() && dim() == 2 && other.dim() == 1 && other.size(0) == size(1)) {
-            return nmc_ops::add_broadcast(*this, other);
+            result = nmc_ops::add_broadcast(*this, other);
+        } else {
+            result = nmc_ops::add(*this, other);
         }
-        return nmc_ops::add(*this, other);
-    }
+    } else
 #endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) {
         if (numel() != other.numel() && dim() == 2 && other.dim() == 1 && other.size(0) == size(1)) {
-            return cuda_ops::add_broadcast(*this, other);
+            result = cuda_ops::add_broadcast(*this, other);
+        } else {
+            result = cuda_ops::add(*this, other);
         }
-        return cuda_ops::add(*this, other);
-    }
+    } else
 #endif
-    return native::add(*this, other, alpha);
+    { result = native::add(*this, other, alpha); }
+
+    // Wire autograd backward
+    if (torch::autograd::GradMode::is_enabled() &&
+        torch::autograd::compute_requires_grad(*this, other)) {
+        auto grad_fn = torch::autograd::NodePool<torch::autograd::TensorAddBackward>::make_shared(
+            alpha, sizes(), other.sizes());
+        grad_fn->add_input_metadata(*this);
+        grad_fn->add_input_metadata(other);
+        torch::autograd::set_grad_fn(result, grad_fn);
+        result.set_requires_grad(true);
+    }
+    return result;
 }
 inline Tensor Tensor::sub(const Tensor& other, Scalar alpha) const {
+    Tensor result;
 #ifdef PT_USE_LINQ
-    if (device().is_linq()) { return linq_dispatch::sub(*this, other); }
+    if (device().is_linq()) { result = linq_dispatch::sub(*this, other); }
+    else
 #endif
 #ifdef PT_USE_NMCARD
-    if (is_nmcard()) { return nmc_ops::sub(*this, other); }
+    if (is_nmcard()) { result = nmc_ops::sub(*this, other); }
+    else
 #endif
 #ifdef PT_USE_CUDA
-    if (is_cuda()) { return cuda_ops::sub(*this, other); }
+    if (is_cuda()) { result = cuda_ops::sub(*this, other); }
+    else
 #endif
-    return native::sub(*this, other, alpha);
+    { result = native::sub(*this, other, alpha); }
+
+    // Wire autograd backward
+    if (torch::autograd::GradMode::is_enabled() &&
+        torch::autograd::compute_requires_grad(*this, other)) {
+        auto grad_fn = torch::autograd::NodePool<torch::autograd::TensorSubBackward>::make_shared(
+            alpha, sizes(), other.sizes());
+        grad_fn->add_input_metadata(*this);
+        grad_fn->add_input_metadata(other);
+        torch::autograd::set_grad_fn(result, grad_fn);
+        result.set_requires_grad(true);
+    }
+    return result;
 }
 inline Tensor Tensor::mul(const Tensor& other) const {
+    Tensor result;
 #ifdef PT_USE_LINQ
-    if (device().is_linq()) { return linq_dispatch::mul(*this, other); }
+    if (device().is_linq()) { result = linq_dispatch::mul(*this, other); }
+    else
 #endif
 #ifdef PT_USE_NMCARD
-    if (is_nmcard()) { return nmc_ops::mul(*this, other); }
+    if (is_nmcard()) { result = nmc_ops::mul(*this, other); }
+    else
 #endif
 #ifdef PT_USE_CUDA
-    if (is_cuda()) { return cuda_ops::mul(*this, other); }
+    if (is_cuda()) { result = cuda_ops::mul(*this, other); }
+    else
 #endif
-    return native::mul(*this, other);
+    { result = native::mul(*this, other); }
+
+    // Wire autograd backward
+    if (torch::autograd::GradMode::is_enabled() &&
+        torch::autograd::compute_requires_grad(*this, other)) {
+        auto grad_fn = torch::autograd::NodePool<torch::autograd::TensorMulBackward>::make_shared(*this, other);
+        grad_fn->add_input_metadata(*this);
+        grad_fn->add_input_metadata(other);
+        torch::autograd::set_grad_fn(result, grad_fn);
+        result.set_requires_grad(true);
+    }
+    return result;
 }
 inline Tensor Tensor::mul_broadcast(const Tensor& other) const {
 #ifdef PT_USE_NMCARD
@@ -637,16 +810,31 @@ inline Tensor Tensor::mul_broadcast(const Tensor& other) const {
     return native::mul(*this, other);
 }
 inline Tensor Tensor::div(const Tensor& other) const {
+    Tensor result;
 #ifdef PT_USE_LINQ
-    if (device().is_linq()) { return linq_dispatch::div(*this, other); }
+    if (device().is_linq()) { result = linq_dispatch::div(*this, other); }
+    else
 #endif
 #ifdef PT_USE_NMCARD
-    if (is_nmcard()) { return nmc_ops::div(*this, other); }
+    if (is_nmcard()) { result = nmc_ops::div(*this, other); }
+    else
 #endif
 #ifdef PT_USE_CUDA
-    if (is_cuda()) { return cuda_ops::div(*this, other); }
+    if (is_cuda()) { result = cuda_ops::div(*this, other); }
+    else
 #endif
-    return native::div(*this, other);
+    { result = native::div(*this, other); }
+
+    // Wire autograd backward
+    if (torch::autograd::GradMode::is_enabled() &&
+        torch::autograd::compute_requires_grad(*this, other)) {
+        auto grad_fn = torch::autograd::NodePool<torch::autograd::TensorDivBackward>::make_shared(*this, other);
+        grad_fn->add_input_metadata(*this);
+        grad_fn->add_input_metadata(other);
+        torch::autograd::set_grad_fn(result, grad_fn);
+        result.set_requires_grad(true);
+    }
+    return result;
 }
 inline Tensor Tensor::pow(const Tensor& exponent) const {
 #ifdef PT_USE_NMCARD
