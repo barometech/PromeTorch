@@ -131,8 +131,8 @@ public:
 private:
     Engine() = default;
 
-    // FIX 1.2: removed cached_task_ member — data race when multiple threads
-    // call backward() on the singleton Engine. Now thread_local in execute().
+    // FIX 1.2: removed cached_task_ member — data race on singleton.
+    // Now thread_local in execute().
 
     // Count dependencies for all nodes
     void compute_dependencies(
@@ -267,8 +267,13 @@ inline void Engine::execute_node(
 ) {
     auto& fn = node_task.fn;
 
-    // Execute the node
-    variable_list grads = fn->apply(variable_list(node_task.inputs));
+    // Execute the node under NoGradGuard so that Tensor ops called inside
+    // backward (e.g. mul, add) do not create spurious autograd nodes.
+    variable_list grads;
+    {
+        NoGradGuard no_grad;
+        grads = fn->apply(variable_list(node_task.inputs));
+    }
 
     // Gradient tensors produced by backward are float32 contiguous CPU — mark trusted
     for (auto& g : grads) {
@@ -320,8 +325,7 @@ inline variable_list Engine::execute(
 ) {
     validate_inputs(roots, grad_outputs);
 
-    // Thread-local cached GraphTask — reused across backward() calls per thread.
-    // FIX 1.2: was class member (data race on singleton). Now thread_local.
+    // FIX 1.2: thread_local cached GraphTask (was class member = data race)
     thread_local GraphTask cached_task;
     GraphTask& task = cached_task;
     task.reset();
