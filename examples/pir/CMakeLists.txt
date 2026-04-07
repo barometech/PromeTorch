@@ -20,6 +20,10 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/train_pir_elbrus.cpp")
     if(OpenMP_CXX_FOUND)
         target_link_libraries(train_pir_elbrus PRIVATE OpenMP::OpenMP_CXX)
     endif()
+    # POSIX shared memory for data-parallel gradient sync
+    if(NOT MSVC)
+        target_link_libraries(train_pir_elbrus PRIVATE rt pthread)
+    endif()
 endif()
 
 # MLP Char Model (existing)
