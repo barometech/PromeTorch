@@ -586,7 +586,9 @@ public:
         }
 
         if (reduction_ == Reduction::Mean) {
-            sum = has_weight_ ? sum / weight_sum : sum / count;
+            // FIX Bug5: guard against count==0 (all targets = ignore_index)
+            if (has_weight_) { sum = weight_sum > 0 ? sum / weight_sum : 0.0; }
+            else { sum = count > 0 ? sum / count : 0.0; }
         }
 
         Tensor output = at::empty({});
@@ -913,7 +915,9 @@ public:
         }
 
         if (reduction_ == Reduction::Mean) {
-            sum = has_weight_ ? sum / weight_sum : sum / count;
+            // FIX Bug5: guard against count==0 (all targets = ignore_index)
+            if (has_weight_) { sum = weight_sum > 0 ? sum / weight_sum : 0.0; }
+            else { sum = count > 0 ? sum / count : 0.0; }
         }
 
         Tensor output = at::empty({});
