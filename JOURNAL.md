@@ -3,6 +3,45 @@
 Полная история разработки проекта. Актуальные инструкции — в `CLAUDE.md`.
 Полный аудит инфраструктуры — в `INFRASTRUCTURE_AUDIT.md`.
 
+## 2026-04-07: GEMINI 3.1 PRO АУДИТ → 15 БАГОВ ПОФИКШЕНО
+
+### Процесс
+1. Весь исходный код (31K строк) отправлен в Gemini 3.1 Pro для аудита
+2. Gemini нашёл 10 багов (3 CRITICAL, 4 HIGH, 3 MEDIUM)
+3. 10 агентов Opus 4.6 верифицировали каждый баг — 9 из 10 подтверждены
+4. 10 агентов Opus 4.6 в изолированных worktrees написали фиксы параллельно
+5. Пофиксили, отправили re-audit в Gemini → нашёл ещё 5 новых багов
+6. Opus 4.6 верифицировал — все 5 подтверждены
+7. Пофиксили все 5
+
+### Первый аудит — 10 багов
+| # | Баг | Severity | Файл |
+|---|-----|----------|------|
+| 1.1 | Tensor::add/sub/mul bypass autograd | CRITICAL | ATen.h, ConvBackward.h, normalization.h |
+| 1.2 | Engine data race (cached_task_) | CRITICAL | engine.h |
+| 1.3 | index_select OOB при dim>1 | CRITICAL | IndexOps.h |
+| 1.4 | copy_() без проверки dtype | HIGH | ATen.h |
+| 3.1 | cuda_synchronize() в contiguous() | HIGH | ShapeOps.h |
+| 3.3 | ThreadPool spinlock (yield) | MEDIUM | ThreadPool.h |
+| 4.1 | Cross-entropy числовая нестабильность | HIGH | fused_step.h |
+| 4.2 | BatchNorm div/0 при count=1 | MEDIUM | normalization.h |
+| 5.1 | Allocator alignment overflow | HIGH | Allocator.h |
+| 5.2 | numel overflow в TensorImpl | HIGH | TensorImpl.h + 5 dispatch |
+
+### Re-audit — 5 новых багов
+| # | Баг | Severity | Файл |
+|---|-----|----------|------|
+| R1 | grad_sync allgather offset | CRITICAL | grad_sync.h |
+| R2 | Barrier reuse deadlock | CRITICAL | grad_sync.h |
+| R3 | AccumulateGrad hardcoded float | CRITICAL | autograd.h, engine.h |
+| R4 | Mul/Div backward missing reduce_grad | CRITICAL | ATen.h |
+| R5 | NLLLoss div/0 all ignore_index | HIGH | loss.h |
+
+### Подтверждено Gemini
+- LayerNormBackward, GroupNormBackward — математика верна
+- RMSNormBackward — корректно
+- DynamicParallelScanBackward — корректно
+
 ## 2026-04-07: 4-NUMA DATA PARALLEL — 936 tok/s на 32 ядрах Эльбруса
 
 ### Проблема
