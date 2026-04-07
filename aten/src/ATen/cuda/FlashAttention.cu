@@ -23,7 +23,14 @@ namespace cuda {
 // Constants
 // ============================================================================
 
+// FIX: WARP_SIZE macro for CUDA (32) vs AMD HIP (64)
+#ifdef __HIP_PLATFORM_AMD__
+constexpr int WARP_SIZE = 64;
+constexpr unsigned WARP_MASK = 0xFFFFFFFFFFFFFFFFULL;
+#else
 constexpr int WARP_SIZE = 32;
+constexpr unsigned WARP_MASK = 0xFFFFFFFF;
+#endif
 constexpr float SOFTMAX_SCALE_UNINIT = -1.0f;
 
 // ============================================================================
@@ -34,7 +41,7 @@ constexpr float SOFTMAX_SCALE_UNINIT = -1.0f;
 __device__ __forceinline__ float warp_reduce_max(float val) {
     #pragma unroll
     for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
-        val = fmaxf(val, __shfl_down_sync(0xffffffff, val, offset));
+        val = fmaxf(val, __shfl_down_sync(WARP_MASK, val, offset));
     }
     return val;
 }
@@ -43,7 +50,7 @@ __device__ __forceinline__ float warp_reduce_max(float val) {
 __device__ __forceinline__ float warp_reduce_sum(float val) {
     #pragma unroll
     for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
-        val += __shfl_down_sync(0xffffffff, val, offset);
+        val += __shfl_down_sync(WARP_MASK, val, offset);
     }
     return val;
 }

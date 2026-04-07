@@ -57,21 +57,26 @@
 ### 1.1 MKL Detection в CMake
 Intel MKL (Math Kernel Library) критичен для CPU-матричных умножений.
 ```cmake
-# cmake/FindMKL.cmake (упрощенный паттерн)
-option(USE_MKL "Use Intel MKL" ON)
-if(USE_MKL)
-    find_path(MKL_INCLUDE_DIR mkl.h HINTS $ENV{MKLROOT}/include)
-    find_library(MKL_CORE_LIB mkl_core HINTS $ENV{MKLROOT}/lib/intel64)
-    find_library(MKL_INTEL_LP64_LIB mkl_intel_lp64 HINTS $ENV{MKLROOT}/lib/intel64)
-    find_library(MKL_SEQUENTIAL_LIB mkl_sequential HINTS $ENV{MKLROOT}/lib/intel64) # или mkl_gnu_thread
-
-    if(MKL_INCLUDE_DIR AND MKL_CORE_LIB)
-        set(MKL_FOUND TRUE)
-        add_library(prometorch::mkl INTERFACE IMPORTED)
-        target_include_directories(prometorch::mkl INTERFACE ${MKL_INCLUDE_DIR})
-        target_link_libraries(prometorch::mkl INTERFACE 
-            ${MKL_INTEL_LP64_LIB} ${MKL_SEQUENTIAL_LIB} ${MKL_CORE_LIB} pthread m dl)
-        add_definitions(-DUSE_MKL)
+# Современный способ (Intel OneAPI MKL):
+find_package(MKL CONFIG)
+if(MKL_FOUND)
+    target_link_libraries(aten_cpu PUBLIC MKL::MKL)
+    target_compile_definitions(aten_cpu PUBLIC PT_USE_MKL)
+    message(STATUS "Intel MKL found via OneAPI config")
+else()
+    # Fallback: ручной поиск (Legacy MKL)
+    option(USE_MKL "Use Intel MKL" ON)
+    if(USE_MKL)
+        find_path(MKL_INCLUDE_DIR mkl.h HINTS $ENV{MKLROOT}/include)
+        find_library(MKL_CORE_LIB mkl_core HINTS $ENV{MKLROOT}/lib/intel64)
+        find_library(MKL_INTEL_LP64_LIB mkl_intel_lp64 HINTS $ENV{MKLROOT}/lib/intel64)
+        find_library(MKL_SEQUENTIAL_LIB mkl_sequential HINTS $ENV{MKLROOT}/lib/intel64)
+        if(MKL_INCLUDE_DIR AND MKL_CORE_LIB)
+            target_include_directories(aten_cpu PUBLIC ${MKL_INCLUDE_DIR})
+            target_link_libraries(aten_cpu PUBLIC
+                ${MKL_INTEL_LP64_LIB} ${MKL_SEQUENTIAL_LIB} ${MKL_CORE_LIB} pthread m dl)
+            target_compile_definitions(aten_cpu PUBLIC PT_USE_MKL)
+        endif()
     endif()
 endif()
 ```
@@ -100,8 +105,13 @@ void add_avx512<float>(const float* a, const float* b, float* out, size_t size) 
         __m512 vc = _mm512_add_ps(va, vb);
         _mm512_storeu_ps(&out[i], vc);
     }
-    // Tail processing (scalar or masked)
-    for (; i < size; ++i) { out[i] = a[i] + b[i]; }
+    // Tail processing with AVX-512 masked ops (no scalar fallback needed)
+    if (i < size) {
+        __mmask16 mask = (__mmask16)((1 << (size - i)) - 1);
+        __m512 va = _mm512_maskz_loadu_ps(mask, &a[i]);
+        __m512 vb = _mm512_maskz_loadu_ps(mask, &b[i]);
+        _mm512_mask_storeu_ps(&out[i], mask, _mm512_add_ps(va, vb));
+    }
 }
 
 }}} // namespace
@@ -235,6 +245,12 @@ void sgemm_blis(bool transA, bool transB, int M, int N, int K,
 *Архитектурный совет:* Лучше переименовать `.cu` файлы в `.hip` и использовать их как единый source of truth для обоих GPU-бэкендов, так как HIP синтаксически совместим с CUDA через макросы.
 
 ### 3.2 HIP Porting: Механические изменения
+
+> **КРИТИЧНО: WARP_SIZE!** AMD CDNA/RDNA использует wavefront=64 (не 32 как NVIDIA). 
+> Все `__shfl_down_sync(0xffffffff, ...)` и `constexpr WARP_SIZE=32` ДОЛЖНЫ быть заменены на макросы.
+> Это уже сделано в PromeTorch (`WARP_MASK` + `#ifdef __HIP_PLATFORM_AMD__` в FlashAttention.cu, CUDAReduce.cu, CUDAQuantGemv.cu).
+> Также: для AMX (Intel) в Linux нужен `syscall(SYS_arch_prctl, ARCH_REQ_XCOMP_PERM, XFEATURE_XTILEDATA)` перед использованием — иначе SIGILL.
+
 Можно использовать утилиту `hipify-perl` или `hipify-clang` от AMD, которая сделает 90% работы:
 *   `cudaMalloc` -> `hipMalloc`
 *   `cudaMemcpy` -> `hipMemcpy`
