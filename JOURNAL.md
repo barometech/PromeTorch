@@ -3,6 +3,23 @@
 Полная история разработки проекта. Актуальные инструкции — в `CLAUDE.md`.
 Полный аудит инфраструктуры — в `INFRASTRUCTURE_AUDIT.md`.
 
+## 2026-04-08: GRAD SYNC FIX + API REFERENCE + PROMESERVE UI
+
+### grad_sync.h — финальный фикс
+Предыдущая reduce-scatter+allgather схема имела race conditions → модель не училась.
+Заменена на простую all-average: каждый процесс читает все 4 строки и считает полное среднее.
+Overhead: ~100ms (0.3% от 34s step). Verified: loss 5.53→5.37 за 20 шагов.
+
+### README API Reference
+Gemini 3.1 Pro проверил все заголовочные файлы vs README.
+Нашёл: Tensor methods, Dataset classes, GradScaler API, Custom Functions, checkpoint — не документированы.
+Добавлен полный Справочник API (~60 строк) покрывающий все 9 компонентов.
+
+### PromeServe Web UI
+Gemini 3.1 Pro сгенерировал production chat UI (770 строк):
+- Тёмная тема, streaming, markdown+syntax highlighting
+- Выбор модели, temperature/top_p, история чатов, tok/s индикатор
+
 ## 2026-04-07: ПОЛНЫЙ АУДИТ (4 раунда Gemini 3.1 Pro + Opus 4.6)
 
 ### Итого за день

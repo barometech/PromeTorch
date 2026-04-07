@@ -234,6 +234,64 @@ curl -s http://localhost:11434/api/chat \
 
 ---
 
+## Справочник API (API Reference)
+
+PromeTorch предоставляет API, максимально приближенный к PyTorch, как в C++, так и в Python.
+
+### 1. Тензоры и операции (ATen)
+Базовый класс `at::Tensor` (в Python `torch.Tensor`) поддерживает семантику ссылок и copy-on-write.
+
+* **Методы тензора:** `.clone()`, `.detach()`, `.contiguous()`, `.to(device/dtype)`, `.item()`, `.copy_()`, `.view()`, `.reshape()`, `.flatten()`, `.squeeze()`, `.unsqueeze()`, `.transpose()`, `.permute()`, `.expand()`, `.repeat()`, `.split()`, `.chunk()`.
+* **Фабрики:** `tensor`, `empty`, `zeros`, `ones`, `full`, `rand`, `randn`, `randint`, `arange`, `linspace`, `eye`, `zeros_like`, `ones_like`, `from_numpy`.
+* **Математика:** `add`, `sub`, `mul`, `div`, `neg`, `abs`, `sqrt`, `rsqrt`, `square`, `exp`, `log`, `sin`, `cos`, `tanh`, `sigmoid`, `relu`, `clamp`, `nan_to_num`.
+* **Редукции:** `sum`, `mean`, `max`, `min`, `norm`, `topk`, `sort`, `argmax`, `argmin`.
+* **Линейная алгебра:** `mm`, `bmm`, `matmul`, `dot`, `einsum`.
+* **Проверки:** `isinf`, `isnan`, `isfinite`.
+
+### 2. Нейросетевые модули (`torch::nn` / `torch.nn`)
+Все модели наследуются от `torch::nn::Module`.
+* **Базовые методы Module:** `.forward()`, `.train()`, `.eval()`, `.to()`, `.zero_grad()`, `.parameters()`, `.named_parameters()`, `.state_dict()`, `.load_state_dict()`.
+* **Хуки:** `ForwardPreHook`, `ForwardHook`, `ForwardHookWithReturn`.
+* **Слои:** `Linear`, `Bilinear`, `LazyLinear`, `Identity`, `Conv1d`, `Conv2d`, `Conv3d`, `ConvTranspose2d`.
+* **Активации:** `ReLU`, `ReLU6`, `LeakyReLU`, `PReLU`, `ELU`, `SELU`, `GELU`, `Sigmoid`, `Tanh`, `Softmax`, `LogSoftmax`, `Softplus`, `Softsign`, `Hardtanh`, `Hardsigmoid`, `Hardswish`, `SiLU`, `Mish`, `Threshold`.
+* **Нормализация:** `BatchNorm1d`, `BatchNorm2d`, `LayerNorm`, `RMSNorm`, `GroupNorm`, `InstanceNorm2d`.
+* **RNN & Transformer:** `RNN`, `LSTM`, `GRU`, `TransformerEncoder`, `TransformerDecoder`, `MultiheadAttention`, `PositionalEncoding`.
+* **PIR Architecture:** `PIRBlock`, `PIRLayer`, `PIR270M` — Parallel Infinite Retention (без attention, O(T) memory).
+* **Функции потерь:** `L1Loss`, `MSELoss`, `SmoothL1Loss`, `HuberLoss`, `BCELoss`, `BCEWithLogitsLoss`, `CrossEntropyLoss`, `NLLLoss`, `KLDivLoss`, `CosineEmbeddingLoss`, `TripletMarginLoss`, `CTCLoss`.
+
+### 3. Оптимизаторы и планировщики (`torch::optim`)
+* **Оптимизаторы:** `SGD`, `Adam`, `AdamW`, `RMSprop`. Fused версии: `fused_adam_multi`, `fused_sgd_multi` (все параметры за один вызов).
+* **LR Schedulers:** `StepLR`, `MultiStepLR`, `ExponentialLR`, `CosineAnnealingLR`, `LinearLR`, `ConstantLR`, `ReduceLROnPlateau`, `WarmupCosineAnnealingLR`, `OneCycleLR`.
+
+### 4. Autograd и Checkpointing
+* **Gradient computation:** `torch::autograd::backward()`, `NoGradGuard`, `EnableGradGuard`.
+* **Custom Functions:** `torch::autograd::Function<Derived>` + `FunctionCtx` + `save_for_backward()`.
+* **Gradient Checkpointing:** `torch::utils::checkpoint(fn, inputs)`.
+* **107 backward functions** для всех операций.
+
+### 5. Загрузка данных (`torch::data`)
+* **Датасеты:** `Dataset`, `TensorDataset`, `MapDataset`, `ConcatDataset`, `SubsetDataset`, `random_split`.
+* **DataLoader:** `batch_size`, `shuffle`, `drop_last`. Samplers: `SequentialSampler`, `RandomSampler`, `BatchSampler`.
+
+### 6. Сериализация (формат PTOR)
+* `torch::save()`, `torch::load()`, `torch::save_state_dict()`, `torch::load_state_dict()`.
+
+### 7. Mixed Precision (AMP)
+* **GradScaler:** `.scale(loss)`, `.unscale(optimizer)`, `.step(optimizer)`, `.update()`.
+* **Autocast:** контекстный менеджер для FP16/BF16.
+
+### 8. Backends
+* **CPU:** AVX2 vectorized ops, cache-tiled GEMM, OpenMP parallelism.
+* **CUDA:** Custom kernels (GEMM, reduce, element-wise), cuDNN (conv, pool, batchnorm), FlashAttention, Quantized inference (Q4_K_M, Q5_K, Q6_K, Q8_1).
+* **Elbrus E2K:** EML BLAS, NUMA-aware 4-chip training, VLIW-optimized fused ops.
+* **NMCard Mini:** Q16.16 fixed-point, 64-core NMC4 emulator + hardware driver.
+
+### 9. PromeServe (Inference Server)
+Ollama-совместимый LLM сервер. API: `/api/generate`, `/api/chat`, `/api/tags`, `/api/show`.
+Web UI с streaming chat, markdown rendering, syntax highlighting.
+
+---
+
 ## Архитектура
 
 ```
