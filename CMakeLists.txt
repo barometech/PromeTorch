@@ -183,9 +183,10 @@ if(PT_USE_CUDA)
     # 75 = Turing (RTX 20xx), 80 = Ampere (A100), 86 = Ampere (RTX 30xx), 89 = Ada (RTX 40xx)
     set(CMAKE_CUDA_ARCHITECTURES 75 80 86 89)
 
-    # CUDA compiler flags
+    # CUDA compiler flags — aggressive optimization for inference
     set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
     set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Wno-deprecated-gpu-targets")
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --use_fast_math -Xptxas -O3,-v")
 
     # Host compiler flags for CUDA (pass MSVC flags through -Xcompiler)
     if(MSVC)
