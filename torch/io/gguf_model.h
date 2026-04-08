@@ -1207,9 +1207,27 @@ public:
                                          sp.buf_x[0].mutable_data_ptr<float>(), H, nullptr);
         }
 
-        int cur = 0; // which buf_x holds current hidden state
+        int cur = 0;
+        bool capturing = false;
+        cudaStream_t s = nullptr;
 
-        // 2. Transformer layers
+        // 2. Transformer layers with CUDA Graph (PromeGraph)
+        if (graph_captured_ && decode_graph_exec_) {
+            // FAST PATH: replay graph (eliminates ~2.5ms kernel launch overhead)
+            cudaMemcpyAsync(d_past_len_, &past_len, sizeof(int64_t), cudaMemcpyHostToDevice, nullptr);
+            cudaGraphLaunch(decode_graph_exec_, 0);
+            cudaStreamSynchronize(0);
+            cur = config.num_layers % 2 == 0 ? 0 : 1;
+            goto graph_done;
+        }
+
+        // First token: start CUDA Graph capture on dedicated stream
+        capturing = (d_past_len_ && !graph_captured_);
+        if (capturing) {
+            if (!decode_stream_) cudaStreamCreateWithFlags(&decode_stream_, cudaStreamNonBlocking);
+            cudaStreamBeginCapture(decode_stream_, cudaStreamCaptureModeThreadLocal);
+            s = decode_stream_;
+        }
 
         for (int64_t i = 0; i < config.num_layers; ++i) {
             auto& layer = layers[i];
@@ -1239,7 +1257,7 @@ public:
                     static_cast<int>(layer.q_attn_k.rows),
                     static_cast<int>(layer.q_attn_v.rows),
                     layer.q_attn_q.row_stride_bytes,
-                    eps, add_one, nullptr);
+                    eps, add_one, s);
                 PROF_END(profiler, "fused_norm_qkv");
             } else {
                 // Fallback: separate attn_norm + 3 GEMVs
@@ -1247,7 +1265,7 @@ public:
                 at::cuda::launch_rms_norm(
                     x_ptr, layer.attn_norm.data_ptr<float>(),
                     sp.buf_normed.mutable_data_ptr<float>(),
-                    1, static_cast<int>(H), eps, add_one, nullptr);
+                    1, static_cast<int>(H), eps, add_one, s);
                 PROF_END(profiler, "attn_norm");
 
                 const float* normed_ptr = sp.buf_normed.data_ptr<float>();
@@ -1266,13 +1284,13 @@ public:
             if (layer.attn_q_bias.defined()) {
                 at::cuda::launch_add(
                     sp.buf_q.data_ptr<float>(), layer.attn_q_bias.data_ptr<float>(),
-                    sp.buf_q.mutable_data_ptr<float>(), q_dim, nullptr);
+                    sp.buf_q.mutable_data_ptr<float>(), q_dim, s);
                 at::cuda::launch_add(
                     sp.buf_k.data_ptr<float>(), layer.attn_k_bias.data_ptr<float>(),
-                    sp.buf_k.mutable_data_ptr<float>(), kv_dim, nullptr);
+                    sp.buf_k.mutable_data_ptr<float>(), kv_dim, s);
                 at::cuda::launch_add(
                     sp.buf_v.data_ptr<float>(), layer.attn_v_bias.data_ptr<float>(),
-                    sp.buf_v.mutable_data_ptr<float>(), kv_dim, nullptr);
+                    sp.buf_v.mutable_data_ptr<float>(), kv_dim, s);
             }
 
             // -- Fused QK-norm + RoPE + KV cache write --
@@ -1290,7 +1308,7 @@ public:
                     static_cast<int>(n_heads), static_cast<int>(n_kv_heads),
                     static_cast<int>(head_dim),
                     d_past_len_, config.rope_freq_base,
-                    eps, add_one, nullptr);
+                    eps, add_one, s);
             } else {
                 at::cuda::launch_fused_qknorm_rope_kvwrite(
                     sp.buf_q.mutable_data_ptr<float>(),
@@ -1303,7 +1321,7 @@ public:
                     static_cast<int>(n_heads), static_cast<int>(n_kv_heads),
                     static_cast<int>(head_dim),
                     static_cast<int>(past_len), config.rope_freq_base,
-                    eps, add_one, past_len, nullptr);
+                    eps, add_one, past_len, s);
             }
             PROF_END(profiler, "fused_qknorm_rope_kv");
 
@@ -1312,19 +1330,30 @@ public:
                 at::cuda::launch_fp16_kv_cache_write(
                     kv_cache.key_cache[i].data_ptr<float>() + past_len * kv_dim,
                     kv_cache.key_cache_fp16[i],
-                    1, kv_dim, past_len, nullptr);
+                    1, kv_dim, past_len, s);
                 at::cuda::launch_fp16_kv_cache_write(
                     kv_cache.value_cache[i].data_ptr<float>() + past_len * kv_dim,
                     kv_cache.value_cache_fp16[i],
-                    1, kv_dim, past_len, nullptr);
+                    1, kv_dim, past_len, s);
             }
 
-            int64_t total_seq = past_len + 1;
             float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
 
-            // -- Flash-Decode attention: FP16 KV cache if available --
+            // -- Flash-Decode attention (graph-compatible: reads d_past_len from GPU) --
             PROF_BEGIN(profiler, "flash_decode");
-            if (kv_cache.use_fp16_kv) {
+            if (d_past_len_) {
+                // Graph-compatible: fixed grid, device pointer for total_seq
+                at::cuda::launch_flash_decode_graph(
+                    sp.buf_q.data_ptr<float>(),
+                    kv_cache.key_cache[i].data_ptr<float>(),
+                    kv_cache.value_cache[i].data_ptr<float>(),
+                    sp.buf_attn.mutable_data_ptr<float>(),
+                    sp.fd_partial_O, sp.fd_partial_lse, sp.fd_partial_max,
+                    static_cast<int>(n_heads), static_cast<int>(n_kv_heads),
+                    static_cast<int>(head_dim),
+                    d_past_len_, static_cast<int>(kv_cache.max_seq), scale, s);
+            } else if (kv_cache.use_fp16_kv) {
+                int64_t total_seq = past_len + 1;
                 at::cuda::launch_flash_decode_fp16(
                     sp.buf_q.data_ptr<float>(),
                     kv_cache.key_cache_fp16[i],
@@ -1333,8 +1362,9 @@ public:
                     sp.fd_partial_O, sp.fd_partial_lse, sp.fd_partial_max,
                     static_cast<int>(n_heads), static_cast<int>(n_kv_heads),
                     static_cast<int>(head_dim),
-                    static_cast<int>(total_seq), scale, nullptr);
+                    static_cast<int>(total_seq), scale, s);
             } else {
+                int64_t total_seq = past_len + 1;
                 at::cuda::launch_flash_decode(
                     sp.buf_q.data_ptr<float>(),
                     kv_cache.key_cache[i].data_ptr<float>(),
@@ -1343,7 +1373,7 @@ public:
                     sp.fd_partial_O, sp.fd_partial_lse, sp.fd_partial_max,
                     static_cast<int>(n_heads), static_cast<int>(n_kv_heads),
                     static_cast<int>(head_dim),
-                    static_cast<int>(total_seq), scale, nullptr);
+                    static_cast<int>(total_seq), scale, s);
             }
             PROF_END(profiler, "flash_decode");
 
@@ -1359,7 +1389,7 @@ public:
             if (can_fuse_output_residual) {
                 PROF_BEGIN(profiler, "fused_output_residual");
                 // Copy x → buf_h (residual base)
-                at::cuda::launch_copy(x_ptr, sp.buf_h.mutable_data_ptr<float>(), H, nullptr);
+                at::cuda::launch_copy(x_ptr, sp.buf_h.mutable_data_ptr<float>(), H, s);
                 // buf_h += W_output @ attn_out (accumulate)
                 at::cuda::launch_q4km_persistent_gemv_accumulate(
                     layer.q_attn_output.gpu_data,
@@ -1367,7 +1397,7 @@ public:
                     sp.buf_h.mutable_data_ptr<float>(),
                     static_cast<int>(layer.q_attn_output.cols),
                     static_cast<int>(layer.q_attn_output.rows),
-                    layer.q_attn_output.row_stride_bytes, nullptr);
+                    layer.q_attn_output.row_stride_bytes, s);
                 PROF_END(profiler, "fused_output_residual");
             } else {
                 // Fallback: separate output_proj + residual_add
@@ -1382,12 +1412,12 @@ public:
                         sp.buf_attn_proj.data_ptr<float>(),
                         layer.post_attention_norm.data_ptr<float>(),
                         sp.buf_attn_proj.mutable_data_ptr<float>(),
-                        1, static_cast<int>(H), eps, add_one, nullptr);
+                        1, static_cast<int>(H), eps, add_one, s);
                 }
 
                 PROF_BEGIN(profiler, "residual_add");
                 at::cuda::launch_add(x_ptr, sp.buf_attn_proj.data_ptr<float>(),
-                                      sp.buf_h.mutable_data_ptr<float>(), H, nullptr);
+                                      sp.buf_h.mutable_data_ptr<float>(), H, s);
                 PROF_END(profiler, "residual_add");
             }
 
@@ -1412,7 +1442,7 @@ public:
                     static_cast<int>(layer.q_ffn_gate.rows),
                     static_cast<int>(layer.q_ffn_up.rows),
                     layer.q_ffn_gate.row_stride_bytes,
-                    eps, add_one, nullptr);
+                    eps, add_one, s);
                 PROF_END(profiler, "fused_norm_gate_up");
             } else {
                 // Fallback: separate ffn_norm + gate/up GEMVs
@@ -1420,7 +1450,7 @@ public:
                 at::cuda::launch_rms_norm(
                     sp.buf_h.data_ptr<float>(), layer.ffn_norm.data_ptr<float>(),
                     sp.buf_normed.mutable_data_ptr<float>(),
-                    1, static_cast<int>(H), eps, add_one, nullptr);
+                    1, static_cast<int>(H), eps, add_one, s);
                 PROF_END(profiler, "ffn_norm");
 
                 const float* normed_ptr = sp.buf_normed.data_ptr<float>();
@@ -1436,7 +1466,7 @@ public:
             PROF_BEGIN(profiler, "silu_mul");
             at::cuda::launch_silu_mul(
                 sp.buf_gate.data_ptr<float>(), sp.buf_up.data_ptr<float>(),
-                sp.buf_silu.mutable_data_ptr<float>(), inter, nullptr);
+                sp.buf_silu.mutable_data_ptr<float>(), inter, s);
             PROF_END(profiler, "silu_mul");
 
             // -- Down projection with fused residual add --
@@ -1450,7 +1480,7 @@ public:
                 PROF_BEGIN(profiler, "fused_down_residual");
                 // Copy buf_h → buf_x[next] (residual base)
                 at::cuda::launch_copy(sp.buf_h.data_ptr<float>(),
-                                       sp.buf_x[next].mutable_data_ptr<float>(), H, nullptr);
+                                       sp.buf_x[next].mutable_data_ptr<float>(), H, s);
                 // buf_x[next] += W_down @ silu_out (accumulate)
                 at::cuda::launch_q4km_persistent_gemv_accumulate(
                     layer.q_ffn_down.gpu_data,
@@ -1458,7 +1488,7 @@ public:
                     sp.buf_x[next].mutable_data_ptr<float>(),
                     static_cast<int>(layer.q_ffn_down.cols),
                     static_cast<int>(layer.q_ffn_down.rows),
-                    layer.q_ffn_down.row_stride_bytes, nullptr);
+                    layer.q_ffn_down.row_stride_bytes, s);
                 PROF_END(profiler, "fused_down_residual");
             } else {
                 // Fallback: separate down_proj + post-norm + residual
@@ -1473,18 +1503,31 @@ public:
                         sp.buf_down.data_ptr<float>(),
                         layer.post_ffw_norm.data_ptr<float>(),
                         sp.buf_down.mutable_data_ptr<float>(),
-                        1, static_cast<int>(H), eps, add_one, nullptr);
+                        1, static_cast<int>(H), eps, add_one, s);
                 }
 
                 PROF_BEGIN(profiler, "residual_add");
                 at::cuda::launch_add(sp.buf_h.data_ptr<float>(), sp.buf_down.data_ptr<float>(),
-                                      sp.buf_x[next].mutable_data_ptr<float>(), H, nullptr);
+                                      sp.buf_x[next].mutable_data_ptr<float>(), H, s);
                 PROF_END(profiler, "residual_add");
             }
             cur = next;
         }
 
-        // End transformer layers
+        // End transformer layers — finalize CUDA Graph capture
+        if (d_past_len_ && !graph_captured_ && decode_stream_) {
+            cudaStreamEndCapture(decode_stream_, &decode_graph_);
+            cudaError_t err = cudaGraphInstantiate(&decode_graph_exec_, decode_graph_, NULL, NULL, 0);
+            if (err == cudaSuccess) {
+                graph_captured_ = true;
+                std::cout << "[PromeGraph] Captured " << config.num_layers << " layers decode graph!" << std::endl;
+            } else {
+                std::cerr << "[PromeGraph] Capture failed: " << cudaGetErrorString(err) << std::endl;
+                decode_graph_ = nullptr;
+                decode_graph_exec_ = nullptr;
+            }
+        }
+graph_done:
 
         // 3. Final RMS norm: buf_x[cur] → buf_normed
         PROF_BEGIN(profiler, "final_norm");

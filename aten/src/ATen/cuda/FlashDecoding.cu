@@ -742,6 +742,92 @@ ATEN_CUDA_API void launch_fused_qknorm_rope_kvwrite_graph(
 }
 
 // Flash decode with device pointer past_len (CUDA Graph compatible)
+// Graph-compatible partial kernel: reads total_seq from device memory
+__global__ void flash_decode_partial_graph_kernel(
+    const float* __restrict__ Q,
+    const float* __restrict__ K_cache,
+    const float* __restrict__ V_cache,
+    float* __restrict__ partial_O,
+    float* __restrict__ partial_lse,
+    float* __restrict__ partial_max,
+    int n_heads, int n_kv_heads, int head_dim,
+    const int64_t* __restrict__ d_past_len, float scale)
+{
+    int total_seq = (int)(*d_past_len) + 1;  // read from device memory
+    int split_idx = blockIdx.x;
+    int head_idx = blockIdx.y;
+    int tid = threadIdx.x;
+    int heads_per_group = n_heads / n_kv_heads;
+    int kv_head = head_idx / heads_per_group;
+    int kv_dim = n_kv_heads * head_dim;
+
+    int kv_start = split_idx * KV_CHUNK_SIZE;
+    int kv_end = kv_start + KV_CHUNK_SIZE;
+    if (kv_end > total_seq) kv_end = total_seq;
+    int chunk_len = kv_end - kv_start;
+
+    if (chunk_len <= 0) {
+        if (tid == 0) {
+            int idx = split_idx * n_heads + head_idx;
+            partial_lse[idx] = 0.0f;
+            partial_max[idx] = -FLT_MAX;
+        }
+        if (tid < head_dim) {
+            partial_O[(split_idx * n_heads + head_idx) * head_dim + tid] = 0.0f;
+        }
+        return;
+    }
+
+    extern __shared__ float smem[];
+    float* q_shared = smem;
+    float* scores = smem + head_dim;
+
+    const float* q_head = Q + head_idx * head_dim;
+    for (int d = tid; d < head_dim; d += blockDim.x) q_shared[d] = q_head[d];
+    __syncthreads();
+
+    for (int t = tid; t < chunk_len; t += blockDim.x) {
+        const float* k_vec = K_cache + (kv_start + t) * kv_dim + kv_head * head_dim;
+        float dot = 0.0f;
+        for (int d = 0; d < head_dim; d++) dot += q_shared[d] * k_vec[d];
+        scores[t] = dot * scale;
+    }
+    __syncthreads();
+
+    __shared__ float s_max, s_sum;
+    if (tid == 0) {
+        float m = -FLT_MAX;
+        for (int t = 0; t < chunk_len; t++) if (scores[t] > m) m = scores[t];
+        s_max = m;
+    }
+    __syncthreads();
+
+    for (int t = tid; t < chunk_len; t += blockDim.x) scores[t] = expf(scores[t] - s_max);
+    __syncthreads();
+
+    if (tid == 0) {
+        float sum = 0.0f;
+        for (int t = 0; t < chunk_len; t++) sum += scores[t];
+        s_sum = sum;
+    }
+    __syncthreads();
+
+    int out_base = (split_idx * n_heads + head_idx) * head_dim;
+    for (int d = tid; d < head_dim; d += blockDim.x) {
+        float acc = 0.0f;
+        for (int t = 0; t < chunk_len; t++) {
+            acc += scores[t] * V_cache[(kv_start + t) * kv_dim + kv_head * head_dim + d];
+        }
+        partial_O[out_base + d] = acc;
+    }
+
+    if (tid == 0) {
+        int idx = split_idx * n_heads + head_idx;
+        partial_max[idx] = s_max;
+        partial_lse[idx] = s_sum;
+    }
+}
+
 ATEN_CUDA_API void launch_flash_decode_graph(
     const float* Q, const float* K_cache, const float* V_cache,
     float* O, float* partial_O, float* partial_lse, float* partial_max,
@@ -749,19 +835,23 @@ ATEN_CUDA_API void launch_flash_decode_graph(
     const int64_t* d_past_len, int max_seq, float scale,
     cudaStream_t stream)
 {
-    // Fixed grid for CUDA Graph (max_splits covers max_seq)
+    // FIXED grid size for CUDA Graph compatibility
     int max_splits = (max_seq + KV_CHUNK_SIZE - 1) / KV_CHUNK_SIZE;
     if (max_splits < 1) max_splits = 1;
     int block_size = head_dim > 128 ? 256 : 128;
 
-    // Reuse existing partial kernel but pass d_past_len
-    // For now, fall back to non-graph version with sync read
-    // TODO: full graph-compatible flash_decode_partial kernel
-    int64_t host_past_len;
-    cudaMemcpy(&host_past_len, d_past_len, sizeof(int64_t), cudaMemcpyDeviceToHost);
-    int total_seq = (int)host_past_len + 1;
-    launch_flash_decode(Q, K_cache, V_cache, O, partial_O, partial_lse, partial_max,
-                        n_heads, n_kv_heads, head_dim, total_seq, scale, stream);
+    // Phase 1: partial attention (reads d_past_len from device memory — NO cudaMemcpy!)
+    dim3 grid(max_splits, n_heads);
+    int shared_mem = (head_dim + KV_CHUNK_SIZE) * sizeof(float);
+    flash_decode_partial_graph_kernel<<<grid, block_size, shared_mem, stream>>>(
+        Q, K_cache, V_cache, partial_O, partial_lse, partial_max,
+        n_heads, n_kv_heads, head_dim, d_past_len, scale);
+
+    // Phase 2: reduce across splits (max_splits is fixed, reduce handles empty splits)
+    int shared_mem_reduce = max_splits * sizeof(float);
+    flash_decode_reduce_kernel<<<n_heads, block_size, shared_mem_reduce, stream>>>(
+        partial_O, partial_lse, partial_max, O,
+        n_heads, head_dim, max_splits);
 }
 
 } // namespace cuda
