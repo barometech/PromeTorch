@@ -1209,12 +1209,8 @@ public:
 
         int cur = 0; // which buf_x holds current hidden state
 
-        // 2. Transformer layers — FUSED operations for maximum throughput
-        // Fusion strategy (vs old):
-        //   OLD: attn_norm → Q GEMV → K GEMV → V GEMV → ... → ffn_norm → gate GEMV → up GEMV → ...
-        //   NEW: fused(attn_norm + QKV GEMV) → ... → fused(output_proj + residual) → fused(ffn_norm + gate+up GEMV) → ...
-        // Kernel launch reduction: ~14 launches/layer → ~7 launches/layer
-        // Shared memory x load reduction: 5 loads → 2 loads (attn_norm+QKV shares 1, ffn_norm+gate_up shares 1)
+        // 2. Transformer layers
+
         for (int64_t i = 0; i < config.num_layers; ++i) {
             auto& layer = layers[i];
             float* x_ptr = sp.buf_x[cur].mutable_data_ptr<float>();
@@ -1487,6 +1483,8 @@ public:
             }
             cur = next;
         }
+
+        // End transformer layers
 
         // 3. Final RMS norm: buf_x[cur] → buf_normed
         PROF_BEGIN(profiler, "final_norm");
