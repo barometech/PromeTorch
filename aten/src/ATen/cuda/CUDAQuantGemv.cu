@@ -156,6 +156,8 @@ __global__ void q4km_gemv_kernel(
 // Launches one block per SM. Each block loads x into shared memory ONCE,
 // then loops over multiple rows. Eliminates redundant x loading.
 
+// llama.cpp-style Q4_K_M GEMV: 2 warps per row, 2 blocks per warp iteration
+// Key: maximize HBM utilization by processing more data per warp
 __global__ void q4km_persistent_gemv_kernel(
     const uint8_t* __restrict__ weights,
     const float* __restrict__ x,
@@ -163,36 +165,45 @@ __global__ void q4km_persistent_gemv_kernel(
     int K, int N,
     int64_t row_stride_bytes)
 {
-    // FP16 shared memory: 2x less bandwidth pressure vs FP32
-    extern __shared__ half x_smem_fp16[];
+    extern __shared__ float x_shared[];  // back to FP32 (simpler, nvcc optimizes well)
 
     const int tid = threadIdx.x;
     const int block_size = blockDim.x;
-    const int warps_per_block = block_size / 32;
+    // 2 warps per row for better bandwidth utilization
+    const int warps_per_row = 2;
+    const int rows_per_block = block_size / 32 / warps_per_row;
     const int warp_id = tid / 32;
+    const int row_in_block = warp_id / warps_per_row;
+    const int warp_half = warp_id % warps_per_row;  // 0 or 1: which half of blocks
     const int lane = tid & 31;
 
-    // Load x into FP16 shared memory ONCE
+    // Load x into shared memory ONCE (cooperative, all threads)
     for (int k = tid; k < K; k += block_size) {
-        x_smem_fp16[k] = __float2half(x[k]);
+        x_shared[k] = x[k];
     }
     __syncthreads();
 
     const int group = lane / 8;
     const int pos = (lane & 7) * 4;
     const int num_blocks_per_row = K / 256;
+    const int blocks_per_half = (num_blocks_per_row + 1) / 2;
 
-    // Grid-stride loop: each block processes multiple rows
-    for (int base_n = blockIdx.x * warps_per_block; base_n < N;
-         base_n += gridDim.x * warps_per_block)
+    // Grid-stride loop
+    for (int base_n = blockIdx.x * rows_per_block; base_n < N;
+         base_n += gridDim.x * rows_per_block)
     {
-        int n = base_n + warp_id;
+        int n = base_n + row_in_block;
         if (n >= N) continue;
 
         const uint8_t* row_data = weights + (int64_t)n * row_stride_bytes;
         float sum = 0.0f;
 
-        for (int blk = 0; blk < num_blocks_per_row; ++blk) {
+        // Each warp_half processes its half of the Q4_K_M blocks
+        int blk_start = warp_half * blocks_per_half;
+        int blk_end = blk_start + blocks_per_half;
+        if (blk_end > num_blocks_per_row) blk_end = num_blocks_per_row;
+
+        for (int blk = blk_start; blk < blk_end; ++blk) {
             const uint8_t* bp = row_data + blk * 144;
 
             uint32_t d_dmin = __ldg(reinterpret_cast<const uint32_t*>(bp));
@@ -208,33 +219,39 @@ __global__ void q4km_persistent_gemv_kernel(
             float dl = d * sc_lo, ml = dm * m_lo;
             float dh = d * sc_hi, mh = dm * m_hi;
 
-            // Read x from FP16 smem (half bandwidth vs FP32)
             const int k_base = blk * 256 + group * 64 + pos;
-            float x0 = __half2float(x_smem_fp16[k_base]);
-            float x1 = __half2float(x_smem_fp16[k_base+1]);
-            float x2 = __half2float(x_smem_fp16[k_base+2]);
-            float x3 = __half2float(x_smem_fp16[k_base+3]);
-            float x4 = __half2float(x_smem_fp16[k_base+32]);
-            float x5 = __half2float(x_smem_fp16[k_base+33]);
-            float x6 = __half2float(x_smem_fp16[k_base+34]);
-            float x7 = __half2float(x_smem_fp16[k_base+35]);
+            const float4 x_lo = *reinterpret_cast<const float4*>(&x_shared[k_base]);
+            const float4 x_hi = *reinterpret_cast<const float4*>(&x_shared[k_base + 32]);
 
-            sum += (dl * (float)( qs4        & 0xF) - ml) * x0;
-            sum += (dl * (float)((qs4 >>  8) & 0xF) - ml) * x1;
-            sum += (dl * (float)((qs4 >> 16) & 0xF) - ml) * x2;
-            sum += (dl * (float)((qs4 >> 24) & 0xF) - ml) * x3;
-            sum += (dh * (float)((qs4 >>  4) & 0xF) - mh) * x4;
-            sum += (dh * (float)((qs4 >> 12) & 0xF) - mh) * x5;
-            sum += (dh * (float)((qs4 >> 20) & 0xF) - mh) * x6;
-            sum += (dh * (float)((qs4 >> 28) & 0xF) - mh) * x7;
+            sum += (dl * (float)( qs4        & 0xF) - ml) * x_lo.x;
+            sum += (dl * (float)((qs4 >>  8) & 0xF) - ml) * x_lo.y;
+            sum += (dl * (float)((qs4 >> 16) & 0xF) - ml) * x_lo.z;
+            sum += (dl * (float)((qs4 >> 24) & 0xF) - ml) * x_lo.w;
+            sum += (dh * (float)((qs4 >>  4) & 0xF) - mh) * x_hi.x;
+            sum += (dh * (float)((qs4 >> 12) & 0xF) - mh) * x_hi.y;
+            sum += (dh * (float)((qs4 >> 20) & 0xF) - mh) * x_hi.z;
+            sum += (dh * (float)((qs4 >> 28) & 0xF) - mh) * x_hi.w;
         }
 
-        // Warp shuffle reduction
+        // Warp shuffle reduction within warp
         #pragma unroll
         for (int offset = 16; offset > 0; offset >>= 1) {
             sum += __shfl_down_sync(WARP_MASK, sum, offset);
         }
-        if (lane == 0) y[n] = sum;
+
+        // Cross-warp reduction: warp_half 1 sends to warp_half 0
+        if (warps_per_row == 2) {
+            // Use shared memory for inter-warp reduce
+            __shared__ float warp_sums[64];  // max 32 rows × 2 halves
+            if (lane == 0) warp_sums[warp_id] = sum;
+            __syncthreads();
+            if (warp_half == 0 && lane == 0) {
+                y[n] = warp_sums[warp_id] + warp_sums[warp_id + 1];
+            }
+            __syncthreads();
+        } else {
+            if (lane == 0) y[n] = sum;
+        }
     }
 }
 
@@ -283,7 +300,7 @@ ATEN_CUDA_API void launch_q4km_persistent_gemv(
     const int BLOCK_SIZE = WARPS * 32;  // 256 threads per block
     // Launch 2 blocks per SM for latency hiding
     int grid = sm_count * 4;
-    int smem_bytes = K * sizeof(half);  // FP16 smem = 2x less
+    int smem_bytes = K * sizeof(float) + 64 * sizeof(float);  // x_shared + warp_sums
 
     if (smem_bytes > 48 * 1024) {
         cudaFuncSetAttribute(q4km_persistent_gemv_kernel,
