@@ -508,6 +508,7 @@ public:
     bool graph_captured_ = false;
     int graph_token_id_ = 0;      // Updated before each graph launch
     int* d_token_id_ = nullptr;   // Device memory for token_id (graph-updateable)
+    int64_t* d_past_len_ = nullptr;  // Device memory for past_len (graph-compatible RoPE/KV)
     cudaStream_t decode_stream_ = nullptr;
 #endif
 
@@ -1172,6 +1173,12 @@ public:
         float eps = config.rms_norm_eps;
         bool add_one = config.gemma_norm_add_one;
 
+        // 0. Initialize device past_len pointer (once) + update each token
+        if (!d_past_len_) {
+            cudaMalloc(&d_past_len_, sizeof(int64_t));
+        }
+        cudaMemcpyAsync(d_past_len_, &past_len, sizeof(int64_t), cudaMemcpyHostToDevice, nullptr);
+
         // 1. Embedding: GPU lookup (zero H2D copy for CUDA Graph compatibility)
         PROF_BEGIN(profiler, "embedding");
         if (!emb_gpu_.defined() && token_embedding.defined()) {
@@ -1272,20 +1279,36 @@ public:
                     sp.buf_v.mutable_data_ptr<float>(), kv_dim, nullptr);
             }
 
-            // -- Fused QK-norm + RoPE + KV cache write (1 launch instead of 6) --
+            // -- Fused QK-norm + RoPE + KV cache write --
+            // Use graph-compatible version with device pointer past_len
             PROF_BEGIN(profiler, "fused_qknorm_rope_kv");
-            at::cuda::launch_fused_qknorm_rope_kvwrite(
-                sp.buf_q.mutable_data_ptr<float>(),
-                sp.buf_k.mutable_data_ptr<float>(),
-                sp.buf_v.data_ptr<float>(),
-                layer.attn_q_norm.defined() ? layer.attn_q_norm.data_ptr<float>() : nullptr,
-                layer.attn_q_norm.defined() ? layer.attn_k_norm.data_ptr<float>() : nullptr,
-                kv_cache.key_cache[i].mutable_data_ptr<float>(),
-                kv_cache.value_cache[i].mutable_data_ptr<float>(),
-                static_cast<int>(n_heads), static_cast<int>(n_kv_heads),
-                static_cast<int>(head_dim),
-                static_cast<int>(past_len), config.rope_freq_base,
-                eps, add_one, past_len, nullptr);
+            if (d_past_len_) {
+                at::cuda::launch_fused_qknorm_rope_kvwrite_graph(
+                    sp.buf_q.mutable_data_ptr<float>(),
+                    sp.buf_k.mutable_data_ptr<float>(),
+                    sp.buf_v.data_ptr<float>(),
+                    layer.attn_q_norm.defined() ? layer.attn_q_norm.data_ptr<float>() : nullptr,
+                    layer.attn_q_norm.defined() ? layer.attn_k_norm.data_ptr<float>() : nullptr,
+                    kv_cache.key_cache[i].mutable_data_ptr<float>(),
+                    kv_cache.value_cache[i].mutable_data_ptr<float>(),
+                    static_cast<int>(n_heads), static_cast<int>(n_kv_heads),
+                    static_cast<int>(head_dim),
+                    d_past_len_, config.rope_freq_base,
+                    eps, add_one, nullptr);
+            } else {
+                at::cuda::launch_fused_qknorm_rope_kvwrite(
+                    sp.buf_q.mutable_data_ptr<float>(),
+                    sp.buf_k.mutable_data_ptr<float>(),
+                    sp.buf_v.data_ptr<float>(),
+                    layer.attn_q_norm.defined() ? layer.attn_q_norm.data_ptr<float>() : nullptr,
+                    layer.attn_q_norm.defined() ? layer.attn_k_norm.data_ptr<float>() : nullptr,
+                    kv_cache.key_cache[i].mutable_data_ptr<float>(),
+                    kv_cache.value_cache[i].mutable_data_ptr<float>(),
+                    static_cast<int>(n_heads), static_cast<int>(n_kv_heads),
+                    static_cast<int>(head_dim),
+                    static_cast<int>(past_len), config.rope_freq_base,
+                    eps, add_one, past_len, nullptr);
+            }
             PROF_END(profiler, "fused_qknorm_rope_kv");
 
             // Also write K/V to FP16 cache for attention bandwidth reduction
