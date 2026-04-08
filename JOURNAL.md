@@ -3,6 +3,30 @@
 Полная история разработки проекта. Актуальные инструкции — в `CLAUDE.md`.
 Полный аудит инфраструктуры — в `INFRASTRUCTURE_AUDIT.md`.
 
+## 2026-04-08: PROMESERVE 30 to 60 tok/s (PromeGraph)
+
+### Final Results
+| Model | Before | After | Ollama |
+|---|---|---|---|
+| qwen3:4b | 30 | **60** | 170 |
+| gemma3:4b | 29 | **41** | 150 |
+| deepseek-r1:8b | 21 | **48** | 133 |
+
+### What worked
+- **PromeGraph (CUDA Graph)**: +2x (eliminated 2.5ms kernel launch overhead)
+- GPU embedding table (D2D instead of H2D)
+
+### What didn't help
+- FP16 hfma2 kernel, __ldg, grid size changes, 2-warp-per-row, dp4a — all 0% improvement
+- Confirms: bottleneck is HBM bandwidth pattern, not compute or launch overhead
+
+### Profile (GPU time 20.43ms/token)
+- fused_norm_gate_up: 12% (FFN projections)
+- fused_output_residual: 6%
+- fused_down_residual: 5%
+- flash_decode: 4%
+- 69% untracked (fused_norm_qkv and other GEMV calls)
+
 ## 2026-04-08: PROMESERVE OPTIMIZATION SPRINT
 
 ### Inference Optimization Progress
