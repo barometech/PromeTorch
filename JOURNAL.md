@@ -3,6 +3,25 @@
 Полная история разработки проекта. Актуальные инструкции — в `CLAUDE.md`.
 Полный аудит инфраструктуры — в `INFRASTRUCTURE_AUDIT.md`.
 
+## 2026-04-08: BENCHMARKS + PRODUCTION READINESS + GRAD SYNC FIX
+
+### PromeServe vs Ollama (A100 40GB)
+| Model | PromeServe | Ollama | Ratio |
+|---|---|---|---|
+| qwen3:4b | 30 tok/s | 161 tok/s | 0.19x |
+| gemma3:4b | 29 tok/s | 145 tok/s | 0.20x |
+| deepseek-r1:8b | 21 tok/s | 126 tok/s | 0.17x |
+
+**Root cause:** `__dp4a` (scalar CUDA cores) вместо Tensor Cores (`wmma::mma_sync`).
+A100 Tensor Cores = 600+ TFLOPS vs 20 TFLOPS на обычных ядрах.
+**Fix needed:** Переписать CUDAQuantGemv.cu на wmma:: API для A100.
+
+### Production Readiness (Gemini + Opus audit)
+14/14 checklist: CI/CD, тесты (18 файлов), README API Reference, LICENSE,
+build instructions, Python package, Docker, examples, CONTRIBUTING,
+CHANGELOG, SECURITY, issue templates, release workflow.
+Gemini ошибся что тестов нет — Opus нашёл 18 файлов в test/cpp/.
+
 ## 2026-04-08: GRAD SYNC FIX + API REFERENCE + PROMESERVE UI
 
 ### grad_sync.h — финальный фикс
