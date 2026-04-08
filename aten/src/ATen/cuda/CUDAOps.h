@@ -608,5 +608,24 @@ ATEN_CUDA_API void launch_flash_decode_fp16(
     int total_seq, float scale,
     cudaStream_t stream = nullptr);
 
+// ============================================================================
+// CUDA Graph Compatible Kernels (past_len via Device Pointer)
+// ============================================================================
+
+ATEN_CUDA_API void launch_fused_qknorm_rope_kvwrite_graph(
+    float* Q, float* K, const float* V,
+    const float* q_norm_w, const float* k_norm_w,
+    float* K_cache, float* V_cache,
+    int n_heads, int n_kv_heads, int head_dim,
+    const int64_t* d_past_len, float rope_freq_base, float eps, bool add_one,
+    cudaStream_t stream = nullptr);
+
+ATEN_CUDA_API void launch_flash_decode_graph(
+    const float* Q, const float* K_cache, const float* V_cache,
+    float* O, float* partial_O, float* partial_lse, float* partial_max,
+    int n_heads, int n_kv_heads, int head_dim,
+    const int64_t* d_past_len, int max_seq, float scale,
+    cudaStream_t stream = nullptr);
+
 } // namespace cuda
 } // namespace at
