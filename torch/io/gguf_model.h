@@ -501,6 +501,16 @@ public:
     gguf::MmapHandle mmap_handle_;
     bool use_mmap_ = false;  // true if weights are mmap'd (don't free cpu_data!)
 
+    // CUDA Graph for decode acceleration (eliminates kernel launch overhead)
+#ifdef PT_USE_CUDA
+    cudaGraph_t decode_graph_ = nullptr;
+    cudaGraphExec_t decode_graph_exec_ = nullptr;
+    bool graph_captured_ = false;
+    int graph_token_id_ = 0;      // Updated before each graph launch
+    int* d_token_id_ = nullptr;   // Device memory for token_id (graph-updateable)
+    cudaStream_t decode_stream_ = nullptr;
+#endif
+
     // Profiler (enabled with --profile flag)
     InferenceProfiler profiler;
 
