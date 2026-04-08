@@ -216,51 +216,90 @@ __global__ void q4km_persistent_gemv_kernel(
         const uint8_t* row_data = weights + (int64_t)n * row_stride_bytes;
         float sum = 0.0f;
 
-        for (int blk = 0; blk < num_blocks_per_row; ++blk) {
-            const uint8_t* bp = row_data + blk * 144;
+        // SOFTWARE PIPELINING: prefetch block N+1 while computing block N
+        // Process 2 blocks per iteration for better compute/memory overlap
+        const uint8_t* bp0 = row_data;
+        // Prefetch first block
+        uint32_t pf_d_dmin = __ldg(reinterpret_cast<const uint32_t*>(bp0));
+        uint32_t pf_qs4 = __ldg(reinterpret_cast<const uint32_t*>(bp0 + 16 + lane * 4));
 
-            uint32_t d_dmin = __ldg(reinterpret_cast<const uint32_t*>(bp));
-            const float d = fp16_to_fp32_device(d_dmin & 0xFFFF);
-            const float dm = fp16_to_fp32_device(d_dmin >> 16);
+        for (int blk = 0; blk < num_blocks_per_row; blk += 2) {
+            // === BLOCK A (blk): use prefetched data ===
+            const uint8_t* bpA = row_data + blk * 144;
+            uint32_t d_dminA = pf_d_dmin;
+            uint32_t qs4A = pf_qs4;
 
-            uint8_t sc_lo, m_lo, sc_hi, m_hi;
-            get_scale_min_k4_device(group * 2, bp + 4, &sc_lo, &m_lo);
-            get_scale_min_k4_device(group * 2 + 1, bp + 4, &sc_hi, &m_hi);
+            // Prefetch BLOCK B (blk+1) while computing A
+            const uint8_t* bpB = bpA + 144;
+            uint32_t d_dminB = 0, qs4B = 0;
+            bool has_B = (blk + 1 < num_blocks_per_row);
+            if (has_B) {
+                d_dminB = __ldg(reinterpret_cast<const uint32_t*>(bpB));
+                qs4B = __ldg(reinterpret_cast<const uint32_t*>(bpB + 16 + lane * 4));
+            }
 
-            // Read 4 bytes of Q4 weights = 8 nibbles
-            uint32_t qs4 = __ldg(reinterpret_cast<const uint32_t*>(bp + 16 + lane * 4));
+            // Compute BLOCK A
+            {
+                float dA = fp16_to_fp32_device(d_dminA & 0xFFFF);
+                float dmA = fp16_to_fp32_device(d_dminA >> 16);
+                uint8_t sc_lo, m_lo, sc_hi, m_hi;
+                get_scale_min_k4_device(group * 2, bpA + 4, &sc_lo, &m_lo);
+                get_scale_min_k4_device(group * 2 + 1, bpA + 4, &sc_hi, &m_hi);
 
-            // Unpack low nibbles into int8: [q0, q1, q2, q3]
-            uint32_t v_lo = ((qs4 & 0x0F) | ((qs4 >> 4) & 0x0F00) |
-                             ((qs4 >> 8) & 0x0F0000) | ((qs4 >> 12) & 0x0F000000));
-            // Unpack high nibbles
-            uint32_t v_hi = (((qs4 >> 4) & 0x0F) | ((qs4 >> 8) & 0x0F00) |
-                             ((qs4 >> 12) & 0x0F0000) | ((qs4 >> 16) & 0x0F000000));
+                uint32_t v_lo = ((qs4A & 0x0F) | ((qs4A >> 4) & 0x0F00) |
+                                 ((qs4A >> 8) & 0x0F0000) | ((qs4A >> 12) & 0x0F000000));
+                uint32_t v_hi = (((qs4A >> 4) & 0x0F) | ((qs4A >> 8) & 0x0F00) |
+                                 ((qs4A >> 12) & 0x0F0000) | ((qs4A >> 16) & 0x0F000000));
 
-            // Q8_1 x values for this thread's 8 elements
-            int q8_blk_lo = blk * 8 + group * 2;     // which Q8 block (lo nibbles)
-            int q8_blk_hi = blk * 8 + group * 2 + 1; // which Q8 block (hi nibbles)
-            int k_off = pos_in_group * 4;
+                int q8A_lo = blk * 8 + group * 2;
+                int q8A_hi = q8A_lo + 1;
+                int k_off = pos_in_group * 4;
+                uint32_t u_lo = *reinterpret_cast<const uint32_t*>(&x_q8[q8A_lo * 32 + k_off]);
+                uint32_t u_hi = *reinterpret_cast<const uint32_t*>(&x_q8[q8A_hi * 32 + k_off]);
 
-            // Load Q8 x as packed int32 (4 int8 values)
-            uint32_t u_lo = *reinterpret_cast<const uint32_t*>(&x_q8[q8_blk_lo * 32 + k_off]);
-            uint32_t u_hi = *reinterpret_cast<const uint32_t*>(&x_q8[q8_blk_hi * 32 + k_off]);
+                int dot_lo = __dp4a((int)v_lo, (int)u_lo, (int)0);
+                int dot_hi = __dp4a((int)v_hi, (int)u_hi, (int)0);
+                int sum_lo = __dp4a((int)0x01010101, (int)u_lo, (int)0);
+                int sum_hi = __dp4a((int)0x01010101, (int)u_hi, (int)0);
 
-            // dp4a: 4 int8×int8 multiply-adds in 1 instruction
-            int dot_lo = __dp4a((int)v_lo, (int)u_lo, (int)0);
-            int dot_hi = __dp4a((int)v_hi, (int)u_hi, (int)0);
+                sum += dA * sc_lo * x_q8_d[q8A_lo] * (float)dot_lo - dmA * m_lo * x_q8_d[q8A_lo] * (float)sum_lo;
+                sum += dA * sc_hi * x_q8_d[q8A_hi] * (float)dot_hi - dmA * m_hi * x_q8_d[q8A_hi] * (float)sum_hi;
+            }
 
-            // Sum of x_q8 values (for min correction)
-            int sum_lo = __dp4a((int)0x01010101, (int)u_lo, (int)0);
-            int sum_hi = __dp4a((int)0x01010101, (int)u_hi, (int)0);
+            // Prefetch BLOCK C (blk+2) for next iteration
+            if (blk + 2 < num_blocks_per_row) {
+                const uint8_t* bpC = row_data + (blk + 2) * 144;
+                pf_d_dmin = __ldg(reinterpret_cast<const uint32_t*>(bpC));
+                pf_qs4 = __ldg(reinterpret_cast<const uint32_t*>(bpC + 16 + lane * 4));
+            }
 
-            float dl = d * sc_lo * x_q8_d[q8_blk_lo];
-            float dh = d * sc_hi * x_q8_d[q8_blk_hi];
-            float ml = dm * m_lo * x_q8_d[q8_blk_lo];
-            float mh = dm * m_hi * x_q8_d[q8_blk_hi];
+            // Compute BLOCK B (if exists)
+            if (has_B) {
+                float dB = fp16_to_fp32_device(d_dminB & 0xFFFF);
+                float dmB = fp16_to_fp32_device(d_dminB >> 16);
+                uint8_t sc_lo, m_lo, sc_hi, m_hi;
+                get_scale_min_k4_device(group * 2, bpB + 4, &sc_lo, &m_lo);
+                get_scale_min_k4_device(group * 2 + 1, bpB + 4, &sc_hi, &m_hi);
 
-            sum += dl * (float)dot_lo - ml * (float)sum_lo;
-            sum += dh * (float)dot_hi - mh * (float)sum_hi;
+                uint32_t v_lo = ((qs4B & 0x0F) | ((qs4B >> 4) & 0x0F00) |
+                                 ((qs4B >> 8) & 0x0F0000) | ((qs4B >> 12) & 0x0F000000));
+                uint32_t v_hi = (((qs4B >> 4) & 0x0F) | ((qs4B >> 8) & 0x0F00) |
+                                 ((qs4B >> 12) & 0x0F0000) | ((qs4B >> 16) & 0x0F000000));
+
+                int q8B_lo = (blk+1) * 8 + group * 2;
+                int q8B_hi = q8B_lo + 1;
+                int k_off = pos_in_group * 4;
+                uint32_t u_lo = *reinterpret_cast<const uint32_t*>(&x_q8[q8B_lo * 32 + k_off]);
+                uint32_t u_hi = *reinterpret_cast<const uint32_t*>(&x_q8[q8B_hi * 32 + k_off]);
+
+                int dot_lo = __dp4a((int)v_lo, (int)u_lo, (int)0);
+                int dot_hi = __dp4a((int)v_hi, (int)u_hi, (int)0);
+                int sum_lo = __dp4a((int)0x01010101, (int)u_lo, (int)0);
+                int sum_hi = __dp4a((int)0x01010101, (int)u_hi, (int)0);
+
+                sum += dB * sc_lo * x_q8_d[q8B_lo] * (float)dot_lo - dmB * m_lo * x_q8_d[q8B_lo] * (float)sum_lo;
+                sum += dB * sc_hi * x_q8_d[q8B_hi] * (float)dot_hi - dmB * m_hi * x_q8_d[q8B_hi] * (float)sum_hi;
+            }
         }
 
         #pragma unroll
