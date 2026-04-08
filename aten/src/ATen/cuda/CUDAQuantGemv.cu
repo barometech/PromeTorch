@@ -194,11 +194,10 @@ __global__ void q4km_persistent_gemv_kernel(
         for (int blk = 0; blk < num_blocks_per_row; ++blk) {
             const uint8_t* bp = row_data + blk * 144;
 
-            uint16_t d_bits, dmin_bits;
-            memcpy(&d_bits, bp, 2);
-            memcpy(&dmin_bits, bp + 2, 2);
-            const float d = fp16_to_fp32_device(d_bits);
-            const float dm = fp16_to_fp32_device(dmin_bits);
+            // Vectorized d/dmin read via __ldg (1 transaction instead of 2 memcpy)
+            uint32_t d_dmin = __ldg(reinterpret_cast<const uint32_t*>(bp));
+            const float d = fp16_to_fp32_device(d_dmin & 0xFFFF);
+            const float dm = fp16_to_fp32_device(d_dmin >> 16);
 
             uint8_t sc_lo, m_lo, sc_hi, m_hi;
             get_scale_min_k4_device(group * 2, bp + 4, &sc_lo, &m_lo);
@@ -351,11 +350,10 @@ __global__ void q4km_fused_gate_up_kernel(
         for (int blk = 0; blk < num_blocks_per_row; ++blk) {
             const uint8_t* bp = row_data + blk * 144;
 
-            uint16_t d_bits, dmin_bits;
-            memcpy(&d_bits, bp, 2);
-            memcpy(&dmin_bits, bp + 2, 2);
-            const float d = fp16_to_fp32_device(d_bits);
-            const float dm = fp16_to_fp32_device(dmin_bits);
+            // Vectorized d/dmin read via __ldg (1 transaction instead of 2 memcpy)
+            uint32_t d_dmin = __ldg(reinterpret_cast<const uint32_t*>(bp));
+            const float d = fp16_to_fp32_device(d_dmin & 0xFFFF);
+            const float dm = fp16_to_fp32_device(d_dmin >> 16);
 
             uint8_t sc_lo, m_lo, sc_hi, m_hi;
             get_scale_min_k4_device(group * 2, bp + 4, &sc_lo, &m_lo);
@@ -1070,11 +1068,10 @@ __global__ void q4km_fused_qkv_gemv_kernel(
         for (int blk = 0; blk < num_blocks_per_row; ++blk) {
             const uint8_t* bp = row_data + blk * 144;
 
-            uint16_t d_bits, dmin_bits;
-            memcpy(&d_bits, bp, 2);
-            memcpy(&dmin_bits, bp + 2, 2);
-            const float d = fp16_to_fp32_device(d_bits);
-            const float dm = fp16_to_fp32_device(dmin_bits);
+            // Vectorized d/dmin read via __ldg (1 transaction instead of 2 memcpy)
+            uint32_t d_dmin = __ldg(reinterpret_cast<const uint32_t*>(bp));
+            const float d = fp16_to_fp32_device(d_dmin & 0xFFFF);
+            const float dm = fp16_to_fp32_device(d_dmin >> 16);
 
             uint8_t sc_lo, m_lo, sc_hi, m_hi;
             get_scale_min_k4_device(group * 2, bp + 4, &sc_lo, &m_lo);
@@ -1215,11 +1212,10 @@ __global__ void q4km_fused_rmsnorm_gemv_kernel(
         for (int blk = 0; blk < num_blocks_per_row; ++blk) {
             const uint8_t* bp = row_data + blk * 144;
 
-            uint16_t d_bits, dmin_bits;
-            memcpy(&d_bits, bp, 2);
-            memcpy(&dmin_bits, bp + 2, 2);
-            const float d = fp16_to_fp32_device(d_bits);
-            const float dm = fp16_to_fp32_device(dmin_bits);
+            // Vectorized d/dmin read via __ldg (1 transaction instead of 2 memcpy)
+            uint32_t d_dmin = __ldg(reinterpret_cast<const uint32_t*>(bp));
+            const float d = fp16_to_fp32_device(d_dmin & 0xFFFF);
+            const float dm = fp16_to_fp32_device(d_dmin >> 16);
 
             uint8_t sc_lo, m_lo, sc_hi, m_hi;
             get_scale_min_k4_device(group * 2, bp + 4, &sc_lo, &m_lo);
@@ -1370,11 +1366,10 @@ __global__ void q4km_fused_rmsnorm_qkv_gemv_kernel(
         for (int blk = 0; blk < num_blocks_per_row; ++blk) {
             const uint8_t* bp = row_data + blk * 144;
 
-            uint16_t d_bits, dmin_bits;
-            memcpy(&d_bits, bp, 2);
-            memcpy(&dmin_bits, bp + 2, 2);
-            const float d = fp16_to_fp32_device(d_bits);
-            const float dm = fp16_to_fp32_device(dmin_bits);
+            // Vectorized d/dmin read via __ldg (1 transaction instead of 2 memcpy)
+            uint32_t d_dmin = __ldg(reinterpret_cast<const uint32_t*>(bp));
+            const float d = fp16_to_fp32_device(d_dmin & 0xFFFF);
+            const float dm = fp16_to_fp32_device(d_dmin >> 16);
 
             uint8_t sc_lo, m_lo, sc_hi, m_hi;
             get_scale_min_k4_device(group * 2, bp + 4, &sc_lo, &m_lo);
@@ -1486,11 +1481,10 @@ __global__ void q4km_persistent_gemv_accumulate_kernel(
         for (int blk = 0; blk < num_blocks_per_row; ++blk) {
             const uint8_t* bp = row_data + blk * 144;
 
-            uint16_t d_bits, dmin_bits;
-            memcpy(&d_bits, bp, 2);
-            memcpy(&dmin_bits, bp + 2, 2);
-            const float d = fp16_to_fp32_device(d_bits);
-            const float dm = fp16_to_fp32_device(dmin_bits);
+            // Vectorized d/dmin read via __ldg (1 transaction instead of 2 memcpy)
+            uint32_t d_dmin = __ldg(reinterpret_cast<const uint32_t*>(bp));
+            const float d = fp16_to_fp32_device(d_dmin & 0xFFFF);
+            const float dm = fp16_to_fp32_device(d_dmin >> 16);
 
             uint8_t sc_lo, m_lo, sc_hi, m_hi;
             get_scale_min_k4_device(group * 2, bp + 4, &sc_lo, &m_lo);
@@ -1631,11 +1625,10 @@ __global__ void q4km_fused_rmsnorm_gate_up_kernel(
         for (int blk = 0; blk < num_blocks_per_row; ++blk) {
             const uint8_t* bp = row_data + blk * 144;
 
-            uint16_t d_bits, dmin_bits;
-            memcpy(&d_bits, bp, 2);
-            memcpy(&dmin_bits, bp + 2, 2);
-            const float d = fp16_to_fp32_device(d_bits);
-            const float dm = fp16_to_fp32_device(dmin_bits);
+            // Vectorized d/dmin read via __ldg (1 transaction instead of 2 memcpy)
+            uint32_t d_dmin = __ldg(reinterpret_cast<const uint32_t*>(bp));
+            const float d = fp16_to_fp32_device(d_dmin & 0xFFFF);
+            const float dm = fp16_to_fp32_device(d_dmin >> 16);
 
             uint8_t sc_lo, m_lo, sc_hi, m_hi;
             get_scale_min_k4_device(group * 2, bp + 4, &sc_lo, &m_lo);
