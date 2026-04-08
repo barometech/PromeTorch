@@ -36,6 +36,7 @@
 #include "torch/csrc/autograd/node.h"
 #include "torch/csrc/autograd/node_pool.h"
 #include "torch/csrc/autograd/autograd_meta.h"
+#include "torch/csrc/autograd/autograd.h"  // for Node::add_input_metadata definition
 
 // ---------------------------------------------------------------------------
 // Lightweight backward nodes for Tensor::add/sub/mul/div
@@ -115,43 +116,51 @@ private:
     }
 };
 
-struct TensorMulBackward : public TensorAddBackward {
-    // Inherits reduce_grad from TensorAddBackward
+struct TensorMulBackward : public Node {
     at::Tensor saved_self_;
     at::Tensor saved_other_;
+    std::vector<int64_t> self_sizes_, other_sizes_;
 
     TensorMulBackward(const at::Tensor& self, const at::Tensor& other)
-        : saved_self_(self), saved_other_(other) {
-        self_sizes_ = self.sizes().vec();
-        other_sizes_ = other.sizes().vec();
-    }
+        : saved_self_(self), saved_other_(other),
+          self_sizes_(self.sizes().vec()), other_sizes_(other.sizes().vec()) {}
 
     variable_list apply(variable_list&& grads) override {
         auto& grad = grads[0];
         if (!grad.defined()) return {at::Tensor(), at::Tensor()};
-        // FIX Bug4: reduce_grad for broadcasting
         at::Tensor grad_self = reduce_grad(at::native::mul(grad, saved_other_), self_sizes_);
         at::Tensor grad_other = reduce_grad(at::native::mul(grad, saved_self_), other_sizes_);
         return {grad_self, grad_other};
     }
 
     std::string name() const override { return "TensorMulBackward"; }
+
+private:
+    at::Tensor reduce_grad(const at::Tensor& grad, const std::vector<int64_t>& shape) {
+        if (grad.sizes().vec() == shape) return grad;
+        at::Tensor result = grad;
+        int64_t orig_dim = static_cast<int64_t>(shape.size());
+        while (result.dim() > orig_dim) result = at::native::sum(result, 0, false);
+        for (int64_t i = 0; i < orig_dim; ++i) {
+            if (shape[i] == 1 && result.size(i) != 1)
+                result = at::native::sum(result, i, true);
+        }
+        return result;
+    }
 };
 
-struct TensorDivBackward : public TensorAddBackward {
+struct TensorDivBackward : public Node {
     at::Tensor saved_self_;
     at::Tensor saved_other_;
+    std::vector<int64_t> self_sizes_, other_sizes_;
 
     TensorDivBackward(const at::Tensor& self, const at::Tensor& other)
-        : saved_self_(self), saved_other_(other) {
-        self_sizes_ = self.sizes().vec();
-        other_sizes_ = other.sizes().vec();
-    }
+        : saved_self_(self), saved_other_(other),
+          self_sizes_(self.sizes().vec()), other_sizes_(other.sizes().vec()) {}
 
     variable_list apply(variable_list&& grads) override {
         auto& grad = grads[0];
         if (!grad.defined()) return {at::Tensor(), at::Tensor()};
-        // FIX Bug4: reduce_grad for broadcasting
         at::Tensor grad_self = reduce_grad(at::native::div(grad, saved_other_), self_sizes_);
         at::Tensor other_sq = at::native::mul(saved_other_, saved_other_);
         at::Tensor grad_other = reduce_grad(at::native::mul(
@@ -161,6 +170,19 @@ struct TensorDivBackward : public TensorAddBackward {
     }
 
     std::string name() const override { return "TensorDivBackward"; }
+
+private:
+    at::Tensor reduce_grad(const at::Tensor& grad, const std::vector<int64_t>& shape) {
+        if (grad.sizes().vec() == shape) return grad;
+        at::Tensor result = grad;
+        int64_t orig_dim = static_cast<int64_t>(shape.size());
+        while (result.dim() > orig_dim) result = at::native::sum(result, 0, false);
+        for (int64_t i = 0; i < orig_dim; ++i) {
+            if (shape[i] == 1 && result.size(i) != 1)
+                result = at::native::sum(result, i, true);
+        }
+        return result;
+    }
 };
 
 } // namespace autograd
