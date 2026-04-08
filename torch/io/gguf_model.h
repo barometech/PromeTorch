@@ -477,7 +477,8 @@ public:
     GGUFTokenizer tokenizer;
 
     // Weights
-    Tensor token_embedding;  // [vocab_size, hidden]
+    Tensor token_embedding;  // [vocab_size, hidden] (CPU)
+    Tensor emb_gpu_;         // [vocab_size, hidden] (GPU copy for CUDA Graph)
     Tensor output_norm;      // [hidden]
     Tensor output_weight;    // [vocab_size, hidden]
     std::vector<TransformerLayer> layers;
@@ -1161,11 +1162,25 @@ public:
         float eps = config.rms_norm_eps;
         bool add_one = config.gemma_norm_add_one;
 
-        // 1. Embedding: CPU lookup → H2D into buf_x[0]
+        // 1. Embedding: GPU lookup (zero H2D copy for CUDA Graph compatibility)
         PROF_BEGIN(profiler, "embedding");
-        const float* emb_table = token_embedding.data_ptr<float>();
-        cudaMemcpy(sp.buf_x[0].mutable_data_ptr<float>(),
-                   emb_table + token_id * H, H * sizeof(float), cudaMemcpyHostToDevice);
+        if (!emb_gpu_.defined() && token_embedding.defined()) {
+            // First call: copy embedding table to GPU (once)
+            emb_gpu_ = at::empty_cuda({config.vocab_size, H});
+            cudaMemcpy(emb_gpu_.mutable_data_ptr<float>(), token_embedding.data_ptr<float>(),
+                       config.vocab_size * H * sizeof(float), cudaMemcpyHostToDevice);
+        }
+        if (emb_gpu_.defined()) {
+            // GPU→GPU copy (stays on device, CUDA Graph friendly)
+            cudaMemcpyAsync(sp.buf_x[0].mutable_data_ptr<float>(),
+                       emb_gpu_.data_ptr<float>() + token_id * H,
+                       H * sizeof(float), cudaMemcpyDeviceToDevice, nullptr);
+        } else {
+            // Fallback: CPU embedding
+            const float* emb_table = token_embedding.data_ptr<float>();
+            cudaMemcpy(sp.buf_x[0].mutable_data_ptr<float>(),
+                       emb_table + token_id * H, H * sizeof(float), cudaMemcpyHostToDevice);
+        }
         PROF_END(profiler, "embedding");
 
         // Scale embeddings (Gemma)
