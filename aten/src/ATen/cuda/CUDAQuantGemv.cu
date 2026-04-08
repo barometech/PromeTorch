@@ -156,8 +156,9 @@ __global__ void q4km_gemv_kernel(
 // Launches one block per SM. Each block loads x into shared memory ONCE,
 // then loops over multiple rows. Eliminates redundant x loading.
 
-// llama.cpp-style Q4_K_M GEMV: 2 warps per row, 2 blocks per warp iteration
-// Key: maximize HBM utilization by processing more data per warp
+// Q4_K_M × Q8_1 GEMV: dp4a INT8 dot product (llama.cpp approach)
+// x pre-quantized to Q8_1 in shared memory → 4 MACs per __dp4a instruction
+// Less registers → more warps → better memory latency hiding → higher DRAM utilization
 __global__ void q4km_persistent_gemv_kernel(
     const uint8_t* __restrict__ weights,
     const float* __restrict__ x,
@@ -165,45 +166,57 @@ __global__ void q4km_persistent_gemv_kernel(
     int K, int N,
     int64_t row_stride_bytes)
 {
-    extern __shared__ float x_shared[];  // back to FP32 (simpler, nvcc optimizes well)
+    // Shared memory: Q8_1 quantized x [K int8] + scales [K/32 float] + sums [K/32 float]
+    extern __shared__ char smem_raw[];
+    const int num_q8_blocks = K / 32;  // Q8_1: 32 elements per block
+    int8_t* x_q8 = reinterpret_cast<int8_t*>(smem_raw);
+    float* x_q8_d = reinterpret_cast<float*>(smem_raw + K);        // scale per 32 elements
+    float* x_q8_s = reinterpret_cast<float*>(smem_raw + K + num_q8_blocks * 4);  // sum per 32
 
     const int tid = threadIdx.x;
     const int block_size = blockDim.x;
-    // 2 warps per row for better bandwidth utilization
-    const int warps_per_row = 2;
-    const int rows_per_block = block_size / 32 / warps_per_row;
+    const int warps_per_block = block_size / 32;
     const int warp_id = tid / 32;
-    const int row_in_block = warp_id / warps_per_row;
-    const int warp_half = warp_id % warps_per_row;  // 0 or 1: which half of blocks
     const int lane = tid & 31;
 
-    // Load x into shared memory ONCE (cooperative, all threads)
-    for (int k = tid; k < K; k += block_size) {
-        x_shared[k] = x[k];
+    // Quantize x to Q8_1 in shared memory (cooperative, all threads)
+    for (int blk = tid; blk < num_q8_blocks; blk += block_size) {
+        const float* xb = x + blk * 32;
+        // Find max abs value in this block of 32
+        float amax = 0.0f;
+        for (int j = 0; j < 32; j++) {
+            float v = fabsf(xb[j]);
+            if (v > amax) amax = v;
+        }
+        float d = amax / 127.0f;
+        float id = (d > 0.0f) ? 1.0f / d : 0.0f;
+        float sum = 0.0f;
+        int8_t* qb = x_q8 + blk * 32;
+        for (int j = 0; j < 32; j++) {
+            int8_t q = (int8_t)roundf(xb[j] * id);
+            qb[j] = q;
+            sum += (float)q;
+        }
+        x_q8_d[blk] = d;
+        x_q8_s[blk] = sum;
     }
     __syncthreads();
 
     const int group = lane / 8;
-    const int pos = (lane & 7) * 4;
+    const int pos_in_group = lane & 7;
     const int num_blocks_per_row = K / 256;
-    const int blocks_per_half = (num_blocks_per_row + 1) / 2;
 
-    // Grid-stride loop
-    for (int base_n = blockIdx.x * rows_per_block; base_n < N;
-         base_n += gridDim.x * rows_per_block)
+    // Grid-stride: 1 warp per row, 8 rows per block
+    for (int base_n = blockIdx.x * warps_per_block; base_n < N;
+         base_n += gridDim.x * warps_per_block)
     {
-        int n = base_n + row_in_block;
+        int n = base_n + warp_id;
         if (n >= N) continue;
 
         const uint8_t* row_data = weights + (int64_t)n * row_stride_bytes;
         float sum = 0.0f;
 
-        // Each warp_half processes its half of the Q4_K_M blocks
-        int blk_start = warp_half * blocks_per_half;
-        int blk_end = blk_start + blocks_per_half;
-        if (blk_end > num_blocks_per_row) blk_end = num_blocks_per_row;
-
-        for (int blk = blk_start; blk < blk_end; ++blk) {
+        for (int blk = 0; blk < num_blocks_per_row; ++blk) {
             const uint8_t* bp = row_data + blk * 144;
 
             uint32_t d_dmin = __ldg(reinterpret_cast<const uint32_t*>(bp));
@@ -214,44 +227,47 @@ __global__ void q4km_persistent_gemv_kernel(
             get_scale_min_k4_device(group * 2, bp + 4, &sc_lo, &m_lo);
             get_scale_min_k4_device(group * 2 + 1, bp + 4, &sc_hi, &m_hi);
 
+            // Read 4 bytes of Q4 weights = 8 nibbles
             uint32_t qs4 = __ldg(reinterpret_cast<const uint32_t*>(bp + 16 + lane * 4));
 
-            float dl = d * sc_lo, ml = dm * m_lo;
-            float dh = d * sc_hi, mh = dm * m_hi;
+            // Unpack low nibbles into int8: [q0, q1, q2, q3]
+            uint32_t v_lo = ((qs4 & 0x0F) | ((qs4 >> 4) & 0x0F00) |
+                             ((qs4 >> 8) & 0x0F0000) | ((qs4 >> 12) & 0x0F000000));
+            // Unpack high nibbles
+            uint32_t v_hi = (((qs4 >> 4) & 0x0F) | ((qs4 >> 8) & 0x0F00) |
+                             ((qs4 >> 12) & 0x0F0000) | ((qs4 >> 16) & 0x0F000000));
 
-            const int k_base = blk * 256 + group * 64 + pos;
-            const float4 x_lo = *reinterpret_cast<const float4*>(&x_shared[k_base]);
-            const float4 x_hi = *reinterpret_cast<const float4*>(&x_shared[k_base + 32]);
+            // Q8_1 x values for this thread's 8 elements
+            int q8_blk_lo = blk * 8 + group * 2;     // which Q8 block (lo nibbles)
+            int q8_blk_hi = blk * 8 + group * 2 + 1; // which Q8 block (hi nibbles)
+            int k_off = pos_in_group * 4;
 
-            sum += (dl * (float)( qs4        & 0xF) - ml) * x_lo.x;
-            sum += (dl * (float)((qs4 >>  8) & 0xF) - ml) * x_lo.y;
-            sum += (dl * (float)((qs4 >> 16) & 0xF) - ml) * x_lo.z;
-            sum += (dl * (float)((qs4 >> 24) & 0xF) - ml) * x_lo.w;
-            sum += (dh * (float)((qs4 >>  4) & 0xF) - mh) * x_hi.x;
-            sum += (dh * (float)((qs4 >> 12) & 0xF) - mh) * x_hi.y;
-            sum += (dh * (float)((qs4 >> 20) & 0xF) - mh) * x_hi.z;
-            sum += (dh * (float)((qs4 >> 28) & 0xF) - mh) * x_hi.w;
+            // Load Q8 x as packed int32 (4 int8 values)
+            uint32_t u_lo = *reinterpret_cast<const uint32_t*>(&x_q8[q8_blk_lo * 32 + k_off]);
+            uint32_t u_hi = *reinterpret_cast<const uint32_t*>(&x_q8[q8_blk_hi * 32 + k_off]);
+
+            // dp4a: 4 int8×int8 multiply-adds in 1 instruction
+            int dot_lo = __dp4a((int)v_lo, (int)u_lo, (int)0);
+            int dot_hi = __dp4a((int)v_hi, (int)u_hi, (int)0);
+
+            // Sum of x_q8 values (for min correction)
+            int sum_lo = __dp4a((int)0x01010101, (int)u_lo, (int)0);
+            int sum_hi = __dp4a((int)0x01010101, (int)u_hi, (int)0);
+
+            float dl = d * sc_lo * x_q8_d[q8_blk_lo];
+            float dh = d * sc_hi * x_q8_d[q8_blk_hi];
+            float ml = dm * m_lo * x_q8_d[q8_blk_lo];
+            float mh = dm * m_hi * x_q8_d[q8_blk_hi];
+
+            sum += dl * (float)dot_lo - ml * (float)sum_lo;
+            sum += dh * (float)dot_hi - mh * (float)sum_hi;
         }
 
-        // Warp shuffle reduction within warp
         #pragma unroll
         for (int offset = 16; offset > 0; offset >>= 1) {
             sum += __shfl_down_sync(WARP_MASK, sum, offset);
         }
-
-        // Cross-warp reduction: warp_half 1 sends to warp_half 0
-        if (warps_per_row == 2) {
-            // Use shared memory for inter-warp reduce
-            __shared__ float warp_sums[64];  // max 32 rows × 2 halves
-            if (lane == 0) warp_sums[warp_id] = sum;
-            __syncthreads();
-            if (warp_half == 0 && lane == 0) {
-                y[n] = warp_sums[warp_id] + warp_sums[warp_id + 1];
-            }
-            __syncthreads();
-        } else {
-            if (lane == 0) y[n] = sum;
-        }
+        if (lane == 0) y[n] = sum;
     }
 }
 
@@ -300,7 +316,8 @@ ATEN_CUDA_API void launch_q4km_persistent_gemv(
     const int BLOCK_SIZE = WARPS * 32;  // 256 threads per block
     // Launch 2 blocks per SM for latency hiding
     int grid = sm_count * 4;
-    int smem_bytes = K * sizeof(float) + 64 * sizeof(float);  // x_shared + warp_sums
+    int num_q8 = K / 32;
+    int smem_bytes = K * 1 + num_q8 * 4 + num_q8 * 4;  // Q8 int8[K] + scales[K/32] + sums[K/32]
 
     if (smem_bytes > 48 * 1024) {
         cudaFuncSetAttribute(q4km_persistent_gemv_kernel,
