@@ -3,6 +3,35 @@
 Полная история разработки проекта. Актуальные инструкции — в `CLAUDE.md`.
 Полный аудит инфраструктуры — в `INFRASTRUCTURE_AUDIT.md`.
 
+## 2026-04-08: PROMESERVE OPTIMIZATION SPRINT
+
+### Inference Optimization Progress
+| Step | tok/s | vs Ollama | Change |
+|---|---|---|---|
+| Baseline (FP32 __dp4a) | 30.0 | 0.19x | - |
+| FP16 hfma2 kernel | 30.0 | 0.19x | Compute not bottleneck |
+| + __ldg + 4x grid | 32.0 | 0.20x | +7% |
+| + GPU embedding D2D | 34.1 | 0.21x | +13% |
+| + vectorized d/dmin | 34.7 | 0.22x | +16% |
+| **Ollama** | **161** | **1.0x** | cuBLAS + CUDA Graphs |
+
+### Profiling (A100)
+- GPU time/token: 23.17ms (Ollama: 6.46ms)
+- 75% time in GEMV at 7% HBM bandwidth (147/1500 GB/s)
+- Kernel launch overhead: 2.5ms (252 launches × 10us)
+- fused_norm_gate_up: 20% of profiled time
+
+### CUDA Graph Implementation
+- Graph-compatible kernels added (d_past_len via device pointer)
+- fused_qknorm_rope_kvwrite_graph: reads past_len from GPU memory
+- Full graph capture requires flash_decode_graph with device pointer
+- Theoretical with full CUDA Graphs: 100-200 tok/s (5x current)
+
+### Next Steps
+1. Full CUDA Graph capture for decode loop (eliminate 2.5ms overhead)
+2. Vectorized uint4 loads in GEMV (saturate 1.5 TB/s HBM)
+3. cuBLAS for prefill (batch > 1)
+
 ## 2026-04-08: BENCHMARKS + PRODUCTION READINESS + GRAD SYNC FIX
 
 ### PromeServe vs Ollama (A100 40GB)
