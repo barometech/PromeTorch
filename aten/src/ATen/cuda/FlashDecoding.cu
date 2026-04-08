@@ -632,5 +632,137 @@ ATEN_CUDA_API void launch_flash_decode_fp16(
     }
 }
 
+// ============================================================================
+// CUDA Graph Compatible Kernels (past_len from device memory)
+// ============================================================================
+
+__global__ void fused_qknorm_rope_kvwrite_graph_kernel(
+    float* __restrict__ Q, float* __restrict__ K, const float* __restrict__ V,
+    const float* __restrict__ q_norm_w, const float* __restrict__ k_norm_w,
+    float* __restrict__ K_cache, float* __restrict__ V_cache,
+    int n_heads, int n_kv_heads, int head_dim,
+    const int64_t* __restrict__ d_past_len,
+    float rope_freq_base, float eps, bool add_one)
+{
+    int64_t past_len = *d_past_len;
+    int position = (int)past_len;
+    int kv_dim = n_kv_heads * head_dim;
+
+    int head = blockIdx.x;
+    int tid = threadIdx.x;
+
+    // Q head: QK-norm + RoPE
+    if (head < n_heads) {
+        float* q_head = Q + head * head_dim;
+        if (q_norm_w != nullptr) {
+            extern __shared__ float smem[];
+            float local_sum = 0.0f;
+            for (int d = tid; d < head_dim; d += blockDim.x)
+                local_sum += q_head[d] * q_head[d];
+            smem[tid] = local_sum;
+            __syncthreads();
+            for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+                if (tid < s) smem[tid] += smem[tid + s];
+                __syncthreads();
+            }
+            float rms = rsqrtf(smem[0] / head_dim + eps);
+            for (int d = tid; d < head_dim; d += blockDim.x) {
+                float w = add_one ? (1.0f + q_norm_w[d]) : q_norm_w[d];
+                q_head[d] = q_head[d] * rms * w;
+            }
+            __syncthreads();
+        }
+        int half_dim = head_dim / 2;
+        for (int d = tid; d < half_dim; d += blockDim.x) {
+            float freq = 1.0f / powf(rope_freq_base, 2.0f * d / head_dim);
+            float theta = position * freq;
+            float cos_t = cosf(theta), sin_t = sinf(theta);
+            float x0 = q_head[2*d], x1 = q_head[2*d+1];
+            q_head[2*d]   = x0 * cos_t - x1 * sin_t;
+            q_head[2*d+1] = x0 * sin_t + x1 * cos_t;
+        }
+    }
+
+    // K head: QK-norm + RoPE + cache write. V: cache write
+    int kv_head = head;
+    if (kv_head < n_kv_heads) {
+        float* k_head = K + kv_head * head_dim;
+        if (k_norm_w != nullptr) {
+            extern __shared__ float smem[];
+            float local_sum = 0.0f;
+            for (int d = tid; d < head_dim; d += blockDim.x)
+                local_sum += k_head[d] * k_head[d];
+            smem[tid] = local_sum;
+            __syncthreads();
+            for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+                if (tid < s) smem[tid] += smem[tid + s];
+                __syncthreads();
+            }
+            float rms = rsqrtf(smem[0] / head_dim + eps);
+            for (int d = tid; d < head_dim; d += blockDim.x) {
+                float w = add_one ? (1.0f + k_norm_w[d]) : k_norm_w[d];
+                k_head[d] = k_head[d] * rms * w;
+            }
+            __syncthreads();
+        }
+        int half_dim = head_dim / 2;
+        for (int d = tid; d < half_dim; d += blockDim.x) {
+            float freq = 1.0f / powf(rope_freq_base, 2.0f * d / head_dim);
+            float theta = position * freq;
+            float cos_t = cosf(theta), sin_t = sinf(theta);
+            float x0 = k_head[2*d], x1 = k_head[2*d+1];
+            k_head[2*d]   = x0 * cos_t - x1 * sin_t;
+            k_head[2*d+1] = x0 * sin_t + x1 * cos_t;
+        }
+        __syncthreads();
+        for (int d = tid; d < head_dim; d += blockDim.x) {
+            K_cache[past_len * kv_dim + kv_head * head_dim + d] = k_head[d];
+        }
+        const float* v_head = V + kv_head * head_dim;
+        for (int d = tid; d < head_dim; d += blockDim.x) {
+            V_cache[past_len * kv_dim + kv_head * head_dim + d] = v_head[d];
+        }
+    }
+}
+
+ATEN_CUDA_API void launch_fused_qknorm_rope_kvwrite_graph(
+    float* Q, float* K, const float* V,
+    const float* q_norm_w, const float* k_norm_w,
+    float* K_cache, float* V_cache,
+    int n_heads, int n_kv_heads, int head_dim,
+    const int64_t* d_past_len, float rope_freq_base, float eps, bool add_one,
+    cudaStream_t stream)
+{
+    int num_blocks = n_heads > n_kv_heads ? n_heads : n_kv_heads;
+    int block_size = head_dim > 128 ? 256 : 128;
+    int shared_mem = block_size * sizeof(float);
+    fused_qknorm_rope_kvwrite_graph_kernel<<<num_blocks, block_size, shared_mem, stream>>>(
+        Q, K, V, q_norm_w, k_norm_w, K_cache, V_cache,
+        n_heads, n_kv_heads, head_dim, d_past_len, rope_freq_base, eps, add_one);
+}
+
+// Flash decode with device pointer past_len (CUDA Graph compatible)
+ATEN_CUDA_API void launch_flash_decode_graph(
+    const float* Q, const float* K_cache, const float* V_cache,
+    float* O, float* partial_O, float* partial_lse, float* partial_max,
+    int n_heads, int n_kv_heads, int head_dim,
+    const int64_t* d_past_len, int max_seq, float scale,
+    cudaStream_t stream)
+{
+    // Fixed grid for CUDA Graph (max_splits covers max_seq)
+    int max_splits = (max_seq + KV_CHUNK_SIZE - 1) / KV_CHUNK_SIZE;
+    if (max_splits < 1) max_splits = 1;
+    int block_size = head_dim > 128 ? 256 : 128;
+
+    // Reuse existing partial kernel but pass d_past_len
+    // For now, fall back to non-graph version with sync read
+    // TODO: full graph-compatible flash_decode_partial kernel
+    int64_t host_past_len;
+    cudaMemcpy(&host_past_len, d_past_len, sizeof(int64_t), cudaMemcpyDeviceToHost);
+    int total_seq = (int)host_past_len + 1;
+    launch_flash_decode(Q, K_cache, V_cache, O, partial_O, partial_lse, partial_max,
+                        n_heads, n_kv_heads, head_dim, total_seq, scale, stream);
+}
+
 } // namespace cuda
 } // namespace at
