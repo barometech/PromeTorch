@@ -323,7 +323,7 @@ struct InferenceScratchPool {
     Tensor buf_silu;       // [1, intermediate]
     Tensor buf_down;       // [1, H]
     Tensor buf_logits;     // [1, vocab_size]
-    void* q8_buf = nullptr;     // Q8_1 quantized x for dp4a GEMV (legacy)
+    void* q8_buf = nullptr;     // Q8_1 quantized x for dp4a GEMV (all projections)
     void* x_fp16_buf = nullptr; // FP16 scratch for cuBLAS GEMV input
     void* y_fp16_buf = nullptr; // FP16 scratch for cuBLAS GEMV output
 
@@ -365,6 +365,13 @@ struct InferenceScratchPool {
         if (q_dim > max_N) max_N = q_dim;
         cudaMalloc(&x_fp16_buf, max_K * 2);  // sizeof(half) = 2
         cudaMalloc(&y_fp16_buf, max_N * 2);
+
+        // Q8_1 scratch buffer for dp4a GEMV pipeline (all projections)
+        // sizeof(block_q8_1) = 36 bytes per 32 elements
+        int64_t q8_num_blocks = (max_K + 31) / 32;
+        int64_t q8_bytes = q8_num_blocks * 36;
+        cudaMalloc(&q8_buf, q8_bytes);
+        std::cout << "[Scratch] Q8_1 buffer: " << (q8_bytes / 1024) << " KB (max_K=" << max_K << ")" << std::endl;
 
         // Flash-decode scratch buffers
         // Max context = max_seq_len, splits = ceil(max_seq / 256)
@@ -1233,34 +1240,46 @@ public:
             auto& layer = layers[i];
             float* x_ptr = sp.buf_x[cur].mutable_data_ptr<float>();
 
-            // Check if all QKV weights are Q4_K with same K and stride (for fused path)
-            bool can_fuse_qkv = use_quant_gemv_ &&
+            // Q8 pipeline: check if Q4_K weights available for dp4a GEMV
+            bool use_q8_qkv = use_quant_gemv_ && sp.q8_buf &&
                 layer.q_attn_q.valid && layer.q_attn_k.valid && layer.q_attn_v.valid &&
                 layer.q_attn_q.is_q4k() && layer.q_attn_k.is_q4k() && layer.q_attn_v.is_q4k() &&
-                layer.q_attn_q.gpu_data && layer.q_attn_k.gpu_data && layer.q_attn_v.gpu_data &&
-                layer.q_attn_q.cols == layer.q_attn_k.cols &&
-                layer.q_attn_q.cols == layer.q_attn_v.cols &&
-                layer.q_attn_q.row_stride_bytes == layer.q_attn_k.row_stride_bytes &&
-                layer.q_attn_q.row_stride_bytes == layer.q_attn_v.row_stride_bytes;
+                layer.q_attn_q.gpu_data && layer.q_attn_k.gpu_data && layer.q_attn_v.gpu_data;
 
-            if (can_fuse_qkv) {
-                // -- FUSED: attn_norm + Q/K/V projections (1 kernel instead of 4) --
-                PROF_BEGIN(profiler, "fused_norm_qkv");
-                at::cuda::launch_q4km_fused_rmsnorm_qkv_gemv(
+            if (use_q8_qkv) {
+                // -- Q8 PIPELINE: norm → quantize x → dp4a GEMV × 3 --
+                // 100% occupancy (1 block/row, no smem) vs old 50% (persistent, smem)
+                PROF_BEGIN(profiler, "attn_norm");
+                at::cuda::launch_rms_norm(
                     x_ptr, layer.attn_norm.data_ptr<float>(),
-                    layer.q_attn_q.gpu_data, layer.q_attn_k.gpu_data, layer.q_attn_v.gpu_data,
+                    sp.buf_normed.mutable_data_ptr<float>(),
+                    1, static_cast<int>(H), eps, add_one, s);
+                PROF_END(profiler, "attn_norm");
+
+                PROF_BEGIN(profiler, "qkv_proj");
+                // Quantize normed x → Q8_1 once, reuse for all 3 projections
+                at::cuda::launch_quantize_q8_1(
+                    sp.buf_normed.data_ptr<float>(), sp.q8_buf,
+                    static_cast<int>(H), s);
+                // dp4a GEMV: 1 block per output row → max occupancy
+                at::cuda::launch_q4km_q8_gemv(
+                    layer.q_attn_q.gpu_data, sp.q8_buf,
                     sp.buf_q.mutable_data_ptr<float>(),
+                    static_cast<int>(H), static_cast<int>(layer.q_attn_q.rows),
+                    layer.q_attn_q.row_stride_bytes, s);
+                at::cuda::launch_q4km_q8_gemv(
+                    layer.q_attn_k.gpu_data, sp.q8_buf,
                     sp.buf_k.mutable_data_ptr<float>(),
+                    static_cast<int>(H), static_cast<int>(layer.q_attn_k.rows),
+                    layer.q_attn_k.row_stride_bytes, s);
+                at::cuda::launch_q4km_q8_gemv(
+                    layer.q_attn_v.gpu_data, sp.q8_buf,
                     sp.buf_v.mutable_data_ptr<float>(),
-                    static_cast<int>(H),
-                    static_cast<int>(layer.q_attn_q.rows),
-                    static_cast<int>(layer.q_attn_k.rows),
-                    static_cast<int>(layer.q_attn_v.rows),
-                    layer.q_attn_q.row_stride_bytes,
-                    eps, add_one, s);
-                PROF_END(profiler, "fused_norm_qkv");
+                    static_cast<int>(H), static_cast<int>(layer.q_attn_v.rows),
+                    layer.q_attn_v.row_stride_bytes, s);
+                PROF_END(profiler, "qkv_proj");
             } else {
-                // Fallback: separate attn_norm + 3 GEMVs
+                // Fallback: separate attn_norm + 3 persistent GEMVs
                 PROF_BEGIN(profiler, "attn_norm");
                 at::cuda::launch_rms_norm(
                     x_ptr, layer.attn_norm.data_ptr<float>(),
@@ -1388,34 +1407,29 @@ public:
             }
             PROF_END(profiler, "flash_decode");
 
-            // -- Output projection with fused residual add --
-            // Instead of: output_proj → buf_attn_proj, then add(x, buf_attn_proj) → buf_h
-            // We do: copy x → buf_h, then accumulate: buf_h += W @ attn_out
-            // This saves 1 kernel launch (residual_add) per layer.
-            bool can_fuse_output_residual = use_quant_gemv_ &&
-                layer.q_attn_output.valid && layer.q_attn_output.is_q4k() &&
-                layer.q_attn_output.gpu_data &&
-                !layer.post_attention_norm.defined();  // Can't fuse if post-norm needed
+            // -- Output projection + residual add --
+            {
+                bool use_q8_output = use_quant_gemv_ && sp.q8_buf &&
+                    layer.q_attn_output.valid && layer.q_attn_output.is_q4k() &&
+                    layer.q_attn_output.gpu_data;
 
-            if (can_fuse_output_residual) {
-                PROF_BEGIN(profiler, "fused_output_residual");
-                // Copy x → buf_h (residual base)
-                at::cuda::launch_copy(x_ptr, sp.buf_h.mutable_data_ptr<float>(), H, s);
-                // buf_h += W_output @ attn_out (accumulate)
-                at::cuda::launch_q4km_persistent_gemv_accumulate(
-                    layer.q_attn_output.gpu_data,
-                    sp.buf_attn.data_ptr<float>(),
-                    sp.buf_h.mutable_data_ptr<float>(),
-                    static_cast<int>(layer.q_attn_output.cols),
-                    static_cast<int>(layer.q_attn_output.rows),
-                    layer.q_attn_output.row_stride_bytes, s);
-                PROF_END(profiler, "fused_output_residual");
-            } else {
-                // Fallback: separate output_proj + residual_add
                 PROF_BEGIN(profiler, "attn_output_proj");
-                gemv_scratch(layer.q_attn_output, layer.attn_output,
-                            sp.buf_attn.data_ptr<float>(),
-                            sp.buf_attn_proj.mutable_data_ptr<float>(), H);
+                if (use_q8_output) {
+                    // Q8 pipeline: quantize attn_out → dp4a GEMV
+                    at::cuda::launch_quantize_q8_1(
+                        sp.buf_attn.data_ptr<float>(), sp.q8_buf,
+                        static_cast<int>(layer.q_attn_output.cols), s);
+                    at::cuda::launch_q4km_q8_gemv(
+                        layer.q_attn_output.gpu_data, sp.q8_buf,
+                        sp.buf_attn_proj.mutable_data_ptr<float>(),
+                        static_cast<int>(layer.q_attn_output.cols),
+                        static_cast<int>(layer.q_attn_output.rows),
+                        layer.q_attn_output.row_stride_bytes, s);
+                } else {
+                    gemv_scratch(layer.q_attn_output, layer.attn_output,
+                                sp.buf_attn.data_ptr<float>(),
+                                sp.buf_attn_proj.mutable_data_ptr<float>(), H);
+                }
                 PROF_END(profiler, "attn_output_proj");
 
                 if (layer.post_attention_norm.defined()) {
@@ -1432,31 +1446,14 @@ public:
                 PROF_END(profiler, "residual_add");
             }
 
-            // -- FFN: Check if we can fuse norm + gate+up --
-            bool can_fuse_ffn = use_quant_gemv_ &&
-                layer.q_ffn_gate.valid && layer.q_ffn_up.valid &&
-                layer.q_ffn_gate.is_q4k() && layer.q_ffn_up.is_q4k() &&
-                layer.q_ffn_gate.gpu_data && layer.q_ffn_up.gpu_data &&
-                layer.q_ffn_gate.cols == layer.q_ffn_up.cols &&
-                layer.q_ffn_gate.row_stride_bytes == layer.q_ffn_up.row_stride_bytes;
+            // -- FFN gate+up projections --
+            {
+                bool use_q8_ffn = use_quant_gemv_ && sp.q8_buf &&
+                    layer.q_ffn_gate.valid && layer.q_ffn_up.valid &&
+                    layer.q_ffn_gate.is_q4k() && layer.q_ffn_up.is_q4k() &&
+                    layer.q_ffn_gate.gpu_data && layer.q_ffn_up.gpu_data;
 
-            if (can_fuse_ffn) {
-                // -- FUSED: ffn_norm + gate+up projections (1 kernel instead of 3) --
-                PROF_BEGIN(profiler, "fused_norm_gate_up");
-                at::cuda::launch_q4km_fused_rmsnorm_gate_up_gemv(
-                    sp.buf_h.data_ptr<float>(),
-                    layer.ffn_norm.data_ptr<float>(),
-                    layer.q_ffn_gate.gpu_data, layer.q_ffn_up.gpu_data,
-                    sp.buf_gate.mutable_data_ptr<float>(),
-                    sp.buf_up.mutable_data_ptr<float>(),
-                    static_cast<int>(H),
-                    static_cast<int>(layer.q_ffn_gate.rows),
-                    static_cast<int>(layer.q_ffn_up.rows),
-                    layer.q_ffn_gate.row_stride_bytes,
-                    eps, add_one, s);
-                PROF_END(profiler, "fused_norm_gate_up");
-            } else {
-                // Fallback: separate ffn_norm + gate/up GEMVs
+                // FFN norm (always separate — Q8 pipeline replaces fused norm+gemv)
                 PROF_BEGIN(profiler, "ffn_norm");
                 at::cuda::launch_rms_norm(
                     sp.buf_h.data_ptr<float>(), layer.ffn_norm.data_ptr<float>(),
@@ -1464,12 +1461,28 @@ public:
                     1, static_cast<int>(H), eps, add_one, s);
                 PROF_END(profiler, "ffn_norm");
 
-                const float* normed_ptr = sp.buf_normed.data_ptr<float>();
-
                 PROF_BEGIN(profiler, "ffn_gate_up");
-                fused_gate_up_gemv(layer, normed_ptr,
-                                  sp.buf_gate.mutable_data_ptr<float>(),
-                                  sp.buf_up.mutable_data_ptr<float>(), inter);
+                if (use_q8_ffn) {
+                    // Q8 pipeline: quantize normed h → dp4a GEMV × 2
+                    at::cuda::launch_quantize_q8_1(
+                        sp.buf_normed.data_ptr<float>(), sp.q8_buf,
+                        static_cast<int>(H), s);
+                    at::cuda::launch_q4km_q8_gemv(
+                        layer.q_ffn_gate.gpu_data, sp.q8_buf,
+                        sp.buf_gate.mutable_data_ptr<float>(),
+                        static_cast<int>(H), static_cast<int>(layer.q_ffn_gate.rows),
+                        layer.q_ffn_gate.row_stride_bytes, s);
+                    at::cuda::launch_q4km_q8_gemv(
+                        layer.q_ffn_up.gpu_data, sp.q8_buf,
+                        sp.buf_up.mutable_data_ptr<float>(),
+                        static_cast<int>(H), static_cast<int>(layer.q_ffn_up.rows),
+                        layer.q_ffn_up.row_stride_bytes, s);
+                } else {
+                    // Fallback: persistent GEMV
+                    fused_gate_up_gemv(layer, sp.buf_normed.data_ptr<float>(),
+                                      sp.buf_gate.mutable_data_ptr<float>(),
+                                      sp.buf_up.mutable_data_ptr<float>(), inter);
+                }
                 PROF_END(profiler, "ffn_gate_up");
             }
 
@@ -1480,33 +1493,30 @@ public:
                 sp.buf_silu.mutable_data_ptr<float>(), inter, s);
             PROF_END(profiler, "silu_mul");
 
-            // -- Down projection with fused residual add --
-            bool can_fuse_down_residual = use_quant_gemv_ &&
-                layer.q_ffn_down.valid && layer.q_ffn_down.is_q4k() &&
-                layer.q_ffn_down.gpu_data &&
-                !layer.post_ffw_norm.defined();  // Can't fuse if post-norm needed
-
+            // -- Down projection + residual add --
             int next = 1 - cur;
-            if (can_fuse_down_residual) {
-                PROF_BEGIN(profiler, "fused_down_residual");
-                // Copy buf_h → buf_x[next] (residual base)
-                at::cuda::launch_copy(sp.buf_h.data_ptr<float>(),
-                                       sp.buf_x[next].mutable_data_ptr<float>(), H, s);
-                // buf_x[next] += W_down @ silu_out (accumulate)
-                at::cuda::launch_q4km_persistent_gemv_accumulate(
-                    layer.q_ffn_down.gpu_data,
-                    sp.buf_silu.data_ptr<float>(),
-                    sp.buf_x[next].mutable_data_ptr<float>(),
-                    static_cast<int>(layer.q_ffn_down.cols),
-                    static_cast<int>(layer.q_ffn_down.rows),
-                    layer.q_ffn_down.row_stride_bytes, s);
-                PROF_END(profiler, "fused_down_residual");
-            } else {
-                // Fallback: separate down_proj + post-norm + residual
+            {
+                bool use_q8_down = use_quant_gemv_ && sp.q8_buf &&
+                    layer.q_ffn_down.valid && layer.q_ffn_down.is_q4k() &&
+                    layer.q_ffn_down.gpu_data;
+
                 PROF_BEGIN(profiler, "ffn_down");
-                gemv_scratch(layer.q_ffn_down, layer.ffn_down,
-                            sp.buf_silu.data_ptr<float>(),
-                            sp.buf_down.mutable_data_ptr<float>(), H);
+                if (use_q8_down) {
+                    // Q8 pipeline: quantize silu_out → dp4a GEMV
+                    at::cuda::launch_quantize_q8_1(
+                        sp.buf_silu.data_ptr<float>(), sp.q8_buf,
+                        static_cast<int>(layer.q_ffn_down.cols), s);
+                    at::cuda::launch_q4km_q8_gemv(
+                        layer.q_ffn_down.gpu_data, sp.q8_buf,
+                        sp.buf_down.mutable_data_ptr<float>(),
+                        static_cast<int>(layer.q_ffn_down.cols),
+                        static_cast<int>(layer.q_ffn_down.rows),
+                        layer.q_ffn_down.row_stride_bytes, s);
+                } else {
+                    gemv_scratch(layer.q_ffn_down, layer.ffn_down,
+                                sp.buf_silu.data_ptr<float>(),
+                                sp.buf_down.mutable_data_ptr<float>(), H);
+                }
                 PROF_END(profiler, "ffn_down");
 
                 if (layer.post_ffw_norm.defined()) {
@@ -1548,22 +1558,24 @@ graph_done:
             1, static_cast<int>(H), eps, add_one, nullptr);
         PROF_END(profiler, "final_norm");
 
-        // 4. Output projection: buf_normed → buf_logits (cuBLAS for FP32, quant GEMV for Q4_K)
+        // 4. Output projection: buf_normed → buf_logits (Q8 dp4a for Q4_K, cuBLAS for FP32)
         PROF_BEGIN(profiler, "output_proj");
         if (use_quant_gemv_ && q_output_weight.valid && q_output_weight.gpu_data) {
-            // Quantized output weight — use our persistent GEMV
             int K_out = static_cast<int>(q_output_weight.cols);
             int N_out = static_cast<int>(q_output_weight.rows);
-            if (q_output_weight.is_q4k()) {
-                at::cuda::launch_q4km_persistent_gemv(q_output_weight.gpu_data,
-                    sp.buf_normed.data_ptr<float>(), sp.buf_logits.mutable_data_ptr<float>(),
+            if (q_output_weight.is_q4k() && sp.q8_buf) {
+                // Q8 pipeline: quantize → dp4a GEMV (vocab_size rows = massive parallelism)
+                at::cuda::launch_quantize_q8_1(
+                    sp.buf_normed.data_ptr<float>(), sp.q8_buf, K_out, nullptr);
+                at::cuda::launch_q4km_q8_gemv(q_output_weight.gpu_data, sp.q8_buf,
+                    sp.buf_logits.mutable_data_ptr<float>(),
                     K_out, N_out, q_output_weight.row_stride_bytes, nullptr);
             } else {
                 gemv_scratch(q_output_weight, output_weight, sp.buf_normed.data_ptr<float>(),
                     sp.buf_logits.mutable_data_ptr<float>(), config.vocab_size);
             }
         } else if (output_weight.defined()) {
-            // FP32 output weight — use cuBLAS SGEMV (much faster than our custom kernel)
+            // FP32 output weight — use cuBLAS SGEMV
             at::cuda::launch_gemv(output_weight.data_ptr<float>(),
                 sp.buf_normed.data_ptr<float>(), sp.buf_logits.mutable_data_ptr<float>(),
                 config.vocab_size, static_cast<int>(H), nullptr);
@@ -1574,14 +1586,19 @@ graph_done:
         return sp.buf_logits;
     }
 
-    // GEMV helper for scratch pool: dispatch persistent > quant > float32
-    // Uses persistent kernel for Q4_K to reduce launch overhead (grid-stride over rows).
+    // GEMV helper for scratch pool: Q8 dp4a > persistent > float32
+    // Q8 pipeline: quantize x → dp4a GEMV (1 block/row = 100% occupancy)
+    // Fallback to persistent GEMV for non-Q4_K or when q8_buf unavailable.
     void gemv_scratch(const QuantizedWeight& qw, const Tensor& float_w,
                       const float* x, float* y, int64_t N) {
         if (use_quant_gemv_ && qw.valid) {
             int K = static_cast<int>(qw.cols);
             int Nr = static_cast<int>(qw.rows);
-            if (qw.is_q4k() && qw.gpu_data) {
+            if (qw.is_q4k() && qw.gpu_data && scratch_.q8_buf) {
+                // Q8 dp4a path: quantize + GEMV (best occupancy)
+                at::cuda::launch_quantize_q8_1(x, scratch_.q8_buf, K, nullptr);
+                at::cuda::launch_q4km_q8_gemv(qw.gpu_data, scratch_.q8_buf, y, K, Nr, qw.row_stride_bytes, nullptr);
+            } else if (qw.is_q4k() && qw.gpu_data) {
                 at::cuda::launch_q4km_persistent_gemv(qw.gpu_data, x, y, K, Nr, qw.row_stride_bytes, nullptr);
             } else if (qw.is_q6k() && qw.gpu_data) {
                 at::cuda::launch_q6k_gemv(qw.gpu_data, x, y, K, Nr, qw.row_stride_bytes, nullptr);
@@ -2475,12 +2492,22 @@ graph_done:
 
         // Pre-check: can we use GPU-only greedy path? (no D2H transfer)
         bool gpu_greedy = use_cuda_ && (temperature < 1e-6f) && (repetition_penalty <= 1.0f);
+        // GPU top-k sampling: apply temp + top-k on GPU, copy only K values to host
+        bool gpu_sample = use_cuda_ && (temperature >= 1e-6f) && (repetition_penalty <= 1.0f);
 
-        // Pre-allocate GPU argmax buffer (reused every token, 8 bytes)
+        // Pre-allocate GPU sampling buffers
 #ifdef PT_USE_CUDA
         int64_t* d_argmax_idx = nullptr;
+        float* d_topk_vals = nullptr;
+        int32_t* d_topk_indices = nullptr;
+        float h_topk_vals[64];
+        int32_t h_topk_indices[64];
         if (gpu_greedy) {
             cudaMalloc(&d_argmax_idx, sizeof(int64_t));
+        }
+        if (gpu_sample) {
+            cudaMalloc(&d_topk_vals, 64 * sizeof(float));
+            cudaMalloc(&d_topk_indices, 64 * sizeof(int32_t));
         }
 #endif
 
@@ -2515,6 +2542,40 @@ graph_done:
                 cudaMemcpy(&h_idx, d_argmax_idx, sizeof(int64_t), cudaMemcpyDeviceToHost);
                 next_token = static_cast<int32_t>(h_idx);
                 PROF_END(profiler, "argmax");
+            } else if (gpu_sample && logits.is_cuda()) {
+                // GPU top-k sampling: temp+topk on GPU, only K×8 bytes D2H
+                PROF_BEGIN(profiler, "gpu_sample");
+                int64_t last_pos = logits.size(0) - 1;
+                int64_t V = logits.size(1);
+                const float* logit_row = logits.data_ptr<float>() + last_pos * V;
+                at::cuda::launch_topk_sample(logit_row, d_topk_vals, d_topk_indices,
+                    V, temperature, nullptr);
+                // Copy only top-K values + indices (320 bytes vs 608KB)
+                cudaMemcpy(h_topk_vals, d_topk_vals, 64 * sizeof(float), cudaMemcpyDeviceToHost);
+                cudaMemcpy(h_topk_indices, d_topk_indices, 64 * sizeof(int32_t), cudaMemcpyDeviceToHost);
+                // CPU softmax on tiny array + sample
+                int K_actual = 0;
+                for (int i = 0; i < 64; i++) {
+                    if (h_topk_indices[i] < 0) break;
+                    K_actual++;
+                }
+                if (K_actual == 0) K_actual = 1;  // safety
+                // Softmax on K_actual values (already temperature-scaled)
+                float max_v = h_topk_vals[0];
+                float sum_exp = 0.0f;
+                for (int i = 0; i < K_actual; i++) {
+                    h_topk_vals[i] = std::exp(h_topk_vals[i] - max_v);
+                    sum_exp += h_topk_vals[i];
+                }
+                // Sample from distribution
+                float r = static_cast<float>(::rand()) / RAND_MAX * sum_exp;
+                float cum = 0.0f;
+                next_token = h_topk_indices[0];  // fallback
+                for (int i = 0; i < K_actual; i++) {
+                    cum += h_topk_vals[i];
+                    if (cum >= r) { next_token = h_topk_indices[i]; break; }
+                }
+                PROF_END(profiler, "gpu_sample");
             } else
 #endif
             {
@@ -2629,6 +2690,14 @@ graph_done:
         if (d_argmax_idx) {
             cudaFree(d_argmax_idx);
             d_argmax_idx = nullptr;
+        }
+        if (d_topk_vals) {
+            cudaFree(d_topk_vals);
+            d_topk_vals = nullptr;
+        }
+        if (d_topk_indices) {
+            cudaFree(d_topk_indices);
+            d_topk_indices = nullptr;
         }
 #endif
 
@@ -3687,6 +3756,83 @@ graph_done:
 
         return static_cast<int32_t>(vocab - 1);
     }
+
+    // ========================================================================
+    // GPU-accelerated sampling: top-k on GPU, softmax+sample on CPU
+    // ========================================================================
+    // Copies only 64×8 bytes (512B) instead of vocab×4 bytes (608KB) per token.
+    // For temperature > 0 without repetition penalty.
+#ifdef PT_USE_CUDA
+    struct GPUSamplerState {
+        float* d_topk_vals = nullptr;
+        int32_t* d_topk_indices = nullptr;
+        bool allocated = false;
+
+        void allocate() {
+            if (!allocated) {
+                cudaMalloc(&d_topk_vals, 64 * sizeof(float));
+                cudaMalloc(&d_topk_indices, 64 * sizeof(int32_t));
+                allocated = true;
+            }
+        }
+    };
+
+    GPUSamplerState gpu_sampler_;
+
+    int32_t gpu_sample_token(const float* d_logits, int64_t vocab_size,
+                              float temperature, int top_k, float top_p) {
+        gpu_sampler_.allocate();
+
+        // GPU: apply temperature + find top-k (1 kernel, 512 bytes D2H)
+        at::cuda::launch_topk_sample(d_logits, gpu_sampler_.d_topk_vals,
+            gpu_sampler_.d_topk_indices, vocab_size, temperature, nullptr);
+
+        float h_vals[64];
+        int32_t h_indices[64];
+        cudaMemcpy(h_vals, gpu_sampler_.d_topk_vals, 64 * sizeof(float), cudaMemcpyDeviceToHost);
+        cudaMemcpy(h_indices, gpu_sampler_.d_topk_indices, 64 * sizeof(int32_t), cudaMemcpyDeviceToHost);
+
+        // Count valid entries
+        int K = 0;
+        for (int i = 0; i < 64; i++) {
+            if (h_indices[i] < 0) break;
+            K++;
+        }
+        if (K == 0) return 0;
+
+        // Softmax on K values (already temperature-scaled by GPU kernel)
+        float max_v = h_vals[0];
+        float sum_exp = 0.0f;
+        for (int i = 0; i < K; i++) {
+            h_vals[i] = std::exp(h_vals[i] - max_v);
+            sum_exp += h_vals[i];
+        }
+
+        // Top-p filtering on small array
+        if (top_p < 1.0f && K > 1) {
+            float cum = 0.0f;
+            int cutoff = K;
+            for (int i = 0; i < K; i++) {
+                cum += h_vals[i] / sum_exp;
+                if (cum >= top_p) { cutoff = i + 1; break; }
+            }
+            K = cutoff;
+            sum_exp = 0.0f;
+            for (int i = 0; i < K; i++) sum_exp += h_vals[i];
+        }
+
+        // Sample
+        static std::mt19937 gpu_rng(123);
+        std::uniform_real_distribution<float> dist(0.0f, sum_exp);
+        float r = dist(gpu_rng);
+        float cum = 0.0f;
+        for (int i = 0; i < K; i++) {
+            cum += h_vals[i];
+            if (cum >= r) return h_indices[i];
+        }
+        return h_indices[K - 1];
+    }
+#endif
 };
 
 // ============================================================================

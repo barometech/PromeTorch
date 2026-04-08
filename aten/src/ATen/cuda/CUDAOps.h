@@ -142,6 +142,16 @@ ATEN_CUDA_API void launch_l1_norm(const float* input, float* output, int64_t n, 
 ATEN_CUDA_API void launch_l2_norm(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
 
 ATEN_CUDA_API void launch_argmax(const float* input, int64_t* output, int64_t n, cudaStream_t stream = nullptr);
+
+// GPU top-K sampling: apply temperature + extract top-K values/indices on GPU
+// Copies only K×8 bytes to host instead of vocab×4 bytes (608KB → 320 bytes)
+ATEN_CUDA_API void launch_topk_sample(
+    const float* logits,
+    float* d_topk_vals,        // device buffer [64]
+    int32_t* d_topk_indices,   // device buffer [64]
+    int64_t vocab_size,
+    float temperature,
+    cudaStream_t stream = nullptr);
 ATEN_CUDA_API void launch_argmin(const float* input, int64_t* output, int64_t n, cudaStream_t stream = nullptr);
 
 // ============================================================================

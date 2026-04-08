@@ -3,6 +3,54 @@
 Полная история разработки проекта. Актуальные инструкции — в `CLAUDE.md`.
 Полный аудит инфраструктуры — в `INFRASTRUCTURE_AUDIT.md`.
 
+## 2026-04-09: PROMESERVE 60 → 148 tok/s (2.5x speedup)
+
+### Results
+| Model | Before | After | Speedup |
+|---|---|---|---|
+| qwen3:4b (temp=0.7) | 60 tok/s | **148.6 tok/s** | **2.48x** |
+| qwen3:4b (greedy) | 60 tok/s | **158.8 tok/s** | **2.65x** |
+
+### Root cause: CPU sampling was the bottleneck (NOT GPU kernels)
+- GPU decode: 6.3ms/token (fast)
+- CPU sampling: 9.6ms/token (60% of total time!)
+- CPU path: D2H copy 608KB logits → partial_sort(151936) → softmax(151936) → top-p sort → sample
+- repeat_penalty default was 1.05 → always forced CPU fallback path
+
+### Fix 1: GPU Top-K Sampling Kernel (`CUDAReduce.cu`)
+- New `topk_sample_kernel`: apply temperature + extract top-40 values on GPU
+- D2H transfer: 512 bytes (top-40 vals+indices) instead of 608KB (full vocab)
+- CPU: softmax on 40 values + sample → < 0.01ms instead of ~5ms
+
+### Fix 2: API Handler GPU Sampling Path (`api_handlers.h`)
+- Both generate and chat handlers now use GPU sampling when CUDA + no repetition penalty
+- Greedy: GPU argmax (8 bytes D2H)
+- Temperature: GPU top-k + CPU softmax on 40 values (512 bytes D2H)
+- Default repeat_penalty changed from 1.05 to 1.0 to enable GPU path
+
+### Fix 3: Q8_1 GEMV Pipeline (`gguf_model.h`, `CUDAQuantGemv.cu`)
+- All Q4_K GEMV calls now use quantize-x → dp4a Q8 GEMV (was persistent FP32 smem)
+- Kernel rewritten to llama.cpp-style: 1 warp/row, 8 rows/block, no __syncthreads__
+- `__ldg` for all weight reads (L2 cache hints)
+- `launch_bounds(256, 8)` for optimal register allocation
+- Q8_1 scratch buffer allocated once, reused across all projections
+
+### Profiling insight
+```
+60 tok/s = 16.4ms/token breakdown:
+  GPU forward_decode: 6.3ms (graph replay + output proj)
+  D2H logits copy:    0.02ms (608KB at 25 GB/s)
+  CPU sampling:       9.6ms (partial_sort + softmax + top-p on 151936 elements)
+  Other overhead:     0.5ms
+
+148 tok/s = 6.7ms/token breakdown:
+  GPU forward_decode: 6.3ms (same)
+  GPU top-k sampling: 0.1ms
+  D2H top-k copy:     0.001ms (512 bytes)
+  CPU sample:          0.01ms (softmax on 40 values)
+  Other overhead:      0.3ms
+```
+
 ## 2026-04-08: PROMESERVE 30 to 60 tok/s (PromeGraph)
 
 ### Final Results
