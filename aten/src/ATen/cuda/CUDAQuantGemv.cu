@@ -163,7 +163,8 @@ __global__ void q4km_persistent_gemv_kernel(
     int K, int N,
     int64_t row_stride_bytes)
 {
-    extern __shared__ float x_shared[];
+    // FP16 shared memory: 2x less bandwidth pressure vs FP32
+    extern __shared__ half x_smem_fp16[];
 
     const int tid = threadIdx.x;
     const int block_size = blockDim.x;
@@ -171,9 +172,9 @@ __global__ void q4km_persistent_gemv_kernel(
     const int warp_id = tid / 32;
     const int lane = tid & 31;
 
-    // Load x into shared memory ONCE
+    // Load x into FP16 shared memory ONCE
     for (int k = tid; k < K; k += block_size) {
-        x_shared[k] = x[k];
+        x_smem_fp16[k] = __float2half(x[k]);
     }
     __syncthreads();
 
@@ -194,7 +195,6 @@ __global__ void q4km_persistent_gemv_kernel(
         for (int blk = 0; blk < num_blocks_per_row; ++blk) {
             const uint8_t* bp = row_data + blk * 144;
 
-            // Vectorized d/dmin read via __ldg (1 transaction instead of 2 memcpy)
             uint32_t d_dmin = __ldg(reinterpret_cast<const uint32_t*>(bp));
             const float d = fp16_to_fp32_device(d_dmin & 0xFFFF);
             const float dm = fp16_to_fp32_device(d_dmin >> 16);
@@ -203,24 +203,30 @@ __global__ void q4km_persistent_gemv_kernel(
             get_scale_min_k4_device(group * 2, bp + 4, &sc_lo, &m_lo);
             get_scale_min_k4_device(group * 2 + 1, bp + 4, &sc_hi, &m_hi);
 
-            uint32_t qs4;
-            memcpy(&qs4, bp + 16 + lane * 4, 4);
+            uint32_t qs4 = __ldg(reinterpret_cast<const uint32_t*>(bp + 16 + lane * 4));
 
             float dl = d * sc_lo, ml = dm * m_lo;
             float dh = d * sc_hi, mh = dm * m_hi;
 
+            // Read x from FP16 smem (half bandwidth vs FP32)
             const int k_base = blk * 256 + group * 64 + pos;
-            const float4 x_lo = *reinterpret_cast<const float4*>(&x_shared[k_base]);
-            const float4 x_hi = *reinterpret_cast<const float4*>(&x_shared[k_base + 32]);
+            float x0 = __half2float(x_smem_fp16[k_base]);
+            float x1 = __half2float(x_smem_fp16[k_base+1]);
+            float x2 = __half2float(x_smem_fp16[k_base+2]);
+            float x3 = __half2float(x_smem_fp16[k_base+3]);
+            float x4 = __half2float(x_smem_fp16[k_base+32]);
+            float x5 = __half2float(x_smem_fp16[k_base+33]);
+            float x6 = __half2float(x_smem_fp16[k_base+34]);
+            float x7 = __half2float(x_smem_fp16[k_base+35]);
 
-            sum += (dl * (float)( qs4        & 0xF) - ml) * x_lo.x;
-            sum += (dl * (float)((qs4 >>  8) & 0xF) - ml) * x_lo.y;
-            sum += (dl * (float)((qs4 >> 16) & 0xF) - ml) * x_lo.z;
-            sum += (dl * (float)((qs4 >> 24) & 0xF) - ml) * x_lo.w;
-            sum += (dh * (float)((qs4 >>  4) & 0xF) - mh) * x_hi.x;
-            sum += (dh * (float)((qs4 >> 12) & 0xF) - mh) * x_hi.y;
-            sum += (dh * (float)((qs4 >> 20) & 0xF) - mh) * x_hi.z;
-            sum += (dh * (float)((qs4 >> 28) & 0xF) - mh) * x_hi.w;
+            sum += (dl * (float)( qs4        & 0xF) - ml) * x0;
+            sum += (dl * (float)((qs4 >>  8) & 0xF) - ml) * x1;
+            sum += (dl * (float)((qs4 >> 16) & 0xF) - ml) * x2;
+            sum += (dl * (float)((qs4 >> 24) & 0xF) - ml) * x3;
+            sum += (dh * (float)((qs4 >>  4) & 0xF) - mh) * x4;
+            sum += (dh * (float)((qs4 >> 12) & 0xF) - mh) * x5;
+            sum += (dh * (float)((qs4 >> 20) & 0xF) - mh) * x6;
+            sum += (dh * (float)((qs4 >> 28) & 0xF) - mh) * x7;
         }
 
         // Warp shuffle reduction
@@ -276,8 +282,8 @@ ATEN_CUDA_API void launch_q4km_persistent_gemv(
     const int WARPS = 8;
     const int BLOCK_SIZE = WARPS * 32;  // 256 threads per block
     // Launch 2 blocks per SM for latency hiding
-    int grid = sm_count * 4;  // 4x occupancy for A100 bandwidth saturation
-    int smem_bytes = K * sizeof(float);
+    int grid = sm_count * 4;
+    int smem_bytes = K * sizeof(half);  // FP16 smem = 2x less
 
     if (smem_bytes > 48 * 1024) {
         cudaFuncSetAttribute(q4km_persistent_gemv_kernel,
