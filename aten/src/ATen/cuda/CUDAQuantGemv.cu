@@ -102,8 +102,8 @@ __global__ void q4km_gemv_kernel(
         get_scale_min_k4_device(group * 2, bp + 4, &sc_lo, &m_lo);
         get_scale_min_k4_device(group * 2 + 1, bp + 4, &sc_hi, &m_hi);
 
-        uint32_t qs4;
-        memcpy(&qs4, bp + 16 + lane * 4, 4);
+        // FIX: __ldg forces L2 cache read (was memcpy = scalar loads)
+        uint32_t qs4 = __ldg(reinterpret_cast<const uint32_t*>(bp + 16 + lane * 4));
 
         // Compute scale/min as half2 for hfma2
         half dl_h = __hmul(d_h, __short2half_rn(sc_lo));
@@ -277,7 +277,7 @@ ATEN_CUDA_API void launch_q4km_persistent_gemv(
     const int WARPS = 8;
     const int BLOCK_SIZE = WARPS * 32;  // 256 threads per block
     // Launch 2 blocks per SM for latency hiding
-    int grid = sm_count * 2;
+    int grid = sm_count * 4;  // 4x occupancy for A100 bandwidth saturation
     int smem_bytes = K * sizeof(float);
 
     if (smem_bytes > 48 * 1024) {
@@ -404,7 +404,7 @@ ATEN_CUDA_API void launch_q4km_fused_gate_up_gemv(
 
     const int WARPS = 8;
     const int BLOCK_SIZE = WARPS * 32;
-    int grid = sm_count * 2;
+    int grid = sm_count * 4;  // 4x occupancy for A100 bandwidth saturation
     int smem_bytes = K * sizeof(float);
 
     if (smem_bytes > 48 * 1024) {
@@ -1123,7 +1123,7 @@ ATEN_CUDA_API void launch_q4km_fused_qkv_gemv(
 
     const int WARPS = 8;
     const int BLOCK_SIZE = WARPS * 32;
-    int grid = sm_count * 2;
+    int grid = sm_count * 4;  // 4x occupancy for A100 bandwidth saturation
     int smem_bytes = K * sizeof(float);
 
     if (smem_bytes > 48 * 1024) {
@@ -1267,7 +1267,7 @@ ATEN_CUDA_API void launch_q4km_fused_rmsnorm_gemv(
 
     const int WARPS = 8;
     const int BLOCK_SIZE = WARPS * 32;
-    int grid = sm_count * 2;
+    int grid = sm_count * 4;  // 4x occupancy for A100 bandwidth saturation
     // Shared: K floats for x + BLOCK_SIZE floats for reduction
     int smem_bytes = (K + BLOCK_SIZE) * sizeof(float);
 
@@ -1424,7 +1424,7 @@ ATEN_CUDA_API void launch_q4km_fused_rmsnorm_qkv_gemv(
 
     const int WARPS = 8;
     const int BLOCK_SIZE = WARPS * 32;
-    int grid = sm_count * 2;
+    int grid = sm_count * 4;  // 4x occupancy for A100 bandwidth saturation
     int smem_bytes = (K + BLOCK_SIZE) * sizeof(float);
 
     if (smem_bytes > 48 * 1024) {
@@ -1536,7 +1536,7 @@ ATEN_CUDA_API void launch_q4km_persistent_gemv_accumulate(
 
     const int WARPS = 8;
     const int BLOCK_SIZE = WARPS * 32;
-    int grid = sm_count * 2;
+    int grid = sm_count * 4;  // 4x occupancy for A100 bandwidth saturation
     int smem_bytes = K * sizeof(float);
 
     if (smem_bytes > 48 * 1024) {
@@ -1685,7 +1685,7 @@ ATEN_CUDA_API void launch_q4km_fused_rmsnorm_gate_up_gemv(
 
     const int WARPS = 8;
     const int BLOCK_SIZE = WARPS * 32;
-    int grid = sm_count * 2;
+    int grid = sm_count * 4;  // 4x occupancy for A100 bandwidth saturation
     int smem_bytes = (K + BLOCK_SIZE) * sizeof(float);
 
     if (smem_bytes > 48 * 1024) {
