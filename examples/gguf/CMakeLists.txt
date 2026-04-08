@@ -6,7 +6,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test_gguf_inference.cpp")
         ${PROJECT_SOURCE_DIR}
         ${PROJECT_SOURCE_DIR}/aten/src
     )
-    target_link_libraries(test_gguf_inference PRIVATE c10 aten)
+    target_link_libraries(test_gguf_inference PRIVATE c10 aten torch_autograd)
     if(PT_USE_CUDA)
         target_link_libraries(test_gguf_inference PRIVATE aten_cuda ${CUDA_LIBRARIES})
         target_compile_definitions(test_gguf_inference PRIVATE PT_USE_CUDA)
