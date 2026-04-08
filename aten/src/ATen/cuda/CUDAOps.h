@@ -627,5 +627,12 @@ ATEN_CUDA_API void launch_flash_decode_graph(
     const int64_t* d_past_len, int max_seq, float scale,
     cudaStream_t stream = nullptr);
 
+ATEN_CUDA_API void launch_flash_decode_fp16_graph(
+    const float* Q, const void* K_cache_fp16, const void* V_cache_fp16,
+    float* O, float* partial_O, float* partial_lse, float* partial_max,
+    int n_heads, int n_kv_heads, int head_dim,
+    const int64_t* d_past_len, int max_seq, float scale,
+    cudaStream_t stream = nullptr);
+
 } // namespace cuda
 } // namespace at

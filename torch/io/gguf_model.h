@@ -1341,8 +1341,19 @@ public:
 
             // -- Flash-Decode attention (graph-compatible: reads d_past_len from GPU) --
             PROF_BEGIN(profiler, "flash_decode");
-            if (d_past_len_) {
-                // Graph-compatible: fixed grid, device pointer for total_seq
+            if (d_past_len_ && kv_cache.use_fp16_kv) {
+                // Graph-compatible FP16: 2x less memory bandwidth for attention
+                at::cuda::launch_flash_decode_fp16_graph(
+                    sp.buf_q.data_ptr<float>(),
+                    kv_cache.key_cache_fp16[i],
+                    kv_cache.value_cache_fp16[i],
+                    sp.buf_attn.mutable_data_ptr<float>(),
+                    sp.fd_partial_O, sp.fd_partial_lse, sp.fd_partial_max,
+                    static_cast<int>(n_heads), static_cast<int>(n_kv_heads),
+                    static_cast<int>(head_dim),
+                    d_past_len_, static_cast<int>(kv_cache.max_seq), scale, s);
+            } else if (d_past_len_) {
+                // Graph-compatible FP32 fallback
                 at::cuda::launch_flash_decode_graph(
                     sp.buf_q.data_ptr<float>(),
                     kv_cache.key_cache[i].data_ptr<float>(),
