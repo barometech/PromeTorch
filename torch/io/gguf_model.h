@@ -1216,7 +1216,7 @@ public:
             // FAST PATH: replay graph (eliminates ~2.5ms kernel launch overhead)
             cudaMemcpyAsync(d_past_len_, &past_len, sizeof(int64_t), cudaMemcpyHostToDevice, nullptr);
             cudaGraphLaunch(decode_graph_exec_, 0);
-            cudaStreamSynchronize(0);
+            // NO sync here — final_norm + output_proj will execute on same stream after graph
             cur = config.num_layers % 2 == 0 ? 0 : 1;
             goto graph_done;
         }
@@ -1548,11 +1548,26 @@ graph_done:
             1, static_cast<int>(H), eps, add_one, nullptr);
         PROF_END(profiler, "final_norm");
 
-        // 4. Output projection: buf_normed → buf_logits
+        // 4. Output projection: buf_normed → buf_logits (cuBLAS for FP32, quant GEMV for Q4_K)
         PROF_BEGIN(profiler, "output_proj");
-        gemv_scratch(q_output_weight, output_weight,
-                    sp.buf_normed.data_ptr<float>(),
+        if (use_quant_gemv_ && q_output_weight.valid && q_output_weight.gpu_data) {
+            // Quantized output weight — use our persistent GEMV
+            int K_out = static_cast<int>(q_output_weight.cols);
+            int N_out = static_cast<int>(q_output_weight.rows);
+            if (q_output_weight.is_q4k()) {
+                at::cuda::launch_q4km_persistent_gemv(q_output_weight.gpu_data,
+                    sp.buf_normed.data_ptr<float>(), sp.buf_logits.mutable_data_ptr<float>(),
+                    K_out, N_out, q_output_weight.row_stride_bytes, nullptr);
+            } else {
+                gemv_scratch(q_output_weight, output_weight, sp.buf_normed.data_ptr<float>(),
                     sp.buf_logits.mutable_data_ptr<float>(), config.vocab_size);
+            }
+        } else if (output_weight.defined()) {
+            // FP32 output weight — use cuBLAS SGEMV (much faster than our custom kernel)
+            at::cuda::launch_gemv(output_weight.data_ptr<float>(),
+                sp.buf_normed.data_ptr<float>(), sp.buf_logits.mutable_data_ptr<float>(),
+                config.vocab_size, static_cast<int>(H), nullptr);
+        }
         PROF_END(profiler, "output_proj");
 
         kv_cache.seq_len += 1;
