@@ -539,29 +539,32 @@ ATEN_CUDA_API void launch_quantize_q8_1(
 }
 
 // ============================================================================
-// Q4_K × Q8_1 GEMV — dp4a integer dot product, 4 warps per output row
+// Q4_K × Q8_1 GEMV — llama.cpp-style: 1 warp per row, maximum bandwidth
 // ============================================================================
-// Key innovation from llama.cpp:
-// - x is pre-quantized to Q8_1 (int8), enabling __dp4a (4 multiply-adds/cycle)
-// - No shared memory needed (Q8_1 data is tiny, cached in L2)
-// - 4 warps cooperate on K-dimension reduction for each output row
-// - More thread blocks → better SM utilization and memory-level parallelism
+// Design (matches llama.cpp mul_mat_vec_q for maximum HBM utilization):
+// - 1 warp per output row (NO inter-warp reduction, NO __syncthreads__)
+// - blockDim = {32, ROWS_PER_BLOCK} → multiple independent rows per block
+// - Each warp processes ALL K blocks sequentially → sequential HBM reads
+// - NO shared memory → maximum occupancy (up to 8 blocks/SM = 64 warps)
+// - x_q8 stays in L2 cache (4KB for K=3584)
+// - 64 independent row streams per SM → saturates HBM bandwidth
 
-__global__ void q4km_q8_gemv_kernel(
+static constexpr int Q8_ROWS_PER_BLOCK = 8;
+
+__global__ void __launch_bounds__(Q8_ROWS_PER_BLOCK * 32, 8)
+q4km_q8_gemv_kernel(
     const uint8_t* __restrict__ weights,
     const block_q8_1* __restrict__ x_q8,
     float* __restrict__ y,
     int K, int N,
     int64_t row_stride_bytes)
 {
-    const int n = blockIdx.x;
-    if (n >= N) return;
+    const int row = blockIdx.x * Q8_ROWS_PER_BLOCK + threadIdx.y;
+    if (row >= N) return;
 
-    const int tid = threadIdx.x;  // 0..127
-    const int warp_id = tid / 32;
-    const int lane = tid & 31;
+    const int lane = threadIdx.x;  // 0..31
 
-    const uint8_t* row_data = weights + (int64_t)n * row_stride_bytes;
+    const uint8_t* row_data = weights + (int64_t)row * row_stride_bytes;
     const int num_blocks = K / 256;
 
     const int group = lane / 8;        // 0-3
@@ -569,28 +572,20 @@ __global__ void q4km_q8_gemv_kernel(
 
     float sum = 0.0f;
 
-    // 4 warps stride across Q4_K blocks, unrolled ×2 for better latency hiding
-    // Each iteration: process blk and blk+4 simultaneously (8 blocks/iter total)
-    for (int blk = warp_id; blk < num_blocks; blk += 8) {
-        // ---- Block A (blk) ----
+    // 1 warp processes ALL Q4_K blocks sequentially (better HBM prefetch)
+    for (int blk = 0; blk < num_blocks; blk += 2) {
         const uint8_t* bpA = row_data + blk * 144;
-        uint32_t qs4A;
-        memcpy(&qs4A, bpA + 16 + lane * 4, 4);  // issue load early
+        uint32_t qs4A = __ldg(reinterpret_cast<const uint32_t*>(bpA + 16 + lane * 4));
 
-        // ---- Block B (blk+4) — pre-load while A is in flight ----
-        const int blkB = blk + 4;
-        const bool validB = (blkB < num_blocks);
-        const uint8_t* bpB = validB ? row_data + blkB * 144 : bpA;
-        uint32_t qs4B;
-        memcpy(&qs4B, bpB + 16 + lane * 4, 4);  // second load overlaps first
+        const bool hasB = (blk + 1 < num_blocks);
+        const uint8_t* bpB = hasB ? row_data + (blk + 1) * 144 : bpA;
+        uint32_t qs4B = __ldg(reinterpret_cast<const uint32_t*>(bpB + 16 + lane * 4));
 
-        // ---- Process block A ----
+        // Block A
         {
-            uint16_t d_bits, dmin_bits;
-            memcpy(&d_bits, bpA, 2);
-            memcpy(&dmin_bits, bpA + 2, 2);
-            float d_q4 = fp16_to_fp32_device(d_bits);
-            float dm_q4 = fp16_to_fp32_device(dmin_bits);
+            uint32_t d_dmin = __ldg(reinterpret_cast<const uint32_t*>(bpA));
+            float d_q4 = fp16_to_fp32_device(d_dmin & 0xFFFF);
+            float dm_q4 = fp16_to_fp32_device(d_dmin >> 16);
 
             uint8_t sc_lo, m_lo, sc_hi, m_hi;
             get_scale_min_k4_device(group * 2, bpA + 4, &sc_lo, &m_lo);
@@ -599,32 +594,24 @@ __global__ void q4km_q8_gemv_kernel(
             int v_lo = (int)(qs4A & 0x0F0F0F0F);
             int v_hi = (int)((qs4A >> 4) & 0x0F0F0F0F);
 
-            const int q8A_lo = blk * 8 + group * 2;
-            const int q8A_hi = q8A_lo + 1;
-            float d8_lo = __half2float(*reinterpret_cast<const __half*>(&x_q8[q8A_lo].ds));
-            float d8_hi = __half2float(*reinterpret_cast<const __half*>(&x_q8[q8A_hi].ds));
-            int u_lo, u_hi;
-            memcpy(&u_lo, &x_q8[q8A_lo].qs[pos], 4);
-            memcpy(&u_hi, &x_q8[q8A_hi].qs[pos], 4);
+            const int q8_lo = blk * 8 + group * 2;
+            const int q8_hi = q8_lo + 1;
+            float d8_lo = __half2float(*reinterpret_cast<const __half*>(&x_q8[q8_lo].ds));
+            float d8_hi = __half2float(*reinterpret_cast<const __half*>(&x_q8[q8_hi].ds));
+            int u_lo = __ldg(reinterpret_cast<const int*>(&x_q8[q8_lo].qs[pos]));
+            int u_hi = __ldg(reinterpret_cast<const int*>(&x_q8[q8_hi].qs[pos]));
 
-            int dot_lo = __dp4a(v_lo, u_lo, 0);
-            int dot_hi = __dp4a(v_hi, u_hi, 0);
-            int sum_lo = __dp4a(0x01010101, u_lo, 0);
-            int sum_hi = __dp4a(0x01010101, u_hi, 0);
-
-            sum += d_q4 * (float)sc_lo * d8_lo * (float)dot_lo
-                 - dm_q4 * (float)m_lo * d8_lo * (float)sum_lo;
-            sum += d_q4 * (float)sc_hi * d8_hi * (float)dot_hi
-                 - dm_q4 * (float)m_hi * d8_hi * (float)sum_hi;
+            sum += d_q4 * (float)sc_lo * d8_lo * (float)__dp4a(v_lo, u_lo, 0)
+                 - dm_q4 * (float)m_lo * d8_lo * (float)__dp4a(0x01010101, u_lo, 0);
+            sum += d_q4 * (float)sc_hi * d8_hi * (float)__dp4a(v_hi, u_hi, 0)
+                 - dm_q4 * (float)m_hi * d8_hi * (float)__dp4a(0x01010101, u_hi, 0);
         }
 
-        // ---- Process block B (if valid) ----
-        if (validB) {
-            uint16_t d_bits, dmin_bits;
-            memcpy(&d_bits, bpB, 2);
-            memcpy(&dmin_bits, bpB + 2, 2);
-            float d_q4 = fp16_to_fp32_device(d_bits);
-            float dm_q4 = fp16_to_fp32_device(dmin_bits);
+        // Block B
+        if (hasB) {
+            uint32_t d_dmin = __ldg(reinterpret_cast<const uint32_t*>(bpB));
+            float d_q4 = fp16_to_fp32_device(d_dmin & 0xFFFF);
+            float dm_q4 = fp16_to_fp32_device(d_dmin >> 16);
 
             uint8_t sc_lo, m_lo, sc_hi, m_hi;
             get_scale_min_k4_device(group * 2, bpB + 4, &sc_lo, &m_lo);
@@ -633,39 +620,26 @@ __global__ void q4km_q8_gemv_kernel(
             int v_lo = (int)(qs4B & 0x0F0F0F0F);
             int v_hi = (int)((qs4B >> 4) & 0x0F0F0F0F);
 
-            const int q8B_lo = blkB * 8 + group * 2;
-            const int q8B_hi = q8B_lo + 1;
-            float d8_lo = __half2float(*reinterpret_cast<const __half*>(&x_q8[q8B_lo].ds));
-            float d8_hi = __half2float(*reinterpret_cast<const __half*>(&x_q8[q8B_hi].ds));
-            int u_lo, u_hi;
-            memcpy(&u_lo, &x_q8[q8B_lo].qs[pos], 4);
-            memcpy(&u_hi, &x_q8[q8B_hi].qs[pos], 4);
+            const int q8_lo = (blk + 1) * 8 + group * 2;
+            const int q8_hi = q8_lo + 1;
+            float d8_lo = __half2float(*reinterpret_cast<const __half*>(&x_q8[q8_lo].ds));
+            float d8_hi = __half2float(*reinterpret_cast<const __half*>(&x_q8[q8_hi].ds));
+            int u_lo = __ldg(reinterpret_cast<const int*>(&x_q8[q8_lo].qs[pos]));
+            int u_hi = __ldg(reinterpret_cast<const int*>(&x_q8[q8_hi].qs[pos]));
 
-            int dot_lo = __dp4a(v_lo, u_lo, 0);
-            int dot_hi = __dp4a(v_hi, u_hi, 0);
-            int sum_lo = __dp4a(0x01010101, u_lo, 0);
-            int sum_hi = __dp4a(0x01010101, u_hi, 0);
-
-            sum += d_q4 * (float)sc_lo * d8_lo * (float)dot_lo
-                 - dm_q4 * (float)m_lo * d8_lo * (float)sum_lo;
-            sum += d_q4 * (float)sc_hi * d8_hi * (float)dot_hi
-                 - dm_q4 * (float)m_hi * d8_hi * (float)sum_hi;
+            sum += d_q4 * (float)sc_lo * d8_lo * (float)__dp4a(v_lo, u_lo, 0)
+                 - dm_q4 * (float)m_lo * d8_lo * (float)__dp4a(0x01010101, u_lo, 0);
+            sum += d_q4 * (float)sc_hi * d8_hi * (float)__dp4a(v_hi, u_hi, 0)
+                 - dm_q4 * (float)m_hi * d8_hi * (float)__dp4a(0x01010101, u_hi, 0);
         }
     }
 
-    // Intra-warp reduction
+    // Intra-warp reduction only (no inter-warp sync needed!)
     #pragma unroll
     for (int offset = 16; offset > 0; offset >>= 1)
         sum += __shfl_down_sync(WARP_MASK, sum, offset);
 
-    // Inter-warp reduction via shared memory
-    __shared__ float warp_sums[4];
-    if (lane == 0) warp_sums[warp_id] = sum;
-    __syncthreads();
-
-    if (tid == 0) {
-        y[n] = warp_sums[0] + warp_sums[1] + warp_sums[2] + warp_sums[3];
-    }
+    if (lane == 0) y[row] = sum;
 }
 
 ATEN_CUDA_API void launch_q4km_q8_gemv(
@@ -673,8 +647,9 @@ ATEN_CUDA_API void launch_q4km_q8_gemv(
     int K, int N, int64_t row_stride_bytes,
     cudaStream_t stream)
 {
-    const int BLOCK_SIZE = 128;  // 4 warps × 32 threads
-    q4km_q8_gemv_kernel<<<N, BLOCK_SIZE, 0, stream>>>(
+    const int grid = (N + Q8_ROWS_PER_BLOCK - 1) / Q8_ROWS_PER_BLOCK;
+    const dim3 block(32, Q8_ROWS_PER_BLOCK);  // 32 lanes × 8 rows = 256 threads
+    q4km_q8_gemv_kernel<<<grid, block, 0, stream>>>(
         static_cast<const uint8_t*>(weights),
         static_cast<const block_q8_1*>(x_q8),
         y, K, N, row_stride_bytes);
