@@ -1771,5 +1771,35 @@ ATEN_CUDA_API void launch_q4km_fused_rmsnorm_gate_up_gemv(
         eps, add_one);
 }
 
+// ============================================================================
+// Pre-initialize shared memory attributes for CUDA Graph compatibility
+// ============================================================================
+// cudaFuncSetAttribute is a CUDA runtime API call that cannot be captured
+// inside a CUDA Graph. This function sets max shared memory for ALL kernels
+// that might need >48KB, based on the model dimensions. Must be called ONCE
+// before any CUDA Graph capture begins.
+
+ATEN_CUDA_API void init_cuda_kernel_smem_attributes(int max_hidden, int max_inter) {
+    int smem_h_fp32 = (max_hidden + 256) * (int)sizeof(float);  // norm + reduction
+    int smem_h_fp16 = max_hidden * (int)sizeof(uint16_t);
+    int smem_h_q8 = max_hidden + (max_hidden / 32) * 8;
+    int smem_i_fp32 = max_inter * (int)sizeof(float);
+
+    auto set_max = [](const void* func, int bytes) {
+        if (bytes > 48 * 1024) {
+            cudaFuncSetAttribute(func, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes);
+        }
+    };
+
+    set_max((const void*)q4km_gemv_kernel, smem_h_fp16);
+    set_max((const void*)q4km_persistent_gemv_kernel, smem_h_q8);
+    set_max((const void*)q4km_fused_gate_up_kernel, std::max(smem_h_fp32, smem_i_fp32));
+    set_max((const void*)q6k_gemv_kernel, smem_h_fp32);
+    set_max((const void*)q5k_gemv_kernel, smem_h_fp32);
+    set_max((const void*)q4km_persistent_gemv_accumulate_kernel, smem_h_fp32);
+    set_max((const void*)q4km_fused_rmsnorm_qkv_gemv_kernel, smem_h_fp32);
+    set_max((const void*)q4km_fused_rmsnorm_gate_up_kernel, smem_h_fp32);
+}
+
 } // namespace cuda
 } // namespace at

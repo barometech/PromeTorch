@@ -1228,19 +1228,27 @@ public:
 
         // 2. Transformer layers with CUDA Graph (PromeGraph)
         if (graph_captured_ && decode_graph_exec_) {
-            // FAST PATH: replay graph (eliminates ~2.5ms kernel launch overhead)
+            // Update d_past_len on default stream, then sync to decode_stream
             cudaMemcpyAsync(d_past_len_, &past_len, sizeof(int64_t), cudaMemcpyHostToDevice, nullptr);
-            cudaGraphLaunch(decode_graph_exec_, 0);
-            // NO sync here — final_norm + output_proj will execute on same stream after graph
+            // Sync: default stream (embedding + d_past_len) → decode_stream
+            cudaEvent_t sync_ev;
+            cudaEventCreate(&sync_ev);
+            cudaEventRecord(sync_ev, nullptr);
+            cudaStreamWaitEvent(decode_stream_, sync_ev, 0);
+            // Launch graph on SAME stream it was captured on
+            cudaGraphLaunch(decode_graph_exec_, decode_stream_);
+            // Sync back: decode_stream → default stream (for final_norm + output_proj)
+            cudaEventRecord(sync_ev, decode_stream_);
+            cudaStreamWaitEvent(nullptr, sync_ev, 0);
+            cudaEventDestroy(sync_ev);
             cur = config.num_layers % 2 == 0 ? 0 : 1;
             goto graph_done;
         }
 
-        // CUDA Graph DISABLED: graph replay produces wrong output.
-        // Root cause: something in transformer layer kernels has mutable state
-        // beyond d_past_len_ that gets baked during capture. Needs investigation.
-        // Without graph: 30-50 tok/s (correct output)
-        // With graph: 150 tok/s (garbage output)
+        // CUDA Graph disabled: graph replay corrupts attention output.
+        // Investigated: stream sync, smem pre-init, KV pointer invalidation — none fix it.
+        // The graph bakes some internal state that prevents correct execution on replay.
+        // Without graph: correct output at 30-50 tok/s. With graph: 150 tok/s but garbage.
         capturing = false;
 
         for (int64_t i = 0; i < config.num_layers; ++i) {
