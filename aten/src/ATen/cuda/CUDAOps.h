@@ -144,6 +144,12 @@ ATEN_CUDA_API void launch_l2_norm(const float* input, float* output, int64_t n, 
 ATEN_CUDA_API void launch_argmax(const float* input, int64_t* output, int64_t n, cudaStream_t stream = nullptr);
 ATEN_CUDA_API void launch_argmin(const float* input, int64_t* output, int64_t n, cudaStream_t stream = nullptr);
 
+// Embedding lookup from GPU table using device token_id pointer (CUDA Graph compatible)
+ATEN_CUDA_API void launch_embedding_lookup(
+    const float* emb_table, float* output,
+    const int* d_token_id, int hidden_size,
+    cudaStream_t stream = nullptr);
+
 // ============================================================================
 // Linear Algebra / BLAS Operations
 // ============================================================================

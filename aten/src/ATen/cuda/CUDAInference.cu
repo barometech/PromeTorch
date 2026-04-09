@@ -468,5 +468,34 @@ ATEN_CUDA_API void launch_inference_gemv(
     inference_gemv_kernel<<<grid_size, block_size, shared_mem, stream>>>(x, W, y, K, N);
 }
 
+// ============================================================================
+// Embedding Lookup Kernel (CUDA Graph compatible)
+// ============================================================================
+// Reads token_id from device memory, copies one row from embedding table.
+// This replaces cudaMemcpyAsync with a kernel that can be captured in a graph.
+
+__global__ void embedding_lookup_kernel(
+    const float* __restrict__ emb_table,  // [vocab_size, hidden_size]
+    float* __restrict__ output,           // [hidden_size]
+    const int* __restrict__ d_token_id,   // device pointer to token ID
+    int hidden_size)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= hidden_size) return;
+    int token_id = *d_token_id;
+    output[tid] = emb_table[token_id * hidden_size + tid];
+}
+
+ATEN_CUDA_API void launch_embedding_lookup(
+    const float* emb_table, float* output,
+    const int* d_token_id, int hidden_size,
+    cudaStream_t stream)
+{
+    int block = 256;
+    int grid = (hidden_size + block - 1) / block;
+    embedding_lookup_kernel<<<grid, block, 0, stream>>>(
+        emb_table, output, d_token_id, hidden_size);
+}
+
 } // namespace cuda
 } // namespace at
