@@ -142,16 +142,6 @@ ATEN_CUDA_API void launch_l1_norm(const float* input, float* output, int64_t n, 
 ATEN_CUDA_API void launch_l2_norm(const float* input, float* output, int64_t n, cudaStream_t stream = nullptr);
 
 ATEN_CUDA_API void launch_argmax(const float* input, int64_t* output, int64_t n, cudaStream_t stream = nullptr);
-
-// GPU top-K sampling: apply temperature + extract top-K values/indices on GPU
-// Copies only K×8 bytes to host instead of vocab×4 bytes (608KB → 320 bytes)
-ATEN_CUDA_API void launch_topk_sample(
-    const float* logits,
-    float* d_topk_vals,        // device buffer [64]
-    int32_t* d_topk_indices,   // device buffer [64]
-    int64_t vocab_size,
-    float temperature,
-    cudaStream_t stream = nullptr);
 ATEN_CUDA_API void launch_argmin(const float* input, int64_t* output, int64_t n, cudaStream_t stream = nullptr);
 
 // ============================================================================
@@ -607,12 +597,6 @@ ATEN_CUDA_API void launch_q4km_fused_rmsnorm_gate_up_gemv(
 ATEN_CUDA_API void launch_fp16_kv_cache_write(
     const float* src, void* dst_cache_fp16,
     int64_t num_new_rows, int64_t cols, int64_t offset_row,
-    cudaStream_t stream = nullptr);
-
-// Graph-compatible: reads past_len from device pointer (not baked into graph)
-ATEN_CUDA_API void launch_fp16_kv_cache_write_graph(
-    const float* src_cache_base, void* dst_cache_fp16,
-    int64_t cols, const int64_t* d_past_len,
     cudaStream_t stream = nullptr);
 
 // Flash-decode with FP16 KV cache — halves memory bandwidth for attention
