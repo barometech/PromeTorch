@@ -1224,13 +1224,20 @@ public:
             cudaMemcpyAsync(d_past_len_, &past_len, sizeof(int64_t), cudaMemcpyHostToDevice, decode_stream_);
             cudaMemcpyAsync(d_token_id_, &token_id_int, sizeof(int), cudaMemcpyHostToDevice, decode_stream_);
             cudaGraphLaunch(decode_graph_exec_, decode_stream_);
-            cudaStreamSynchronize(decode_stream_);
+            // CRITICAL: sync decode_stream → default stream
+            // Non-blocking stream does NOT auto-sync with default!
+            // final_norm + output_proj on default stream need graph's buf_x[cur]
+            cudaEvent_t graph_done_ev;
+            cudaEventCreate(&graph_done_ev);
+            cudaEventRecord(graph_done_ev, decode_stream_);
+            cudaStreamWaitEvent(nullptr, graph_done_ev, 0);
+            cudaEventDestroy(graph_done_ev);
             cur = config.num_layers % 2 == 0 ? 0 : 1;
             goto graph_done;
         }
 
         // CUDA Graph: capture on second decode token (first warms up all statics)
-        capturing = false; // graph capture works but replay output corrupted
+        capturing = false; // TODO: graph replay output still wrong despite event sync
         ++graph_token_id_;
 
         if (capturing) {
@@ -1584,10 +1591,13 @@ public:
                 graph_captured_ = true;
                 std::cout << "[PromeGraph] Captured " << config.num_layers << " layers decode graph!" << std::endl;
                 // RE-EXECUTE: capture didn't execute kernels, so KV cache is empty.
-                // Launch graph once to fill KV cache for this token.
-                // d_past_len_ and d_token_id_ already correct (set before capture)
                 cudaGraphLaunch(decode_graph_exec_, decode_stream_);
-                cudaStreamSynchronize(decode_stream_);
+                // Sync decode → default for final_norm + output_proj
+                cudaEvent_t re_ev;
+                cudaEventCreate(&re_ev);
+                cudaEventRecord(re_ev, decode_stream_);
+                cudaStreamWaitEvent(nullptr, re_ev, 0);
+                cudaEventDestroy(re_ev);
             } else {
                 std::cerr << "[PromeGraph] Capture failed: " << cudaGetErrorString(err) << std::endl;
                 decode_graph_ = nullptr;
