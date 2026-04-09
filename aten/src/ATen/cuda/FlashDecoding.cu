@@ -488,6 +488,31 @@ ATEN_CUDA_API void launch_fp16_kv_cache_write(
         num_new_rows, cols, offset_row);
 }
 
+// Graph-compatible: reads past_len from device pointer, copies from FP32 cache to FP16 cache
+__global__ void fp16_kv_cache_write_graph_kernel(
+    const float* __restrict__ src_cache,   // [max_seq, cols] FP32 KV cache (base)
+    __half* __restrict__ dst_cache,        // [max_seq, cols] FP16 KV cache
+    int64_t cols,
+    const int64_t* __restrict__ d_past_len)  // device pointer to current position
+{
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= cols) return;
+    int64_t pos = *d_past_len;
+    dst_cache[pos * cols + idx] = __float2half(src_cache[pos * cols + idx]);
+}
+
+ATEN_CUDA_API void launch_fp16_kv_cache_write_graph(
+    const float* src_cache_base, void* dst_cache_fp16,
+    int64_t cols, const int64_t* d_past_len,
+    cudaStream_t stream)
+{
+    int block = 256;
+    int grid = (int)((cols + block - 1) / block);
+    fp16_kv_cache_write_graph_kernel<<<grid, block, 0, stream>>>(
+        src_cache_base, static_cast<__half*>(dst_cache_fp16),
+        cols, d_past_len);
+}
+
 // ============================================================================
 // Flash-Decode with FP16 KV Cache
 // ============================================================================

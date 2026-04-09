@@ -609,6 +609,12 @@ ATEN_CUDA_API void launch_fp16_kv_cache_write(
     int64_t num_new_rows, int64_t cols, int64_t offset_row,
     cudaStream_t stream = nullptr);
 
+// Graph-compatible: reads past_len from device pointer (not baked into graph)
+ATEN_CUDA_API void launch_fp16_kv_cache_write_graph(
+    const float* src_cache_base, void* dst_cache_fp16,
+    int64_t cols, const int64_t* d_past_len,
+    cudaStream_t stream = nullptr);
+
 // Flash-decode with FP16 KV cache — halves memory bandwidth for attention
 ATEN_CUDA_API void launch_flash_decode_fp16(
     const float* Q, const void* K_cache_fp16, const void* V_cache_fp16,
