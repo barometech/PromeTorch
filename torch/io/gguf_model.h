@@ -1221,10 +1221,10 @@ public:
             goto graph_done;
         }
 
-        // CUDA Graph disabled: launch functions contain cudaGetDevice/cudaDeviceGetAttribute
-        // which are runtime API calls incompatible with stream capture.
-        // Need to pre-compute sm_count and cache it, removing all runtime API from launch functions.
-        capturing = false;
+        // CUDA Graph disabled — cudaStreamBeginCapture returns "invalid argument"
+        // on this CUDA version/driver. All known blockers fixed but capture still fails.
+        static bool graph_disabled_ = true;  // TODO: investigate CUDA version requirement
+        capturing = false && !graph_disabled_ && (d_past_len_ && !graph_captured_);
         if (capturing) {
             static bool smem_inited = false;
             if (!smem_inited) {
@@ -1232,28 +1232,12 @@ public:
                 at::cuda::init_cuda_kernel_smem_attributes(max_K, static_cast<int>(inter));
                 smem_inited = true;
             }
-            // Use a REGULAR stream (not non-blocking) — synchronizes with default stream
             if (!decode_stream_) cudaStreamCreate(&decode_stream_);
-            cudaStreamBeginCapture(decode_stream_, cudaStreamCaptureModeGlobal);
-            s = decode_stream_;
-        }
-        if (capturing) {
-            static bool smem_inited = false;
-            if (!smem_inited) {
-                int max_K = static_cast<int>(std::max({H, q_dim, kv_dim, inter}));
-                at::cuda::init_cuda_kernel_smem_attributes(max_K, static_cast<int>(inter));
-                smem_inited = true;
-            }
-            if (!decode_stream_) cudaStreamCreateWithFlags(&decode_stream_, cudaStreamNonBlocking);
-            // Update device pointers on default stream, sync to decode_stream via event
+            // Update device pointers BEFORE capture (on default stream)
             cudaMemcpyAsync(d_past_len_, &past_len, sizeof(int64_t), cudaMemcpyHostToDevice, nullptr);
             cudaMemcpyAsync(d_token_id_, &token_id_int, sizeof(int), cudaMemcpyHostToDevice, nullptr);
-            cudaEvent_t cap_ev;
-            cudaEventCreate(&cap_ev);
-            cudaEventRecord(cap_ev, nullptr);  // record after memcpy on default stream
-            cudaStreamWaitEvent(decode_stream_, cap_ev, 0);  // decode_stream waits
-            cudaEventDestroy(cap_ev);
-            cudaStreamBeginCapture(decode_stream_, cudaStreamCaptureModeRelaxed);
+            cudaStreamSynchronize(nullptr);  // ensure memcpy complete before capture
+            cudaStreamBeginCapture(decode_stream_, cudaStreamCaptureModeThreadLocal);
             s = decode_stream_;
         } else {
             // Non-graph path: update device pointers normally
