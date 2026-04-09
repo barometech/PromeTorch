@@ -337,10 +337,8 @@ ATEN_CUDA_API void launch_q4km_persistent_gemv(
     cudaStream_t stream)
 {
     // Query SM count for optimal grid size
-    int device = 0;
-    cudaGetDevice(&device);
-    int sm_count = 0;
-    cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, device);
+    static int sm_count = 0;
+    if (!sm_count) { int dev=0; cudaGetDevice(&dev); cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, dev); }
 
     const int WARPS = 8;
     const int BLOCK_SIZE = WARPS * 32;  // 256 threads per block
@@ -460,10 +458,8 @@ ATEN_CUDA_API void launch_q4km_fused_gate_up_gemv(
     int64_t row_stride_bytes,
     cudaStream_t stream)
 {
-    int device = 0;
-    cudaGetDevice(&device);
-    int sm_count = 0;
-    cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, device);
+    static int sm_count = 0;
+    if (!sm_count) { int dev=0; cudaGetDevice(&dev); cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, dev); }
 
     const int WARPS = 8;
     const int BLOCK_SIZE = WARPS * 32;
@@ -1163,10 +1159,8 @@ ATEN_CUDA_API void launch_q4km_fused_qkv_gemv(
     int64_t row_stride_bytes,
     cudaStream_t stream)
 {
-    int device = 0;
-    cudaGetDevice(&device);
-    int sm_count = 0;
-    cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, device);
+    static int sm_count = 0;
+    if (!sm_count) { int dev=0; cudaGetDevice(&dev); cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, dev); }
 
     const int WARPS = 8;
     const int BLOCK_SIZE = WARPS * 32;
@@ -1301,10 +1295,8 @@ ATEN_CUDA_API void launch_q4km_fused_rmsnorm_gemv(
     float eps, bool add_one,
     cudaStream_t stream)
 {
-    int device = 0;
-    cudaGetDevice(&device);
-    int sm_count = 0;
-    cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, device);
+    static int sm_count = 0;
+    if (!sm_count) { int dev=0; cudaGetDevice(&dev); cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, dev); }
 
     const int WARPS = 8;
     const int BLOCK_SIZE = WARPS * 32;
@@ -1452,10 +1444,8 @@ ATEN_CUDA_API void launch_q4km_fused_rmsnorm_qkv_gemv(
     float eps, bool add_one,
     cudaStream_t stream)
 {
-    int device = 0;
-    cudaGetDevice(&device);
-    int sm_count = 0;
-    cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, device);
+    static int sm_count = 0;
+    if (!sm_count) { int dev=0; cudaGetDevice(&dev); cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, dev); }
 
     const int WARPS = 8;
     const int BLOCK_SIZE = WARPS * 32;
@@ -1558,10 +1548,8 @@ ATEN_CUDA_API void launch_q4km_persistent_gemv_accumulate(
     int K, int N, int64_t row_stride_bytes,
     cudaStream_t stream)
 {
-    int device = 0;
-    cudaGetDevice(&device);
-    int sm_count = 0;
-    cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, device);
+    static int sm_count = 0;
+    if (!sm_count) { int dev=0; cudaGetDevice(&dev); cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, dev); }
 
     const int WARPS = 8;
     const int BLOCK_SIZE = WARPS * 32;
@@ -1701,10 +1689,8 @@ ATEN_CUDA_API void launch_q4km_fused_rmsnorm_gate_up_gemv(
     float eps, bool add_one,
     cudaStream_t stream)
 {
-    int device = 0;
-    cudaGetDevice(&device);
-    int sm_count = 0;
-    cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, device);
+    static int sm_count = 0;
+    if (!sm_count) { int dev=0; cudaGetDevice(&dev); cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, dev); }
 
     const int WARPS = 8;
     const int BLOCK_SIZE = WARPS * 32;
