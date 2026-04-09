@@ -171,14 +171,16 @@ __global__ void flash_decode_reduce_kernel(
         }
         global_max = gm;
 
-        // Step 2: Compute rescaled sums
+        // Step 2: Compute per-split correction factors and denominator
+        // correction[s] = exp(max[s] - global_max)  (for numerator)
+        // denominator = sum(correction[s] * partial_lse[s])
         float ts = 0.0f;
         for (int s = 0; s < num_splits; s++) {
             float m = partial_max[s * n_heads + head_idx];
             float sum_s = partial_lse[s * n_heads + head_idx];
-            float rescaled = sum_s * expf(m - gm);
-            smem[s] = rescaled;
-            ts += rescaled;
+            float correction = expf(m - gm);
+            smem[s] = correction;     // JUST exp correction (NOT * sum_s)
+            ts += correction * sum_s;  // denominator includes sum_s
         }
         total_sum = ts;
     }
@@ -186,12 +188,12 @@ __global__ void flash_decode_reduce_kernel(
 
     float inv_total = 1.0f / (total_sum + 1e-10f);
 
-    // Step 3: Weighted sum of partial outputs
+    // Step 3: Weighted sum of partial outputs (correction only, not * lse)
     for (int d = tid; d < head_dim; d += blockDim.x) {
         float acc = 0.0f;
         for (int s = 0; s < num_splits; s++) {
-            float w = smem[s];
-            acc += w * partial_O[(s * n_heads + head_idx) * head_dim + d];
+            float correction = smem[s];  // exp(max[s] - gmax) only
+            acc += correction * partial_O[(s * n_heads + head_idx) * head_dim + d];
         }
         O[head_idx * head_dim + d] = acc * inv_total;
     }

@@ -251,7 +251,7 @@ struct KVCache {
         // Allocate FP16 KV cache for CUDA decode (halves attention bandwidth)
 #ifdef PT_USE_CUDA
         if (use_cuda) {
-            use_fp16_kv = true;
+            use_fp16_kv = false;  // Disabled: FP16 KV cache has baked offset bug in graph + reduce norm bug
             key_cache_fp16.resize(num_layers, nullptr);
             value_cache_fp16.resize(num_layers, nullptr);
             for (int64_t i = 0; i < num_layers; ++i) {
@@ -510,6 +510,21 @@ public:
     int* d_token_id_ = nullptr;   // Device memory for token_id (graph-updateable)
     int64_t* d_past_len_ = nullptr;  // Device memory for past_len (graph-compatible RoPE/KV)
     cudaStream_t decode_stream_ = nullptr;
+
+    void invalidate_graph() {
+        if (decode_graph_exec_) {
+            cudaGraphExecDestroy(decode_graph_exec_);
+            decode_graph_exec_ = nullptr;
+        }
+        if (decode_graph_) {
+            cudaGraphDestroy(decode_graph_);
+            decode_graph_ = nullptr;
+        }
+        graph_captured_ = false;
+        std::cerr << "[PromeGraph] Graph invalidated (KV cache reallocated)" << std::endl;
+    }
+#else
+    void invalidate_graph() {}  // no-op for non-CUDA
 #endif
 
     // Profiler (enabled with --profile flag)
@@ -1222,7 +1237,9 @@ public:
         }
 
         // First token: start CUDA Graph capture on dedicated stream
-        capturing = (d_past_len_ && !graph_captured_);
+        // CUDA Graph disabled: baked KV cache pointers + embedding offsets break replay
+        // TODO: fix graph to use device pointers for ALL mutable state
+        capturing = false;
         if (capturing) {
             if (!decode_stream_) cudaStreamCreateWithFlags(&decode_stream_, cudaStreamNonBlocking);
             cudaStreamBeginCapture(decode_stream_, cudaStreamCaptureModeThreadLocal);
@@ -1326,33 +1343,15 @@ public:
             PROF_END(profiler, "fused_qknorm_rope_kv");
 
             // Also write K/V to FP16 cache for attention bandwidth reduction
-            if (kv_cache.use_fp16_kv) {
-                at::cuda::launch_fp16_kv_cache_write(
-                    kv_cache.key_cache[i].data_ptr<float>() + past_len * kv_dim,
-                    kv_cache.key_cache_fp16[i],
-                    1, kv_dim, past_len, s);
-                at::cuda::launch_fp16_kv_cache_write(
-                    kv_cache.value_cache[i].data_ptr<float>() + past_len * kv_dim,
-                    kv_cache.value_cache_fp16[i],
-                    1, kv_dim, past_len, s);
-            }
+            // NOTE: FP16 KV cache writes disabled in decode — baked offsets break CUDA Graph.
+            // FP32 flash_decode is used instead (graph-compatible, reads d_past_len from GPU).
+            // The FP16 KV cache is still used for PREFILL (via kv_cache.append()).
 
             float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
 
-            // -- Flash-Decode attention (graph-compatible: reads d_past_len from GPU) --
+            // -- Flash-Decode attention (graph-compatible FP32: reads d_past_len from GPU) --
             PROF_BEGIN(profiler, "flash_decode");
-            if (d_past_len_ && kv_cache.use_fp16_kv) {
-                // Graph-compatible FP16: 2x less memory bandwidth for attention
-                at::cuda::launch_flash_decode_fp16_graph(
-                    sp.buf_q.data_ptr<float>(),
-                    kv_cache.key_cache_fp16[i],
-                    kv_cache.value_cache_fp16[i],
-                    sp.buf_attn.mutable_data_ptr<float>(),
-                    sp.fd_partial_O, sp.fd_partial_lse, sp.fd_partial_max,
-                    static_cast<int>(n_heads), static_cast<int>(n_kv_heads),
-                    static_cast<int>(head_dim),
-                    d_past_len_, static_cast<int>(kv_cache.max_seq), scale, s);
-            } else if (d_past_len_) {
+            if (d_past_len_) {
                 // Graph-compatible FP32 fallback
                 at::cuda::launch_flash_decode_graph(
                     sp.buf_q.data_ptr<float>(),
