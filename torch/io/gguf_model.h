@@ -1236,15 +1236,12 @@ public:
             goto graph_done;
         }
 
-        // First token: start CUDA Graph capture on dedicated stream
-        // CUDA Graph disabled: baked KV cache pointers + embedding offsets break replay
-        // TODO: fix graph to use device pointers for ALL mutable state
+        // CUDA Graph DISABLED: graph replay produces wrong output.
+        // Root cause: something in transformer layer kernels has mutable state
+        // beyond d_past_len_ that gets baked during capture. Needs investigation.
+        // Without graph: 30-50 tok/s (correct output)
+        // With graph: 150 tok/s (garbage output)
         capturing = false;
-        if (capturing) {
-            if (!decode_stream_) cudaStreamCreateWithFlags(&decode_stream_, cudaStreamNonBlocking);
-            cudaStreamBeginCapture(decode_stream_, cudaStreamCaptureModeThreadLocal);
-            s = decode_stream_;
-        }
 
         for (int64_t i = 0; i < config.num_layers; ++i) {
             auto& layer = layers[i];
@@ -1525,7 +1522,7 @@ public:
         }
 
         // End transformer layers — finalize CUDA Graph capture
-        if (d_past_len_ && !graph_captured_ && decode_stream_) {
+        if (capturing) {
             cudaStreamEndCapture(decode_stream_, &decode_graph_);
             cudaError_t err = cudaGraphInstantiate(&decode_graph_exec_, decode_graph_, NULL, NULL, 0);
             if (err == cudaSuccess) {
