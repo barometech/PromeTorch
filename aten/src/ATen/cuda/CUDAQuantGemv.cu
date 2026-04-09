@@ -319,11 +319,6 @@ ATEN_CUDA_API void launch_q4km_gemv(
     int grid = (N + WARPS - 1) / WARPS;
     int smem_bytes = K * sizeof(half);  // FP16 smem (was float = 2x smaller now)
 
-    if (smem_bytes > 48 * 1024) {
-        cudaFuncSetAttribute(q4km_gemv_kernel,
-            cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
-    }
-
     q4km_gemv_kernel<<<grid, BLOCK_SIZE, smem_bytes, stream>>>(
         static_cast<const uint8_t*>(weights), x, y,
         K, N, row_stride_bytes);
@@ -353,11 +348,6 @@ ATEN_CUDA_API void launch_q4km_persistent_gemv(
     int grid = sm_count * 4;
     int num_q8 = K / 32;
     int smem_bytes = K * 1 + num_q8 * 4 + num_q8 * 4;  // Q8 int8[K] + scales[K/32] + sums[K/32]
-
-    if (smem_bytes > 48 * 1024) {
-        cudaFuncSetAttribute(q4km_persistent_gemv_kernel,
-            cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
-    }
 
     q4km_persistent_gemv_kernel<<<grid, BLOCK_SIZE, smem_bytes, stream>>>(
         static_cast<const uint8_t*>(weights), x, y,
@@ -479,11 +469,6 @@ ATEN_CUDA_API void launch_q4km_fused_gate_up_gemv(
     const int BLOCK_SIZE = WARPS * 32;
     int grid = sm_count * 4;  // 4x occupancy for A100 bandwidth saturation
     int smem_bytes = K * sizeof(float);
-
-    if (smem_bytes > 48 * 1024) {
-        cudaFuncSetAttribute(q4km_fused_gate_up_kernel,
-            cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
-    }
 
     q4km_fused_gate_up_kernel<<<grid, BLOCK_SIZE, smem_bytes, stream>>>(
         static_cast<const uint8_t*>(w_gate),
@@ -780,11 +765,6 @@ ATEN_CUDA_API void launch_q6k_gemv(
     int grid = (N + WARPS - 1) / WARPS;
     int smem_bytes = K * sizeof(float);
 
-    if (smem_bytes > 48 * 1024) {
-        cudaFuncSetAttribute(q6k_gemv_kernel,
-            cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
-    }
-
     q6k_gemv_kernel<<<grid, BLOCK_SIZE, smem_bytes, stream>>>(
         static_cast<const uint8_t*>(weights), x, y,
         K, N, row_stride_bytes);
@@ -914,11 +894,6 @@ ATEN_CUDA_API void launch_q5k_gemv(
     const int BLOCK_SIZE = WARPS * 32;
     int grid = (N + WARPS - 1) / WARPS;
     int smem_bytes = K * sizeof(float);
-
-    if (smem_bytes > 48 * 1024) {
-        cudaFuncSetAttribute(q5k_gemv_kernel,
-            cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
-    }
 
     q5k_gemv_kernel<<<grid, BLOCK_SIZE, smem_bytes, stream>>>(
         static_cast<const uint8_t*>(weights), x, y,
@@ -1198,11 +1173,6 @@ ATEN_CUDA_API void launch_q4km_fused_qkv_gemv(
     int grid = sm_count * 4;  // 4x occupancy for A100 bandwidth saturation
     int smem_bytes = K * sizeof(float);
 
-    if (smem_bytes > 48 * 1024) {
-        cudaFuncSetAttribute(q4km_fused_qkv_gemv_kernel,
-            cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
-    }
-
     q4km_fused_qkv_gemv_kernel<<<grid, BLOCK_SIZE, smem_bytes, stream>>>(
         static_cast<const uint8_t*>(w_q),
         static_cast<const uint8_t*>(w_k),
@@ -1341,11 +1311,6 @@ ATEN_CUDA_API void launch_q4km_fused_rmsnorm_gemv(
     int grid = sm_count * 4;  // 4x occupancy for A100 bandwidth saturation
     // Shared: K floats for x + BLOCK_SIZE floats for reduction
     int smem_bytes = (K + BLOCK_SIZE) * sizeof(float);
-
-    if (smem_bytes > 48 * 1024) {
-        cudaFuncSetAttribute(q4km_fused_rmsnorm_gemv_kernel,
-            cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
-    }
 
     q4km_fused_rmsnorm_gemv_kernel<<<grid, BLOCK_SIZE, smem_bytes, stream>>>(
         x, norm_weight,
@@ -1497,11 +1462,6 @@ ATEN_CUDA_API void launch_q4km_fused_rmsnorm_qkv_gemv(
     int grid = sm_count * 4;  // 4x occupancy for A100 bandwidth saturation
     int smem_bytes = (K + BLOCK_SIZE) * sizeof(float);
 
-    if (smem_bytes > 48 * 1024) {
-        cudaFuncSetAttribute(q4km_fused_rmsnorm_qkv_gemv_kernel,
-            cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
-    }
-
     q4km_fused_rmsnorm_qkv_gemv_kernel<<<grid, BLOCK_SIZE, smem_bytes, stream>>>(
         x, norm_weight,
         static_cast<const uint8_t*>(w_q),
@@ -1607,11 +1567,6 @@ ATEN_CUDA_API void launch_q4km_persistent_gemv_accumulate(
     const int BLOCK_SIZE = WARPS * 32;
     int grid = sm_count * 4;  // 4x occupancy for A100 bandwidth saturation
     int smem_bytes = K * sizeof(float);
-
-    if (smem_bytes > 48 * 1024) {
-        cudaFuncSetAttribute(q4km_persistent_gemv_accumulate_kernel,
-            cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
-    }
 
     q4km_persistent_gemv_accumulate_kernel<<<grid, BLOCK_SIZE, smem_bytes, stream>>>(
         static_cast<const uint8_t*>(weights), x, y,
@@ -1755,11 +1710,6 @@ ATEN_CUDA_API void launch_q4km_fused_rmsnorm_gate_up_gemv(
     const int BLOCK_SIZE = WARPS * 32;
     int grid = sm_count * 4;  // 4x occupancy for A100 bandwidth saturation
     int smem_bytes = (K + BLOCK_SIZE) * sizeof(float);
-
-    if (smem_bytes > 48 * 1024) {
-        cudaFuncSetAttribute(q4km_fused_rmsnorm_gate_up_kernel,
-            cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
-    }
 
     q4km_fused_rmsnorm_gate_up_kernel<<<grid, BLOCK_SIZE, smem_bytes, stream>>>(
         x, norm_weight,
