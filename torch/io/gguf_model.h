@@ -520,8 +520,12 @@ public:
             cudaGraphDestroy(decode_graph_);
             decode_graph_ = nullptr;
         }
+        if (decode_stream_) {
+            cudaStreamDestroy(decode_stream_);
+            decode_stream_ = nullptr;
+        }
         graph_captured_ = false;
-        graph_token_id_ = 0;  // reset capture counter
+        graph_token_id_ = 0;
         std::cerr << "[PromeGraph] Graph invalidated (KV cache reallocated)" << std::endl;
     }
 #else
@@ -1211,8 +1215,12 @@ public:
 
         // 2. CUDA Graph: replay or capture
         if (graph_captured_ && decode_graph_exec_) {
-            // FAST PATH: update device pointers + replay graph on decode_stream
-            // Regular (blocking) stream syncs with default stream automatically
+            // FAST PATH: sync embedding (default) → decode, update ptrs, replay
+            cudaEvent_t emb_done;
+            cudaEventCreate(&emb_done);
+            cudaEventRecord(emb_done, nullptr);
+            cudaStreamWaitEvent(decode_stream_, emb_done, 0);
+            cudaEventDestroy(emb_done);
             cudaMemcpyAsync(d_past_len_, &past_len, sizeof(int64_t), cudaMemcpyHostToDevice, decode_stream_);
             cudaMemcpyAsync(d_token_id_, &token_id_int, sizeof(int), cudaMemcpyHostToDevice, decode_stream_);
             cudaGraphLaunch(decode_graph_exec_, decode_stream_);
@@ -1221,32 +1229,52 @@ public:
             goto graph_done;
         }
 
-        // CUDA Graph disabled — needs proper fix for cudaStreamBeginCapture failure
-        capturing = false;
+        // CUDA Graph: capture on second decode token (first warms up all statics)
+        capturing = false; // graph capture works but replay output corrupted
+        ++graph_token_id_;
 
         if (capturing) {
+            // Pre-init smem attributes once
             static bool smem_inited = false;
             if (!smem_inited) {
                 int max_K = static_cast<int>(std::max({H, q_dim, kv_dim, inter}));
                 at::cuda::init_cuda_kernel_smem_attributes(max_K, static_cast<int>(inter));
                 smem_inited = true;
             }
-            if (!decode_stream_) cudaStreamCreate(&decode_stream_);
-            cudaMemcpyAsync(d_past_len_, &past_len, sizeof(int64_t), cudaMemcpyHostToDevice, nullptr);
-            cudaMemcpyAsync(d_token_id_, &token_id_int, sizeof(int), cudaMemcpyHostToDevice, nullptr);
-            cudaStreamSynchronize(nullptr);
-            cudaError_t cap_err = cudaStreamBeginCapture(decode_stream_, cudaStreamCaptureModeThreadLocal);
+            // Clear any lingering CUDA errors before capture
+            cudaGetLastError();
+            // Non-blocking stream for capture (blocking stream conflicts with default)
+            if (!decode_stream_) {
+                cudaError_t se = cudaStreamCreateWithFlags(&decode_stream_, cudaStreamNonBlocking);
+                if (se != cudaSuccess) {
+                    std::cerr << "[PromeGraph] StreamCreate FAILED: " << cudaGetErrorString(se) << std::endl;
+                    capturing = false;
+                    goto skip_capture;
+                }
+            }
+            // Sync prefill (default stream) → decode_stream before capture
+            // Non-blocking stream doesn't see default stream's KV cache writes
+            cudaEvent_t prefill_done;
+            cudaEventCreate(&prefill_done);
+            cudaEventRecord(prefill_done, nullptr);  // mark default stream done
+            cudaStreamWaitEvent(decode_stream_, prefill_done, 0);  // decode waits
+            cudaEventDestroy(prefill_done);
+            // Device pointers on decode_stream_
+            cudaMemcpyAsync(d_past_len_, &past_len, sizeof(int64_t), cudaMemcpyHostToDevice, decode_stream_);
+            cudaMemcpyAsync(d_token_id_, &token_id_int, sizeof(int), cudaMemcpyHostToDevice, decode_stream_);
+            cudaStreamSynchronize(decode_stream_);
+            // Begin capture
+            cudaError_t cap_err = cudaStreamBeginCapture(decode_stream_, cudaStreamCaptureModeGlobal);
             if (cap_err != cudaSuccess) {
                 std::cerr << "[PromeGraph] BeginCapture FAILED: " << cudaGetErrorString(cap_err)
                           << " (code " << (int)cap_err << ")" << std::endl;
-                cudaGetLastError();  // clear error state
-                graph_capture_failed_ = true;
+                cudaGetLastError();
                 capturing = false;
-                // Continue with normal execution on default stream
             } else {
                 s = decode_stream_;
             }
         }
+        skip_capture:
         if (!capturing) {
             // Non-graph path: update device pointers normally
             cudaMemcpyAsync(d_past_len_, &past_len, sizeof(int64_t), cudaMemcpyHostToDevice, nullptr);

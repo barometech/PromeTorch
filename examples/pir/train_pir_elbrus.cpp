@@ -1358,6 +1358,20 @@ int main(int argc, char** argv) {
                 running_count = 0;
                 step_start = now;
             }
+
+            // === FUSED CHECKPOINT SAVE ===
+            if (step % train_cfg.save_interval == 0) {
+                std::string ckpt_dir = train_cfg.save_dir;
+                system(("mkdir -p " + ckpt_dir).c_str());
+                std::string path = ckpt_dir + "/pir_fused_step_" + std::to_string(step) + ".bin";
+                FILE* f = fopen(path.c_str(), "wb");
+                if (f) {
+                    for (size_t i = 0; i < trainer.all_params.size(); i++)
+                        fwrite(trainer.all_params[i], sizeof(float), trainer.all_sizes[i], f);
+                    fclose(f);
+                    std::cout << "  [fused checkpoint: " << path << "]" << std::endl;
+                }
+            }
         }
 
         auto total_end = std::chrono::high_resolution_clock::now();
