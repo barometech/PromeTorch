@@ -1211,27 +1211,32 @@ public:
 
         // 2. CUDA Graph: replay or capture
         if (graph_captured_ && decode_graph_exec_) {
-            // FAST PATH: update device pointers, then replay graph
-            cudaMemcpyAsync(d_past_len_, &past_len, sizeof(int64_t), cudaMemcpyHostToDevice, nullptr);
-            cudaMemcpyAsync(d_token_id_, &token_id_int, sizeof(int), cudaMemcpyHostToDevice, nullptr);
-            // Sync memcpy → decode_stream
-            cudaEvent_t ev;
-            cudaEventCreate(&ev);
-            cudaEventRecord(ev, nullptr);
-            cudaStreamWaitEvent(decode_stream_, ev, 0);
+            // FAST PATH: update device pointers + replay graph on decode_stream
+            // Regular (blocking) stream syncs with default stream automatically
+            cudaMemcpyAsync(d_past_len_, &past_len, sizeof(int64_t), cudaMemcpyHostToDevice, decode_stream_);
+            cudaMemcpyAsync(d_token_id_, &token_id_int, sizeof(int), cudaMemcpyHostToDevice, decode_stream_);
             cudaGraphLaunch(decode_graph_exec_, decode_stream_);
-            // Sync decode_stream → default stream
-            cudaEventRecord(ev, decode_stream_);
-            cudaStreamWaitEvent(nullptr, ev, 0);
-            cudaEventDestroy(ev);
+            cudaStreamSynchronize(decode_stream_);
             cur = config.num_layers % 2 == 0 ? 0 : 1;
             goto graph_done;
         }
 
-        // CUDA Graph disabled until capture-and-execute is implemented.
-        // Root cause: cudaStreamBeginCapture does NOT execute kernels.
-        // The captured token's KV cache is empty, corrupting all subsequent tokens.
+        // CUDA Graph disabled: launch functions contain cudaGetDevice/cudaDeviceGetAttribute
+        // which are runtime API calls incompatible with stream capture.
+        // Need to pre-compute sm_count and cache it, removing all runtime API from launch functions.
         capturing = false;
+        if (capturing) {
+            static bool smem_inited = false;
+            if (!smem_inited) {
+                int max_K = static_cast<int>(std::max({H, q_dim, kv_dim, inter}));
+                at::cuda::init_cuda_kernel_smem_attributes(max_K, static_cast<int>(inter));
+                smem_inited = true;
+            }
+            // Use a REGULAR stream (not non-blocking) — synchronizes with default stream
+            if (!decode_stream_) cudaStreamCreate(&decode_stream_);
+            cudaStreamBeginCapture(decode_stream_, cudaStreamCaptureModeGlobal);
+            s = decode_stream_;
+        }
         if (capturing) {
             static bool smem_inited = false;
             if (!smem_inited) {
@@ -1559,15 +1564,10 @@ public:
                 graph_captured_ = true;
                 std::cout << "[PromeGraph] Captured " << config.num_layers << " layers decode graph!" << std::endl;
                 // RE-EXECUTE: capture didn't execute kernels, so KV cache is empty.
-                // Launch graph once on decode_stream to fill KV cache for this token.
-                cudaEvent_t re_ev;
-                cudaEventCreate(&re_ev);
-                cudaEventRecord(re_ev, nullptr);  // sync default → decode
-                cudaStreamWaitEvent(decode_stream_, re_ev, 0);
+                // Launch graph once to fill KV cache for this token.
+                // d_past_len_ and d_token_id_ already correct (set before capture)
                 cudaGraphLaunch(decode_graph_exec_, decode_stream_);
-                cudaEventRecord(re_ev, decode_stream_);  // sync decode → default
-                cudaStreamWaitEvent(nullptr, re_ev, 0);
-                cudaEventDestroy(re_ev);
+                cudaStreamSynchronize(decode_stream_);
             } else {
                 std::cerr << "[PromeGraph] Capture failed: " << cudaGetErrorString(err) << std::endl;
                 decode_graph_ = nullptr;
