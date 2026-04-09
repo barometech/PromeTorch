@@ -442,6 +442,10 @@ ATEN_CUDA_API void launch_q4km_q8_gemv(
     int K, int N, int64_t row_stride_bytes,
     cudaStream_t stream = nullptr);
 
+// Pre-initialize kernel shared memory attributes for CUDA Graph compatibility.
+// Must be called ONCE before any graph capture. Pass model's max hidden and intermediate dims.
+ATEN_CUDA_API void init_cuda_kernel_smem_attributes(int max_K, int max_inter);
+
 // Dequantize Q4_K_M weights to FP16 (one-time at load)
 ATEN_CUDA_API void launch_dequant_q4k_to_fp16(
     const void* weights, void* out_fp16,
