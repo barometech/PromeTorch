@@ -1237,7 +1237,7 @@ public:
         }
 
         // CUDA Graph: capture on second decode token (first warms up all statics)
-        capturing = false; // TODO: graph replay output still wrong despite event sync
+        capturing = false; // graph replay still wrong — need value dump to find divergence
         ++graph_token_id_;
 
         if (capturing) {
@@ -1271,7 +1271,7 @@ public:
             cudaMemcpyAsync(d_token_id_, &token_id_int, sizeof(int), cudaMemcpyHostToDevice, decode_stream_);
             cudaStreamSynchronize(decode_stream_);
             // Begin capture
-            cudaError_t cap_err = cudaStreamBeginCapture(decode_stream_, cudaStreamCaptureModeGlobal);
+            cudaError_t cap_err = cudaStreamBeginCapture(decode_stream_, cudaStreamCaptureModeThreadLocal);
             if (cap_err != cudaSuccess) {
                 std::cerr << "[PromeGraph] BeginCapture FAILED: " << cudaGetErrorString(cap_err)
                           << " (code " << (int)cap_err << ")" << std::endl;
