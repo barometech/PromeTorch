@@ -1221,10 +1221,9 @@ public:
             goto graph_done;
         }
 
-        // CUDA Graph disabled — cudaStreamBeginCapture returns "invalid argument"
-        // on this CUDA version/driver. All known blockers fixed but capture still fails.
-        static bool graph_disabled_ = true;  // TODO: investigate CUDA version requirement
-        capturing = false && !graph_disabled_ && (d_past_len_ && !graph_captured_);
+        // CUDA Graph disabled — needs proper fix for cudaStreamBeginCapture failure
+        capturing = false;
+
         if (capturing) {
             static bool smem_inited = false;
             if (!smem_inited) {
@@ -1233,13 +1232,22 @@ public:
                 smem_inited = true;
             }
             if (!decode_stream_) cudaStreamCreate(&decode_stream_);
-            // Update device pointers BEFORE capture (on default stream)
             cudaMemcpyAsync(d_past_len_, &past_len, sizeof(int64_t), cudaMemcpyHostToDevice, nullptr);
             cudaMemcpyAsync(d_token_id_, &token_id_int, sizeof(int), cudaMemcpyHostToDevice, nullptr);
-            cudaStreamSynchronize(nullptr);  // ensure memcpy complete before capture
-            cudaStreamBeginCapture(decode_stream_, cudaStreamCaptureModeThreadLocal);
-            s = decode_stream_;
-        } else {
+            cudaStreamSynchronize(nullptr);
+            cudaError_t cap_err = cudaStreamBeginCapture(decode_stream_, cudaStreamCaptureModeThreadLocal);
+            if (cap_err != cudaSuccess) {
+                std::cerr << "[PromeGraph] BeginCapture FAILED: " << cudaGetErrorString(cap_err)
+                          << " (code " << (int)cap_err << ")" << std::endl;
+                cudaGetLastError();  // clear error state
+                graph_capture_failed_ = true;
+                capturing = false;
+                // Continue with normal execution on default stream
+            } else {
+                s = decode_stream_;
+            }
+        }
+        if (!capturing) {
             // Non-graph path: update device pointers normally
             cudaMemcpyAsync(d_past_len_, &past_len, sizeof(int64_t), cudaMemcpyHostToDevice, nullptr);
             cudaMemcpyAsync(d_token_id_, &token_id_int, sizeof(int), cudaMemcpyHostToDevice, nullptr);
