@@ -683,6 +683,8 @@ private:
                   << " use_cuda=" << model->use_cuda_ << std::endl;
 
         if (!model->kv_cache.allocated || model->kv_cache.max_seq < max_total_seq) {
+            // Invalidate CUDA Graph — KV cache pointers will change
+            model->invalidate_graph();
             try {
                 model->kv_cache.allocate(model->config.num_layers, max_total_seq, kv_dim,
                                          model->use_cuda_);
@@ -901,6 +903,7 @@ private:
                   << " use_cuda=" << model->use_cuda_ << std::endl;
 
         if (!model->kv_cache.allocated || model->kv_cache.max_seq < max_total_seq) {
+            model->invalidate_graph();
             try {
                 model->kv_cache.allocate(model->config.num_layers, max_total_seq, kv_dim,
                                          model->use_cuda_);
