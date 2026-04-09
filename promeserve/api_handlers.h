@@ -480,7 +480,7 @@ private:
         float temperature = 0.7f;
         int top_k = 40;
         float top_p = 0.9f;
-        float repeat_penalty = 1.0f;  // Default 1.0 = disabled (enables GPU sampling path)
+        float repeat_penalty = 1.05f;
 
         if (body.has("options")) {
             auto& opts = body["options"];
@@ -575,7 +575,7 @@ private:
         float temperature = 0.7f;
         int top_k = 40;
         float top_p = 0.9f;
-        float repeat_penalty = 1.0f;  // Default 1.0 = disabled (enables GPU sampling path)
+        float repeat_penalty = 1.05f;
 
         if (body.has("options")) {
             auto& opts = body["options"];
@@ -752,45 +752,21 @@ private:
 
         for (int step = 0; step < max_tokens; ++step) {
             try {
-                int32_t next_token;
+                int64_t last_pos = logits.size(0) - 1;
+                at::Tensor last_logits = model->get_row(logits, last_pos);
 
-#ifdef PT_USE_CUDA
-                // GPU fast path: sampling entirely on GPU (512B D2H vs 608KB)
-                if (logits.is_cuda() && repeat_penalty <= 1.0f) {
-                    int64_t last_pos = logits.size(0) - 1;
-                    int64_t V = logits.size(1);
-                    const float* logit_row = logits.data_ptr<float>() + last_pos * V;
-                    if (temperature < 1e-6f) {
-                        // Greedy: GPU argmax (8 bytes D2H)
-                        if (!model->gpu_sampler_.allocated) model->gpu_sampler_.allocate();
-                        int64_t* d_idx = reinterpret_cast<int64_t*>(model->gpu_sampler_.d_topk_indices);
-                        at::cuda::launch_argmax(logit_row, d_idx, V, nullptr);
-                        int64_t h_idx = 0;
-                        cudaMemcpy(&h_idx, d_idx, sizeof(int64_t), cudaMemcpyDeviceToHost);
-                        next_token = static_cast<int32_t>(h_idx);
-                    } else {
-                        // Temperature sampling: GPU top-k (512B D2H)
-                        next_token = model->gpu_sample_token(logit_row, V, temperature, top_k, top_p);
-                    }
-                } else
-#endif
-                {
-                    // CPU fallback (with repetition penalty or non-CUDA)
-                    int64_t last_pos = logits.size(0) - 1;
-                    at::Tensor last_logits = model->get_row(logits, last_pos);
-
-                    if (repeat_penalty > 1.0f && !generated.empty()) {
-                        float* logit_data = last_logits.mutable_data_ptr<float>();
-                        for (int32_t prev : generated) {
-                            if (prev >= 0 && prev < static_cast<int32_t>(model->tokenizer.vocab.size())) {
-                                if (logit_data[prev] > 0) logit_data[prev] /= repeat_penalty;
-                                else logit_data[prev] *= repeat_penalty;
-                            }
+                // Apply repetition penalty on CPU
+                if (repeat_penalty > 1.0f && !generated.empty()) {
+                    float* logit_data = last_logits.mutable_data_ptr<float>();
+                    for (int32_t prev : generated) {
+                        if (prev >= 0 && prev < static_cast<int32_t>(model->tokenizer.vocab.size())) {
+                            if (logit_data[prev] > 0) logit_data[prev] /= repeat_penalty;
+                            else logit_data[prev] *= repeat_penalty;
                         }
                     }
-
-                    next_token = model->sample_token(last_logits, temperature, top_k, top_p);
                 }
+
+                int32_t next_token = model->sample_token(last_logits, temperature, top_k, top_p);
 
                 if (step == 0) {
                     std::cerr << "[Generate] First sampled token: " << next_token
@@ -992,39 +968,20 @@ private:
 
         for (int step = 0; step < max_tokens; ++step) {
             try {
-                int32_t next_token;
+                int64_t last_pos = logits.size(0) - 1;
+                at::Tensor last_logits = model->get_row(logits, last_pos);
 
-#ifdef PT_USE_CUDA
-                if (logits.is_cuda() && repeat_penalty <= 1.0f) {
-                    int64_t last_pos = logits.size(0) - 1;
-                    int64_t V = logits.size(1);
-                    const float* logit_row = logits.data_ptr<float>() + last_pos * V;
-                    if (temperature < 1e-6f) {
-                        if (!model->gpu_sampler_.allocated) model->gpu_sampler_.allocate();
-                        int64_t* d_idx = reinterpret_cast<int64_t*>(model->gpu_sampler_.d_topk_indices);
-                        at::cuda::launch_argmax(logit_row, d_idx, V, nullptr);
-                        int64_t h_idx = 0;
-                        cudaMemcpy(&h_idx, d_idx, sizeof(int64_t), cudaMemcpyDeviceToHost);
-                        next_token = static_cast<int32_t>(h_idx);
-                    } else {
-                        next_token = model->gpu_sample_token(logit_row, V, temperature, top_k, top_p);
-                    }
-                } else
-#endif
-                {
-                    int64_t last_pos = logits.size(0) - 1;
-                    at::Tensor last_logits = model->get_row(logits, last_pos);
-                    if (repeat_penalty > 1.0f && !generated.empty()) {
-                        float* logit_data = last_logits.mutable_data_ptr<float>();
-                        for (int32_t prev : generated) {
-                            if (prev >= 0 && prev < static_cast<int32_t>(model->tokenizer.vocab.size())) {
-                                if (logit_data[prev] > 0) logit_data[prev] /= repeat_penalty;
-                                else logit_data[prev] *= repeat_penalty;
-                            }
+                if (repeat_penalty > 1.0f && !generated.empty()) {
+                    float* logit_data = last_logits.mutable_data_ptr<float>();
+                    for (int32_t prev : generated) {
+                        if (prev >= 0 && prev < static_cast<int32_t>(model->tokenizer.vocab.size())) {
+                            if (logit_data[prev] > 0) logit_data[prev] /= repeat_penalty;
+                            else logit_data[prev] *= repeat_penalty;
                         }
                     }
-                    next_token = model->sample_token(last_logits, temperature, top_k, top_p);
                 }
+
+                int32_t next_token = model->sample_token(last_logits, temperature, top_k, top_p);
 
                 if (step == 0) {
                     std::cerr << "[Chat] First sampled token: " << next_token
