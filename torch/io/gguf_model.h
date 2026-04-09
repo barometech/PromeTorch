@@ -1248,7 +1248,6 @@ public:
 
             if (use_q8_qkv) {
                 // -- Q8 PIPELINE: norm → quantize x → dp4a GEMV × 3 --
-                // 100% occupancy (1 block/row, no smem) vs old 50% (persistent, smem)
                 PROF_BEGIN(profiler, "attn_norm");
                 at::cuda::launch_rms_norm(
                     x_ptr, layer.attn_norm.data_ptr<float>(),
@@ -1257,11 +1256,9 @@ public:
                 PROF_END(profiler, "attn_norm");
 
                 PROF_BEGIN(profiler, "qkv_proj");
-                // Quantize normed x → Q8_1 once, reuse for all 3 projections
                 at::cuda::launch_quantize_q8_1(
                     sp.buf_normed.data_ptr<float>(), sp.q8_buf,
                     static_cast<int>(H), s);
-                // dp4a GEMV: 1 block per output row → max occupancy
                 at::cuda::launch_q4km_q8_gemv(
                     layer.q_attn_q.gpu_data, sp.q8_buf,
                     sp.buf_q.mutable_data_ptr<float>(),
@@ -1346,14 +1343,27 @@ public:
 
             // Also write K/V to FP16 cache for attention bandwidth reduction
             if (kv_cache.use_fp16_kv) {
-                at::cuda::launch_fp16_kv_cache_write(
-                    kv_cache.key_cache[i].data_ptr<float>() + past_len * kv_dim,
-                    kv_cache.key_cache_fp16[i],
-                    1, kv_dim, past_len, s);
-                at::cuda::launch_fp16_kv_cache_write(
-                    kv_cache.value_cache[i].data_ptr<float>() + past_len * kv_dim,
-                    kv_cache.value_cache_fp16[i],
-                    1, kv_dim, past_len, s);
+                if (d_past_len_) {
+                    // Graph-compatible: kernel reads past_len from device pointer
+                    // Source = FP32 KV cache (already written by fused_qknorm_rope_kvwrite_graph)
+                    at::cuda::launch_fp16_kv_cache_write_graph(
+                        kv_cache.key_cache[i].data_ptr<float>(),
+                        kv_cache.key_cache_fp16[i],
+                        kv_dim, d_past_len_, s);
+                    at::cuda::launch_fp16_kv_cache_write_graph(
+                        kv_cache.value_cache[i].data_ptr<float>(),
+                        kv_cache.value_cache_fp16[i],
+                        kv_dim, d_past_len_, s);
+                } else {
+                    at::cuda::launch_fp16_kv_cache_write(
+                        kv_cache.key_cache[i].data_ptr<float>() + past_len * kv_dim,
+                        kv_cache.key_cache_fp16[i],
+                        1, kv_dim, past_len, s);
+                    at::cuda::launch_fp16_kv_cache_write(
+                        kv_cache.value_cache[i].data_ptr<float>() + past_len * kv_dim,
+                        kv_cache.value_cache_fp16[i],
+                        1, kv_dim, past_len, s);
+                }
             }
 
             float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
