@@ -521,6 +521,7 @@ public:
             decode_graph_ = nullptr;
         }
         graph_captured_ = false;
+        graph_token_id_ = 0;  // reset capture counter
         std::cerr << "[PromeGraph] Graph invalidated (KV cache reallocated)" << std::endl;
     }
 #else
@@ -1188,30 +1189,80 @@ public:
         float eps = config.rms_norm_eps;
         bool add_one = config.gemma_norm_add_one;
 
-        // 0. Initialize device past_len pointer (once) + update each token
+        // 0. Initialize device pointers (once)
         if (!d_past_len_) {
             cudaMalloc(&d_past_len_, sizeof(int64_t));
         }
-        cudaMemcpyAsync(d_past_len_, &past_len, sizeof(int64_t), cudaMemcpyHostToDevice, nullptr);
+        if (!d_token_id_) {
+            cudaMalloc(&d_token_id_, sizeof(int));
+        }
 
-        // 1. Embedding: GPU lookup (zero H2D copy for CUDA Graph compatibility)
-        PROF_BEGIN(profiler, "embedding");
+        // Ensure embedding table is on GPU (one-time)
         if (!emb_gpu_.defined() && token_embedding.defined()) {
-            // First call: copy embedding table to GPU (once)
             emb_gpu_ = at::empty_cuda({config.vocab_size, H});
             cudaMemcpy(emb_gpu_.mutable_data_ptr<float>(), token_embedding.data_ptr<float>(),
                        config.vocab_size * H * sizeof(float), cudaMemcpyHostToDevice);
         }
-        if (emb_gpu_.defined()) {
-            // GPU→GPU copy (stays on device, CUDA Graph friendly)
-            cudaMemcpyAsync(sp.buf_x[0].mutable_data_ptr<float>(),
-                       emb_gpu_.data_ptr<float>() + token_id * H,
-                       H * sizeof(float), cudaMemcpyDeviceToDevice, nullptr);
+
+        int token_id_int = static_cast<int>(token_id);
+        int cur = 0;
+        bool capturing = false;
+        cudaStream_t s = nullptr;
+
+        // 2. CUDA Graph: replay or capture
+        if (graph_captured_ && decode_graph_exec_) {
+            // FAST PATH: update device pointers, then replay graph
+            cudaMemcpyAsync(d_past_len_, &past_len, sizeof(int64_t), cudaMemcpyHostToDevice, nullptr);
+            cudaMemcpyAsync(d_token_id_, &token_id_int, sizeof(int), cudaMemcpyHostToDevice, nullptr);
+            // Sync memcpy → decode_stream
+            cudaEvent_t ev;
+            cudaEventCreate(&ev);
+            cudaEventRecord(ev, nullptr);
+            cudaStreamWaitEvent(decode_stream_, ev, 0);
+            cudaGraphLaunch(decode_graph_exec_, decode_stream_);
+            // Sync decode_stream → default stream
+            cudaEventRecord(ev, decode_stream_);
+            cudaStreamWaitEvent(nullptr, ev, 0);
+            cudaEventDestroy(ev);
+            cur = config.num_layers % 2 == 0 ? 0 : 1;
+            goto graph_done;
+        }
+
+        // CUDA Graph disabled: capture mode does NOT execute kernels, so the captured
+        // decode token produces no output. The next token (replay) reads invalid KV cache.
+        // Need cudaStreamBeginCapture alternative that also executes, or re-execute after capture.
+        capturing = false;
+        if (capturing) {
+            static bool smem_inited = false;
+            if (!smem_inited) {
+                int max_K = static_cast<int>(std::max({H, q_dim, kv_dim, inter}));
+                at::cuda::init_cuda_kernel_smem_attributes(max_K, static_cast<int>(inter));
+                smem_inited = true;
+            }
+            if (!decode_stream_) cudaStreamCreateWithFlags(&decode_stream_, cudaStreamNonBlocking);
+            // Update device pointers on default stream, sync to decode_stream via event
+            cudaMemcpyAsync(d_past_len_, &past_len, sizeof(int64_t), cudaMemcpyHostToDevice, nullptr);
+            cudaMemcpyAsync(d_token_id_, &token_id_int, sizeof(int), cudaMemcpyHostToDevice, nullptr);
+            cudaEvent_t cap_ev;
+            cudaEventCreate(&cap_ev);
+            cudaEventRecord(cap_ev, nullptr);  // record after memcpy on default stream
+            cudaStreamWaitEvent(decode_stream_, cap_ev, 0);  // decode_stream waits
+            cudaEventDestroy(cap_ev);
+            cudaStreamBeginCapture(decode_stream_, cudaStreamCaptureModeRelaxed);
+            s = decode_stream_;
         } else {
-            // Fallback: CPU embedding
-            const float* emb_table = token_embedding.data_ptr<float>();
-            cudaMemcpy(sp.buf_x[0].mutable_data_ptr<float>(),
-                       emb_table + token_id * H, H * sizeof(float), cudaMemcpyHostToDevice);
+            // Non-graph path: update device pointers normally
+            cudaMemcpyAsync(d_past_len_, &past_len, sizeof(int64_t), cudaMemcpyHostToDevice, nullptr);
+            cudaMemcpyAsync(d_token_id_, &token_id_int, sizeof(int), cudaMemcpyHostToDevice, nullptr);
+        }
+
+        // 1. Embedding lookup (captured inside graph when capturing)
+        PROF_BEGIN(profiler, "embedding");
+        if (emb_gpu_.defined()) {
+            at::cuda::launch_embedding_lookup(
+                emb_gpu_.data_ptr<float>(),
+                sp.buf_x[0].mutable_data_ptr<float>(),
+                d_token_id_, static_cast<int>(H), s);
         }
         PROF_END(profiler, "embedding");
 
@@ -1219,37 +1270,8 @@ public:
         if (config.scale_embeddings) {
             float scale = std::sqrt(static_cast<float>(H));
             at::cuda::launch_mul_scalar(sp.buf_x[0].data_ptr<float>(), scale,
-                                         sp.buf_x[0].mutable_data_ptr<float>(), H, nullptr);
+                                         sp.buf_x[0].mutable_data_ptr<float>(), H, s);
         }
-
-        int cur = 0;
-        bool capturing = false;
-        cudaStream_t s = nullptr;
-
-        // 2. Transformer layers with CUDA Graph (PromeGraph)
-        if (graph_captured_ && decode_graph_exec_) {
-            // Update d_past_len on default stream, then sync to decode_stream
-            cudaMemcpyAsync(d_past_len_, &past_len, sizeof(int64_t), cudaMemcpyHostToDevice, nullptr);
-            // Sync: default stream (embedding + d_past_len) → decode_stream
-            cudaEvent_t sync_ev;
-            cudaEventCreate(&sync_ev);
-            cudaEventRecord(sync_ev, nullptr);
-            cudaStreamWaitEvent(decode_stream_, sync_ev, 0);
-            // Launch graph on SAME stream it was captured on
-            cudaGraphLaunch(decode_graph_exec_, decode_stream_);
-            // Sync back: decode_stream → default stream (for final_norm + output_proj)
-            cudaEventRecord(sync_ev, decode_stream_);
-            cudaStreamWaitEvent(nullptr, sync_ev, 0);
-            cudaEventDestroy(sync_ev);
-            cur = config.num_layers % 2 == 0 ? 0 : 1;
-            goto graph_done;
-        }
-
-        // CUDA Graph disabled: graph replay corrupts attention output.
-        // Investigated: stream sync, smem pre-init, KV pointer invalidation — none fix it.
-        // The graph bakes some internal state that prevents correct execution on replay.
-        // Without graph: correct output at 30-50 tok/s. With graph: 150 tok/s but garbage.
-        capturing = false;
 
         for (int64_t i = 0; i < config.num_layers; ++i) {
             auto& layer = layers[i];
