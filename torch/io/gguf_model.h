@@ -1228,9 +1228,9 @@ public:
             goto graph_done;
         }
 
-        // CUDA Graph disabled: capture mode does NOT execute kernels, so the captured
-        // decode token produces no output. The next token (replay) reads invalid KV cache.
-        // Need cudaStreamBeginCapture alternative that also executes, or re-execute after capture.
+        // CUDA Graph disabled until capture-and-execute is implemented.
+        // Root cause: cudaStreamBeginCapture does NOT execute kernels.
+        // The captured token's KV cache is empty, corrupting all subsequent tokens.
         capturing = false;
         if (capturing) {
             static bool smem_inited = false;
@@ -1558,6 +1558,16 @@ public:
             if (err == cudaSuccess) {
                 graph_captured_ = true;
                 std::cout << "[PromeGraph] Captured " << config.num_layers << " layers decode graph!" << std::endl;
+                // RE-EXECUTE: capture didn't execute kernels, so KV cache is empty.
+                // Launch graph once on decode_stream to fill KV cache for this token.
+                cudaEvent_t re_ev;
+                cudaEventCreate(&re_ev);
+                cudaEventRecord(re_ev, nullptr);  // sync default → decode
+                cudaStreamWaitEvent(decode_stream_, re_ev, 0);
+                cudaGraphLaunch(decode_graph_exec_, decode_stream_);
+                cudaEventRecord(re_ev, decode_stream_);  // sync decode → default
+                cudaStreamWaitEvent(nullptr, re_ev, 0);
+                cudaEventDestroy(re_ev);
             } else {
                 std::cerr << "[PromeGraph] Capture failed: " << cudaGetErrorString(err) << std::endl;
                 decode_graph_ = nullptr;
