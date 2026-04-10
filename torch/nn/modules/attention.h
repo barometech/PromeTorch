@@ -277,9 +277,12 @@ public:
 
 private:
     // Batched matrix multiplication
-    Tensor batch_matmul(const Tensor& a, const Tensor& b) {
+    Tensor batch_matmul(const Tensor& a_in, const Tensor& b_in) {
         // a: [N, num_heads, L, d1], b: [N, num_heads, d1, S]
         // result: [N, num_heads, L, S]
+        // Must be contiguous — permuted views have non-trivial strides
+        Tensor a = a_in.contiguous();
+        Tensor b = b_in.contiguous();
         auto a_sizes = a.sizes().vec();
         auto b_sizes = b.sizes().vec();
 
