@@ -1236,9 +1236,8 @@ public:
             goto graph_done;
         }
 
-        // CUDA Graph: capture on second decode token (first warms up all statics)
-        capturing = false; // graph replay still wrong — need value dump to find divergence
-        ++graph_token_id_;
+        cudaDeviceSynchronize();  // FULL sync — ensure ALL prior GPU work visible
+        s = decode_stream_;
 
         if (capturing) {
             // Pre-init smem attributes once
@@ -1297,6 +1296,16 @@ public:
                 d_token_id_, static_cast<int>(H), s);
         }
         PROF_END(profiler, "embedding");
+
+        // DEBUG: dump buf_x[0] after embedding (skip during capture — cudaMemcpy illegal)
+        if (!capturing) {
+            float dbg[4];
+            cudaDeviceSynchronize();
+            cudaMemcpy(dbg, sp.buf_x[0].data_ptr<float>(), 4*sizeof(float), cudaMemcpyDeviceToHost);
+            std::cerr << "[DBG emb] token=" << token_id_int << " past=" << past_len
+                      << " x[0..3]=" << dbg[0] << "," << dbg[1] << "," << dbg[2] << "," << dbg[3]
+                      << (graph_captured_ ? " REPLAY" : " NORMAL") << std::endl;
+        }
 
         // Scale embeddings (Gemma)
         if (config.scale_embeddings) {
@@ -1605,6 +1614,16 @@ public:
             }
         }
 graph_done:
+
+        // DEBUG: dump buf_x[cur] AFTER all layers (graph or normal)
+        {
+            float dbg[4];
+            cudaDeviceSynchronize();
+            cudaMemcpy(dbg, sp.buf_x[cur].data_ptr<float>(), 4*sizeof(float), cudaMemcpyDeviceToHost);
+            std::cerr << "[DBG out] token=" << token_id_int << " past=" << past_len << " cur=" << cur
+                      << " x[0..3]=" << dbg[0] << "," << dbg[1] << "," << dbg[2] << "," << dbg[3]
+                      << (graph_captured_ ? " GRAPH" : " NORMAL") << std::endl;
+        }
 
         // 3. Final RMS norm: buf_x[cur] → buf_normed
         PROF_BEGIN(profiler, "final_norm");
