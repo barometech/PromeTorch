@@ -512,6 +512,9 @@ public:
 #ifdef PT_USE_CUDA
     cudaGraph_t decode_graph_ = nullptr;
     cudaGraphExec_t decode_graph_exec_ = nullptr;
+    // Pinned host memory for async H2D copies (Gemini 3.1 Pro: without pinned, cudaMemcpyAsync syncs)
+    int64_t* h_past_len_pinned_ = nullptr;
+    int* h_token_id_pinned_ = nullptr;
     bool graph_captured_ = false;
     int graph_token_id_ = 0;      // Updated before each graph launch
     int* d_token_id_ = nullptr;   // Device memory for token_id (graph-updateable)
@@ -1200,12 +1203,14 @@ public:
         float eps = config.rms_norm_eps;
         bool add_one = config.gemma_norm_add_one;
 
-        // 0. Initialize device pointers (once)
+        // 0. Initialize device + pinned host pointers (once)
         if (!d_past_len_) {
             cudaMalloc(&d_past_len_, sizeof(int64_t));
+            cudaHostAlloc(&h_past_len_pinned_, sizeof(int64_t), cudaHostAllocDefault);
         }
         if (!d_token_id_) {
             cudaMalloc(&d_token_id_, sizeof(int));
+            cudaHostAlloc(&h_token_id_pinned_, sizeof(int), cudaHostAllocDefault);
         }
 
         // Ensure embedding table is on GPU (one-time)
@@ -1223,8 +1228,10 @@ public:
         // 2. CUDA Graph: ALL on default stream (llama.cpp approach)
         if (graph_captured_ && decode_graph_exec_) {
             // FAST PATH: update device ptrs + replay entire model on default stream
-            cudaMemcpyAsync(d_past_len_, &past_len, sizeof(int64_t), cudaMemcpyHostToDevice, nullptr);
-            cudaMemcpyAsync(d_token_id_, &token_id_int, sizeof(int), cudaMemcpyHostToDevice, nullptr);
+            *h_past_len_pinned_ = past_len;
+            cudaMemcpyAsync(d_past_len_, h_past_len_pinned_, sizeof(int64_t), cudaMemcpyHostToDevice, nullptr);
+            *h_token_id_pinned_ = token_id_int;
+            cudaMemcpyAsync(d_token_id_, h_token_id_pinned_, sizeof(int), cudaMemcpyHostToDevice, nullptr);
             cudaGraphLaunch(decode_graph_exec_, nullptr);
             // Graph includes final_norm + output_proj → logits ready in buf_logits
             kv_cache.seq_len += 1;
@@ -1242,8 +1249,10 @@ public:
             }
             cudaGetLastError();
             // Default stream + ThreadLocal: captures only this thread's API calls
-            cudaMemcpyAsync(d_past_len_, &past_len, sizeof(int64_t), cudaMemcpyHostToDevice, nullptr);
-            cudaMemcpyAsync(d_token_id_, &token_id_int, sizeof(int), cudaMemcpyHostToDevice, nullptr);
+            *h_past_len_pinned_ = past_len;
+            cudaMemcpyAsync(d_past_len_, h_past_len_pinned_, sizeof(int64_t), cudaMemcpyHostToDevice, nullptr);
+            *h_token_id_pinned_ = token_id_int;
+            cudaMemcpyAsync(d_token_id_, h_token_id_pinned_, sizeof(int), cudaMemcpyHostToDevice, nullptr);
             cudaError_t cap_err = cudaStreamBeginCapture(nullptr, cudaStreamCaptureModeThreadLocal);
             if (cap_err != cudaSuccess) {
                 std::cerr << "[PromeGraph] BeginCapture FAILED: "
@@ -1265,8 +1274,10 @@ public:
             // BLOCKING stream — auto-syncs with default, correct numerics
             if (!decode_stream_) cudaStreamCreate(&decode_stream_);
             // Set device pointers before capture (blocking stream waits for default)
-            cudaMemcpyAsync(d_past_len_, &past_len, sizeof(int64_t), cudaMemcpyHostToDevice, decode_stream_);
-            cudaMemcpyAsync(d_token_id_, &token_id_int, sizeof(int), cudaMemcpyHostToDevice, decode_stream_);
+            *h_past_len_pinned_ = past_len;
+            cudaMemcpyAsync(d_past_len_, h_past_len_pinned_, sizeof(int64_t), cudaMemcpyHostToDevice, decode_stream_);
+            *h_token_id_pinned_ = token_id_int;
+            cudaMemcpyAsync(d_token_id_, h_token_id_pinned_, sizeof(int), cudaMemcpyHostToDevice, decode_stream_);
             // Begin capture
             cudaError_t cap_err = cudaStreamBeginCapture(decode_stream_, cudaStreamCaptureModeThreadLocal);
             if (cap_err != cudaSuccess) {
@@ -1280,8 +1291,10 @@ public:
         }
         if (!capturing) {
             // Non-graph path: update device pointers normally
-            cudaMemcpyAsync(d_past_len_, &past_len, sizeof(int64_t), cudaMemcpyHostToDevice, nullptr);
-            cudaMemcpyAsync(d_token_id_, &token_id_int, sizeof(int), cudaMemcpyHostToDevice, nullptr);
+            *h_past_len_pinned_ = past_len;
+            cudaMemcpyAsync(d_past_len_, h_past_len_pinned_, sizeof(int64_t), cudaMemcpyHostToDevice, nullptr);
+            *h_token_id_pinned_ = token_id_int;
+            cudaMemcpyAsync(d_token_id_, h_token_id_pinned_, sizeof(int), cudaMemcpyHostToDevice, nullptr);
         }
 
         // 1. Embedding lookup (captured inside graph when capturing)
