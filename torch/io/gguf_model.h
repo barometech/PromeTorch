@@ -1224,9 +1224,9 @@ public:
         int cur = 0;
         bool capturing = false;
 
-        // Non-blocking stream for ALL decode ops (cuBLAS stream bug FIXED)
+        // Blocking stream (non-blocking still broken despite all stream fixes)
         if (!decode_stream_) {
-            cudaStreamCreateWithFlags(&decode_stream_, cudaStreamNonBlocking);
+            cudaStreamCreate(&decode_stream_);
             static bool smem_inited = false;
             if (!smem_inited) {
                 int max_K = static_cast<int>(std::max({H, q_dim, kv_dim, inter}));
