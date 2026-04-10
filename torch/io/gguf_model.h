@@ -1224,10 +1224,10 @@ public:
         int cur = 0;
         bool capturing = false;
 
-        // With --default-stream per-thread, nullptr = per-thread non-blocking stream
-        // No need for separate decode_stream_ — nullptr is capturable and fast
+        // Blocking stream — correct numerics, 50 tok/s
+        // TODO: --default-stream per-thread needs CMake integration
         if (!decode_stream_) {
-            decode_stream_ = nullptr;  // use per-thread default stream
+            cudaStreamCreate(&decode_stream_);
             static bool smem_inited = false;
             if (!smem_inited) {
                 int max_K = static_cast<int>(std::max({H, q_dim, kv_dim, inter}));
@@ -1657,8 +1657,8 @@ public:
                 K, N_gate, N_up, qg.row_stride_bytes, stream);
         } else {
             // Fallback: two separate GEMVs
-            gemv_scratch(qg, layer.ffn_gate, x, y_gate, inter, s);
-            gemv_scratch(qu, layer.ffn_up, x, y_up, inter, s);
+            gemv_scratch(qg, layer.ffn_gate, x, y_gate, inter, stream);
+            gemv_scratch(qu, layer.ffn_up, x, y_up, inter, stream);
         }
     }
 #endif
