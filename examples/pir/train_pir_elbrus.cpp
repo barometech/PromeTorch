@@ -1359,6 +1359,38 @@ int main(int argc, char** argv) {
                 step_start = now;
             }
 
+            // === FUSED GENERATION ===
+            if (step % train_cfg.gen_interval == 0) {
+                std::cout << "\n--- Fused generation at step " << step << " ---" << std::endl;
+                // Create a temporary PIR250M model and copy weights from fused trainer
+                auto gen_model = std::make_shared<PIR250M>(model_cfg);
+                // Copy weights from fused trainer to model state_dict
+                auto sd = gen_model->state_dict();
+                size_t pi = 0;
+                for (auto& kv : sd) {
+                    if (pi < trainer.all_params.size()) {
+                        float* src = trainer.all_params[pi];
+                        float* dst = kv.second.mutable_data_ptr<float>();
+                        int64_t n = kv.second.numel();
+                        memcpy(dst, src, n * sizeof(float));
+                        pi++;
+                    }
+                }
+                gen_model->eval();
+
+                std::vector<std::string> prompts = {"В ", "Он ", "Она ", "The "};
+                for (auto& prompt : prompts) {
+                    std::string generated = gen_model->generate(prompt, train_cfg.gen_tokens, 0.8f);
+                    std::cout << ">>> " << prompt << ": ";
+                    for (char c : generated) {
+                        if ((unsigned char)c >= 32 || c == '\n') std::cout << c;
+                        else std::cout << '?';
+                    }
+                    std::cout << "\n";
+                }
+                std::cout << "--- end generation ---\n" << std::endl;
+            }
+
             // === FUSED CHECKPOINT SAVE ===
             if (step % train_cfg.save_interval == 0) {
                 std::string ckpt_dir = train_cfg.save_dir;
