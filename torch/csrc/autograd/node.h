@@ -239,6 +239,19 @@ protected:
     mutable std::mutex mutex_;
 
 public:
+    // ========================================================================
+    // Graph traversal state (stored IN node, not in unordered_map)
+    // Eliminates hash table overhead during backward pass.
+    // ========================================================================
+    int dependency_count_ = 0;           // how many times this node needs input
+    variable_list accumulated_grad_;     // accumulated gradients from multiple paths
+    bool visited_ = false;               // cycle detection / traversal flag
+
+    void reset_graph_state() {
+        dependency_count_ = 0;
+        accumulated_grad_.clear();
+        visited_ = false;
+    }
     Node() : sequence_nr_(sequence_nr_counter_++) {
         g_nodes_created++;
     }
