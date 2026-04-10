@@ -273,6 +273,13 @@ struct KVCache {
         int64_t num_new = new_k.size(0);
         int64_t kv_dim = new_k.size(1);
         (void)kv_dim;
+        // Bounds check: prevent writing past allocated cache
+        if (seq_len + num_new > max_seq) {
+            std::cerr << "[KVCache] ERROR: seq_len(" << seq_len << ") + num_new(" << num_new
+                      << ") > max_seq(" << max_seq << "). Truncating." << std::endl;
+            num_new = max_seq - seq_len;
+            if (num_new <= 0) return;
+        }
 #ifdef PT_USE_CUDA
         if (use_cuda) {
             at::cuda::launch_kv_cache_write(

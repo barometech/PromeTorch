@@ -529,9 +529,13 @@ private:
                   << " use_cuda=" << model->use_cuda_
                   << " prompt=\"" << prompt.substr(0, 100) << "\"" << std::endl;
 
-        // Tokenize and generate with streaming callback
+        // Auto-apply chat template if prompt doesn't already have one
+        bool needs_template = (prompt.find("<|im_start|>") == std::string::npos &&
+                               prompt.find("<s>") == std::string::npos &&
+                               prompt.find("[INST]") == std::string::npos);
+
         try {
-            generate_streaming(model, model_name, prompt, false /* raw prompt */,
+            generate_streaming(model, model_name, prompt, needs_template,
                               max_tokens, temperature, top_k, top_p, repeat_penalty,
                               stream, writer, t_total_start);
         } catch (const std::exception& e) {
