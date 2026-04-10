@@ -3,6 +3,33 @@
 Полная история разработки проекта. Актуальные инструкции — в `CLAUDE.md`.
 Полный аудит инфраструктуры — в `INFRASTRUCTURE_AUDIT.md`.
 
+## 2026-04-10: FP16 V weight fix: 35 → 47 tok/s (correct output)
+
+### Root cause: qwen3:4b stores attn_v weights as FP16 (type=1), NOT Q4_K
+- GGUF has 217 Q4_K weights + 36 FP16 weights (V projections)
+- Our loader skipped FP16 → V fell back to slow FP32 GEMV (8x more bandwidth)
+- Profiler showed QKV projection = **55% of total time** (11.5ms/token out of 20.8ms)
+- V projection alone was the bottleneck: FP32 GEMV for 1024×2560 matrix
+
+### Fix: FP16 weight support throughout the pipeline
+1. `upload_quant`: handle GGML_TYPE_F16 — cudaMalloc + upload raw FP16 bytes to GPU
+2. `map_quant_mmap`: same for mmap path
+3. New `fp16_gemv_kernel`: warp-per-row dequant-on-the-fly GEMV
+4. `gemv_scratch`: dispatch `launch_fp16_gemv` for FP16 weights
+5. **CRITICAL**: `matmul_q` (prefill path) — added FP16 dispatch. Without this, prefill produced GARBAGE (uninitialized output from lambda with no FP16 branch)
+6. `launch_cublas_hgemv`: added `row_major` parameter for GGUF layout
+7. `QuantizedWeight::is_f16()` method added
+
+### Also fixed
+- **CUDA Graph capture**: `graph_token_id_++` was missing → graph never captured
+- **Per-thread default stream**: tested but 30% slower (35 vs 50 tok/s), reverted
+- Removed dead `__half` code that broke CXX compilation
+
+### Results
+- qwen3:4b: **35 → 47 tok/s** (35% speedup)
+- Output verified correct ("2+2=4")
+- [Quant] 253 weights loaded (217 Q4_K + 36 FP16), 0 float32 fallback
+
 ## 2026-04-09: PROMESERVE 60 → 148 tok/s (2.5x speedup)
 
 ### Results
