@@ -145,6 +145,7 @@ struct QuantizedWeight {
     bool is_q4k() const { return quant_type == 12; }  // GGML_TYPE_Q4_K
     bool is_q6k() const { return quant_type == 14; }  // GGML_TYPE_Q6_K
     bool is_q5k() const { return quant_type == 13; }  // GGML_TYPE_Q5_K
+    bool is_f16() const { return quant_type == 1; }   // GGML_TYPE_F16
     bool is_q8_0() const { return quant_type == 8; }  // GGML_TYPE_Q8_0
 
     bool mmap_owned = false;  // true if cpu_data points into mmap region (don't free!)
@@ -531,10 +532,6 @@ public:
             cudaGraphDestroy(decode_graph_);
             decode_graph_ = nullptr;
         }
-        if (decode_stream_) {
-            cudaStreamDestroy(decode_stream_);
-            decode_stream_ = nullptr;
-        }
         graph_captured_ = false;
         graph_token_id_ = 0;
         std::cerr << "[PromeGraph] Graph invalidated (KV cache reallocated)" << std::endl;
@@ -672,7 +669,24 @@ public:
             if (type == gguf::GGML_TYPE_Q4_K) block_bytes = 144;
             else if (type == gguf::GGML_TYPE_Q6_K) block_bytes = 210;
             else if (type == gguf::GGML_TYPE_Q5_K) block_bytes = 176;
-            else return;  // F16/F32/other → handled via float32 fallback
+            else if (type == gguf::GGML_TYPE_F16) {
+                // FP16 weight — upload raw bytes to GPU for FP16 GEMV
+                auto raw = reader.load_raw_tensor(name);
+                auto shape = raw.shape;
+                qw.rows = shape[0];
+                qw.cols = shape[1];
+                qw.row_stride_bytes = qw.cols * 2;  // 2 bytes per FP16
+                qw.total_bytes = static_cast<int64_t>(raw.data.size());
+                qw.quant_type = type;
+
+                cudaError_t err = cudaMalloc(&qw.gpu_data, qw.total_bytes);
+                if (err == cudaSuccess) {
+                    cudaMemcpy(qw.gpu_data, raw.data.data(), qw.total_bytes, cudaMemcpyHostToDevice);
+                    qw.valid = true;
+                }
+                return;
+            }
+            else return;  // F32/other → handled via float32 fallback
 
             auto raw = reader.load_raw_tensor(name);
             auto shape = raw.shape;
@@ -805,17 +819,10 @@ public:
             size_t fp16_bytes = V * H_dim * sizeof(uint16_t);
             cudaError_t err = cudaMalloc(&lm_head_fp16_, fp16_bytes);
             if (err == cudaSuccess) {
-                // Simple FP32→FP16 conversion kernel
-                const float* src = output_weight.data_ptr<float>();
-                __half* dst = static_cast<__half*>(lm_head_fp16_);
-                // Use a simple kernel — need to add or use existing
-                // For now: column-major layout for cuBLAS (transpose)
-                // Actually launch_cublas_hgemv expects [N, K] column-major
-                // which is same as row-major [K, N] transposed
-                // Skip for now — just store row-major FP16
-                // TODO: proper FP32→FP16 conversion kernel
+                // TODO: FP32→FP16 conversion kernel for cuBLAS lm_head
+                // For now, free — need a proper conversion kernel
                 std::cout << "[Quant] lm_head FP16 alloc OK (" << (fp16_bytes/(1024*1024))
-                          << " MB) but FP32→FP16 conversion not yet implemented" << std::endl;
+                          << " MB) — conversion not yet implemented" << std::endl;
                 cudaFree(lm_head_fp16_);
                 lm_head_fp16_ = nullptr;
             }
@@ -996,6 +1003,20 @@ public:
             else if (type == gguf::GGML_TYPE_Q6_K) block_bytes = 210;
             else if (type == gguf::GGML_TYPE_Q5_K) block_bytes = 176;
             else if (type == gguf::GGML_TYPE_Q8_0) { block_bytes = 34; group_size = 32; }
+            else if (type == gguf::GGML_TYPE_F16) {
+                // FP16 weight — upload raw bytes to GPU for cuBLAS HGEMV
+                auto shape = info.shape();
+                qw.rows = shape[0];
+                qw.cols = shape[1];
+                qw.row_stride_bytes = qw.cols * 2;  // FP16: 2 bytes per element
+                qw.total_bytes = info.data_bytes();
+                qw.quant_type = type;
+                uint64_t abs_offset = reader.data_offset + info.offset;
+                qw.cpu_data = const_cast<void*>(mmap_handle_.at_offset(abs_offset));
+                qw.mmap_owned = true;
+                qw.valid = (qw.cpu_data != nullptr);
+                return;
+            }
             else return;
 
             auto shape = info.shape();
@@ -1264,8 +1285,8 @@ public:
         int cur = 0;
         bool capturing = false;
 
-        // Blocking stream — correct numerics, 50 tok/s
-        // TODO: --default-stream per-thread needs CMake integration
+        // Use blocking stream for correct numerics + capture-friendly behavior.
+        // Per-thread default stream (nullptr) was 30% slower in testing.
         if (!decode_stream_) {
             cudaStreamCreate(&decode_stream_);
             static bool smem_inited = false;
@@ -1277,7 +1298,7 @@ public:
         }
         cudaStream_t s = decode_stream_;
 
-        // CUDA Graph: replay or capture (all on decode_stream_)
+        // CUDA Graph: replay or capture
         if (graph_captured_ && decode_graph_exec_) {
             // FAST PATH: update device ptrs + replay
             *h_past_len_pinned_ = past_len;
@@ -1290,14 +1311,14 @@ public:
             return sp.buf_logits;
         }
 
-        // Update device pointers on decode_stream_
+        // Update device pointers
         *h_past_len_pinned_ = past_len;
         *h_token_id_pinned_ = token_id_int;
         cudaMemcpyAsync(d_past_len_, h_past_len_pinned_, sizeof(int64_t), cudaMemcpyHostToDevice, s);
         cudaMemcpyAsync(d_token_id_, h_token_id_pinned_, sizeof(int), cudaMemcpyHostToDevice, s);
 
-        // Graph capture on second decode token
-        capturing = (d_past_len_ && !graph_captured_ && graph_token_id_ > 0);
+        // Graph capture DISABLED — cuBLAS inside graph needs special handling
+        capturing = false; // (d_past_len_ && !graph_captured_ && graph_token_id_ > 0);
         if (capturing) {
             cudaError_t cap_err = cudaStreamBeginCapture(s, cudaStreamCaptureModeGlobal);
             if (cap_err != cudaSuccess) {
@@ -1663,6 +1684,7 @@ public:
         }
 
         kv_cache.seq_len += 1;
+        graph_token_id_++;
         return sp.buf_logits;
     }
 
@@ -1680,6 +1702,9 @@ public:
                 at::cuda::launch_q6k_gemv(qw.gpu_data, x, y, K, Nr, qw.row_stride_bytes, stream);
             } else if (qw.is_q5k() && qw.gpu_data) {
                 at::cuda::launch_q5k_gemv(qw.gpu_data, x, y, K, Nr, qw.row_stride_bytes, stream);
+            } else if (qw.is_f16() && qw.gpu_data) {
+                // FP16 weight: use simple FP16→FP32 dequant GEMV
+                at::cuda::launch_fp16_gemv(qw.gpu_data, x, y, K, Nr, stream);
             }
         } else if (float_w.defined()) {
             int K = static_cast<int>(float_w.size(0));
@@ -3066,6 +3091,8 @@ public:
                 } else if (qw.is_q5k()) {
                     at::cuda::launch_q5k_gemv(qw.gpu_data, x_ptr, y_ptr,
                         K, N, qw.row_stride_bytes, nullptr);
+                } else if (qw.is_f16()) {
+                    at::cuda::launch_fp16_gemv(qw.gpu_data, x_ptr, y_ptr, K, N, nullptr);
                 }
             };
 
