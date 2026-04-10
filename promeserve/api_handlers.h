@@ -26,6 +26,7 @@
 #include <chrono>
 #include <cmath>
 #include <algorithm>
+#include <fstream>
 #include <iostream>
 #include <mutex>
 
@@ -371,11 +372,30 @@ public:
 
 private:
     // ========================================================================
-    // GET / — health check
+    // GET / — serve Web UI (index.html) or health check
     // ========================================================================
-    HttpResponse handle_health(const HttpRequest&) {
+    HttpResponse handle_health(const HttpRequest& req) {
         HttpResponse resp;
         resp.status = 200;
+
+        // Try to serve index.html from web/ directory
+        std::vector<std::string> paths = {
+            "promeserve/web/index.html",
+            "../promeserve/web/index.html",
+            "web/index.html"
+        };
+        for (const auto& path : paths) {
+            std::ifstream f(path);
+            if (f.good()) {
+                std::string html((std::istreambuf_iterator<char>(f)),
+                                  std::istreambuf_iterator<char>());
+                resp.body = html;
+                resp.headers["Content-Type"] = "text/html; charset=utf-8";
+                return resp;
+            }
+        }
+
+        // Fallback: plain text health check
         resp.body = "PromeServe is running";
         resp.headers["Content-Type"] = "text/plain";
         return resp;
