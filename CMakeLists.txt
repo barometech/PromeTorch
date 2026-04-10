@@ -187,6 +187,8 @@ if(PT_USE_CUDA)
     set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
     set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Wno-deprecated-gpu-targets")
     set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --use_fast_math -Xptxas -O3,-v")
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --default-stream per-thread")
+    add_definitions(-DCUDA_API_PER_THREAD_DEFAULT_STREAM)
 
     # Host compiler flags for CUDA (pass MSVC flags through -Xcompiler)
     if(MSVC)
