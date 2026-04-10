@@ -1215,23 +1215,10 @@ public:
 
         // 2. CUDA Graph: replay or capture
         if (graph_captured_ && decode_graph_exec_) {
-            // FAST PATH: sync embedding (default) → decode, update ptrs, replay
-            cudaEvent_t emb_done;
-            cudaEventCreate(&emb_done);
-            cudaEventRecord(emb_done, nullptr);
-            cudaStreamWaitEvent(decode_stream_, emb_done, 0);
-            cudaEventDestroy(emb_done);
+            // FAST PATH: blocking stream auto-syncs with default — no events needed
             cudaMemcpyAsync(d_past_len_, &past_len, sizeof(int64_t), cudaMemcpyHostToDevice, decode_stream_);
             cudaMemcpyAsync(d_token_id_, &token_id_int, sizeof(int), cudaMemcpyHostToDevice, decode_stream_);
             cudaGraphLaunch(decode_graph_exec_, decode_stream_);
-            // CRITICAL: sync decode_stream → default stream
-            // Non-blocking stream does NOT auto-sync with default!
-            // final_norm + output_proj on default stream need graph's buf_x[cur]
-            cudaEvent_t graph_done_ev;
-            cudaEventCreate(&graph_done_ev);
-            cudaEventRecord(graph_done_ev, decode_stream_);
-            cudaStreamWaitEvent(nullptr, graph_done_ev, 0);
-            cudaEventDestroy(graph_done_ev);
             cur = config.num_layers % 2 == 0 ? 0 : 1;
             goto graph_done;
         }
@@ -1261,35 +1248,18 @@ public:
         }
 
         if (capturing) {
-            // Pre-init smem attributes once
             static bool smem_inited = false;
             if (!smem_inited) {
                 int max_K = static_cast<int>(std::max({H, q_dim, kv_dim, inter}));
                 at::cuda::init_cuda_kernel_smem_attributes(max_K, static_cast<int>(inter));
                 smem_inited = true;
             }
-            // Clear any lingering CUDA errors before capture
             cudaGetLastError();
-            // Non-blocking stream for capture (blocking stream conflicts with default)
-            if (!decode_stream_) {
-                cudaError_t se = cudaStreamCreateWithFlags(&decode_stream_, cudaStreamNonBlocking);
-                if (se != cudaSuccess) {
-                    std::cerr << "[PromeGraph] StreamCreate FAILED: " << cudaGetErrorString(se) << std::endl;
-                    capturing = false;
-                    goto skip_capture;
-                }
-            }
-            // Sync prefill (default stream) → decode_stream before capture
-            // Non-blocking stream doesn't see default stream's KV cache writes
-            cudaEvent_t prefill_done;
-            cudaEventCreate(&prefill_done);
-            cudaEventRecord(prefill_done, nullptr);  // mark default stream done
-            cudaStreamWaitEvent(decode_stream_, prefill_done, 0);  // decode waits
-            cudaEventDestroy(prefill_done);
-            // Device pointers on decode_stream_
+            // BLOCKING stream — auto-syncs with default, correct numerics
+            if (!decode_stream_) cudaStreamCreate(&decode_stream_);
+            // Set device pointers before capture (blocking stream waits for default)
             cudaMemcpyAsync(d_past_len_, &past_len, sizeof(int64_t), cudaMemcpyHostToDevice, decode_stream_);
             cudaMemcpyAsync(d_token_id_, &token_id_int, sizeof(int), cudaMemcpyHostToDevice, decode_stream_);
-            cudaStreamSynchronize(decode_stream_);
             // Begin capture
             cudaError_t cap_err = cudaStreamBeginCapture(decode_stream_, cudaStreamCaptureModeThreadLocal);
             if (cap_err != cudaSuccess) {
@@ -1301,7 +1271,6 @@ public:
                 s = decode_stream_;
             }
         }
-        skip_capture:
         if (!capturing) {
             // Non-graph path: update device pointers normally
             cudaMemcpyAsync(d_past_len_, &past_len, sizeof(int64_t), cudaMemcpyHostToDevice, nullptr);
@@ -1318,15 +1287,6 @@ public:
         }
         PROF_END(profiler, "embedding");
 
-        // DEBUG: dump buf_x[0] after embedding (skip during capture — cudaMemcpy illegal)
-        if (!capturing) {
-            float dbg[4];
-            cudaDeviceSynchronize();
-            cudaMemcpy(dbg, sp.buf_x[0].data_ptr<float>(), 4*sizeof(float), cudaMemcpyDeviceToHost);
-            std::cerr << "[DBG emb] token=" << token_id_int << " past=" << past_len
-                      << " x[0..3]=" << dbg[0] << "," << dbg[1] << "," << dbg[2] << "," << dbg[3]
-                      << (graph_captured_ ? " REPLAY" : " NORMAL") << std::endl;
-        }
 
         // Scale embeddings (Gemma)
         if (config.scale_embeddings) {
@@ -1621,13 +1581,8 @@ public:
                 graph_captured_ = true;
                 std::cout << "[PromeGraph] Captured " << config.num_layers << " layers decode graph!" << std::endl;
                 // RE-EXECUTE: capture didn't execute kernels, so KV cache is empty.
+                // Blocking stream auto-syncs with default — no event needed.
                 cudaGraphLaunch(decode_graph_exec_, decode_stream_);
-                // Sync decode → default for final_norm + output_proj
-                cudaEvent_t re_ev;
-                cudaEventCreate(&re_ev);
-                cudaEventRecord(re_ev, decode_stream_);
-                cudaStreamWaitEvent(nullptr, re_ev, 0);
-                cudaEventDestroy(re_ev);
             } else {
                 std::cerr << "[PromeGraph] Capture failed: " << cudaGetErrorString(err) << std::endl;
                 decode_graph_ = nullptr;
@@ -1636,15 +1591,6 @@ public:
         }
 graph_done:
 
-        // DEBUG: dump buf_x[cur] AFTER all layers (graph or normal)
-        {
-            float dbg[4];
-            cudaDeviceSynchronize();
-            cudaMemcpy(dbg, sp.buf_x[cur].data_ptr<float>(), 4*sizeof(float), cudaMemcpyDeviceToHost);
-            std::cerr << "[DBG out] token=" << token_id_int << " past=" << past_len << " cur=" << cur
-                      << " x[0..3]=" << dbg[0] << "," << dbg[1] << "," << dbg[2] << "," << dbg[3]
-                      << (graph_captured_ ? " GRAPH" : " NORMAL") << std::endl;
-        }
 
         // 3. Final RMS norm: buf_x[cur] → buf_normed
         PROF_BEGIN(profiler, "final_norm");
