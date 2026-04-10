@@ -1224,10 +1224,9 @@ public:
         int cur = 0;
         bool capturing = false;
 
-        // Dedicated BLOCKING stream for ALL decode ops
-        // NON-BLOCKING stream gives WRONG numerical results (empirically verified)
+        // Non-blocking stream for ALL decode ops (cuBLAS stream bug FIXED)
         if (!decode_stream_) {
-            cudaStreamCreate(&decode_stream_);  // BLOCKING — correct numerics
+            cudaStreamCreateWithFlags(&decode_stream_, cudaStreamNonBlocking);
             static bool smem_inited = false;
             if (!smem_inited) {
                 int max_K = static_cast<int>(std::max({H, q_dim, kv_dim, inter}));
@@ -1329,11 +1328,11 @@ public:
 
                 PROF_BEGIN(profiler, "qkv_proj");
                 gemv_scratch(layer.q_attn_q, layer.attn_q, normed_ptr,
-                            sp.buf_q.mutable_data_ptr<float>(), q_dim);
+                            sp.buf_q.mutable_data_ptr<float>(), q_dim, s);
                 gemv_scratch(layer.q_attn_k, layer.attn_k, normed_ptr,
-                            sp.buf_k.mutable_data_ptr<float>(), kv_dim);
+                            sp.buf_k.mutable_data_ptr<float>(), kv_dim, s);
                 gemv_scratch(layer.q_attn_v, layer.attn_v, normed_ptr,
-                            sp.buf_v.mutable_data_ptr<float>(), kv_dim);
+                            sp.buf_v.mutable_data_ptr<float>(), kv_dim, s);
                 PROF_END(profiler, "qkv_proj");
             }
 
@@ -1454,7 +1453,7 @@ public:
                 PROF_BEGIN(profiler, "attn_output_proj");
                 gemv_scratch(layer.q_attn_output, layer.attn_output,
                             sp.buf_attn.data_ptr<float>(),
-                            sp.buf_attn_proj.mutable_data_ptr<float>(), H);
+                            sp.buf_attn_proj.mutable_data_ptr<float>(), H, s);
                 PROF_END(profiler, "attn_output_proj");
 
                 if (layer.post_attention_norm.defined()) {
@@ -1508,7 +1507,7 @@ public:
                 PROF_BEGIN(profiler, "ffn_gate_up");
                 fused_gate_up_gemv(layer, normed_ptr,
                                   sp.buf_gate.mutable_data_ptr<float>(),
-                                  sp.buf_up.mutable_data_ptr<float>(), inter);
+                                  sp.buf_up.mutable_data_ptr<float>(), inter, s);
                 PROF_END(profiler, "ffn_gate_up");
             }
 
@@ -1545,7 +1544,7 @@ public:
                 PROF_BEGIN(profiler, "ffn_down");
                 gemv_scratch(layer.q_ffn_down, layer.ffn_down,
                             sp.buf_silu.data_ptr<float>(),
-                            sp.buf_down.mutable_data_ptr<float>(), H);
+                            sp.buf_down.mutable_data_ptr<float>(), H, s);
                 PROF_END(profiler, "ffn_down");
 
                 if (layer.post_ffw_norm.defined()) {
@@ -1583,7 +1582,7 @@ public:
                     K_out, N_out, q_output_weight.row_stride_bytes, s);
             } else {
                 gemv_scratch(q_output_weight, output_weight, sp.buf_normed.data_ptr<float>(),
-                    sp.buf_logits.mutable_data_ptr<float>(), config.vocab_size);
+                    sp.buf_logits.mutable_data_ptr<float>(), config.vocab_size, s);
             }
         } else if (output_weight.defined()) {
             at::cuda::launch_gemv(output_weight.data_ptr<float>(),
@@ -1619,21 +1618,22 @@ public:
     // GEMV helper for scratch pool: dispatch persistent > quant > float32
     // Uses persistent kernel for Q4_K to reduce launch overhead (grid-stride over rows).
     void gemv_scratch(const QuantizedWeight& qw, const Tensor& float_w,
-                      const float* x, float* y, int64_t N) {
+                      const float* x, float* y, int64_t N,
+                      cudaStream_t stream = nullptr) {
         if (use_quant_gemv_ && qw.valid) {
             int K = static_cast<int>(qw.cols);
             int Nr = static_cast<int>(qw.rows);
             if (qw.is_q4k() && qw.gpu_data) {
-                at::cuda::launch_q4km_persistent_gemv(qw.gpu_data, x, y, K, Nr, qw.row_stride_bytes, nullptr);
+                at::cuda::launch_q4km_persistent_gemv(qw.gpu_data, x, y, K, Nr, qw.row_stride_bytes, stream);
             } else if (qw.is_q6k() && qw.gpu_data) {
-                at::cuda::launch_q6k_gemv(qw.gpu_data, x, y, K, Nr, qw.row_stride_bytes, nullptr);
+                at::cuda::launch_q6k_gemv(qw.gpu_data, x, y, K, Nr, qw.row_stride_bytes, stream);
             } else if (qw.is_q5k() && qw.gpu_data) {
-                at::cuda::launch_q5k_gemv(qw.gpu_data, x, y, K, Nr, qw.row_stride_bytes, nullptr);
+                at::cuda::launch_q5k_gemv(qw.gpu_data, x, y, K, Nr, qw.row_stride_bytes, stream);
             }
         } else if (float_w.defined()) {
             int K = static_cast<int>(float_w.size(0));
             int Ni = static_cast<int>(float_w.size(1));
-            at::cuda::launch_inference_gemv(x, float_w.data_ptr<float>(), y, K, Ni, nullptr);
+            at::cuda::launch_inference_gemv(x, float_w.data_ptr<float>(), y, K, Ni, stream);
         }
     }
 
@@ -1641,7 +1641,7 @@ public:
     // Saves one kernel launch per layer (~28 launches saved for 28-layer model).
     void fused_gate_up_gemv(const TransformerLayer& layer,
                             const float* x, float* y_gate, float* y_up,
-                            int64_t inter) {
+                            int64_t inter, cudaStream_t stream = nullptr) {
         const auto& qg = layer.q_ffn_gate;
         const auto& qu = layer.q_ffn_up;
         // Both must be Q4_K with same K and row_stride for fused kernel
@@ -1653,11 +1653,11 @@ public:
             int N_up = static_cast<int>(qu.rows);
             at::cuda::launch_q4km_fused_gate_up_gemv(
                 qg.gpu_data, qu.gpu_data, x, y_gate, y_up,
-                K, N_gate, N_up, qg.row_stride_bytes, nullptr);
+                K, N_gate, N_up, qg.row_stride_bytes, stream);
         } else {
             // Fallback: two separate GEMVs
-            gemv_scratch(qg, layer.ffn_gate, x, y_gate, inter);
-            gemv_scratch(qu, layer.ffn_up, x, y_up, inter);
+            gemv_scratch(qg, layer.ffn_gate, x, y_gate, inter, s);
+            gemv_scratch(qu, layer.ffn_up, x, y_up, inter, s);
         }
     }
 #endif
