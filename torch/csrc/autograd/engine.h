@@ -7,8 +7,6 @@
 #include "aten/src/ATen/core/TensorFactory.h"
 #include "aten/src/ATen/native/cpu/hot_loops.h"
 #include <queue>
-#include <unordered_map>
-#include <unordered_set>
 #include <vector>
 #include <memory>
 #include <functional>
@@ -25,36 +23,24 @@ using at::Tensor;
 // ============================================================================
 
 struct GraphTask {
-    // The output edges where we start backpropagation
     std::vector<Edge> output_edges;
-
-    // Gradients to propagate from outputs
     variable_list output_grads;
-
-    // Whether to retain the computation graph after backward
     bool retain_graph = false;
-
-    // Whether to create graph of backward pass (for higher-order derivatives)
     bool create_graph = false;
 
-    // Keep track of which nodes we've visited for cycle detection
-    std::unordered_set<Node*> visited;
+    // All nodes visited during this backward pass (for cleanup)
+    std::vector<Node*> all_nodes;
 
-    // Dependencies: how many times each node needs to be called
-    std::unordered_map<Node*, int> dependencies;
-
-    // Accumulated gradients for each node
-    std::unordered_map<Node*, variable_list> accumulated_grads;
-
-    // Reset for reuse (avoids re-creating hash maps = fewer mallocs)
     void reset() {
         output_edges.clear();
         output_grads.clear();
         retain_graph = false;
         create_graph = false;
-        visited.clear();
-        dependencies.clear();
-        accumulated_grads.clear();
+        // Reset graph state on all visited nodes
+        for (Node* n : all_nodes) {
+            n->reset_graph_state();
+        }
+        all_nodes.clear();
     }
 };
 
@@ -173,13 +159,19 @@ inline void Engine::compute_dependencies(
     GraphTask& task,
     const edge_list& roots
 ) {
-    // BFS to find all reachable nodes and count incoming edges
+    // BFS using Node-internal state (no hash maps!)
     std::queue<Node*> queue;
 
     for (const auto& root : roots) {
         if (root.function) {
-            queue.push(root.function.get());
-            task.visited.insert(root.function.get());
+            Node* n = root.function.get();
+            if (!n->visited_) {
+                n->visited_ = true;
+                n->dependency_count_ = 0;
+                n->accumulated_grad_.clear();
+                task.all_nodes.push_back(n);
+                queue.push(n);
+            }
         }
     }
 
@@ -189,11 +181,14 @@ inline void Engine::compute_dependencies(
 
         for (const auto& edge : fn->next_edges()) {
             if (edge.function) {
-                task.dependencies[edge.function.get()]++;
+                Node* next = edge.function.get();
+                next->dependency_count_++;
 
-                if (task.visited.find(edge.function.get()) == task.visited.end()) {
-                    task.visited.insert(edge.function.get());
-                    queue.push(edge.function.get());
+                if (!next->visited_) {
+                    next->visited_ = true;
+                    next->accumulated_grad_.clear();
+                    task.all_nodes.push_back(next);
+                    queue.push(next);
                 }
             }
         }
@@ -227,7 +222,7 @@ inline void Engine::accumulate_grad(
         return;
     }
 
-    auto& grads = task.accumulated_grads[node];
+    auto& grads = node->accumulated_grad_;
     if (grads.empty()) {
         grads.resize(node->num_inputs());
     }
@@ -258,9 +253,8 @@ inline void Engine::accumulate_grad(
     }
 }
 
-inline bool Engine::is_ready(GraphTask& task, Node* node) {
-    auto it = task.dependencies.find(node);
-    return it == task.dependencies.end() || it->second == 0;
+inline bool Engine::is_ready(GraphTask& /*task*/, Node* node) {
+    return node->dependency_count_ <= 0;
 }
 
 inline void Engine::execute_node(
@@ -298,17 +292,14 @@ inline void Engine::execute_node(
             accumulate_grad(task, edge.function.get(), edge.input_nr, grads[i]);
         }
 
-        // Decrement dependency count
-        auto& dep = task.dependencies[edge.function.get()];
-        dep--;
+        // Decrement dependency count (Node-internal, no hash lookup!)
+        Node* next_node = edge.function.get();
+        next_node->dependency_count_--;
 
         // If all dependencies satisfied, add to ready queue
-        if (dep == 0) {
-            auto& accumulated = task.accumulated_grads[edge.function.get()];
-            // Note: Don't resize here - accumulate_grad already sized it correctly
-            // and we don't want to lose the accumulated gradients
-            ready_queue.emplace(edge.function, std::move(accumulated));
-            task.accumulated_grads.erase(edge.function.get());
+        if (next_node->dependency_count_ == 0) {
+            ready_queue.emplace(edge.function, std::move(next_node->accumulated_grad_));
+            next_node->accumulated_grad_.clear();
         }
     }
 
@@ -346,10 +337,8 @@ inline variable_list Engine::execute(
             accumulate_grad(task, fn.get(), roots[i].input_nr, grad_outputs[i]);
 
             if (is_ready(task, fn.get())) {
-                // Take the accumulated gradients (already sized correctly by accumulate_grad)
-                auto& accumulated = task.accumulated_grads[fn.get()];
-                ready_queue.emplace(fn, std::move(accumulated));
-                task.accumulated_grads.erase(fn.get());
+                ready_queue.emplace(fn, std::move(fn->accumulated_grad_));
+                fn->accumulated_grad_.clear();
             }
         }
     }
@@ -361,27 +350,22 @@ inline variable_list Engine::execute(
         execute_node(task, node_task, ready_queue);
     }
 
-    // Collect results for requested inputs
+    // Collect results for requested inputs (from Node-internal state)
     variable_list result;
     if (!inputs.empty()) {
         result.reserve(inputs.size());
         for (const auto& input : inputs) {
-            auto it = task.accumulated_grads.find(input.function.get());
-            if (it != task.accumulated_grads.end() && input.input_nr < it->second.size()) {
-                result.push_back(it->second[input.input_nr]);
+            Node* fn = input.function.get();
+            if (fn && input.input_nr < fn->accumulated_grad_.size()) {
+                result.push_back(fn->accumulated_grad_[input.input_nr]);
             } else {
                 result.push_back(Tensor());
             }
         }
     }
 
-    // CRITICAL FIX: Clear ALL remaining accumulated gradients
-    // This prevents memory leaks from unreferenced gradient tensors
-    // that were accumulated but never consumed (e.g., for unused inputs)
-    task.accumulated_grads.clear();
-
-    // Note: visited and dependencies are cleared in task.reset() on next call.
-    // We don't clear here to preserve allocated bucket arrays for reuse.
+    // Clean up Node-internal state for all visited nodes
+    task.reset();
 
     return result;
 }
