@@ -1223,78 +1223,49 @@ public:
         int token_id_int = static_cast<int>(token_id);
         int cur = 0;
         bool capturing = false;
-        cudaStream_t s = nullptr;
 
-        // 2. CUDA Graph: ALL on default stream (llama.cpp approach)
-        if (graph_captured_ && decode_graph_exec_) {
-            // FAST PATH: update device ptrs + replay entire model on default stream
-            *h_past_len_pinned_ = past_len;
-            cudaMemcpyAsync(d_past_len_, h_past_len_pinned_, sizeof(int64_t), cudaMemcpyHostToDevice, nullptr);
-            *h_token_id_pinned_ = token_id_int;
-            cudaMemcpyAsync(d_token_id_, h_token_id_pinned_, sizeof(int), cudaMemcpyHostToDevice, nullptr);
-            cudaGraphLaunch(decode_graph_exec_, nullptr);
-            // Graph includes final_norm + output_proj → logits ready in buf_logits
-            kv_cache.seq_len += 1;
-            return sp.buf_logits;
-        }
-
-        // Graph capture: on default stream with ThreadLocal mode
-        capturing = (d_past_len_ && !graph_captured_ && graph_token_id_ > 0);
-        if (capturing) {
+        // Dedicated BLOCKING stream for ALL decode ops
+        // NON-BLOCKING stream gives WRONG numerical results (empirically verified)
+        if (!decode_stream_) {
+            cudaStreamCreate(&decode_stream_);  // BLOCKING — correct numerics
             static bool smem_inited = false;
             if (!smem_inited) {
                 int max_K = static_cast<int>(std::max({H, q_dim, kv_dim, inter}));
                 at::cuda::init_cuda_kernel_smem_attributes(max_K, static_cast<int>(inter));
                 smem_inited = true;
             }
-            cudaGetLastError();
-            // Default stream + ThreadLocal: captures only this thread's API calls
+        }
+        cudaStream_t s = decode_stream_;
+
+        // CUDA Graph: replay or capture (all on decode_stream_)
+        if (graph_captured_ && decode_graph_exec_) {
+            // FAST PATH: update device ptrs + replay
             *h_past_len_pinned_ = past_len;
-            cudaMemcpyAsync(d_past_len_, h_past_len_pinned_, sizeof(int64_t), cudaMemcpyHostToDevice, nullptr);
             *h_token_id_pinned_ = token_id_int;
-            cudaMemcpyAsync(d_token_id_, h_token_id_pinned_, sizeof(int), cudaMemcpyHostToDevice, nullptr);
-            cudaError_t cap_err = cudaStreamBeginCapture(nullptr, cudaStreamCaptureModeThreadLocal);
+            cudaMemcpyAsync(d_past_len_, h_past_len_pinned_, sizeof(int64_t), cudaMemcpyHostToDevice, s);
+            cudaMemcpyAsync(d_token_id_, h_token_id_pinned_, sizeof(int), cudaMemcpyHostToDevice, s);
+            cudaGraphLaunch(decode_graph_exec_, s);
+            cudaStreamSynchronize(s);  // CRITICAL: wait before CPU reads logits
+            kv_cache.seq_len += 1;
+            return sp.buf_logits;
+        }
+
+        // Update device pointers on decode_stream_
+        *h_past_len_pinned_ = past_len;
+        *h_token_id_pinned_ = token_id_int;
+        cudaMemcpyAsync(d_past_len_, h_past_len_pinned_, sizeof(int64_t), cudaMemcpyHostToDevice, s);
+        cudaMemcpyAsync(d_token_id_, h_token_id_pinned_, sizeof(int), cudaMemcpyHostToDevice, s);
+
+        // Graph capture on second decode token
+        capturing = (d_past_len_ && !graph_captured_ && graph_token_id_ > 0);
+        if (capturing) {
+            cudaError_t cap_err = cudaStreamBeginCapture(s, cudaStreamCaptureModeGlobal);
             if (cap_err != cudaSuccess) {
                 std::cerr << "[PromeGraph] BeginCapture FAILED: "
                           << cudaGetErrorString(cap_err) << std::endl;
                 cudaGetLastError();
                 capturing = false;
             }
-            // s stays nullptr — capture on default stream
-        }
-
-        if (capturing) {
-            static bool smem_inited = false;
-            if (!smem_inited) {
-                int max_K = static_cast<int>(std::max({H, q_dim, kv_dim, inter}));
-                at::cuda::init_cuda_kernel_smem_attributes(max_K, static_cast<int>(inter));
-                smem_inited = true;
-            }
-            cudaGetLastError();
-            // BLOCKING stream — auto-syncs with default, correct numerics
-            if (!decode_stream_) cudaStreamCreate(&decode_stream_);
-            // Set device pointers before capture (blocking stream waits for default)
-            *h_past_len_pinned_ = past_len;
-            cudaMemcpyAsync(d_past_len_, h_past_len_pinned_, sizeof(int64_t), cudaMemcpyHostToDevice, decode_stream_);
-            *h_token_id_pinned_ = token_id_int;
-            cudaMemcpyAsync(d_token_id_, h_token_id_pinned_, sizeof(int), cudaMemcpyHostToDevice, decode_stream_);
-            // Begin capture
-            cudaError_t cap_err = cudaStreamBeginCapture(decode_stream_, cudaStreamCaptureModeThreadLocal);
-            if (cap_err != cudaSuccess) {
-                std::cerr << "[PromeGraph] BeginCapture FAILED: " << cudaGetErrorString(cap_err)
-                          << " (code " << (int)cap_err << ")" << std::endl;
-                cudaGetLastError();
-                capturing = false;
-            } else {
-                s = decode_stream_;
-            }
-        }
-        if (!capturing) {
-            // Non-graph path: update device pointers normally
-            *h_past_len_pinned_ = past_len;
-            cudaMemcpyAsync(d_past_len_, h_past_len_pinned_, sizeof(int64_t), cudaMemcpyHostToDevice, nullptr);
-            *h_token_id_pinned_ = token_id_int;
-            cudaMemcpyAsync(d_token_id_, h_token_id_pinned_, sizeof(int), cudaMemcpyHostToDevice, nullptr);
         }
 
         // 1. Embedding lookup (captured inside graph when capturing)
@@ -1621,20 +1592,24 @@ public:
         }
         PROF_END(profiler, "output_proj");
 
-        // End CUDA Graph capture (graph now includes embedding → logits)
+        // End CUDA Graph capture (on decode_stream_, NOT nullptr!)
         if (capturing) {
-            cudaStreamEndCapture(nullptr, &decode_graph_);
+            cudaStreamEndCapture(s, &decode_graph_);
             cudaError_t err = cudaGraphInstantiate(&decode_graph_exec_, decode_graph_, NULL, NULL, 0);
             if (err == cudaSuccess) {
                 graph_captured_ = true;
-                std::cout << "[PromeGraph] Captured full decode graph (embedding → logits)!" << std::endl;
-                // RE-EXECUTE: capture didn't run kernels, launch once to fill KV + compute logits
-                cudaGraphLaunch(decode_graph_exec_, nullptr);
+                std::cout << "[PromeGraph] Captured full decode graph!" << std::endl;
+                // RE-EXECUTE: capture didn't run kernels
+                cudaGraphLaunch(decode_graph_exec_, s);
+                cudaStreamSynchronize(s);
             } else {
                 std::cerr << "[PromeGraph] Capture failed: " << cudaGetErrorString(err) << std::endl;
                 decode_graph_ = nullptr;
                 decode_graph_exec_ = nullptr;
             }
+        } else {
+            // Normal path: sync decode_stream before CPU reads logits
+            cudaStreamSynchronize(s);
         }
 
         kv_cache.seq_len += 1;
