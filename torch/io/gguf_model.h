@@ -1236,8 +1236,29 @@ public:
             goto graph_done;
         }
 
-        cudaDeviceSynchronize();  // FULL sync — ensure ALL prior GPU work visible
-        s = decode_stream_;
+        // CUDA Graph on BLOCKING stream (non-blocking gives wrong results!)
+        capturing = (d_past_len_ && !graph_captured_ && graph_token_id_ > 0);
+        if (capturing) {
+            static bool smem_inited = false;
+            if (!smem_inited) {
+                int max_K = static_cast<int>(std::max({H, q_dim, kv_dim, inter}));
+                at::cuda::init_cuda_kernel_smem_attributes(max_K, static_cast<int>(inter));
+                smem_inited = true;
+            }
+            if (!decode_stream_) cudaStreamCreate(&decode_stream_);  // BLOCKING stream!
+            cudaMemcpyAsync(d_past_len_, &past_len, sizeof(int64_t), cudaMemcpyHostToDevice, decode_stream_);
+            cudaMemcpyAsync(d_token_id_, &token_id_int, sizeof(int), cudaMemcpyHostToDevice, decode_stream_);
+            cudaStreamSynchronize(decode_stream_);
+            cudaError_t cap_err = cudaStreamBeginCapture(decode_stream_, cudaStreamCaptureModeThreadLocal);
+            if (cap_err != cudaSuccess) {
+                std::cerr << "[PromeGraph] BeginCapture FAILED on blocking stream: "
+                          << cudaGetErrorString(cap_err) << std::endl;
+                cudaGetLastError();
+                capturing = false;
+            } else {
+                s = decode_stream_;
+            }
+        }
 
         if (capturing) {
             // Pre-init smem attributes once

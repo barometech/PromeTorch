@@ -673,7 +673,8 @@ private:
         // Reset KV cache
         model->kv_cache.reset();
         int64_t kv_dim = model->config.num_kv_heads * model->config.head_dim;
-        int64_t max_total_seq = static_cast<int64_t>(max_tokens) + 2048;
+        // Fixed KV cache size to avoid reallocation (which invalidates CUDA Graph)
+        int64_t max_total_seq = 4096;
         if (max_total_seq > model->config.context_length)
             max_total_seq = model->config.context_length;
 
@@ -893,7 +894,8 @@ private:
         // Reset KV cache
         model->kv_cache.reset();
         int64_t kv_dim = model->config.num_kv_heads * model->config.head_dim;
-        int64_t max_total_seq = static_cast<int64_t>(max_tokens) + 2048;
+        // Fixed KV cache size to avoid reallocation (which invalidates CUDA Graph)
+        int64_t max_total_seq = 4096;
         if (max_total_seq > model->config.context_length)
             max_total_seq = model->config.context_length;
 
