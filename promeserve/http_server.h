@@ -80,7 +80,14 @@ struct HttpRequest {
 
     int64_t content_length() const {
         std::string val = get_header("content-length", "0");
-        return std::stoll(val);
+        try {
+            int64_t len = std::stoll(val);
+            if (len < 0) return 0;
+            if (len > 10 * 1024 * 1024) return 10 * 1024 * 1024;  // 10MB max
+            return len;
+        } catch (...) {
+            return 0;  // malformed Content-Length
+        }
     }
 };
 
