@@ -1001,44 +1001,111 @@ __global__ void f16_to_f32_kernel(const __half* __restrict__ in, float* __restri
 // Requires pre-allocated FP16 scratch buffers (x_fp16, y_fp16).
 
 ATEN_CUDA_API void launch_cublas_hgemv(
-    const void* W_fp16,  // [N, K] row-major FP16 (dequantized weights)
+    const void* W_fp16,  // [N, K] FP16 weights
     const float* x,      // [K] FP32 input vector
     float* y,            // [N] FP32 output vector
     int K, int N,
     void* x_fp16_buf,    // scratch buffer: at least K * sizeof(half) bytes
     void* y_fp16_buf,    // scratch buffer: at least N * sizeof(half) bytes
-    cudaStream_t stream)
+    cudaStream_t stream,
+    bool row_major)      // true = GGUF row-major [N,K], false = column-major [N,K]
 {
     // Convert x: FP32 → FP16
     int threads = 256;
     f32_to_f16_kernel<<<(K + threads - 1) / threads, threads, 0, stream>>>(
         x, static_cast<__half*>(x_fp16_buf), K);
 
-    // cuBLAS GemmEx: FP16 A × FP16 B → FP32 C with FP32 compute
-    // Weights stored in column-major [N, K] with lda=N for coalesced reads
     cublasHandle_t handle = CuBLASHandle::get();
     cublasSetStream(handle, stream);  // ALWAYS set stream (nullptr = default)
 
     float alpha = 1.0f;
     float beta = 0.0f;
 
-    // W is column-major [N, K] with lda=N
-    // y[N] = W[N,K] @ x[K] → CUBLAS_OP_N, m=N, n=1, k=K
-    cublasGemmEx(
-        handle,
-        CUBLAS_OP_N,    // op(A) = A (no transpose, column-major access = coalesced)
-        CUBLAS_OP_N,    // op(B) = B
-        N,              // m
-        1,              // n
-        K,              // k
-        &alpha,
-        W_fp16, CUDA_R_16F, N,                    // A [N,K] col-major, FP16, lda=N
-        x_fp16_buf, CUDA_R_16F, K,                // B [K,1], FP16, ldb=K
-        &beta,
-        y, CUDA_R_32F, N,                          // C [N,1], FP32, ldc=N
-        CUBLAS_COMPUTE_32F,
-        CUBLAS_GEMM_DEFAULT
-    );
+    if (row_major) {
+        // GGUF: row-major [N, K] → cuBLAS sees column-major [K, N] with lda=K
+        // y[N] = A^T @ x[K] where A is [K,N] col-major
+        cublasGemmEx(
+            handle,
+            CUBLAS_OP_T,    // transpose A: (K,N)^T = (N,K)
+            CUBLAS_OP_N,    // no transpose B
+            N,              // m = output rows
+            1,              // n = 1 (vector)
+            K,              // k = inner dim
+            &alpha,
+            W_fp16, CUDA_R_16F, K,                    // A [K,N] col-major (=row-major [N,K]), lda=K
+            x_fp16_buf, CUDA_R_16F, K,                // B [K,1], ldb=K
+            &beta,
+            y, CUDA_R_32F, N,                          // C [N,1], ldc=N
+            CUBLAS_COMPUTE_32F,
+            CUBLAS_GEMM_DEFAULT
+        );
+    } else {
+        // Column-major [N, K] with lda=N (pre-transposed for cuBLAS)
+        cublasGemmEx(
+            handle,
+            CUBLAS_OP_N,    // no transpose
+            CUBLAS_OP_N,
+            N,              // m
+            1,              // n
+            K,              // k
+            &alpha,
+            W_fp16, CUDA_R_16F, N,                    // A [N,K] col-major, lda=N
+            x_fp16_buf, CUDA_R_16F, K,                // B [K,1], ldb=K
+            &beta,
+            y, CUDA_R_32F, N,                          // C [N,1], ldc=N
+            CUBLAS_COMPUTE_32F,
+            CUBLAS_GEMM_DEFAULT
+        );
+    }
+}
+
+// ============================================================================
+// FP16 dequant GEMV — y[n] = sum_k fp16_to_fp32(W[n,k]) * x[k]
+// ============================================================================
+// Simple warp-per-row GEMV for FP16 weights. Dequants on-the-fly.
+// Used for GGUF models where some weights are stored as FP16 (e.g. qwen3 V weights).
+
+__global__ void fp16_gemv_kernel(
+    const __half* __restrict__ W,  // [N, K] row-major FP16
+    const float* __restrict__ x,   // [K] FP32
+    float* __restrict__ y,         // [N] FP32
+    int K, int N)
+{
+    // One warp per output row, grid-stride
+    const int warp_id = (blockIdx.x * blockDim.x + threadIdx.x) / 32;
+    const int lane = threadIdx.x & 31;
+    const int total_warps = (gridDim.x * blockDim.x) / 32;
+
+    for (int n = warp_id; n < N; n += total_warps) {
+        const __half* row = W + (int64_t)n * K;
+        float sum = 0.0f;
+
+        // Each lane handles K/32 elements
+        for (int k = lane; k < K; k += 32) {
+            sum += __half2float(row[k]) * x[k];
+        }
+
+        // Warp reduce
+        #pragma unroll
+        for (int offset = 16; offset > 0; offset >>= 1) {
+            sum += __shfl_down_sync(0xffffffff, sum, offset);
+        }
+        if (lane == 0) y[n] = sum;
+    }
+}
+
+ATEN_CUDA_API void launch_fp16_gemv(
+    const void* W_fp16, const float* x, float* y,
+    int K, int N, cudaStream_t stream)
+{
+    // 8 warps per block = 256 threads, enough blocks for all SMs
+    const int BLOCK = 256;
+    const int warps_per_block = BLOCK / 32;
+    int grid = (N + warps_per_block - 1) / warps_per_block;
+    if (grid > 256) grid = 256;  // cap for persistent-style
+
+    fp16_gemv_kernel<<<grid, BLOCK, 0, stream>>>(
+        static_cast<const __half*>(W_fp16), x, y, K, N);
 }
 
 // ============================================================================

@@ -188,6 +188,9 @@ if(PT_USE_CUDA)
     set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Wno-deprecated-gpu-targets")
     set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --use_fast_math -Xptxas -O3,-v")
 
+    # NOTE: --default-stream per-thread tested but was 30% slower (35 vs 50 tok/s).
+    # Keeping explicit blocking stream + CUDA Graph capture instead.
+
     # Host compiler flags for CUDA (pass MSVC flags through -Xcompiler)
     if(MSVC)
         set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler=/W3,/WX-")
