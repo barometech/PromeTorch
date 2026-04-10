@@ -1213,17 +1213,18 @@ public:
         bool capturing = false;
         cudaStream_t s = nullptr;
 
-        // 2. CUDA Graph: replay or capture
+        // 2. CUDA Graph: ALL on default stream (llama.cpp approach)
         if (graph_captured_ && decode_graph_exec_) {
-            // FAST PATH: blocking stream auto-syncs with default — no events needed
-            cudaMemcpyAsync(d_past_len_, &past_len, sizeof(int64_t), cudaMemcpyHostToDevice, decode_stream_);
-            cudaMemcpyAsync(d_token_id_, &token_id_int, sizeof(int), cudaMemcpyHostToDevice, decode_stream_);
-            cudaGraphLaunch(decode_graph_exec_, decode_stream_);
-            cur = config.num_layers % 2 == 0 ? 0 : 1;
-            goto graph_done;
+            // FAST PATH: update device ptrs + replay entire model on default stream
+            cudaMemcpyAsync(d_past_len_, &past_len, sizeof(int64_t), cudaMemcpyHostToDevice, nullptr);
+            cudaMemcpyAsync(d_token_id_, &token_id_int, sizeof(int), cudaMemcpyHostToDevice, nullptr);
+            cudaGraphLaunch(decode_graph_exec_, nullptr);
+            // Graph includes final_norm + output_proj → logits ready in buf_logits
+            kv_cache.seq_len += 1;
+            return sp.buf_logits;
         }
 
-        // CUDA Graph on BLOCKING stream (non-blocking gives wrong results!)
+        // Graph capture: on default stream with ThreadLocal mode
         capturing = (d_past_len_ && !graph_captured_ && graph_token_id_ > 0);
         if (capturing) {
             static bool smem_inited = false;
@@ -1232,19 +1233,18 @@ public:
                 at::cuda::init_cuda_kernel_smem_attributes(max_K, static_cast<int>(inter));
                 smem_inited = true;
             }
-            if (!decode_stream_) cudaStreamCreate(&decode_stream_);  // BLOCKING stream!
-            cudaMemcpyAsync(d_past_len_, &past_len, sizeof(int64_t), cudaMemcpyHostToDevice, decode_stream_);
-            cudaMemcpyAsync(d_token_id_, &token_id_int, sizeof(int), cudaMemcpyHostToDevice, decode_stream_);
-            cudaStreamSynchronize(decode_stream_);
-            cudaError_t cap_err = cudaStreamBeginCapture(decode_stream_, cudaStreamCaptureModeThreadLocal);
+            cudaGetLastError();
+            // Default stream + ThreadLocal: captures only this thread's API calls
+            cudaMemcpyAsync(d_past_len_, &past_len, sizeof(int64_t), cudaMemcpyHostToDevice, nullptr);
+            cudaMemcpyAsync(d_token_id_, &token_id_int, sizeof(int), cudaMemcpyHostToDevice, nullptr);
+            cudaError_t cap_err = cudaStreamBeginCapture(nullptr, cudaStreamCaptureModeThreadLocal);
             if (cap_err != cudaSuccess) {
-                std::cerr << "[PromeGraph] BeginCapture FAILED on blocking stream: "
+                std::cerr << "[PromeGraph] BeginCapture FAILED: "
                           << cudaGetErrorString(cap_err) << std::endl;
                 cudaGetLastError();
                 capturing = false;
-            } else {
-                s = decode_stream_;
             }
+            // s stays nullptr — capture on default stream
         }
 
         if (capturing) {
@@ -1573,54 +1573,49 @@ public:
             cur = next;
         }
 
-        // End transformer layers — finalize CUDA Graph capture
+        // 3. Final RMS norm (INSIDE graph capture — uses s=nullptr)
+        PROF_BEGIN(profiler, "final_norm");
+        at::cuda::launch_rms_norm(
+            sp.buf_x[cur].data_ptr<float>(), output_norm.data_ptr<float>(),
+            sp.buf_normed.mutable_data_ptr<float>(),
+            1, static_cast<int>(H), eps, add_one, s);
+        PROF_END(profiler, "final_norm");
+
+        // 4. Output projection (INSIDE graph — uses s)
+        PROF_BEGIN(profiler, "output_proj");
+        if (use_quant_gemv_ && q_output_weight.valid && q_output_weight.gpu_data) {
+            int K_out = static_cast<int>(q_output_weight.cols);
+            int N_out = static_cast<int>(q_output_weight.rows);
+            if (q_output_weight.is_q4k()) {
+                at::cuda::launch_q4km_persistent_gemv(q_output_weight.gpu_data,
+                    sp.buf_normed.data_ptr<float>(), sp.buf_logits.mutable_data_ptr<float>(),
+                    K_out, N_out, q_output_weight.row_stride_bytes, s);
+            } else {
+                gemv_scratch(q_output_weight, output_weight, sp.buf_normed.data_ptr<float>(),
+                    sp.buf_logits.mutable_data_ptr<float>(), config.vocab_size);
+            }
+        } else if (output_weight.defined()) {
+            at::cuda::launch_gemv(output_weight.data_ptr<float>(),
+                sp.buf_normed.data_ptr<float>(), sp.buf_logits.mutable_data_ptr<float>(),
+                config.vocab_size, static_cast<int>(H), s);
+        }
+        PROF_END(profiler, "output_proj");
+
+        // End CUDA Graph capture (graph now includes embedding → logits)
         if (capturing) {
-            cudaStreamEndCapture(decode_stream_, &decode_graph_);
+            cudaStreamEndCapture(nullptr, &decode_graph_);
             cudaError_t err = cudaGraphInstantiate(&decode_graph_exec_, decode_graph_, NULL, NULL, 0);
             if (err == cudaSuccess) {
                 graph_captured_ = true;
-                std::cout << "[PromeGraph] Captured " << config.num_layers << " layers decode graph!" << std::endl;
-                // RE-EXECUTE: capture didn't execute kernels, so KV cache is empty.
-                // Blocking stream auto-syncs with default — no event needed.
-                cudaGraphLaunch(decode_graph_exec_, decode_stream_);
+                std::cout << "[PromeGraph] Captured full decode graph (embedding → logits)!" << std::endl;
+                // RE-EXECUTE: capture didn't run kernels, launch once to fill KV + compute logits
+                cudaGraphLaunch(decode_graph_exec_, nullptr);
             } else {
                 std::cerr << "[PromeGraph] Capture failed: " << cudaGetErrorString(err) << std::endl;
                 decode_graph_ = nullptr;
                 decode_graph_exec_ = nullptr;
             }
         }
-graph_done:
-
-
-        // 3. Final RMS norm: buf_x[cur] → buf_normed
-        PROF_BEGIN(profiler, "final_norm");
-        at::cuda::launch_rms_norm(
-            sp.buf_x[cur].data_ptr<float>(), output_norm.data_ptr<float>(),
-            sp.buf_normed.mutable_data_ptr<float>(),
-            1, static_cast<int>(H), eps, add_one, nullptr);
-        PROF_END(profiler, "final_norm");
-
-        // 4. Output projection: buf_normed → buf_logits (cuBLAS for FP32, quant GEMV for Q4_K)
-        PROF_BEGIN(profiler, "output_proj");
-        if (use_quant_gemv_ && q_output_weight.valid && q_output_weight.gpu_data) {
-            // Quantized output weight — use our persistent GEMV
-            int K_out = static_cast<int>(q_output_weight.cols);
-            int N_out = static_cast<int>(q_output_weight.rows);
-            if (q_output_weight.is_q4k()) {
-                at::cuda::launch_q4km_persistent_gemv(q_output_weight.gpu_data,
-                    sp.buf_normed.data_ptr<float>(), sp.buf_logits.mutable_data_ptr<float>(),
-                    K_out, N_out, q_output_weight.row_stride_bytes, nullptr);
-            } else {
-                gemv_scratch(q_output_weight, output_weight, sp.buf_normed.data_ptr<float>(),
-                    sp.buf_logits.mutable_data_ptr<float>(), config.vocab_size);
-            }
-        } else if (output_weight.defined()) {
-            // FP32 output weight — use cuBLAS SGEMV (much faster than our custom kernel)
-            at::cuda::launch_gemv(output_weight.data_ptr<float>(),
-                sp.buf_normed.data_ptr<float>(), sp.buf_logits.mutable_data_ptr<float>(),
-                config.vocab_size, static_cast<int>(H), nullptr);
-        }
-        PROF_END(profiler, "output_proj");
 
         kv_cache.seq_len += 1;
         return sp.buf_logits;
