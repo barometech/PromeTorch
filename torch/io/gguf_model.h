@@ -1224,9 +1224,10 @@ public:
         int cur = 0;
         bool capturing = false;
 
-        // Blocking stream (non-blocking still broken despite all stream fixes)
+        // With --default-stream per-thread, nullptr = per-thread non-blocking stream
+        // No need for separate decode_stream_ — nullptr is capturable and fast
         if (!decode_stream_) {
-            cudaStreamCreate(&decode_stream_);
+            decode_stream_ = nullptr;  // use per-thread default stream
             static bool smem_inited = false;
             if (!smem_inited) {
                 int max_K = static_cast<int>(std::max({H, q_dim, kv_dim, inter}));
