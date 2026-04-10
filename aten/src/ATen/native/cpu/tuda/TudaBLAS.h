@@ -16,7 +16,18 @@
 // Solution: force EML single-threaded per call via omp_set_num_threads(1) in
 // NUMA worker threads, and set omp_set_max_active_levels(1) globally at init.
 // Our own parallelism (NUMA tiling via std::thread) handles the outer level.
+// PT_NO_EML=1 disables EML BLAS entirely (use our scalar GEMM instead).
+// Needed when EML's internal OMP fork causes SIGILL on E2K.
 #if defined(TUDA_E2K) && __has_include(<eml/cblas.h>)
+#include <cstdlib>
+static inline bool eml_disabled() {
+    static int cached = -1;
+    if (cached < 0) {
+        const char* env = std::getenv("PT_NO_EML");
+        cached = (env && env[0] == '1') ? 1 : 0;
+    }
+    return cached == 1;
+}
 #define PT_USE_EML_BLAS 1
 #include <eml/cblas.h>
 #include <omp.h>
@@ -332,13 +343,13 @@ static void sgemm(
     float* __restrict C, int64_t ldc
 ) {
 #if defined(PT_USE_EML_BLAS)
-    // Use EML (Elbrus Math Library) optimized BLAS — VLIW-tuned, multi-threaded
-    // EML cblas_sgemm on E8C2: 230-269 GFLOPS (vs ~10 GFLOPS our scalar)
-    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-                (int)M, (int)N, (int)K,
-                alpha, A, (int)lda, B, (int)ldb,
-                beta, C, (int)ldc);
-    return;
+    if (!eml_disabled()) {
+        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                    (int)M, (int)N, (int)K,
+                    alpha, A, (int)lda, B, (int)ldb,
+                    beta, C, (int)ldc);
+        return;
+    }
 #elif defined(PT_USE_SYSTEM_BLAS)
     // Use system BLAS (MKL, OpenBLAS) — highly optimized for x86 cache hierarchy
     cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
@@ -410,12 +421,13 @@ static void sgemm_nt(
     float* __restrict C, int64_t ldc
 ) {
 #if defined(PT_USE_EML_BLAS)
-    // B is transposed: C = alpha * A @ B^T + beta * C
-    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
-                (int)M, (int)N, (int)K,
-                alpha, A, (int)lda, B, (int)ldb,
-                beta, C, (int)ldc);
-    return;
+    if (!eml_disabled()) {
+        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                    (int)M, (int)N, (int)K,
+                    alpha, A, (int)lda, B, (int)ldb,
+                    beta, C, (int)ldc);
+        return;
+    }
 #elif defined(PT_USE_SYSTEM_BLAS)
     cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
                 (int)M, (int)N, (int)K,
