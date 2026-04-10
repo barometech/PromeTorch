@@ -1017,7 +1017,7 @@ ATEN_CUDA_API void launch_cublas_hgemv(
     // cuBLAS GemmEx: FP16 A × FP16 B → FP32 C with FP32 compute
     // Weights stored in column-major [N, K] with lda=N for coalesced reads
     cublasHandle_t handle = CuBLASHandle::get();
-    if (stream) cublasSetStream(handle, stream);
+    cublasSetStream(handle, stream);  // ALWAYS set stream (nullptr = default)
 
     float alpha = 1.0f;
     float beta = 0.0f;
