@@ -464,7 +464,14 @@ ATEN_CUDA_API void launch_cublas_hgemv(
     const void* W_fp16, const float* x, float* y,
     int K, int N,
     void* x_fp16_buf, void* y_fp16_buf,
-    cudaStream_t stream = nullptr);
+    cudaStream_t stream = nullptr,
+    bool row_major = false);
+
+// FP16 dequant GEMV: y[n] = sum_k fp16_to_fp32(W[n,k]) * x[k]
+// W is [N, K] row-major FP16 (GGML layout: ne[0]=K contiguous)
+ATEN_CUDA_API void launch_fp16_gemv(
+    const void* W_fp16, const float* x, float* y,
+    int K, int N, cudaStream_t stream = nullptr);
 
 // Fused Q6_K dequant-GEMV: y[n] = sum_k dequant(W_q6k[n,k]) * x[k]
 ATEN_CUDA_API void launch_q6k_gemv(
