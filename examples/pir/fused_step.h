@@ -35,7 +35,7 @@ namespace fused {
 // ============================================================================
 
 static void sigmoid_fwd(const float* __restrict x, float* __restrict out, int64_t n) {
-    #pragma omp parallel for schedule(static)
+    // NO OMP: EML_MT manages all parallelism. Our OMP would nest and SIGILL.
     for (int64_t i = 0; i < n; i += 6) {
         out[i]   = 1.0f / (1.0f + std::exp(-x[i]));
         out[i+1] = 1.0f / (1.0f + std::exp(-x[i+1]));
@@ -143,30 +143,22 @@ static void rmsnorm_bwd(const float* grad, const float* x, const float* weight,
 
     #pragma omp parallel
     {
-        // Thread-local dweight accumulator
         std::vector<float> dw_local(D, 0.0f);
-
         #pragma omp for schedule(static)
         for (int64_t i = 0; i < BT; i++) {
             float inv_rms = rms_cache[i];
             const float* xi = x + i * D;
             const float* gi = grad + i * D;
             float* dxi = dx + i * D;
-
-            // d(x * inv_rms * w) / dx = inv_rms * w + x * d(inv_rms)/dx * w
-            // Simplified: dx = inv_rms * (grad * w - x * (dot(grad*w, x) / (D * rms²)))
             float dot = 0.0f;
             for (int64_t d = 0; d < D; d++)
                 dot += gi[d] * weight[d] * xi[d];
             dot *= inv_rms * inv_rms / D;
-
             for (int64_t d = 0; d < D; d++) {
                 dxi[d] = inv_rms * (gi[d] * weight[d] - xi[d] * dot);
                 dw_local[d] += gi[d] * xi[d] * inv_rms;
             }
         }
-
-        // Reduce thread-local dweight
         #pragma omp critical
         for (int64_t d = 0; d < D; d++)
             dweight[d] += dw_local[d];
