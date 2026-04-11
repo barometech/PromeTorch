@@ -912,6 +912,8 @@ public:
                 inp[j] = input_data[j];
             }
 
+            // NoGradGuard prevents autograd graph creation → no memory leak
+            torch::autograd::NoGradGuard no_grad;
             auto logits = this->forward(input_t);
 
             int64_t V = config_.vocab_size;
@@ -1361,28 +1363,17 @@ int main(int argc, char** argv) {
 
             // === FUSED GENERATION ===
             if (step % train_cfg.gen_interval == 0) {
-                std::cout << "\n--- Fused generation at step " << step << " ---" << std::endl;
-                // Create a temporary PIR250M model and copy weights from fused trainer
-                auto gen_model = std::make_shared<PIR250M>(model_cfg);
-                // Copy weights from fused trainer to model state_dict
-                auto sd = gen_model->state_dict();
-                size_t pi = 0;
-                for (auto& kv : sd) {
-                    if (pi < trainer.all_params.size()) {
-                        float* src = trainer.all_params[pi];
-                        float* dst = kv.second.mutable_data_ptr<float>();
-                        int64_t n = kv.second.numel();
-                        memcpy(dst, src, n * sizeof(float));
-                        pi++;
-                    }
-                }
-                gen_model->eval();
-
-                std::vector<std::string> prompts = {"В ", "Он ", "Она ", "The "};
+                std::cout << "\n--- Generation at step " << step << " ---" << std::endl;
+                std::vector<std::string> prompts = {
+                    "\xd0\x92 ",     // "В "
+                    "\xd0\x9e\xd0\xbd ",  // "Он "
+                    "\xd0\x9e\xd0\xbd\xd0\xb0 ", // "Она "
+                    "The "
+                };
                 for (auto& prompt : prompts) {
-                    std::string generated = gen_model->generate(prompt, train_cfg.gen_tokens, 0.8f);
-                    std::cout << ">>> " << prompt << ": ";
-                    for (char c : generated) {
+                    std::string gen = trainer.generate_text(prompt, train_cfg.gen_tokens, 0.8f);
+                    std::cout << ">>> ";
+                    for (char c : gen) {
                         if ((unsigned char)c >= 32 || c == '\n') std::cout << c;
                         else std::cout << '?';
                     }
