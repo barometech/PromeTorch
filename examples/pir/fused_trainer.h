@@ -648,4 +648,157 @@ struct FusedPIRTrainer {
 
         return loss;
     }
+
+    // ============================================================
+    // GENERATE TEXT — forward-only on existing weights
+    // ============================================================
+    // Single-token autoregressive generation using fused forward.
+    // Allocates small temp buffers [1, D] for one position at a time.
+    // No autograd, no memory leak.
+    std::string generate_text(const std::string& prompt, int64_t max_tokens,
+                              float temperature = 0.8f) {
+        std::string result = prompt;
+        std::mt19937 rng(42);
+
+        // Context window: last block_size chars
+        std::vector<int> context;
+        for (char c : prompt)
+            context.push_back((int)(unsigned char)c);
+
+        // Temp buffers for single-position forward
+        int64_t max_seq = T;  // block_size
+        std::vector<float> buf_x(max_seq * D, 0.0f);
+        std::vector<float> buf_y(max_seq * D, 0.0f);
+        std::vector<float> buf_norm(max_seq * D, 0.0f);
+        std::vector<float> buf_rms(max_seq, 0.0f);
+        std::vector<float> buf_pir(max_seq * D, 0.0f);
+        std::vector<float> buf_gate(max_seq * D, 0.0f);
+        std::vector<float> buf_sig(max_seq * D, 0.0f);
+        std::vector<float> buf_val(max_seq * D, 0.0f);
+        std::vector<float> buf_gated(max_seq * D, 0.0f);
+        std::vector<float> buf_scan(max_seq * D, 0.0f);
+        std::vector<float> buf_out(max_seq * D, 0.0f);
+        std::vector<float> buf_mix(max_seq * D, 0.0f);
+        std::vector<float> buf_norm2(max_seq * D, 0.0f);
+        std::vector<float> buf_rms2(max_seq, 0.0f);
+        std::vector<float> buf_ffn1(max_seq * H, 0.0f);
+        std::vector<float> buf_ffn3(max_seq * H, 0.0f);
+        std::vector<float> buf_ffn_gated(max_seq * H, 0.0f);
+        std::vector<float> buf_ffn2(max_seq * D, 0.0f);
+        std::vector<float> buf_norm_out(max_seq * D, 0.0f);
+        std::vector<float> buf_rms_out(max_seq, 0.0f);
+        std::vector<float> buf_logits(max_seq * V, 0.0f);
+
+        for (int64_t tok_i = 0; tok_i < max_tokens; tok_i++) {
+            int64_t seq_len = (int64_t)context.size();
+            if (seq_len > max_seq) {
+                context.erase(context.begin(), context.begin() + (seq_len - max_seq));
+                seq_len = max_seq;
+            }
+
+            // Embedding: context → buf_x [seq_len, D]
+            for (int64_t i = 0; i < seq_len; i++) {
+                int tok = context[i];
+                if (tok < 0) tok = 0;
+                if (tok >= V) tok = V - 1;
+                memcpy(buf_x.data() + i * D, W_emb + tok * D, D * sizeof(float));
+            }
+
+            // Forward through layers
+            for (int64_t l = 0; l < L; l++) {
+                auto& bw = blocks[l];
+
+                // RMSNorm1
+                fused::rmsnorm_fwd(buf_x.data(), bw.norm1_w, buf_norm.data(),
+                                   buf_rms.data(), seq_len, D);
+
+                // PIR Block
+                memcpy(buf_pir.data(), buf_norm.data(), seq_len * D * sizeof(float));
+
+                for (int64_t p = 0; p < NP; p++) {
+                    auto& pw = bw.pir[p];
+
+                    // gate + value projections
+                    fused::linear_fwd(buf_pir.data(), pw.W_gate, buf_gate.data(), seq_len, D, D);
+                    fused::linear_fwd(buf_pir.data(), pw.W_value, buf_val.data(), seq_len, D, D);
+
+                    // sigmoid(gate) * value
+                    fused::sigmoid_fwd(buf_gate.data(), buf_sig.data(), seq_len * D);
+                    fused::mul_fwd(buf_val.data(), buf_sig.data(), buf_gated.data(), seq_len * D);
+
+                    // Scan gates = sigmoid * base_decay
+                    for (int64_t i = 0; i < seq_len; i++)
+                        for (int64_t d = 0; d < D; d++)
+                            buf_scan.data()[i * D + d] = buf_sig[i * D + d] * pw.base_decay[d];
+
+                    // Parallel scan: h[t] = gate[t]*h[t-1] + x[t]
+                    fused::parallel_scan_fwd(buf_scan.data(), buf_gated.data(), buf_out.data(),
+                                             1, seq_len, D);
+
+                    // Out projection
+                    fused::linear_fwd(buf_out.data(), pw.W_out, buf_pir.data(), seq_len, D, D);
+
+                    // RMSNorm + residual
+                    fused::rmsnorm_fwd(buf_pir.data(), pw.norm_w, buf_pir.data(),
+                                       buf_rms.data(), seq_len, D);
+                }
+
+                // Mix projection
+                fused::linear_fwd(buf_pir.data(), bw.W_mix, buf_mix.data(), seq_len, D, D);
+                fused::rmsnorm_fwd(buf_mix.data(), bw.norm_pir_w, buf_mix.data(),
+                                   buf_rms.data(), seq_len, D);
+
+                // Residual add (x = x + mix)
+                fused::add_fwd(buf_x.data(), buf_mix.data(), buf_x.data(), seq_len * D);
+
+                // RMSNorm2
+                fused::rmsnorm_fwd(buf_x.data(), bw.norm2_w, buf_norm2.data(),
+                                   buf_rms2.data(), seq_len, D);
+
+                // SwiGLU FFN
+                fused::linear_fwd(buf_norm2.data(), bw.W_ffn1, buf_ffn1.data(), seq_len, D, H);
+                fused::linear_fwd(buf_norm2.data(), bw.W_ffn3, buf_ffn3.data(), seq_len, D, H);
+                fused::silu_fwd(buf_ffn1.data(), buf_ffn1.data(), seq_len * H);
+                fused::mul_fwd(buf_ffn1.data(), buf_ffn3.data(), buf_ffn_gated.data(), seq_len * H);
+                fused::linear_fwd(buf_ffn_gated.data(), bw.W_ffn2, buf_ffn2.data(), seq_len, H, D);
+
+                // Residual
+                fused::add_fwd(buf_x.data(), buf_ffn2.data(), buf_x.data(), seq_len * D);
+            }
+
+            // Final norm + LM head (only need last position)
+            fused::rmsnorm_fwd(buf_x.data(), norm_out_w, buf_norm_out.data(),
+                               buf_rms_out.data(), seq_len, D);
+
+            // LM head for last position only
+            const float* last_hidden = buf_norm_out.data() + (seq_len - 1) * D;
+            std::vector<float> last_logits(V);
+            // Manual GEMV: last_logits[v] = sum_d W_lm_head[v*D + d] * last_hidden[d]
+            for (int64_t v = 0; v < V; v++) {
+                float sum = 0.0f;
+                const float* row = W_lm_head + v * D;
+                for (int64_t d = 0; d < D; d++)
+                    sum += row[d] * last_hidden[d];
+                last_logits[v] = sum;
+            }
+
+            // Sample
+            float max_logit = *std::max_element(last_logits.begin(), last_logits.end());
+            float sum_exp = 0.0f;
+            std::vector<float> probs(V);
+            for (int64_t v = 0; v < V; v++) {
+                probs[v] = std::exp((last_logits[v] - max_logit) / temperature);
+                sum_exp += probs[v];
+            }
+            for (int64_t v = 0; v < V; v++)
+                probs[v] /= sum_exp;
+
+            std::discrete_distribution<int> dist(probs.begin(), probs.end());
+            int next_token = dist(rng);
+
+            result += (char)next_token;
+            context.push_back(next_token);
+        }
+        return result;
+    }
 };
