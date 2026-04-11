@@ -135,6 +135,11 @@ static void* numa_gemm_worker(void* arg) {
     CPU_SET(id, &cs);
     pthread_setaffinity_np(pthread_self(), sizeof(cs), &cs);
 
+    // CRITICAL: Force EML single-threaded per worker.
+    // Without this, EML_MT tries to create nested OMP → SIGILL on E2K.
+    // Each worker handles one tile; parallelism is across workers, not within.
+    omp_set_num_threads(1);
+
     while (1) {
         pthread_barrier_wait(&g_numa_bar_start);
         if (!g_numa_pool_alive) break;
