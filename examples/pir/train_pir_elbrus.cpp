@@ -122,6 +122,7 @@ struct TrainConfig {
     int seed = 42;  // Random seed (different per NUMA process)
     int rank = -1;   // -1 = no sync, 0-3 = data-parallel rank
     int nprocs = 4;  // Number of data-parallel processes
+    int grad_accum = 1; // Gradient accumulation steps (sync every N steps)
 };
 
 // Include fused trainer AFTER config structs are defined
@@ -1134,6 +1135,8 @@ void parse_args(int argc, char** argv, PIRConfig& model_cfg, TrainConfig& train_
             train_cfg.rank = std::atoi(argv[++i]);
         } else if (arg == "--nprocs" && i + 1 < argc) {
             train_cfg.nprocs = std::atoi(argv[++i]);
+        } else if (arg == "--grad_accum" && i + 1 < argc) {
+            train_cfg.grad_accum = std::atoi(argv[++i]);
         } else if (arg == "--fused") {
             train_cfg.use_fused = true;
         } else if (arg == "--full") {
@@ -1287,49 +1290,26 @@ int main(int argc, char** argv) {
 
             float loss;
             if (use_sync) {
-                // Data-parallel: forward + backward, then sync, then adam
-                trainer.step_count++;
-                trainer.zero_grad();
-                loss = trainer.forward(inp_buf.data(), tgt_buf.data());
-                trainer.backward();
+                // Local SGD: each process trains independently at full speed.
+                // Every grad_accum steps, average WEIGHTS across all processes.
+                // This gives ~968 tok/s (4×242) with minimal sync overhead.
+                loss = trainer.train_step(inp_buf.data(), tgt_buf.data(), lr, train_cfg.weight_decay);
 
-                // Flatten gradients → shared memory → average → scatter
-                int64_t off = 0;
-                for (size_t i = 0; i < trainer.all_grads.size(); i++) {
-                    memcpy(flat_grads.data() + off, trainer.all_grads[i], trainer.all_sizes[i] * sizeof(float));
-                    off += trainer.all_sizes[i];
-                }
-                grad_sync.sync(flat_grads.data(), nullptr);
-                // Scatter averaged gradients back
-                off = 0;
-                for (size_t i = 0; i < trainer.all_grads.size(); i++) {
-                    memcpy(trainer.all_grads[i], flat_grads.data() + off, trainer.all_sizes[i] * sizeof(float));
-                    off += trainer.all_sizes[i];
-                }
-
-                // Gradient clipping
-                float grad_norm = 0.0f;
-                for (size_t i = 0; i < trainer.all_grads.size(); i++) {
-                    float* g = trainer.all_grads[i];
-                    for (int64_t j = 0; j < trainer.all_sizes[i]; j++)
-                        grad_norm += g[j] * g[j];
-                }
-                grad_norm = std::sqrt(grad_norm);
-                if (grad_norm > 1.0f) {
-                    float scale = 1.0f / grad_norm;
-                    for (size_t i = 0; i < trainer.all_grads.size(); i++) {
-                        float* g = trainer.all_grads[i];
-                        for (int64_t j = 0; j < trainer.all_sizes[i]; j++)
-                            g[j] *= scale;
+                if (step % train_cfg.grad_accum == 0) {
+                    // Sync weights: flatten → shared memory average → scatter
+                    int64_t off = 0;
+                    for (size_t i = 0; i < trainer.all_params.size(); i++) {
+                        memcpy(flat_params.data() + off, trainer.all_params[i], trainer.all_sizes[i] * sizeof(float));
+                        off += trainer.all_sizes[i];
                     }
-                }
-
-                // Adam update (each process independently, same grads → same weights)
-                for (size_t i = 0; i < trainer.all_params.size(); i++) {
-                    fused::adam_update(trainer.all_params[i], trainer.all_grads[i],
-                                      trainer.adam_m[i], trainer.adam_v[i],
-                                      trainer.all_sizes[i], trainer.step_count,
-                                      lr, 0.9f, 0.95f, 1e-8f, train_cfg.weight_decay);
+                    // sync() averages across all ranks
+                    grad_sync.sync(flat_params.data(), nullptr);
+                    // Scatter averaged weights back
+                    off = 0;
+                    for (size_t i = 0; i < trainer.all_params.size(); i++) {
+                        memcpy(trainer.all_params[i], flat_params.data() + off, trainer.all_sizes[i] * sizeof(float));
+                        off += trainer.all_sizes[i];
+                    }
                 }
             } else {
                 // Single-process: original train_step
