@@ -129,16 +129,14 @@ static void* numa_gemm_worker(void* arg) {
     if (node >= g_numa_n_nodes) node = g_numa_n_nodes - 1;
 
     numa_run_on_node(node);
-    // Also pin to specific core for best cache locality
     cpu_set_t cs;
     CPU_ZERO(&cs);
     CPU_SET(id, &cs);
     pthread_setaffinity_np(pthread_self(), sizeof(cs), &cs);
 
-    // CRITICAL: Force EML single-threaded per worker.
-    // Without this, EML_MT tries to create nested OMP → SIGILL on E2K.
-    // Each worker handles one tile; parallelism is across workers, not within.
-    omp_set_num_threads(1);
+    // NOTE: no omp_set_num_threads(1) here — libeml (without _mt) is already single-threaded.
+    // With libeml_mt, this would be needed but omp_set_num_threads is GLOBAL on LCC/E2K
+    // which kills element-wise OMP parallelism in fused_step.h.
 
     while (1) {
         pthread_barrier_wait(&g_numa_bar_start);
@@ -164,9 +162,19 @@ static void numa_pool_init() {
     g_numa_n_nodes = numa_max_node() + 1;
     if (g_numa_n_nodes <= 0) g_numa_n_nodes = 1;
 
-    // Use all available cores (detect from /proc/cpuinfo or sysconf)
-    g_numa_n_workers = g_numa_n_nodes * 8;  // E8C2: 8 cores per chip
+    // Detect ACTUAL available cores via sched_getaffinity (respects numactl --cpunodebind)
+    // This is critical for DDP: 4 processes × 8 cores, NOT 4 × 32.
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    int avail_cores = g_numa_n_nodes * 8;  // fallback
+    if (sched_getaffinity(0, sizeof(cpu_set_t), &cpuset) == 0) {
+        avail_cores = CPU_COUNT(&cpuset);
+    }
+    g_numa_n_workers = avail_cores;
     if (g_numa_n_workers > NUMA_POOL_MAX) g_numa_n_workers = NUMA_POOL_MAX;
+    // Recalculate nodes based on actual cores (numactl may restrict to 1 node)
+    g_numa_n_nodes = (avail_cores + 7) / 8;
+    if (g_numa_n_nodes <= 0) g_numa_n_nodes = 1;
     g_numa_cpn = g_numa_n_workers / g_numa_n_nodes;
 
     g_numa_pool_alive = 1;
@@ -239,6 +247,8 @@ static void numa_tiled_sgemm(int64_t M, int64_t K, int64_t N,
 
     pthread_barrier_wait(&g_numa_bar_start);
     pthread_barrier_wait(&g_numa_bar_done);
+
+    // No OMP restore needed — libeml (ST) doesn't touch OMP.
 }
 
 #elif defined(PT_USE_NUMA) && (defined(PT_USE_SYSTEM_BLAS))
