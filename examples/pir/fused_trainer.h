@@ -390,10 +390,7 @@ struct FusedPIRTrainer {
                 // Dynamic parallel scan with base_decay
                 // gates_for_scan = sigmoid_out * base_decay (broadcast over BT)
                 // Actually: scan gate = sigmoid(gate_logits) * base_decay
-                #pragma omp parallel for schedule(static)
-                for (int64_t i = 0; i < BT; i++)
-                    for (int64_t d = 0; d < D; d++)
-                        pa.gated_values[i * D + d] = pa.gated_values[i * D + d]; // already computed
+                // (no-op removed — gated_values already computed above)
 
                 // For scan: gate = sigmoid_out * base_decay
                 // Reuse sigmoid_out as scan gate (multiply by base_decay)
@@ -432,7 +429,7 @@ struct FusedPIRTrainer {
             fused::silu_fwd(la.ffn1_out, la.ffn1_silu, BT * H);
             fused::linear_fwd(la.norm2_out, bw.W_ffn3, la.ffn3_out, BT, D, H);
             fused::mul_fwd(la.ffn1_silu, la.ffn3_out, la.ffn_gated, BT * H);
-            fused::linear_fwd(la.ffn_gated, bw.W_ffn2, la.ffn2_out, BT, D, H); // NOTE: W_ffn2 is [D, H]
+            fused::linear_fwd(la.ffn_gated, bw.W_ffn2, la.ffn2_out, BT, H, D); // W_ffn2:[D,H], input:[BT,H]->out:[BT,D]
 
             // Residual: x = after_pir + ffn_out
             fused::add_fwd(la.after_pir, la.ffn2_out, act_x, BT * D);

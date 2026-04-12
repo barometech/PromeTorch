@@ -60,11 +60,16 @@
 namespace {
 struct OmpNestedGuard {
     OmpNestedGuard() {
-        // Prevent nested OMP: only one level of parallelism allowed.
-        // This stops EML from forking threads when called from within
-        // an OMP parallel region or from NUMA std::threads.
+        // PT_NO_NUMA_POOL=1: EML_MT uses OMP internally for 8-thread GEMM.
+        // Do NOT restrict OMP levels — let EML_MT use all threads.
+        // Only restrict when NUMA pthread pool is active (prevents SIGILL
+        // from nested OMP: our pthreads + EML's internal OMP fork).
+        if (std::getenv("PT_NO_NUMA_POOL")) {
+            // Let EML_MT use full OMP parallelism (8 threads per NUMA node)
+            return;
+        }
+        // NUMA pool active: prevent nested OMP (SIGILL on E2K)
         omp_set_max_active_levels(1);
-        // Also use deprecated API for older OpenMP implementations (LCC 1.29)
         omp_set_nested(0);
     }
 };
