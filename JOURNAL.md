@@ -3,6 +3,38 @@
 Полная история разработки проекта. Актуальные инструкции — в `CLAUDE.md`.
 Полный аудит инфраструктуры — в `INFRASTRUCTURE_AUDIT.md`.
 
+## 2026-04-12: PIR DDP FIX: 212 → 568 tok/s (2.68x)
+
+### Root cause: OmpNestedGuard killed EML_MT parallelism
+`omp_set_max_active_levels(1)` at static init prevented libeml_mt from using 8 OMP threads.
+Each DDP process ran EML single-threaded (50 GFLOPS) instead of multi-threaded (245 GFLOPS).
+
+### Fixes
+1. **OmpNestedGuard bypass**: skip when `PT_NO_NUMA_POOL=1` — EML_MT needs full OMP
+2. **ffn2 dimension bug**: `linear_fwd(..., BT, D, H)` → `linear_fwd(..., BT, H, D)` — buffer overflow + wrong gradients
+3. **CMakeLists.txt**: `eml` → `eml_mt` on server (was reverted somehow)
+4. **Removed no-op loop**: useless OMP parallel for in forward PIR scan setup
+
+### Results (4-node DDP, 189M PIR, batch=4, seq=2048)
+| Metric | Before | After |
+|--------|--------|-------|
+| Per-node tok/s | 53 | **142** |
+| Total DDP tok/s | 212 | **568** |
+| CPU util per node | 100% (1 core) | 700% (7 cores) |
+| Loss (10 steps) | — | 5.52→5.33 |
+
+### Key findings
+- OMP element-wise ops = 30% of forward time (removing them: 29s → 43s — WORSE)
+- EML_MT sustained ~245 GFLOPS on 8 cores for GEMM
+- Forward = 33s, backward = 18s, adam = 2.2s → 53s/step per node
+- russian_mega.txt (2GB) = 3-4s slower than tiny_shakespeare (mmap page faults)
+
+### Gap to 900 tok/s
+568/900 = 63%. Remaining optimization needs:
+- Forward GEMM = ~12.6s (theory), actual forward = 33s → 20s non-GEMM overhead
+- Element-wise + parallel_scan + memcpy = bulk of overhead
+- Possible: fused GEMM+activation kernels, larger batch, or reduced model config
+
 ## 2026-04-10: FP16 V weight fix: 35 → 47 tok/s (correct output)
 
 ### Root cause: qwen3:4b stores attn_v weights as FP16 (type=1), NOT Q4_K
