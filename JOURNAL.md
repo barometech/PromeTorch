@@ -3,6 +3,39 @@
 Полная история разработки проекта. Актуальные инструкции — в `CLAUDE.md`.
 Полный аудит инфраструктуры — в `INFRASTRUCTURE_AUDIT.md`.
 
+## 2026-04-16: PIR 250M тренировка — 800 steps, loss 1.04, генерация русского текста
+
+### Полный цикл тренировки PIR 250M на Эльбрусе E8C2
+- **189M params**, 16 layers × 4 PIR layers, SwiGLU FFN, char-level vocab=256
+- **4-процесс DDP** (Local SGD), file-based weight sync каждые 10 steps
+- **568 tok/s** суммарно (4 × 142 tok/s per NUMA node)
+- **Датасет**: russian_mega.txt, 2 ГБ
+
+### Результаты тренировки
+| Step | Loss | Perplexity | Генерация |
+|------|------|------------|-----------|
+| 200 | 1.41 | 4.1 | "соположение", "Кроины" — морфемы |
+| 400 | 1.23 | 3.4 | "Первой", "специального", "военных" — слова |
+| 600 | 1.15 | 3.1 | "Российская", "города", "музей", "количеству" — связи |
+| 800 | 1.04 | 2.8 | "В России", "полагается", "15 марта 2008 года" — предложения |
+
+### Исправленные баги
+1. **generate_text() PIR residual** — out_proj перезаписывал buf_pir вместо +=
+2. **grad_sync timeout** — 120s вместо бесконечного ожидания
+3. **systemd Linger=no** — root cause ВСЕХ падений тренировки: systemd убивал процессы при SSH disconnect. Фикс: `loginctl enable-linger`
+4. **Fused checkpoint load** — добавлен --load для .bin файлов (init_random → load overwrites all_params, base_decay stays from init)
+
+### Генерация (step 800, loss 1.04)
+```
+>>> В  России.
+>>> Он  Йевен полагается «О второй специального страны задача, недостаточная как и вопроселания в первый военных
+>>> Она  Киеви полезнены и самости Протически и вопроситься на смерти Нана, к и легками статья группы на составить не
+>>> The history of  the had and v канаселение военно советский
+```
+
+### Научная статья
+Написана: `SPBGU_THESIS_3_PROMETHORCH_NMCARD.md` — тренировка на NM Card Mini + NM Quad + Эльбрус через PromeTorch.
+
 ## 2026-04-12: PIR DDP FIX: 212 → 568 tok/s (2.68x)
 
 ### Root cause: OmpNestedGuard killed EML_MT parallelism
