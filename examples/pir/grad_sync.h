@@ -70,11 +70,19 @@ struct GradSync {
 
         // 2. Rank 0: wait for all, average, write result
         if (rank_ == 0) {
-            // Wait for all ranks to write
+            // Wait for all ranks to write (timeout 120s)
             for (int r = 0; r < nprocs_; r++) {
                 char rf[128];
                 snprintf(rf, sizeof(rf), "/tmp/pir_w_%d.ready", r);
-                while (access(rf, F_OK) != 0) usleep(100);
+                int wait_us = 0;
+                while (access(rf, F_OK) != 0) {
+                    usleep(100);
+                    wait_us += 100;
+                    if (wait_us > 120 * 1000000) {
+                        fprintf(stderr, "GradSync TIMEOUT waiting for rank %d at gen %d — aborting\n", r, sync_gen_);
+                        std::_Exit(2);
+                    }
+                }
             }
 
             // Average all weights
@@ -117,8 +125,16 @@ struct GradSync {
             }
             unlink("/tmp/pir_w_avg.ready");
         } else {
-            // 3. Other ranks: wait for average, read it
-            while (access("/tmp/pir_w_avg.ready", F_OK) != 0) usleep(100);
+            // 3. Other ranks: wait for average, read it (timeout 120s)
+            int wait_us = 0;
+            while (access("/tmp/pir_w_avg.ready", F_OK) != 0) {
+                usleep(100);
+                wait_us += 100;
+                if (wait_us > 120 * 1000000) {
+                    fprintf(stderr, "GradSync TIMEOUT rank %d waiting avg at gen %d — aborting\n", rank_, sync_gen_);
+                    std::_Exit(2);
+                }
+            }
             f = fopen("/tmp/pir_w_avg.bin", "rb");
             if (f) {
                 fread(flat_weights, sizeof(float), total_params_, f);
