@@ -732,34 +732,35 @@ struct FusedPIRTrainer {
                     fused::parallel_scan_fwd(buf_scan.data(), buf_gated.data(), buf_out.data(),
                                              1, seq_len, D);
 
-                    // Out projection → temp (reuse buf_gate, no longer needed)
+                    // Out projection → buf_gate (reuse, no longer needed as gate_logits)
                     fused::linear_fwd(buf_out.data(), pw.W_out, buf_gate.data(), seq_len, D, D);
 
-                    // RMSNorm
-                    fused::rmsnorm_fwd(buf_gate.data(), pw.norm_w, buf_gate.data(),
+                    // RMSNorm (out-of-place: buf_gate → buf_val, avoid __restrict aliasing UB)
+                    fused::rmsnorm_fwd(buf_gate.data(), pw.norm_w, buf_val.data(),
                                        buf_rms.data(), seq_len, D);
 
                     // Residual: pir_residual += normed out_proj
-                    fused::add_fwd(buf_pir.data(), buf_gate.data(), buf_pir.data(), seq_len * D);
+                    fused::add_fwd(buf_pir.data(), buf_val.data(), buf_pir.data(), seq_len * D);
                 }
 
                 // Mix projection
                 fused::linear_fwd(buf_pir.data(), bw.W_mix, buf_mix.data(), seq_len, D, D);
-                fused::rmsnorm_fwd(buf_mix.data(), bw.norm_pir_w, buf_mix.data(),
+                // RMSNorm out-of-place: buf_mix → buf_pir (buf_pir no longer needed, reuse)
+                fused::rmsnorm_fwd(buf_mix.data(), bw.norm_pir_w, buf_pir.data(),
                                    buf_rms.data(), seq_len, D);
 
-                // Residual add (x = x + mix)
-                fused::add_fwd(buf_x.data(), buf_mix.data(), buf_x.data(), seq_len * D);
+                // Residual add (x = x + normed_mix)
+                fused::add_fwd(buf_x.data(), buf_pir.data(), buf_x.data(), seq_len * D);
 
                 // RMSNorm2
                 fused::rmsnorm_fwd(buf_x.data(), bw.norm2_w, buf_norm2.data(),
                                    buf_rms2.data(), seq_len, D);
 
-                // SwiGLU FFN
+                // SwiGLU FFN (out-of-place silu to match training path)
                 fused::linear_fwd(buf_norm2.data(), bw.W_ffn1, buf_ffn1.data(), seq_len, D, H);
                 fused::linear_fwd(buf_norm2.data(), bw.W_ffn3, buf_ffn3.data(), seq_len, D, H);
-                fused::silu_fwd(buf_ffn1.data(), buf_ffn1.data(), seq_len * H);
-                fused::mul_fwd(buf_ffn1.data(), buf_ffn3.data(), buf_ffn_gated.data(), seq_len * H);
+                fused::silu_fwd(buf_ffn1.data(), buf_ffn_gated.data(), seq_len * H); // silu(ffn1) → ffn_gated (temp)
+                fused::mul_fwd(buf_ffn_gated.data(), buf_ffn3.data(), buf_ffn_gated.data(), seq_len * H); // gated = silu * ffn3
                 fused::linear_fwd(buf_ffn_gated.data(), bw.W_ffn2, buf_ffn2.data(), seq_len, H, D);
 
                 // Residual
