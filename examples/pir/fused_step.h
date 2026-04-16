@@ -36,7 +36,8 @@ namespace fused {
 
 static void sigmoid_fwd(const float* __restrict x, float* __restrict out, int64_t n) {
     // NO OMP: EML_MT manages all parallelism. Our OMP would nest and SIGILL.
-    for (int64_t i = 0; i < n; i += 6) {
+    int64_t n6 = n - (n % 6);
+    for (int64_t i = 0; i < n6; i += 6) {
         out[i]   = 1.0f / (1.0f + std::exp(-x[i]));
         out[i+1] = 1.0f / (1.0f + std::exp(-x[i+1]));
         out[i+2] = 1.0f / (1.0f + std::exp(-x[i+2]));
@@ -44,11 +45,13 @@ static void sigmoid_fwd(const float* __restrict x, float* __restrict out, int64_
         out[i+4] = 1.0f / (1.0f + std::exp(-x[i+4]));
         out[i+5] = 1.0f / (1.0f + std::exp(-x[i+5]));
     }
+    for (int64_t i = n6; i < n; i++) out[i] = 1.0f / (1.0f + std::exp(-x[i]));
 }
 
 static void sigmoid_bwd(const float* __restrict grad, const float* __restrict sig_out, float* __restrict dx, int64_t n) {
+    int64_t n6 = n - (n % 6);
     #pragma omp parallel for schedule(static)
-    for (int64_t i = 0; i < n; i += 6) {
+    for (int64_t i = 0; i < n6; i += 6) {
         dx[i]   = grad[i]   * sig_out[i]   * (1.0f - sig_out[i]);
         dx[i+1] = grad[i+1] * sig_out[i+1] * (1.0f - sig_out[i+1]);
         dx[i+2] = grad[i+2] * sig_out[i+2] * (1.0f - sig_out[i+2]);
@@ -56,11 +59,13 @@ static void sigmoid_bwd(const float* __restrict grad, const float* __restrict si
         dx[i+4] = grad[i+4] * sig_out[i+4] * (1.0f - sig_out[i+4]);
         dx[i+5] = grad[i+5] * sig_out[i+5] * (1.0f - sig_out[i+5]);
     }
+    for (int64_t i = n6; i < n; i++) dx[i] = grad[i] * sig_out[i] * (1.0f - sig_out[i]);
 }
 
 static void silu_fwd(const float* __restrict x, float* __restrict out, int64_t n) {
+    int64_t n6 = n - (n % 6);
     #pragma omp parallel for schedule(static)
-    for (int64_t i = 0; i < n; i += 6) {
+    for (int64_t i = 0; i < n6; i += 6) {
         float s0 = 1.0f/(1.0f+std::exp(-x[i]));   out[i]   = x[i]*s0;
         float s1 = 1.0f/(1.0f+std::exp(-x[i+1])); out[i+1] = x[i+1]*s1;
         float s2 = 1.0f/(1.0f+std::exp(-x[i+2])); out[i+2] = x[i+2]*s2;
@@ -68,30 +73,42 @@ static void silu_fwd(const float* __restrict x, float* __restrict out, int64_t n
         float s4 = 1.0f/(1.0f+std::exp(-x[i+4])); out[i+4] = x[i+4]*s4;
         float s5 = 1.0f/(1.0f+std::exp(-x[i+5])); out[i+5] = x[i+5]*s5;
     }
+    for (int64_t i = n6; i < n; i++) {
+        float s = 1.0f / (1.0f + std::exp(-x[i]));
+        out[i] = x[i] * s;
+    }
 }
 
 static void silu_bwd(const float* __restrict grad, const float* __restrict x, float* __restrict dx, int64_t n) {
+    int64_t n6 = n - (n % 6);
     #pragma omp parallel for schedule(static)
-    for (int64_t i = 0; i < n; i += 6) {
+    for (int64_t i = 0; i < n6; i += 6) {
         for (int64_t j = 0; j < 6; j++) {
             float s = 1.0f / (1.0f + std::exp(-x[i+j]));
             dx[i+j] = grad[i+j] * (s + x[i+j] * s * (1.0f - s));
         }
     }
+    for (int64_t i = n6; i < n; i++) {
+        float s = 1.0f / (1.0f + std::exp(-x[i]));
+        dx[i] = grad[i] * (s + x[i] * s * (1.0f - s));
+    }
 }
 
 static void mul_fwd(const float* __restrict a, const float* __restrict b, float* __restrict out, int64_t n) {
+    int64_t n6 = n - (n % 6);
     #pragma omp parallel for schedule(static)
-    for (int64_t i = 0; i < n; i += 6) {
+    for (int64_t i = 0; i < n6; i += 6) {
         out[i]=a[i]*b[i]; out[i+1]=a[i+1]*b[i+1]; out[i+2]=a[i+2]*b[i+2];
         out[i+3]=a[i+3]*b[i+3]; out[i+4]=a[i+4]*b[i+4]; out[i+5]=a[i+5]*b[i+5];
     }
+    for (int64_t i = n6; i < n; i++) out[i] = a[i] * b[i];
 }
 
 static void mul_bwd(const float* __restrict grad, const float* __restrict a, const float* __restrict b,
                     float* __restrict da, float* __restrict db, int64_t n) {
+    int64_t n6 = n - (n % 6);
     #pragma omp parallel for schedule(static)
-    for (int64_t i = 0; i < n; i += 6) {
+    for (int64_t i = 0; i < n6; i += 6) {
         da[i]=grad[i]*b[i]; db[i]=grad[i]*a[i];
         da[i+1]=grad[i+1]*b[i+1]; db[i+1]=grad[i+1]*a[i+1];
         da[i+2]=grad[i+2]*b[i+2]; db[i+2]=grad[i+2]*a[i+2];
@@ -99,17 +116,24 @@ static void mul_bwd(const float* __restrict grad, const float* __restrict a, con
         da[i+4]=grad[i+4]*b[i+4]; db[i+4]=grad[i+4]*a[i+4];
         da[i+5]=grad[i+5]*b[i+5]; db[i+5]=grad[i+5]*a[i+5];
     }
+    for (int64_t i = n6; i < n; i++) { da[i] = grad[i] * b[i]; db[i] = grad[i] * a[i]; }
 }
 
 static void add_fwd(const float* __restrict a, const float* __restrict b, float* __restrict out, int64_t n) {
+    // NOTE: do NOT call with a==out or b==out (aliasing violates __restrict → UB on VLIW/LCC)
+    // Use accum() for in-place add instead.
+    int64_t n6 = n - (n % 6);
     #pragma omp parallel for schedule(static)
-    for (int64_t i = 0; i < n; i += 6) {
+    for (int64_t i = 0; i < n6; i += 6) {
         out[i]=a[i]+b[i]; out[i+1]=a[i+1]+b[i+1]; out[i+2]=a[i+2]+b[i+2];
         out[i+3]=a[i+3]+b[i+3]; out[i+4]=a[i+4]+b[i+4]; out[i+5]=a[i+5]+b[i+5];
     }
+    for (int64_t i = n6; i < n; i++) out[i] = a[i] + b[i];
 }
 
 // RMSNorm: out = x * rsqrt(mean(x²) + eps) * weight
+// IMPORTANT: x and out MUST be distinct buffers (UB on VLIW/LCC with __restrict + aliasing).
+// D must be divisible by 6.
 static void rmsnorm_fwd(const float* __restrict x, const float* __restrict weight, float* __restrict out,
                         float* __restrict rms_cache,
                         int64_t BT, int64_t D, float eps = 1e-6f) {
@@ -223,13 +247,15 @@ static void linear_bwd_weight(const float* dY, const float* X, float* dW,
     at::native::hot::sgemm_tn(M, N, K, 1.0f, dY, N, X, K, 0.0f, dW, K);
 }
 
-// Accumulate: dst += src
+// Accumulate: dst += src. dst and src MUST be distinct pointers.
 static void accum(float* __restrict dst, const float* __restrict src, int64_t n) {
+    int64_t n6 = n - (n % 6);
     #pragma omp parallel for schedule(static)
-    for (int64_t i = 0; i < n; i += 6) {
+    for (int64_t i = 0; i < n6; i += 6) {
         dst[i]+=src[i]; dst[i+1]+=src[i+1]; dst[i+2]+=src[i+2];
         dst[i+3]+=src[i+3]; dst[i+4]+=src[i+4]; dst[i+5]+=src[i+5];
     }
+    for (int64_t i = n6; i < n; i++) dst[i] += src[i];
 }
 
 // ============================================================================
