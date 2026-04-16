@@ -408,8 +408,8 @@ struct FusedPIRTrainer {
                 // norm
                 fused::rmsnorm_fwd(pa.out_proj_out, pw.norm_w, pa.norm_out, pa.rms_cache, BT, D);
 
-                // residual: pir_residual += norm_out
-                fused::add_fwd(la.pir_residual, pa.norm_out, la.pir_residual, BT * D);
+                // residual: pir_residual += norm_out (use accum to avoid __restrict aliasing UB)
+                fused::accum(la.pir_residual, pa.norm_out, BT * D);
             }
 
             // mix_proj
@@ -739,8 +739,8 @@ struct FusedPIRTrainer {
                     fused::rmsnorm_fwd(buf_gate.data(), pw.norm_w, buf_val.data(),
                                        buf_rms.data(), seq_len, D);
 
-                    // Residual: pir_residual += normed out_proj
-                    fused::add_fwd(buf_pir.data(), buf_val.data(), buf_pir.data(), seq_len * D);
+                    // Residual: pir_residual += normed out_proj (accum avoids aliasing UB)
+                    fused::accum(buf_pir.data(), buf_val.data(), seq_len * D);
                 }
 
                 // Mix projection
@@ -749,8 +749,8 @@ struct FusedPIRTrainer {
                 fused::rmsnorm_fwd(buf_mix.data(), bw.norm_pir_w, buf_pir.data(),
                                    buf_rms.data(), seq_len, D);
 
-                // Residual add (x = x + normed_mix)
-                fused::add_fwd(buf_x.data(), buf_pir.data(), buf_x.data(), seq_len * D);
+                // Residual add (x += normed_mix) — accum avoids aliasing UB
+                fused::accum(buf_x.data(), buf_pir.data(), seq_len * D);
 
                 // RMSNorm2
                 fused::rmsnorm_fwd(buf_x.data(), bw.norm2_w, buf_norm2.data(),
@@ -763,8 +763,8 @@ struct FusedPIRTrainer {
                 fused::mul_fwd(buf_ffn_gated.data(), buf_ffn3.data(), buf_ffn_gated.data(), seq_len * H); // gated = silu * ffn3
                 fused::linear_fwd(buf_ffn_gated.data(), bw.W_ffn2, buf_ffn2.data(), seq_len, H, D);
 
-                // Residual
-                fused::add_fwd(buf_x.data(), buf_ffn2.data(), buf_x.data(), seq_len * D);
+                // Residual (x += ffn2_out) — accum avoids aliasing UB
+                fused::accum(buf_x.data(), buf_ffn2.data(), seq_len * D);
             }
 
             // Final norm + LM head (only need last position)
