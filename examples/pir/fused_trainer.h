@@ -631,7 +631,7 @@ struct FusedPIRTrainer {
         }
         auto t3 = std::chrono::high_resolution_clock::now();
 
-        if (step_count <= 5) {
+        if (step_count <= 5 || step_count % 10 == 0) {
             auto ms = [](auto a, auto b) {
                 return std::chrono::duration<double, std::milli>(b - a).count();
             };
@@ -732,12 +732,15 @@ struct FusedPIRTrainer {
                     fused::parallel_scan_fwd(buf_scan.data(), buf_gated.data(), buf_out.data(),
                                              1, seq_len, D);
 
-                    // Out projection
-                    fused::linear_fwd(buf_out.data(), pw.W_out, buf_pir.data(), seq_len, D, D);
+                    // Out projection → temp (reuse buf_gate, no longer needed)
+                    fused::linear_fwd(buf_out.data(), pw.W_out, buf_gate.data(), seq_len, D, D);
 
-                    // RMSNorm + residual
-                    fused::rmsnorm_fwd(buf_pir.data(), pw.norm_w, buf_pir.data(),
+                    // RMSNorm
+                    fused::rmsnorm_fwd(buf_gate.data(), pw.norm_w, buf_gate.data(),
                                        buf_rms.data(), seq_len, D);
+
+                    // Residual: pir_residual += normed out_proj
+                    fused::add_fwd(buf_pir.data(), buf_gate.data(), buf_pir.data(), seq_len * D);
                 }
 
                 // Mix projection
