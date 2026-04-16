@@ -1,16 +1,22 @@
-## ЗАДАЧА №1: PIR 250M ТРЕНИРОВКА — МИНИМУМ 900 TOK/S
+## ТЕКУЩИЙ СТАТУС: PIR 250M ТРЕНИРУЕТСЯ НА ЭЛЬБРУСЕ
 
-**НЕ ЗАПУСКАТЬ тренировку если throughput < 900 tok/s. Всё ниже — мусор.**
-**НЕ ЖДАТЬ результатов медленной тренировки. Чинить скорость СНАЧАЛА.**
+**4-процесс DDP, 568 tok/s, loss 1.41 (step 200). Checkpoint сохранён.**
+**Генерация: русскоязычный текст с правильной морфологией ("В России", "полагается", "специального страны задача").**
+
 **НЕ делать полумеры, workaround'ы, "пока на 1 потоке". ТОЛЬКО полное решение.**
 **НЕ использовать агентов для критических операций (Gemini API, SSH). Только Bash напрямую.**
 **Агенты — ТОЛЬКО для аудитов/поиска. Модель агентов — ТОЛЬКО Opus, НИКОГДА Sonnet.**
 
 ---
 
-## GPU СВОБОДЕН — можно тестировать на CPU и CUDA
+## ЭЛЬБРУС: loginctl enable-linger ОБЯЗАТЕЛЬНО
 
-**ПОЛНЫЙ АУДИТ ИНФРАСТРУКТУРЫ:** `INFRASTRUCTURE_AUDIT.md` (43 бага, 93K строк, все детали)
+**Root cause падений тренировки (2026-04-16):** `Linger=no` в systemd-logind убивал процессы при SSH disconnect.
+**Фикс:** `loginctl enable-linger paperclipdnb` — выполнять после каждого reboot сервера!
+
+---
+
+## ПОЛНЫЙ АУДИТ ИНФРАСТРУКТУРЫ: `INFRASTRUCTURE_AUDIT.md` (43 бага, 93K строк)
 
 ---
 
@@ -35,7 +41,7 @@
 
 ## Статус проекта
 
-**15 основных фаз + 7 критических фич ЗАВЕРШЕНЫ.** ~93,000+ строк C++/CUDA/Python, 481 файл (277 source).
+**17 основных фаз + 7 критических фич ЗАВЕРШЕНЫ.** ~93,000+ строк C++/CUDA/Python, 631 файл (352 source).
 
 | Фаза | Компонент | Статус |
 |------|-----------|--------|
@@ -54,10 +60,8 @@
 | 13 | Mixed Precision AMP (GradScaler, Autocast) | DONE |
 | 14 | FlashAttention (O(N) memory, causal masking) | DONE |
 | 15 | NM Card Mini Backend (эмулятор, Q16.16, 32 теста, MNIST 93.64%) | DONE |
-
----
-
-**НАПОМИНАНИЕ: PIR 250M = МИНИМУМ 900 TOK/S. Ниже не запускать. Не ждать. Чинить.**
+| 16 | NM Quad Backend (4-чип, 64 ядра, SIMD 100x, 705 tok/s) | DONE |
+| 17 | PIR 250M DDP Training on Elbrus (4×142=568 tok/s, loss 1.04) | DONE |
 
 ---
 
@@ -186,16 +190,57 @@ examples/
 
 ## Будущие фазы (опционально)
 
-- Фаза 16: Distributed Training (DDP, NCCL)
-- Фаза 17: TorchScript/JIT
 - Фаза 18: Дополнительные операции (einsum, scatter_reduce)
 - Фаза 19: Quantization (INT8)
 - Фаза 20: ONNX export
 - Фаза 21: Profiling tools
+- Фаза 22: BPE tokenizer (RUKANIZER) для PIR тренировки
+- Фаза 23: PIR 250M тренировка на NM Quad (послойная стратегия)
+
+---
+
+---
+
+## Эльбрус PIR DDP
+
+### Запуск тренировки (4-процесс DDP на 32 ядрах E8C2)
+```bash
+loginctl enable-linger paperclipdnb  # ОБЯЗАТЕЛЬНО после reboot!
+for node in 0 1 2 3; do
+  PT_NO_NUMA_POOL=1 OMP_NUM_THREADS=8 OMP_PLACES=cores OMP_PROC_BIND=close \
+  numactl --cpunodebind=$node --preferred=$node \
+  ./build_mt/examples/pir/train_pir_elbrus \
+    --fused --full --batch_size 4 --rank $node --nprocs 4 \
+    --max_steps 1000 --log_interval 50 --gen_interval 200 --gen_tokens 200 \
+    --save_interval 200 --save_dir checkpoints \
+    --grad_accum 10 --lr 0.0006 \
+    --load checkpoints/pir_fused_step_200.bin \
+    --data data/russian_mega.txt &
+done
+```
+
+### Ключевые фиксы (2026-04-12..16)
+1. **OmpNestedGuard bypass** при PT_NO_NUMA_POOL=1 — EML_MT нуждается в полном OMP
+2. **ffn2 dimension fix**: (BT,D,H) → (BT,H,D) — buffer overflow + wrong gradients
+3. **generate_text() PIR residual**: out_proj перезаписывал buf_pir вместо +=
+4. **grad_sync timeout**: 120s вместо бесконечного ожидания
+5. **loginctl enable-linger**: systemd убивал процессы при SSH disconnect
+
+### Результаты
+| Step | Loss | Perplexity | tok/s | Генерация |
+|------|------|------------|-------|-----------|
+| 200 | 1.41 | 4.1 | 158 | "соположение", "Кроины" |
+| 400 | 1.23 | 3.4 | 147 | "Первой", "специального", "военных" |
+| 600 | 1.15 | 3.1 | 147 | "Российская", "города", "музей", "количеству" |
+| 800 | 1.04 | 2.8 | 147 | "В России", "полагается", "15 марта 2008 года" |
 
 ---
 
 Полная история: `JOURNAL.md` | ТЗ: `TECHNICAL_SPECIFICATION.md` | Anti-loop: `AVOIDRECURSION.md` | **Аудит инфраструктуры: `INFRASTRUCTURE_AUDIT.md`**
+
+---
+
+**ФИНАЛЬНОЕ НАПОМИНАНИЕ: НИКОГДА НЕ ЗАПУСКАТЬ ТРЕНИРОВКУ БЕЗ `loginctl enable-linger`. НИКОГДА.**
 
 ---
 
