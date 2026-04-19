@@ -389,7 +389,7 @@ public:
                     // Broadcast-add bias along channel dim: reshape bias [C] -> [1,C,1,1].
                     Tensor bias_reshaped = bias_tensor.view(
                         {1, bias_tensor.size(0), 1, 1});
-                    out = at::add(out, bias_reshaped);
+                    out = out.add(bias_reshaped);
                 }
                 return out;
             }

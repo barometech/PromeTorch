@@ -13,6 +13,7 @@
 //   - Output Linear (d_model -> vocab_size)
 
 #include "torch/nn/nn.h"
+#include "torch/csrc/autograd/autograd.h"
 #include <memory>
 #include <set>
 #include <fstream>
@@ -101,12 +102,13 @@ public:
         // Get embeddings: [seq_len, batch] -> [seq_len, batch, d_model]
         Tensor embedded = embed_tokens(input);
 
-        // Add positional encoding
-        Tensor encoded = pos_encoder_->forward(embedded);
-
-        // Scale embeddings (as in original Transformer paper)
-        float scale = std::sqrt(static_cast<float>(d_model_));
-        encoded = encoded.mul(at::Scalar(scale));
+        // Add positional encoding via an autograd-wired add. The built-in
+        // PositionalEncoding module uses clone() + raw pointer writes, which
+        // breaks the autograd graph. We bypass it and do the add ourselves
+        // using Tensor::add (which IS autograd-wired).
+        Tensor pos = positional_encoding_tensor(embedded.size(0),
+                                                embedded.size(1));
+        Tensor encoded = embedded.add(pos);  // autograd-wired binary add
 
         // Transformer forward with causal mask
         Tensor transformer_out = transformer_->forward_with_mask(encoded, mask, Tensor());
@@ -198,30 +200,62 @@ public:
     int64_t max_seq_len() const { return max_seq_len_; }
 
 private:
+    // Build a [seq_len, batch, d_model] tensor of sinusoidal positional
+    // encodings. This is a leaf with no grad — safe to mix into an autograd
+    // graph via autograd-wired binary add.
+    Tensor positional_encoding_tensor(int64_t seq_len, int64_t batch) const {
+        Tensor out = at::zeros({seq_len, batch, d_model_});
+        float* data = out.mutable_data_ptr<float>();
+        const int64_t D = d_model_;
+        for (int64_t s = 0; s < seq_len; ++s) {
+            for (int64_t i = 0; i < D; i += 2) {
+                double div_term = std::exp(
+                    -static_cast<double>(i) * std::log(10000.0) / D);
+                float sin_v = static_cast<float>(std::sin(s * div_term));
+                float cos_v = (i + 1 < D)
+                    ? static_cast<float>(std::cos(s * div_term)) : 0.0f;
+                for (int64_t b = 0; b < batch; ++b) {
+                    int64_t base = (s * batch + b) * D;
+                    data[base + i] = sin_v;
+                    if (i + 1 < D) data[base + i + 1] = cos_v;
+                }
+            }
+        }
+        return out;
+    }
+
     // Embed tokens: [seq_len, batch] -> [seq_len, batch, d_model]
+    // Uses reshape_autograd so gradients propagate back to embedding weights.
     Tensor embed_tokens(const Tensor& input) {
         int64_t seq_len = input.size(0);
         int64_t batch_size = input.size(1);
 
-        // Flatten input for embedding lookup
+        // Flatten input for embedding lookup (input has no grad — native reshape is fine)
         Tensor flat_input = input.reshape({-1});  // [seq_len * batch]
+
+        // Embedding::forward wires its own autograd (EmbeddingBackward).
         Tensor embedded = embedding_->forward(flat_input);  // [seq_len * batch, d_model]
 
-        // Reshape back to [seq_len, batch, d_model]
-        return embedded.reshape({seq_len, batch_size, d_model_});
+        // CRITICAL: use reshape_autograd so gradient flows through this reshape.
+        return torch::autograd::reshape_autograd(
+            embedded, {seq_len, batch_size, d_model_});
     }
 
     // Output projection: [seq_len, batch, d_model] -> [seq_len, batch, vocab_size]
+    // Uses reshape_autograd so gradients propagate through the reshapes.
     Tensor output_projection(const Tensor& hidden) {
         int64_t seq_len = hidden.size(0);
         int64_t batch_size = hidden.size(1);
 
-        // Flatten for linear layer
-        Tensor flat_hidden = hidden.reshape({seq_len * batch_size, d_model_});
+        // CRITICAL: autograd-aware reshape.
+        Tensor flat_hidden = torch::autograd::reshape_autograd(
+            hidden, {seq_len * batch_size, d_model_});
+
+        // Linear::forward wires its own autograd internally.
         Tensor logits = output_->forward(flat_hidden);  // [seq_len * batch, vocab_size]
 
-        // Reshape back
-        return logits.reshape({seq_len, batch_size, vocab_size_});
+        return torch::autograd::reshape_autograd(
+            logits, {seq_len, batch_size, vocab_size_});
     }
 
     int64_t vocab_size_;
