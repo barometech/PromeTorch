@@ -136,7 +136,7 @@ Q4_K GEMV + flash_decode + CUDA Graph. Consumer GPU цифры будут мен
 датасетах, ViT, ResNet, VAE. Заготовки `examples/transformer/` и `examples/vit/` в репо
 есть, но никогда не собирались end-to-end.
 
-### PIR 342M на Эльбрусе (Local SGD data-parallel) — fixed backward
+### PIR 342M на Эльбрусе (Local SGD data-parallel) — fixed backward, undertrained
 
 Тренировка собственной linear-RNN LM архитектуры (selective scan, родственник Mamba/HGRN/
 RWKV) на русскоязычном корпусе Wikipedia (2 ГБ, BPE-токенизация SentencePiece 100k).
@@ -145,25 +145,53 @@ RWKV) на русскоязычном корпусе Wikipedia (2 ГБ, BPE-то
 | Метрика | Значение |
 |---------|----------|
 | Архитектура | 342M params, 768d, 16 layers × 4 PIR sublayers, SwiGLU FFN (H=1792), seq=2048 |
+| Vocab | BPE 100 000 (SentencePiece), Russian Wikipedia 2 GB |
 | Parallelism | 4 процесса × 8 ядер **Local SGD** (file-based weight averaging, не gradient AllReduce — ≠ DDP; настоящий DDP теперь есть отдельно в `torch/distributed/ddp.h`) |
-| Throughput | 4 × ~95 tok/s = **~380 tok/s aggregate** на fixed backward (медленнее прошлого 568 т.к. backward теперь делает реальную работу вместо stub'ов) |
+| Throughput | ~90 tok/s per process × 4 = **~360 tok/s aggregate** на fixed backward |
 | Related arch | PIR — diagonal selective scan `h[t] = σ(gate)·base_decay·h[t-1] + σ(gate)·value`. Близко к Mamba (A diagonal SSM), HGRN/RWKV (multi-scale decay) |
 | Checkpoint | Формат: raw float32 concatenation по param order. Python inference: `pir_infer.py` |
 
-**Trajectory на fixed backward (2026-04-19):**
-| Step | Loss | Perplexity | Sample (prompt "В начале") |
-|------|------|------------|----------------------------|
-| 50 | 10.53 | 37,467 | "изменением школе web вший свою сказывается" |
-| 100 | 7.50 | 1,815 | wiki markup (`&lt;/ref&gt;`, section headers) |
-| 200 | 6.44 | 628 | "`== Награды по изменением ровка, чтобы ''х — 1961370`" (section header + связное словосочетание) |
-| 300 | 6.12 | 454 | "Главный этом компонентов в 1884 года на воз поверхности в сотрудничестве. После разгрома время их Второй Украине" |
-| 400 | 5.61 | 275 | "`== Биография ==`" + "`Про Федерации smal sказывается Васильевич`" (patronymic + reflexive verb + gen) |
-| 500 | 5.70 | 298 | "`== Награды ==` ... `=Примечания=` ... `Похорольный`" (proper Wiki infobox + adjective chain) |
+**Honest trajectory (log: `pir_bpe_0.log` на Эльбрусе, 2026-04-19):**
 
-Модель учит Wikipedia-структуру + русский синтаксис. Loss monotone падает через warmup + cosine decay.
-Прежние сигналы "loss 1.04 coherent Russian" относились к **сломанному** backward (embedding/scan/
-gate/value градиенты отсутствовали) — сейчас все 342M params реально учатся, lose descent 3× быстрее
-per-step при корректной математике.
+| Step | Loss | Perplexity | LR |
+|------|------|------------|-----|
+| 1 | 11.52 | ~100k (≈ vocab = uniform random) | warmup |
+| 50 | 10.53 | 37 468 | 1.5e-4 |
+| 100 | 7.50 | 1 815 | 3.0e-4 |
+| 200 | 6.44 | 629 | 6.0e-4 (peak) |
+| 400 | 5.62 | 275 | 5.2e-4 |
+| 600 | 5.44 | 231 | 3.3e-4 |
+| 800 | **5.21** | **184** | 1.4e-4 (cosine) |
+
+Тренировка **остановлена** на step 810. Последний checkpoint:
+`pir_fused_step_800.bin` (1.37 GB) от 2026-04-19 10:21.
+
+**Генерации на step 800 — byte-noise, НЕ coherent Russian.** Модель правильно
+тренируется (loss падает монотонно, backward делает реальную работу), но
+**недобрала compute**: 800 steps × 4096 tokens/step = 3.3M tokens total. Для 342M-
+параметрической модели с vocab 100k нужно **≥100M tokens** чтобы начать выдавать
+слова — дошли до ~3% этого бюджета. Loss плато на 5.21-5.26 — cosine LR схема
+дожимается, а модель упёрлась в capacity на доступной data.
+
+Пример реальной генерации (step 800, prompt "В "):
+```
+>>> В ^>W??{YM^?F^?Iexeekc?ͅ10...????�?Iexej????�V�3Nej...
+>>> Он ^�^a?��?@_?�G�??��?��}���Njffe�[�?��G��?ۻ...
+>>> Она ^��?q���������q����q����������q�����N?�:y~��C...
+```
+
+**Прежние сигналы "loss 1.04 coherent Russian на step 800"** (другой запуск,
+до 2026-04-14) относились к **сломанному** backward — embedding scatter
+backward был stub'ом, parallel_scan backward возвращал identity, dW_gate и
+dW_value получали одинаковый grad. Loss "1.04" получался потому что
+embedding layer НЕ учился (фактический gradient был нулевой), а LM head +
+FFN + mix_proj быстро сошлись к byte-frequency marginal distribution —
+фальшивое "coherent Russian" было просто char-level n-gram от мёртвого
+embedding'а.
+
+Итог: **backward теперь математически корректен** (loss descent 3× быстрее
+per-step), но для coherent Russian generation нужно ≥30× больше tokens —
+это отдельный compute-run, не на сегодня.
 
 ### NM Quad (профиль на удалённой плате НТЦ Модуль)
 
