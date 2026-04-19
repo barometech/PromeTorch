@@ -119,26 +119,49 @@ already win. Option B stays shipped as `--fp16-weights` opt-in (see
 commit `6623fe3`) for future workloads where it might help — prefill
 batching with larger N × K × 1 shapes where Tensor Cores kick in.
 
-### 4.4 What to do next (closing 48 → 150 tok/s)
+### 4.4 What to do next (closing 47 → 100+ tok/s)
 
-Path A — **adopt Ollama's kernels directly**. llama.cpp has hand-tuned
-Q4_K GEMV that saturates A100 HBM2e better than ours. Port
-llama.cpp/ggml-cuda.cu's `mul_mat_q4_K_q8_1` into our CUDA surface
-(~4-6 hours). Expected gain: ~30-50% (hitting ~70-80 tok/s), still
-short of Ollama's 165 but meaningfully closer.
+**Path A — Port llama.cpp kernels** (ORIGINAL HYPOTHESIS — TESTED, DOESN'T WORK).
+The v2 kernel landed in commit `a3d2796` (`launch_q4km_persistent_gemv_v2`,
+opt-in via `--llama-gemv`) applied bulk `__ldg` header loads + NROWS=2 +
+shared smem reads — all the standard llama.cpp optimizations over our v1.
+A100 delta: **+0.5% (46.8 → 47.05 tok/s, within noise)**. Byte-identical
+output at T=0. Our v1 persistent kernel is already saturating A100 HBM2e
+for N=1 decode — there's no raw kernel overhead left to optimize.
 
-Path B — **bigger batches** (continuous batching / prefill). Tensor
-Cores pay off for GEMM shapes; current code only does N=1 single-token.
+**Path B — Continuous batching / prefill (RECOMMENDED).** Tensor Cores pay
+off at N>1 GEMM shapes. Current PromeServe serves single-token decode
+only; a batch of N=8 prompts would turn each matmul from a K×1 GEMV into
+a K×8 GEMM where HGEMM tensor cores actually help. Implementation:
+`gguf_model.h` `run_step_decode_cuda` needs a batched version with
+`launch_cublas_hgemm_batched` (not existing). Effort: ~1-2 day rewrite.
+Expected gain: 3-5× aggregate throughput for multi-request workloads.
 
-Path C — **lower precision weights + activations**: INT4 throughout,
-custom kernels with cuTe (CUDA 12.4 is compatible). Bigger investment.
+**Path C — Lower-precision weights** (INT3/INT2 or sparse GEMV). Reduces
+HBM traffic directly. INT4 → INT3 is ~25% less memory traffic. Requires
+new quantization format + kernel. Effort: ~3-5 days.
 
-Acceptance criteria unchanged:
-- qwen3:4b: ≥ 150 tok/s (stretch), ≥ 100 tok/s (realistic after Path A).
-- Coherence: identical output at T=0 vs baseline (FP16 path confirmed).
+**Path D — Speculative decode.** Run multiple tokens per forward pass via
+a draft model. ~2× speedup if draft is small and mostly agrees with
+target. Effort: ~2 days. Needs a smaller draft GGUF.
 
-Baseline validated on A100 (2026-04-20, build_cuda124, 3-run average):
-**47 tok/s** on qwen3:4b Q4_K_M, 100 tokens in 2.1 s each.
+### 4.5 Acceptance criteria (updated)
+
+Given HBM saturation, the realistic single-request target is:
+- qwen3:4b single-token decode: **~47 tok/s is the upper bound** for our
+  Q4_K_M + A100 combo without changing the problem shape.
+- **Realistic wins come from batching** (Path B). qwen3:4b multi-request
+  throughput at N=8: target ≥250 tok/s aggregate.
+
+Baseline (2026-04-20, 3-run avg):
+- v1 Q4_K persistent GEMV: 46.8 tok/s (default production path)
+- v2 Q4_K llama-style:      47.05 tok/s (opt-in `--llama-gemv`)
+- FP16 dequant + cublasHgemv: 44 tok/s (opt-in `--fp16-weights`, slower)
+
+Ollama on same hardware: 165 tok/s — they use different model execution
+(batched + custom kernels tuned for our specific shape classes). A full
+match likely requires Path B + custom kernels targeting qwen3 shape
+classes specifically.
 
 ---
 
