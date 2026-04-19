@@ -65,7 +65,7 @@ from ._C import (
     einsum,
     # Autograd
     no_grad as _CppNoGrad,
-    enable_grad,
+    enable_grad as _CppEnableGrad,
     is_grad_enabled,
     set_grad_enabled,
     backward,
@@ -179,24 +179,93 @@ cuda = type('cuda', (), {
     'device_count': staticmethod(cuda_device_count),
 })()
 
-class no_grad:
-    """Context manager and decorator that disables gradient computation."""
+# ============================================================================
+# Autograd grad-mode context managers / decorators (BUG-C9 fix)
+# ============================================================================
+# These talk to the C++ singleton torch::autograd::GradMode via the
+# `set_grad_enabled` / `is_grad_enabled` pybind module-level functions, which
+# in turn flip the same thread_local flag that every `*_autograd` wrapper in
+# torch/csrc/autograd/autograd.h consults through `compute_requires_grad()`
+# (see torch/csrc/autograd/node.h:463-476). When grad mode is off, no
+# Function node is attached, so no graph is built — exactly matching PyTorch.
+#
+# THREAD-SAFETY NOTE: GradMode storage is `static thread_local bool` in
+# torch/csrc/autograd/grad_mode.cpp:18, so each *C++* thread sees its own
+# flag. Python threads are 1:1 with OS threads on CPython, so spawning a
+# `threading.Thread` inside a `with no_grad():` block will NOT inherit the
+# disabled state — the new thread starts with grad enabled. This matches
+# PyTorch's documented semantics. If you need a no_grad block to cover code
+# that crosses threads, re-enter the context inside the worker.
+
+class _GradModeContextDecorator:
+    """Base for no_grad / enable_grad: works as both context manager and
+    decorator. Stack-safe (each __enter__ saves the previous state and
+    __exit__ restores it), so nesting `with no_grad(): with enable_grad(): ...`
+    behaves correctly."""
+
+    _target_mode: bool = False  # subclasses override
+
+    def __init__(self):
+        # Use a list as a stack so a single instance can be reused multiple
+        # times (`g = no_grad(); with g: ...; with g: ...`) — matches PyTorch.
+        self._prev_stack = []
+
     def __enter__(self):
-        self._guard = _CppNoGrad()
-        self._guard.__enter__()
+        self._prev_stack.append(is_grad_enabled())
+        set_grad_enabled(self._target_mode)
         return self
 
-    def __exit__(self, *args):
-        self._guard.__exit__(*args)
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self._prev_stack:
+            set_grad_enabled(self._prev_stack.pop())
+        return False  # do not suppress exceptions
 
     def __call__(self, func):
-        """Support usage as @torch.no_grad() decorator."""
+        """Allow usage as @no_grad() / @enable_grad() decorator."""
         import functools
+        cls = type(self)
+
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            with self:
+            # Build a fresh instance per-call so concurrent calls of the
+            # decorated function don't share the prev-stack.
+            with cls():
                 return func(*args, **kwargs)
         return wrapper
+
+
+class no_grad(_GradModeContextDecorator):
+    """Context-manager / decorator that disables autograd graph construction.
+
+    Inside a ``with no_grad():`` block, every C++ ``*_autograd`` wrapper
+    short-circuits via ``compute_requires_grad()`` (which checks
+    ``GradMode::is_enabled()``) and skips attaching a backward Function. The
+    resulting tensors have no grad_fn and no requires_grad flag, so no
+    graph memory is held.
+
+    Examples::
+
+        with promethorch.no_grad():
+            y = model(x)            # no graph built
+
+        @promethorch.no_grad()
+        def predict(model, x):
+            return model(x)
+    """
+    _target_mode = False
+
+
+class enable_grad(_GradModeContextDecorator):
+    """Context-manager / decorator that (re-)enables autograd graph
+    construction. Useful for forcing grad inside an outer ``no_grad`` scope.
+
+    Example::
+
+        with promethorch.no_grad():
+            with promethorch.enable_grad():
+                y = model(x)        # graph IS built here
+    """
+    _target_mode = True
 
 def compile(model, **kwargs):  # no-op if _C doesn't support it
     """Compile a model for fast inference using PromePile JIT.
