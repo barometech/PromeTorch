@@ -155,7 +155,7 @@ inline Tensor cudnn_convolution_forward(
 inline Tensor cudnn_convolution_backward_data(
     const Tensor& grad_output,  // [N, C_out, H_out, W_out]
     const Tensor& weight,       // [C_out, C_in/groups, kH, kW]
-    IntArrayRef input_size,     // [N, C_in, H_in, W_in]
+    c10::IntArrayRef input_size, // [N, C_in, H_in, W_in]
     int64_t padH, int64_t padW,
     int64_t strideH, int64_t strideW,
     int64_t dilationH, int64_t dilationW,
@@ -244,7 +244,7 @@ inline Tensor cudnn_convolution_backward_data(
 inline Tensor cudnn_convolution_backward_filter(
     const Tensor& input,        // [N, C_in, H, W]
     const Tensor& grad_output,  // [N, C_out, H_out, W_out]
-    IntArrayRef weight_size,    // [C_out, C_in/groups, kH, kW]
+    c10::IntArrayRef weight_size, // [C_out, C_in/groups, kH, kW]
     int64_t padH, int64_t padW,
     int64_t strideH, int64_t strideW,
     int64_t dilationH, int64_t dilationW,

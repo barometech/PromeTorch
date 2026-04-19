@@ -97,9 +97,9 @@ std::vector<std::vector<uint8_t>> load_mnist_images(const std::string& path) {
 //   -> ConvT 128->64 k4 s2 p1 -> [B,64,14,14]  BN  ReLU
 //   -> ConvT 64->1   k4 s2 p1 -> [B,1,28,28]   Tanh
 
-class Generator : public Module {
+class GeneratorNet : public Module {
 public:
-    Generator() : Module("Generator") {
+    GeneratorNet() : Module("GeneratorNet") {
         fc     = std::make_shared<Linear>(100, 128 * 7 * 7);
         deconv1 = std::make_shared<ConvTranspose2d>(128, 64, 4, 2, 1);
         bn1     = std::make_shared<BatchNorm2d>(64);
@@ -298,7 +298,7 @@ int main(int argc, char* argv[]) {
     int64_t N = static_cast<int64_t>(images.size());
 
     // Build models
-    auto G = std::make_shared<Generator>();
+    auto G = std::make_shared<GeneratorNet>();
     auto D = std::make_shared<Discriminator>();
 #ifdef PT_USE_CUDA
     if (g_device.is_cuda()) { G->to(g_device); D->to(g_device); }

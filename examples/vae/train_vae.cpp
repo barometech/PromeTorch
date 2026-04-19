@@ -286,8 +286,7 @@ Tensor vae_loss(const Tensor& recon, const Tensor& x,
     Tensor kl_loss  = mul_scalar_autograd(kl_inner,
                             0.5f / static_cast<float>(batch_size));
 
-    (void)kl_loss;
-    return recon_loss;  // DEBUG: BCE without KL, without clamp
+    return ta::add_autograd(recon_loss, kl_loss);
 }
 
 // ============================================================================
