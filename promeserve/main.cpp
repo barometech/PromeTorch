@@ -49,6 +49,7 @@ void print_usage(const char* argv0) {
     std::cout << "  --workers N         Worker thread pool size (default: hardware_concurrency)" << std::endl;
     std::cout << "  --queue-depth N     Max queued requests (default: 128; excess returns 503)" << std::endl;
     std::cout << "  --timeout-ms MS     Per-request generation timeout (default: 60000)" << std::endl;
+    std::cout << "  --fp16-weights      Dequant Q4_K -> FP16 at load; cuBLAS HGEMV decode (CUDA only)" << std::endl;
     std::cout << "  --help              Show this help" << std::endl;
     std::cout << std::endl;
     std::cout << "API endpoints (Ollama-compatible):" << std::endl;
@@ -69,6 +70,7 @@ int main(int argc, char* argv[]) {
     int port = 11434;
     std::string device = "cuda";
     std::string model;
+    bool fp16_weights = false;
     promeserve::ServerConfig cfg;  // defaults: 0 workers (use hw_concurrency), 128 queue, 60000ms timeout
 
     for (int i = 1; i < argc; ++i) {
@@ -92,6 +94,8 @@ int main(int argc, char* argv[]) {
             device = "cpu";
         } else if (arg == "--cuda" || arg == "--gpu") {
             device = "cuda";
+        } else if (arg == "--fp16-weights" || arg == "--fp16_weights") {
+            fp16_weights = true;
         } else {
             std::cerr << "Unknown option: " << arg << std::endl;
             print_usage(argv[0]);
@@ -107,7 +111,7 @@ int main(int argc, char* argv[]) {
     server.set_config(cfg);
     g_server = &server;
 
-    server.start(port, device, model);
+    server.start(port, device, model, fp16_weights);
 
     return 0;
 }

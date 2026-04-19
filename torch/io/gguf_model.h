@@ -502,6 +502,8 @@ public:
     // Device
     bool use_cuda_ = false;
     bool use_quant_gemv_ = false;  // Q4_K_M decode acceleration
+    bool use_fp16_weights_ = false;  // Dequant-at-load FP16 weights + cuBLAS HGEMV decode path
+    size_t fp16_weights_bytes_ = 0;  // Total FP16 weight VRAM (for reporting)
     bool output_weight_needs_float32_ = false;  // true if output.weight has no Q4_K_M
 
     // GGUF file path (for reloading raw quant data)
@@ -833,6 +835,133 @@ public:
         }
 #else
         std::cerr << "[Quant] CUDA not available" << std::endl;
+#endif
+    }
+
+    // ========================================================================
+    // Dequantize ALL layer Q4_K weights to FP16 on GPU (one-shot at load).
+    // Enables cuBLAS HGEMV decode path (Tensor Cores) — expected 2-3x speedup
+    // on A100 vs custom Q4_K fused kernels. Call AFTER load_quantized_to_cuda().
+    //
+    // VRAM cost per weight: rows * cols * 2 bytes (FP16). Total for qwen3:4b:
+    // 7 weights * 28 layers ~ 196 weights, ~5-6 GB extra FP16 buffers.
+    //
+    // On OOM: frees any fp16_data already allocated, resets use_fp16_weights_
+    // to false, and returns false. Caller should fall back to the quant path.
+    //
+    // Returns true on success, false on fallback-to-quant.
+    // ========================================================================
+    bool dequant_all_to_fp16(double max_vram_fraction = 0.85) {
+#ifdef PT_USE_CUDA
+        if (!use_quant_gemv_) {
+            std::cerr << "[FP16] Quantized weights not loaded — call load_quantized_to_cuda() first" << std::endl;
+            return false;
+        }
+
+        auto t_start = std::chrono::high_resolution_clock::now();
+
+        // Estimate total FP16 bytes required before touching any malloc.
+        size_t need_bytes = 0;
+        auto add_w = [&](const QuantizedWeight& qw) {
+            if (qw.valid && qw.is_q4k() && qw.gpu_data && !qw.fp16_data) {
+                need_bytes += static_cast<size_t>(qw.rows) * qw.cols * sizeof(uint16_t);
+            }
+        };
+        for (const auto& layer : layers) {
+            add_w(layer.q_attn_q); add_w(layer.q_attn_k); add_w(layer.q_attn_v);
+            add_w(layer.q_attn_output);
+            add_w(layer.q_ffn_gate); add_w(layer.q_ffn_up); add_w(layer.q_ffn_down);
+        }
+
+        size_t vram_free = 0, vram_total = 0;
+        cudaMemGetInfo(&vram_free, &vram_total);
+        double need_mb = need_bytes / (1024.0 * 1024.0);
+        double free_mb = vram_free / (1024.0 * 1024.0);
+        double total_mb = vram_total / (1024.0 * 1024.0);
+        std::cout << "[FP16] Dequant plan: need " << std::fixed << std::setprecision(1)
+                  << need_mb << " MB, free " << free_mb << " / " << total_mb << " MB" << std::endl;
+
+        // Headroom check: leave room for KV cache + activations + cuBLAS workspace.
+        size_t budget = static_cast<size_t>(vram_total * max_vram_fraction);
+        size_t used = vram_total - vram_free;
+        if (used + need_bytes > budget) {
+            std::cerr << "[FP16] Would exceed " << (max_vram_fraction*100.0) << "% VRAM budget ("
+                      << ((used + need_bytes) / (1024.0*1024.0)) << " MB > "
+                      << (budget / (1024.0*1024.0)) << " MB). Falling back to quant path." << std::endl;
+            use_fp16_weights_ = false;
+            return false;
+        }
+
+        std::cout << "[FP16] Dequantizing Q4_K -> FP16 on GPU..." << std::endl;
+        size_t allocated_bytes = 0;
+        bool ok = true;
+
+        auto dequant_one = [&](QuantizedWeight& qw) -> bool {
+            if (!ok) return false;
+            if (!qw.valid || !qw.is_q4k() || !qw.gpu_data) return true;  // skip non-Q4K
+            if (qw.fp16_data) return true;  // already done
+            size_t bytes = static_cast<size_t>(qw.rows) * qw.cols * sizeof(uint16_t);
+            cudaError_t err = cudaMalloc(&qw.fp16_data, bytes);
+            if (err != cudaSuccess) {
+                std::cerr << "[FP16] cudaMalloc failed (" << (bytes/(1024*1024)) << " MB): "
+                          << cudaGetErrorString(err) << std::endl;
+                qw.fp16_data = nullptr;
+                ok = false;
+                return false;
+            }
+            at::cuda::launch_dequant_q4k_to_fp16(
+                qw.gpu_data, qw.fp16_data,
+                static_cast<int>(qw.cols), static_cast<int>(qw.rows),
+                qw.row_stride_bytes, nullptr);
+            allocated_bytes += bytes;
+            return true;
+        };
+
+        for (auto& layer : layers) {
+            if (!dequant_one(layer.q_attn_q)) break;
+            if (!dequant_one(layer.q_attn_k)) break;
+            if (!dequant_one(layer.q_attn_v)) break;
+            if (!dequant_one(layer.q_attn_output)) break;
+            if (!dequant_one(layer.q_ffn_gate)) break;
+            if (!dequant_one(layer.q_ffn_up)) break;
+            if (!dequant_one(layer.q_ffn_down)) break;
+        }
+        cudaDeviceSynchronize();
+
+        if (!ok) {
+            std::cerr << "[FP16] OOM or dequant failure — releasing " << (allocated_bytes/(1024*1024))
+                      << " MB and falling back to quant path." << std::endl;
+            for (auto& layer : layers) {
+                auto free_one = [](QuantizedWeight& qw) {
+                    if (qw.fp16_data) { cudaFree(qw.fp16_data); qw.fp16_data = nullptr; }
+                };
+                free_one(layer.q_attn_q); free_one(layer.q_attn_k); free_one(layer.q_attn_v);
+                free_one(layer.q_attn_output);
+                free_one(layer.q_ffn_gate); free_one(layer.q_ffn_up); free_one(layer.q_ffn_down);
+            }
+            use_fp16_weights_ = false;
+            fp16_weights_bytes_ = 0;
+            return false;
+        }
+
+        use_fp16_weights_ = true;
+        fp16_weights_bytes_ = allocated_bytes;
+        // Force graph re-capture since hot path dispatches differ now.
+        invalidate_graph();
+
+        auto t_end = std::chrono::high_resolution_clock::now();
+        double s = std::chrono::duration<double>(t_end - t_start).count();
+        cudaMemGetInfo(&vram_free, &vram_total);
+        double used_gb = (vram_total - vram_free) / (1024.0 * 1024.0 * 1024.0);
+        double total_gb = vram_total / (1024.0 * 1024.0 * 1024.0);
+        std::cout << "[FP16] Dequantized in " << s << "s — added "
+                  << (allocated_bytes / (1024.0*1024.0)) << " MB, VRAM "
+                  << std::fixed << std::setprecision(1) << used_gb << " / " << total_gb << " GB" << std::endl;
+        return true;
+#else
+        (void)max_vram_fraction;
+        std::cerr << "[FP16] CUDA not available" << std::endl;
+        return false;
 #endif
     }
 
@@ -1376,7 +1505,38 @@ public:
                 layer.q_attn_q.row_stride_bytes == layer.q_attn_k.row_stride_bytes &&
                 layer.q_attn_q.row_stride_bytes == layer.q_attn_v.row_stride_bytes;
 
-            if (can_fuse_qkv) {
+            // FP16 path: have fp16 for Q/K/V and user requested FP16
+            bool use_fp16_qkv = use_fp16_weights_ &&
+                layer.q_attn_q.fp16_data && layer.q_attn_k.fp16_data && layer.q_attn_v.fp16_data;
+
+            if (use_fp16_qkv) {
+                // -- FP16: rmsnorm then 3x cuBLAS HGEMV on Tensor Cores --
+                PROF_BEGIN(profiler, "fp16_norm_qkv");
+                at::cuda::launch_rms_norm(
+                    x_ptr, layer.attn_norm.data_ptr<float>(),
+                    sp.buf_normed.mutable_data_ptr<float>(),
+                    1, static_cast<int>(H), eps, add_one, s);
+                const float* normed_ptr = sp.buf_normed.data_ptr<float>();
+                at::cuda::launch_cublas_hgemv(
+                    layer.q_attn_q.fp16_data, normed_ptr,
+                    sp.buf_q.mutable_data_ptr<float>(),
+                    static_cast<int>(layer.q_attn_q.cols),
+                    static_cast<int>(layer.q_attn_q.rows),
+                    sp.x_fp16_buf, sp.y_fp16_buf, s);
+                at::cuda::launch_cublas_hgemv(
+                    layer.q_attn_k.fp16_data, normed_ptr,
+                    sp.buf_k.mutable_data_ptr<float>(),
+                    static_cast<int>(layer.q_attn_k.cols),
+                    static_cast<int>(layer.q_attn_k.rows),
+                    sp.x_fp16_buf, sp.y_fp16_buf, s);
+                at::cuda::launch_cublas_hgemv(
+                    layer.q_attn_v.fp16_data, normed_ptr,
+                    sp.buf_v.mutable_data_ptr<float>(),
+                    static_cast<int>(layer.q_attn_v.cols),
+                    static_cast<int>(layer.q_attn_v.rows),
+                    sp.x_fp16_buf, sp.y_fp16_buf, s);
+                PROF_END(profiler, "fp16_norm_qkv");
+            } else if (can_fuse_qkv) {
                 // -- FUSED: attn_norm + Q/K/V projections (1 kernel instead of 4) --
                 PROF_BEGIN(profiler, "fused_norm_qkv");
                 at::cuda::launch_q4km_fused_rmsnorm_qkv_gemv(
@@ -1512,7 +1672,24 @@ public:
                 layer.q_attn_output.gpu_data &&
                 !layer.post_attention_norm.defined();  // Can't fuse if post-norm needed
 
-            if (can_fuse_output_residual) {
+            // FP16 path: cublas HGEMV + add (2 kernels instead of 1 fused, but Tensor Cores win)
+            bool use_fp16_output = use_fp16_weights_ &&
+                layer.q_attn_output.fp16_data &&
+                !layer.post_attention_norm.defined();
+
+            if (use_fp16_output) {
+                PROF_BEGIN(profiler, "fp16_output_residual");
+                at::cuda::launch_cublas_hgemv(
+                    layer.q_attn_output.fp16_data,
+                    sp.buf_attn.data_ptr<float>(),
+                    sp.buf_attn_proj.mutable_data_ptr<float>(),
+                    static_cast<int>(layer.q_attn_output.cols),
+                    static_cast<int>(layer.q_attn_output.rows),
+                    sp.x_fp16_buf, sp.y_fp16_buf, s);
+                at::cuda::launch_add(x_ptr, sp.buf_attn_proj.data_ptr<float>(),
+                                      sp.buf_h.mutable_data_ptr<float>(), H, s);
+                PROF_END(profiler, "fp16_output_residual");
+            } else if (can_fuse_output_residual) {
                 PROF_BEGIN(profiler, "fused_output_residual");
                 // Copy x → buf_h (residual base)
                 at::cuda::launch_copy(x_ptr, sp.buf_h.mutable_data_ptr<float>(), H, s);
@@ -1555,7 +1732,31 @@ public:
                 layer.q_ffn_gate.cols == layer.q_ffn_up.cols &&
                 layer.q_ffn_gate.row_stride_bytes == layer.q_ffn_up.row_stride_bytes;
 
-            if (can_fuse_ffn) {
+            bool use_fp16_ffn_gu = use_fp16_weights_ &&
+                layer.q_ffn_gate.fp16_data && layer.q_ffn_up.fp16_data;
+
+            if (use_fp16_ffn_gu) {
+                // -- FP16: ffn_norm + 2x cuBLAS HGEMV (Tensor Cores) --
+                PROF_BEGIN(profiler, "fp16_norm_gate_up");
+                at::cuda::launch_rms_norm(
+                    sp.buf_h.data_ptr<float>(), layer.ffn_norm.data_ptr<float>(),
+                    sp.buf_normed.mutable_data_ptr<float>(),
+                    1, static_cast<int>(H), eps, add_one, s);
+                const float* normed_ptr = sp.buf_normed.data_ptr<float>();
+                at::cuda::launch_cublas_hgemv(
+                    layer.q_ffn_gate.fp16_data, normed_ptr,
+                    sp.buf_gate.mutable_data_ptr<float>(),
+                    static_cast<int>(layer.q_ffn_gate.cols),
+                    static_cast<int>(layer.q_ffn_gate.rows),
+                    sp.x_fp16_buf, sp.y_fp16_buf, s);
+                at::cuda::launch_cublas_hgemv(
+                    layer.q_ffn_up.fp16_data, normed_ptr,
+                    sp.buf_up.mutable_data_ptr<float>(),
+                    static_cast<int>(layer.q_ffn_up.cols),
+                    static_cast<int>(layer.q_ffn_up.rows),
+                    sp.x_fp16_buf, sp.y_fp16_buf, s);
+                PROF_END(profiler, "fp16_norm_gate_up");
+            } else if (can_fuse_ffn) {
                 // -- FUSED: ffn_norm + gate+up projections (1 kernel instead of 3) --
                 PROF_BEGIN(profiler, "fused_norm_gate_up");
                 at::cuda::launch_q4km_fused_rmsnorm_gate_up_gemv(
@@ -1601,8 +1802,24 @@ public:
                 layer.q_ffn_down.gpu_data &&
                 !layer.post_ffw_norm.defined();  // Can't fuse if post-norm needed
 
+            bool use_fp16_down = use_fp16_weights_ &&
+                layer.q_ffn_down.fp16_data &&
+                !layer.post_ffw_norm.defined();
+
             int next = 1 - cur;
-            if (can_fuse_down_residual) {
+            if (use_fp16_down) {
+                PROF_BEGIN(profiler, "fp16_down_residual");
+                at::cuda::launch_cublas_hgemv(
+                    layer.q_ffn_down.fp16_data,
+                    sp.buf_silu.data_ptr<float>(),
+                    sp.buf_down.mutable_data_ptr<float>(),
+                    static_cast<int>(layer.q_ffn_down.cols),
+                    static_cast<int>(layer.q_ffn_down.rows),
+                    sp.x_fp16_buf, sp.y_fp16_buf, s);
+                at::cuda::launch_add(sp.buf_h.data_ptr<float>(), sp.buf_down.data_ptr<float>(),
+                                      sp.buf_x[next].mutable_data_ptr<float>(), H, s);
+                PROF_END(profiler, "fp16_down_residual");
+            } else if (can_fuse_down_residual) {
                 PROF_BEGIN(profiler, "fused_down_residual");
                 // Copy buf_h → buf_x[next] (residual base)
                 at::cuda::launch_copy(sp.buf_h.data_ptr<float>(),
