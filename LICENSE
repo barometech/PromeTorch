@@ -5,6 +5,11 @@ Copyright (c) 2026 PromeTorch Contributors
 Based on the BSD 3-Clause "New" or "Revised" License (the base license of
 PyTorch, upon which PromeTorch is API-compatible).
 
+This license is intentionally permissive. It is designed to let people
+build, ship, sell, fork, and remix anything they want using PromeTorch.
+The only restriction is that you cannot take PromeTorch itself, repackage
+it as a product, and sell it.
+
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are met:
 
@@ -15,50 +20,90 @@ modification, are permitted provided that the following conditions are met:
    this list of conditions and the following disclaimer in the documentation
    and/or other materials provided with the distribution.
 
-3. Neither the name of PromeTorch nor the names of its contributors may be
+3. Neither the name "PromeTorch" nor the names of its contributors may be
    used to endorse or promote products derived from this software without
-   specific prior written permission.
+   specific prior written permission. (This does not restrict the
+   attribution required by Section 4 — that is encouraged.)
 
-4. ADDITIONAL RESTRICTION — NO RESALE OF THE FRAMEWORK ITSELF:
+4. ATTRIBUTION REQUIREMENT (commercial products and services).
+   If you ship, sell, or operate a commercial product, application, or
+   service that includes PromeTorch as a runtime, library, or component
+   (this includes SaaS / hosted APIs, on-prem software, mobile apps,
+   desktop software, hardware products with embedded inference, paid
+   developer tools, and similar), you must include a visible attribution
+   in at least ONE of the following places:
+
+       (a) The product's About / Credits / Acknowledgements screen;
+       (b) The product's documentation, README, or website;
+       (c) The product's UI footer or splash screen;
+       (d) The "open source notices" section of a mobile / desktop app.
+
+   The attribution must read substantially:
+
+       "Powered by PromeTorch — https://github.com/barometech/PromeTorch"
+
+   You do NOT need to add attribution if PromeTorch is used purely
+   internally (e.g. internal training pipelines, R&D, scripts that don't
+   ship to end users), or for personal / educational / non-commercial
+   use, or in research papers (citation is encouraged but not required).
+
+5. NO RESALE OF THE FRAMEWORK ITSELF.
    You may NOT sell, license, sublicense, rent, lease, or otherwise
-   monetarily distribute this Software (PromeTorch), in whole or in
-   substantial part, as a standalone product, library, SDK, framework,
-   or toolkit. This includes but is not limited to:
+   monetarily distribute PromeTorch — in whole, in substantial part, or
+   as a thin re-skin / wrapper — as a standalone product, library, SDK,
+   framework, or toolkit. This includes:
 
        (a) Rebranding PromeTorch and selling it as a different-named
            framework or library;
-       (b) Selling a "commercial edition" or "enterprise version" of
-           PromeTorch with paywalled core functionality;
-       (c) Charging license fees, subscription fees, or per-seat fees
-           for access to the framework itself;
-       (d) Selling access to the source code of PromeTorch.
+       (b) Selling a "commercial edition" / "enterprise version" /
+           "pro tier" of PromeTorch with paywalled core functionality;
+       (c) Charging license fees, subscription fees, per-seat fees, or
+           cloud-runtime fees for access to the framework itself
+           (as opposed to fees for YOUR product that happens to use it);
+       (d) Selling access to the source code of PromeTorch;
+       (e) Bundling PromeTorch with a trivial wrapper / GUI / CLI shim
+           and selling THAT as a "framework" product.
 
-   The Software must remain freely and openly available to everyone.
+   The PromeTorch source code itself must remain freely and openly
+   available to everyone.
 
-5. PERMITTED COMMERCIAL USES (explicitly allowed, including at scale and
-   for profit):
-       (a) Training neural networks and machine-learning models using
-           PromeTorch, whether for research, internal business, client
-           work, or commercial products;
-       (b) Running inference with models built or trained with PromeTorch,
-           including as part of paid services, APIs, SaaS products,
-           on-premise deployments, and shipped software;
+6. PERMITTED USES (explicitly allowed, including at scale and for profit,
+   with no further fees, no royalties, and no notification required —
+   only the attribution in Section 4):
+
+       (a) Training neural networks and machine-learning models with
+           PromeTorch, for any purpose: research, internal business,
+           client work, commercial products, paid services;
+       (b) Running inference with models trained or built with
+           PromeTorch — including as paid SaaS, paid APIs, paid
+           on-prem deployments, shipped commercial software, embedded
+           inference in hardware, paid mobile / desktop apps;
        (c) Selling, licensing, or monetizing the neural-network models,
            weights, training pipelines, application code, or services
-           that USE PromeTorch as a runtime dependency;
+           that USE PromeTorch as a runtime dependency. The models you
+           train ARE YOURS. The pipelines you build ARE YOURS. The
+           services you operate ARE YOURS;
        (d) Building and selling AI-powered applications, websites, SDKs,
-           mobile apps, or hardware products that embed PromeTorch as
-           a library or runtime;
-       (e) Consulting, integration services, custom training, fine-tuning,
-           or deployment services, where PromeTorch is the underlying
-           framework used to deliver the engagement;
-       (f) Publishing derivative models, applications, or research results
-           trained on PromeTorch, commercial or non-commercial.
+           mobile apps, hardware products, agents, robotics systems,
+           or anything else that embeds PromeTorch as a library;
+       (e) Consulting, integration, custom training, fine-tuning, or
+           deployment services delivered using PromeTorch;
+       (f) Forking PromeTorch, modifying it, and using your fork
+           internally or in your own products. If you redistribute a
+           public fork (open source), it must remain under this license
+           (or a strictly more permissive open license) and the resale
+           restriction in Section 5 still applies — i.e. you can fork,
+           but you cannot fork-and-sell-as-a-product;
+       (g) Publishing derivative models, applications, papers, or
+           research results trained on PromeTorch, commercial or
+           non-commercial.
 
-   In plain terms: the framework is free and open — use it to build,
-   train, and ship whatever you want, charge whatever you want for YOUR
-   models and YOUR products. Only don't rebrand the framework itself and
-   sell it as your own product.
+   In plain terms:
+       - The framework is free, open, and yours to use.
+       - Build whatever you want with it. Charge whatever you want for
+         what YOU built.
+       - Just attribute, and don't repackage and sell the framework
+         itself as your own product.
 
 THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
 AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
@@ -73,9 +118,20 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
 
 Note on OSI status:
-    The additional "no resale of the framework" restriction in Section 4
-    means this license is SOURCE-AVAILABLE rather than strictly
-    OSI-compliant "open source". All standard open-source benefits
-    (free use, modification, redistribution, internal deployment,
-    commercial applications and inference) are preserved. The only
-    restriction is on reselling the framework itself as a product.
+    Sections 4 (attribution requirement) and 5 (no resale of the framework
+    itself) make this a SOURCE-AVAILABLE license rather than strictly
+    OSI-compliant "open source". All standard open-source benefits are
+    preserved: free use, modification, public forks, internal deployment,
+    commercial applications, commercial inference, commercial training,
+    selling models trained on it, selling services built with it. The only
+    restrictions are: (1) attribute in commercial products; (2) don't
+    repackage the framework itself as a paid product.
+
+Note on intent:
+    PromeTorch is meant to stay free and accessible to everyone — students,
+    researchers, indie developers, startups, and large companies alike.
+    The author wants the framework to remain a public good while
+    preventing exploitation by parties that would simply rebrand it and
+    sell it. If you're unsure whether your use is permitted, the answer
+    is almost certainly YES (you can use it). The very narrow "no" is
+    only "don't sell PromeTorch itself as a product".
