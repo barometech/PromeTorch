@@ -45,6 +45,23 @@
 #include <vector>
 #include <cstring>
 
+// ============================================================================
+// cuDNN 9 compatibility guard
+// ============================================================================
+// cuDNN 9 removed the legacy RNN API we wrap here (cudnnSetRNNDescriptor_v6,
+// cudnnGetRNNParamsSize, cudnnRNNBackwardData, cudnnRNNBackwardWeights —
+// all replaced by the cudnnRNN*_v8 API). Porting to the v8 API is a
+// separate task; for now, compile this header into a no-op on cuDNN >= 9
+// so torch/nn/nn.h → rnn.h → this header doesn't break every downstream
+// example (VAE / ResNet / etc.). The RNN modules (LSTM / GRU / RNN) fall
+// back to their pure-C++ forward implementations when CuDNN RNN paths are
+// not available — PromeTorch has those as primary, cuDNN was the optional
+// accelerator.
+#if CUDNN_VERSION >= 9000
+#define PT_CUDNN_RNN_UNAVAILABLE 1
+#endif
+
+#ifndef PT_CUDNN_RNN_UNAVAILABLE
 namespace at {
 namespace cudnn {
 
@@ -581,6 +598,7 @@ inline RNNLinLayerSlot cudnn_rnn_get_lin_layer_bias(
 
 } // namespace cudnn
 } // namespace at
+#endif // !PT_CUDNN_RNN_UNAVAILABLE
 
 #endif // PT_USE_CUDNN
 #endif // PT_USE_CUDA
