@@ -301,8 +301,13 @@ ASGD, LBFGS**. Все на `at::*` tensor ops, CPU-portable, compile на Elbrus
 ### Runtime-verified (GPU tests run 2026-04-19 on A100 40GB)
 - **FP16 CUDA kernels**: `add_fp16`, `mul_fp16`, `relu_fp16`, `sigmoid_fp16`, `tanh_fp16`,
   `check_inf_nan_fp16` — все 7 verified on A100. max |err| vs FP32 reference 1.02e-4 .. 4.88e-4.
-  Throughput `add_fp16`: 34.25 Gelem/s. Self-test: `test_fp16_kernels.cu`, link against
-  `build_cudnn/aten_cuda.lib`.
+  Throughput `add_fp16`: 34.25 Gelem/s. Self-test: `test_fp16_kernels.cu`.
+- **Custom GEMM kernel** (`launch_gemm_native`): numerically matches cuBLAS `launch_gemm`
+  (max |diff| 1e-5 .. 2e-4 across 64×64..1024×1024 FP32 GEMM). Competitive on small
+  matrices (1.1× cuBLAS at 64×64), slower on large (0.3× at 1024×1024 — cuBLAS uses
+  tensor cores, 12.8 TFLOPS on A100). Self-test: `test_gemm_native.cu`.
+- **GGUF inference**: qwen3:4b 86.6 tok/s, deepseek-r1:8b 52.7 tok/s — numbers in "NVIDIA
+  GPU — GGUF inference" section above.
 
 ### Compile-verified, runtime-untested
 Нет доступа к соответствующему железу для verification:
