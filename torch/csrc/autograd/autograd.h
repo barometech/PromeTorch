@@ -37,6 +37,7 @@
 #include "torch/csrc/autograd/functions/FusedBackward.h"
 #include "torch/csrc/autograd/functions/ConvBackward.h"
 #include "torch/csrc/autograd/functions/AttentionBackward.h"
+#include "torch/csrc/autograd/functions/ToBackward.h"
 #include "aten/src/ATen/native/Attention.h"
 
 namespace torch {
@@ -1287,6 +1288,47 @@ inline Tensor low_rank_linear_autograd(const Tensor& input, const Tensor& A,
     }
 
     return output;
+}
+
+// ============================================================================
+// Dtype Cast with Autograd
+// ============================================================================
+// `to_autograd(t, dtype)` is the autograd-aware counterpart to `Tensor::to(dtype)`.
+// Forward: `result = t.to(dtype)` (bare cast).
+// Backward: `grad_input = grad_output.to(source_dtype)`.
+//
+// Behaviour:
+//   - If `t.dtype() == dtype` we return `t` unchanged (true no-op — preserves the
+//     existing grad_fn, exactly like `Tensor::to(dtype)` does for the same case).
+//   - We only attach a ToBackward node when both source and target dtypes are
+//     floating-point. Casting an integer tensor cannot meaningfully participate
+//     in autograd (gradients are not defined for int -> int), so we silently
+//     return the bare cast without any grad_fn — matching PyTorch semantics.
+//   - Respects `GradMode::is_enabled()` and `t.requires_grad()` via the existing
+//     `compute_requires_grad(t)` helper.
+inline Tensor to_autograd(const Tensor& t, c10::ScalarType dtype) {
+    // No-op fast path: dtype already matches. Returning `t` unchanged is
+    // intentional — it preserves any existing grad_fn on `t`.
+    if (t.dtype() == dtype) {
+        return t;
+    }
+
+    Tensor result = t.to(dtype);
+
+    // Only wire backward for floating-point <-> floating-point casts.
+    // Integer casts are non-differentiable (no real-valued Jacobian), and
+    // mixing them into the autograd graph would silently produce nonsense
+    // gradients on the upstream FP path.
+    const bool both_floating = c10::isFloatingType(t.dtype())
+                            && c10::isFloatingType(dtype);
+
+    if (both_floating && compute_requires_grad(t)) {
+        auto grad_fn = NodePool<ToBackward>::make_shared(t.dtype());
+        grad_fn->add_input_metadata(t);
+        set_grad_fn(result, grad_fn);
+        result.set_requires_grad(true);
+    }
+    return result;
 }
 
 // ============================================================================
