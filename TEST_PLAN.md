@@ -89,34 +89,56 @@ Two options, in increasing cost:
   **Verdict: only viable if scratch is reused across all matrices in one
   forward pass, which it can't naively be**.
 
-**Option B — One-shot fp16 unpack at load (RECOMMENDED):**
+**Option B — One-shot fp16 unpack at load (IMPLEMENTED AS OPT-IN; NOT FASTER):**
 - At model load, dequant ALL weights from Q4_K → FP16. VRAM cost goes from
-  ~5 GB to ~8 GB for qwen3:4b — fits A100 40GB easily; consumer 24 GB cards
-  would lose qwen3:14b but those are not the target.
-- Use `cublasHgemv` (or `cublasSgemmEx` with FP16 inputs / FP32 accum) for
-  every matmul. Throw away the custom kernel entirely.
-- Pro: 50-100% expected speedup (matches Ollama path); simpler code.
-- Con: 8 GB instead of 5 GB VRAM; need to expose `--keep-quant` for
-  consumer-card users.
+  ~8 GB to ~14 GB for qwen3:4b.
+- Use `cublasHgemv` for every matmul. Falls back to Q4_K path if VRAM
+  budget would be exceeded.
+- **Expected** 50-100% speedup (this was WRONG — see below).
+- **Actual on A100 (2026-04-20):** baseline ~47 tok/s; --fp16-weights
+  ~44 tok/s. **~6% REGRESSION.**
 
-**Decision (this plan):** Option B, gated behind `--fp16-weights` flag
-(default ON when free VRAM > 1.5 × Q4_K size; auto-fallback otherwise).
+### 4.3 Why Option B doesn't speed up decode (empirical post-mortem)
 
-### 4.3 Implementation steps
-1. Add `dequant_q4k_to_fp16` CUDA kernel (one-shot at load).
-2. Switch `cuda_quant_gemv` callsites (in `gguf_model.h`) to use the FP16
-   tensor + `cublasHgemv` when `--fp16-weights`.
-3. Add VRAM-pressure auto-detect: query `cudaMemGetInfo` after weight load
-   stage, if FP16 unpack would exceed 90% utilization, fall back.
-4. Re-enable CUDA Graph capture along the pure-cuBLAS path (the custom
-   GEMV kernel doesn't capture cleanly; cuBLAS does).
-5. Verify on A100 with 100-token decode.
+Single-token decode is pure **N=1 GEMV** — bandwidth-bound, not
+compute-bound. Math at A100:
+- Q4_K_M weights for qwen3:4b: ~2.5 GB per forward pass.
+- FP16 weights after dequant:  ~5.9 GB per forward pass (**2.36× more
+  memory traffic**).
+- A100 HBM2e: ~1.55 TB/s. Q4_K forward ≈ 1.6 ms; FP16 forward ≈ 3.8 ms.
 
-### 4.4 Acceptance criteria
-- qwen3:4b: ≥ 150 tok/s (target), ≥ 130 tok/s (acceptable).
-- gemma3:4b: ≥ 100 tok/s.
-- Coherence: same logits ± 0.5 cosine vs Q4_K kernel (no quality regression).
-- Memory: VRAM ≤ 10 GB for qwen3:4b unpacked.
+Tensor Cores don't help when the matmul is K×1 — they're optimized for
+GEMM shapes, not GEMV. And the existing Q4_K fused kernels
+(`q4km_fused_rmsnorm_qkv_gemv`, `q4km_fused_rmsnorm_gate_up_gemv`,
+`q4km_persistent_gemv_accumulate`) do **rmsnorm + 3 matmuls + residual
+in ONE kernel launch** per attention / FFN block; the FP16 path needs
+4 separate kernels per QKV.
+
+**Conclusion:** for per-token decode on A100, the bespoke Q4_K kernels
+already win. Option B stays shipped as `--fp16-weights` opt-in (see
+commit `6623fe3`) for future workloads where it might help — prefill
+batching with larger N × K × 1 shapes where Tensor Cores kick in.
+
+### 4.4 What to do next (closing 48 → 150 tok/s)
+
+Path A — **adopt Ollama's kernels directly**. llama.cpp has hand-tuned
+Q4_K GEMV that saturates A100 HBM2e better than ours. Port
+llama.cpp/ggml-cuda.cu's `mul_mat_q4_K_q8_1` into our CUDA surface
+(~4-6 hours). Expected gain: ~30-50% (hitting ~70-80 tok/s), still
+short of Ollama's 165 but meaningfully closer.
+
+Path B — **bigger batches** (continuous batching / prefill). Tensor
+Cores pay off for GEMM shapes; current code only does N=1 single-token.
+
+Path C — **lower precision weights + activations**: INT4 throughout,
+custom kernels with cuTe (CUDA 12.4 is compatible). Bigger investment.
+
+Acceptance criteria unchanged:
+- qwen3:4b: ≥ 150 tok/s (stretch), ≥ 100 tok/s (realistic after Path A).
+- Coherence: identical output at T=0 vs baseline (FP16 path confirmed).
+
+Baseline validated on A100 (2026-04-20, build_cuda124, 3-run average):
+**47 tok/s** on qwen3:4b Q4_K_M, 100 tokens in 2.1 s each.
 
 ---
 
