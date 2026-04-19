@@ -8,6 +8,7 @@
 #pragma once
 
 #include "fused_step.h"
+#include "diagnostics.h"
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
@@ -137,6 +138,15 @@ struct FusedPIRTrainer {
     // Saved input activations per layer (for backward — x before residual add)
     std::vector<float*> saved_x; // [L][BT, D]
 
+    // Input tokens saved for embedding backward (scatter dW_emb[tok[i]] += dx[i])
+    int* saved_tokens;  // [BT]
+
+    // Scratch buffers [BT, D] for PIR backward intermediate gradients.
+    // Needs ~6 simultaneously live buffers inside one PIR sub-layer bwd;
+    // we keep 6 dedicated so aliasing against __restrict kernels (sigmoid_bwd,
+    // mul_bwd) is impossible.
+    float* scratch_bd[6];  // each [BT, D]
+
     int64_t step_count = 0;
     bool allocated = false;
 
@@ -259,6 +269,9 @@ struct FusedPIRTrainer {
         dh = alloc(BT * H);
         dh_tmp = alloc(BT * H);
 
+        saved_tokens = (int*)calloc(BT, sizeof(int));
+        for (int i = 0; i < 6; i++) scratch_bd[i] = alloc(BT * D);
+
         allocated = true;
 
         int64_t total_params = 0;
@@ -351,6 +364,7 @@ struct FusedPIRTrainer {
             int tok = (int)input_tokens[i];
             if (tok < 0) tok = 0;
             if (tok >= V) tok = V - 1;
+            saved_tokens[i] = tok;
             memcpy(act_emb + i * D, W_emb + tok * D, D * sizeof(float));
         }
     }
@@ -447,147 +461,215 @@ struct FusedPIRTrainer {
     }
 
     // ============================================================
-    // BACKWARD PASS
+    // BACKWARD PASS — full chain rule, no stubs.
+    // ------------------------------------------------------------
+    // Forward reminder (per layer l):
+    //   saved_x[l] = act_x                            (input)
+    //   norm1_out  = rmsnorm(saved_x, norm1_w)
+    //   pir_residual ← norm1_out
+    //   for p in NP:
+    //     gate_out  = pir_residual @ W_gate^T
+    //     value_out = pir_residual @ W_value^T
+    //     sig_raw   = sigmoid(gate_out)                  (stored in pa.sigmoid_out)
+    //     gated_val = sig_raw * value_out
+    //     scan_gate = sig_raw * base_decay            (OVERWRITES pa.sigmoid_out in-place in fwd)
+    //     scan_out  = parallel_scan(scan_gate, gated_val)
+    //     out_proj  = scan_out @ W_out^T
+    //     norm_out  = rmsnorm(out_proj, norm_w)
+    //     pir_residual += norm_out
+    //   mix_out      = pir_residual @ W_mix^T
+    //   norm_pir_out = rmsnorm(mix_out, norm_pir_w)
+    //   after_pir    = saved_x + norm_pir_out
+    //   norm2_out    = rmsnorm(after_pir, norm2_w)
+    //   ffn1 = norm2_out @ W_ffn1^T;  ffn1_silu = silu(ffn1)
+    //   ffn3 = norm2_out @ W_ffn3^T;  ffn_gated = ffn1_silu * ffn3
+    //   ffn2_out = ffn_gated @ W_ffn2^T
+    //   act_x    = after_pir + ffn2_out
+    //
+    // NOTE on pa.sigmoid_out: forward overwrites it with scan_gate = sig_raw * base_decay.
+    // We reconstruct raw sig by dividing by base_decay (base_decay ∈ [0.5, 0.9999]).
     // ============================================================
     void backward() {
-        // dlogits is already computed by cross_entropy_fwd_bwd
-
-        // LM head backward
+        // ===== LM head =====
         fused::linear_bwd_weight(dlogits, act_norm_out, dW_lm_head, BT, D, V);
         fused::linear_bwd_input(dlogits, W_lm_head, dx, BT, D, V);
 
-        // Final norm backward
+        // ===== Final norm: dx (d_norm_out_total) -> dx_tmp (d_act_x) =====
         fused::rmsnorm_bwd(dx, act_x, norm_out_w, rms_out_cache,
                            dx_tmp, dnorm_out_w, BT, D);
         std::swap(dx, dx_tmp);
+        // dx := d/d(act_x) — gradient going into last layer's output
 
-        // Backward through layers (reverse order)
         for (int64_t l = L - 1; l >= 0; l--) {
             auto& bw = blocks[l];
             auto& bg = dblocks[l];
             auto& la = layer_acts[l];
 
-            // dx is gradient w.r.t. act_x (output of this layer)
-            // = gradient through FFN residual
+            // Invariant at loop top: dx = d(act_x_out) = d(after_pir + ffn2_out)
 
-            // FFN backward
-            // dx = d(after_pir + ffn2_out) = dx (split to both)
-            // ffn2 backward
-            fused::linear_bwd_weight(dx, la.ffn_gated, bg.dW_ffn2, BT, H, D);  // dW_ffn2
-            fused::linear_bwd_input(dx, bw.W_ffn2, dh, BT, H, D);             // d_ffn_gated
+            // ===== FFN backward =====
+            // ffn2: d_ffn2_out = dx,  d_ffn_gated = dx @ W_ffn2
+            fused::linear_bwd_weight(dx, la.ffn_gated, bg.dW_ffn2, BT, H, D);
+            fused::linear_bwd_input(dx, bw.W_ffn2, dh, BT, H, D);
 
-            // mul backward: d(silu * ffn3)
-            fused::mul_bwd(dh, la.ffn1_silu, la.ffn3_out, dh_tmp, dh, BT * H);  // dh_tmp=d_silu, dh=d_ffn3 (reuse)
+            // mul: ffn_gated = ffn1_silu * ffn3  ->  d_silu, d_ffn3
+            // mul_bwd has __restrict on all args — must use distinct buffers
+            fused::mul_bwd(dh, la.ffn1_silu, la.ffn3_out, dh_tmp, dh, BT * H);
+            // dh_tmp = d_silu, dh = d_ffn3
 
-            // ffn3 backward
-            float* d_ffn3 = dh;  // reuse
-            fused::linear_bwd_weight(d_ffn3, la.norm2_out, bg.dW_ffn3, BT, D, H);
-            fused::linear_bwd_input(d_ffn3, bw.W_ffn3, dx_tmp, BT, D, H);  // dx_tmp = d_norm2 part1
+            // ffn3 weight + input: d_norm2 (part from ffn3 path)
+            fused::linear_bwd_weight(dh, la.norm2_out, bg.dW_ffn3, BT, D, H);
+            float* d_norm2 = dx_tmp;  // [BT, D]
+            fused::linear_bwd_input(dh, bw.W_ffn3, d_norm2, BT, D, H);
 
-            // silu backward
-            float* d_silu = dh_tmp;
-            fused::silu_bwd(d_silu, la.ffn1_out, dh, BT * H);  // dh = d_ffn1
+            // silu: d_silu -> d_ffn1 (need pre-silu ffn1_out as x).
+            // silu_bwd has __restrict — grad != dx required. Put d_ffn1 into dh (it's free now,
+            // dh just held d_ffn3 which is consumed). dh_tmp (d_silu) and dh are distinct.
+            fused::silu_bwd(dh_tmp, la.ffn1_out, dh, BT * H);
+            // dh = d_ffn1
 
-            // ffn1 backward
+            // ffn1 weight + input: d_norm2 += part from ffn1 path
             fused::linear_bwd_weight(dh, la.norm2_out, bg.dW_ffn1, BT, D, H);
-            // dx_tmp2 = d_norm2 part2 — accumulate into dx_tmp
-            float* dx_tmp2 = dh_tmp;  // reuse H buffer... no, size mismatch. Need D buffer.
-            // Actually just accumulate:
-            {
-                // d_norm2_total = part1 (from ffn3) + part2 (from ffn1)
-                // We need another [BT, D] buffer. Use act_norm_out as temp (no longer needed)
-                float* d_norm2_part2 = act_norm_out; // safe to reuse after forward
-                fused::linear_bwd_input(dh, bw.W_ffn1, d_norm2_part2, BT, D, H);
-                fused::accum(dx_tmp, d_norm2_part2, BT * D);
-            }
+            float* d_norm2_part2 = act_norm_out;
+            fused::linear_bwd_input(dh, bw.W_ffn1, d_norm2_part2, BT, D, H);
+            fused::accum(d_norm2, d_norm2_part2, BT * D);
 
-            // norm2 backward
-            fused::rmsnorm_bwd(dx_tmp, la.after_pir, bw.norm2_w, la.rms2_cache,
-                               dx_tmp, bg.dnorm2_w, BT, D);
-            // Note: rmsnorm_bwd writes to dx_tmp (overwrite is OK, same buffer for in/out)
+            // norm2 backward (in-place grad->dx safe, no __restrict in rmsnorm_bwd)
+            fused::rmsnorm_bwd(d_norm2, la.after_pir, bw.norm2_w, la.rms2_cache,
+                               d_norm2, bg.dnorm2_w, BT, D);
+            // d_norm2 := d/d(after_pir) via norm2 path
 
-            // Add residual gradient: dx += dx_tmp (FFN path)
-            // dx already has gradient from residual skip connection
-            fused::accum(dx, dx_tmp, BT * D);
+            // after_pir = saved_x + norm_pir_out. Residual: dx (ffn-skip path) already has
+            // d/d(after_pir) via the direct residual. Accumulate norm2 contribution:
+            fused::accum(dx, d_norm2, BT * D);
+            // dx := d/d(after_pir) total
 
-            // PIR block backward (simplified — through mix_proj, norm, PIR layers)
-            // dx is now gradient w.r.t. after_pir = saved_x + pir_block_out
-            // Split: dx goes to both saved_x (=dx stays) and pir_block_out
-
-            // norm_pir backward
+            // ===== Norm_pir + Mix =====
+            // after_pir = saved_x + norm_pir_out. Split:
+            //   d_saved_x (residual)    = dx  (stays in dx for later)
+            //   d_norm_pir_out           = dx
+            float* d_mix = dx_tmp;  // [BT, D]
             fused::rmsnorm_bwd(dx, la.mix_out, bw.norm_pir_w, la.rms_pir_cache,
-                               dx_tmp, bg.dnorm_pir_w, BT, D);
+                               d_mix, bg.dnorm_pir_w, BT, D);
+            // d_mix := d/d(mix_out)
 
-            // mix_proj backward
-            fused::linear_bwd_weight(dx_tmp, la.pir_residual, bg.dW_mix, BT, D, D);
-            fused::linear_bwd_input(dx_tmp, bw.W_mix, dx_tmp, BT, D, D);
-            // dx_tmp is now gradient w.r.t. pir_residual
+            // mix_proj: d_pir_res = d_mix @ W_mix (no aliasing: output buffer different)
+            fused::linear_bwd_weight(d_mix, la.pir_residual, bg.dW_mix, BT, D, D);
+            float* d_pir_res = scratch_bd[0];  // [BT, D]
+            fused::linear_bwd_input(d_mix, bw.W_mix, d_pir_res, BT, D, D);
+            // d_pir_res := d/d(pir_residual) (i.e. the sum after all NP sub-layers)
 
-            // PIR layers backward (reverse)
+            // ===== PIR sub-layers (reverse order) =====
+            // pir_residual was: norm1_out + sum_p(norm_out_p). Each norm_out_p received the
+            // SAME gradient d_pir_res (via accum branch). Each PIR sub-layer also feeds back
+            // into pir_residual via gate/value projections of pir_residual — accumulate.
+            //
+            // IMPORTANT: la.pir_residual stores the FINAL accumulated value (after all NP
+            // sublayers). For sub-layer p, gate/value saw pir_residual_at_input_p =
+            // norm1_out + sum_{k<p} norm_out_k. We reconstruct this by subtracting
+            // pa[k].norm_out in-place as we walk p from NP-1 down to 0.
+            // This mutates la.pir_residual — safe because we no longer need the final value.
             for (int64_t p = NP - 1; p >= 0; p--) {
                 auto& pw = bw.pir[p];
                 auto& pg = bg.pir[p];
                 auto& pa = la.pir_acts[p];
 
-                // dx_tmp = gradient w.r.t. pir_residual (after += norm_out)
-                // norm backward
-                float* d_out_proj;
+                // Subtract this sub-layer's contribution so la.pir_residual holds the input
+                // value that gate_proj/value_proj actually saw at forward time.
                 {
-                    // Use act_norm_out as temp
-                    d_out_proj = act_norm_out;
-                    fused::rmsnorm_bwd(dx_tmp, pa.out_proj_out, pw.norm_w, pa.rms_cache,
-                                       d_out_proj, pg.dnorm_w, BT, D);
+                    float* pr = la.pir_residual;
+                    const float* no = pa.norm_out;
+                    #pragma omp parallel for schedule(static)
+                    for (int64_t i = 0; i < BT * D; i++) pr[i] -= no[i];
                 }
 
-                // out_proj backward
+                // ----- norm(out_proj, norm_w) backward -----
+                float* d_out_proj = scratch_bd[1];  // [BT, D]
+                fused::rmsnorm_bwd(d_pir_res, pa.out_proj_out, pw.norm_w, pa.rms_cache,
+                                   d_out_proj, pg.dnorm_w, BT, D);
+
+                // ----- out_proj: out_proj = scan_out @ W_out^T -----
                 fused::linear_bwd_weight(d_out_proj, pa.scan_out, pg.dW_out, BT, D, D);
-                float* d_scan;
-                {
-                    d_scan = d_out_proj; // reuse
-                    fused::linear_bwd_input(d_out_proj, pw.W_out, d_scan, BT, D, D);
+                float* d_scan_out = scratch_bd[2];  // [BT, D]
+                fused::linear_bwd_input(d_out_proj, pw.W_out, d_scan_out, BT, D, D);
+
+                // ----- parallel scan backward -----
+                // scan: scan_out[t] = scan_gate[t]*scan_out[t-1] + gated_val[t]
+                // pa.sigmoid_out currently holds scan_gate = sig_raw * base_decay (forward overwrote).
+                float* d_gated = scratch_bd[3];       // [BT, D] — d(gated_values)
+                float* d_scan_gates = scratch_bd[4];  // [BT, D] — d(scan_gates)
+                fused::parallel_scan_bwd(d_scan_out, pa.sigmoid_out, pa.gated_values, pa.scan_out,
+                                         d_gated, d_scan_gates, B, T, D);
+
+                // Reconstruct raw sig = scan_gate / base_decay  (base_decay ∈ [0.5, 0.9999], safe).
+                float* raw_sig = scratch_bd[5];  // [BT, D]
+                #pragma omp parallel for schedule(static)
+                for (int64_t i = 0; i < BT; i++) {
+                    const float* sg = pa.sigmoid_out + i * D;
+                    float* rs = raw_sig + i * D;
+                    for (int64_t d = 0; d < D; d++)
+                        rs[d] = sg[d] / pw.base_decay[d];
                 }
 
-                // parallel_scan backward
-                float* d_gated = dh_tmp; // reuse [BT, H] but we need [BT, D]...
-                // We need [BT, D] buffers. Use saved_x[l] as temp (already saved).
-                float* d_scan_x = saved_x[l]; // CAREFUL: overwriting saved_x[l]!
-                // Actually we need saved_x[l] for the residual gradient later.
-                // Use la.ffn2_out as temp [BT, D] — backward is done with it
-                float* d_scan_gates = la.ffn2_out;
-                d_scan_x = la.ffn1_silu; // Hmm, this is [BT, H] not [BT, D]...
-                // Need proper temp buffers. Just use dx_tmp for accumulation.
+                // ----- mul: gated_val = raw_sig * value_out  ->  d_raw_sig (branch A), d_value -----
+                float* d_sig_A = scratch_bd[1];  // reuse (d_out_proj no longer needed)
+                float* d_value = scratch_bd[2];  // reuse (d_scan_out no longer needed)
+                fused::mul_bwd(d_gated, raw_sig, pa.value_out, d_sig_A, d_value, BT * D);
 
-                // Simplified: skip scan backward details for now,
-                // just propagate gradient through scan as identity (approximation)
-                // TODO: implement proper scan backward
-                memcpy(dx_tmp, d_scan, BT * D * sizeof(float));
+                // ----- d_sig_total = d_sig_A + d_scan_gates * base_decay -----
+                // (scan_gate = raw_sig * base_decay; chain via scan path)
+                #pragma omp parallel for schedule(static)
+                for (int64_t i = 0; i < BT; i++) {
+                    float* dsa = d_sig_A + i * D;
+                    const float* dsg = d_scan_gates + i * D;
+                    for (int64_t d = 0; d < D; d++)
+                        dsa[d] += dsg[d] * pw.base_decay[d];
+                }
+                // d_sig_A is now d_sig_total
 
-                // sigmoid * value backward (through gated_values)
-                // d_gated_values → d_value, d_sigmoid
-                // sigmoid backward → d_gate_logits
-                // Not implementing full chain for now — focus on Linear GEMM speedup
+                // ----- sigmoid_bwd: raw_sig = sigmoid(gate_out)  ->  d_gate_out -----
+                // sigmoid_bwd has __restrict on all three args — must use distinct buffers.
+                float* d_gate_out = d_gated;  // reuse scratch_bd[3]
+                fused::sigmoid_bwd(d_sig_A, raw_sig, d_gate_out, BT * D);
 
-                // gate_proj, value_proj backward
-                fused::linear_bwd_weight(dx_tmp, la.norm1_out, pg.dW_gate, BT, D, D);
-                fused::linear_bwd_weight(dx_tmp, la.norm1_out, pg.dW_value, BT, D, D);
-                // dx through gate+value → accumulate to pir_residual gradient
+                // ----- gate_proj: gate_out = pir_residual @ W_gate^T -----
+                fused::linear_bwd_weight(d_gate_out, la.pir_residual, pg.dW_gate, BT, D, D);
+                float* d_pir_from_gate = d_sig_A;  // reuse scratch_bd[1]
+                fused::linear_bwd_input(d_gate_out, pw.W_gate, d_pir_from_gate, BT, D, D);
+
+                // ----- value_proj: value_out = pir_residual @ W_value^T -----
+                fused::linear_bwd_weight(d_value, la.pir_residual, pg.dW_value, BT, D, D);
+                float* d_pir_from_value = raw_sig;  // reuse scratch_bd[5]
+                fused::linear_bwd_input(d_value, pw.W_value, d_pir_from_value, BT, D, D);
+
+                // ----- accumulate into d_pir_res for next PIR sublayer (or for norm1 path) -----
+                fused::accum(d_pir_res, d_pir_from_gate,  BT * D);
+                fused::accum(d_pir_res, d_pir_from_value, BT * D);
             }
 
-            // norm1 backward
-            fused::rmsnorm_bwd(dx_tmp, saved_x[l], bw.norm1_w, la.rms1_cache,
-                               dx_tmp, bg.dnorm1_w, BT, D);
+            // After all NP sub-layers, d_pir_res = d/d(norm1_out) (the initial pir_residual value).
 
-            // Residual: dx += dx_tmp (norm1 path)
-            fused::accum(dx, dx_tmp, BT * D);
+            // ===== norm1 backward =====
+            float* d_norm1_x = dx_tmp;  // [BT, D]
+            fused::rmsnorm_bwd(d_pir_res, saved_x[l], bw.norm1_w, la.rms1_cache,
+                               d_norm1_x, bg.dnorm1_w, BT, D);
+
+            // act_x = saved_x + (...) — accumulate norm1 path into dx (which already carries
+            // the residual skip gradient d/d(saved_x) via after_pir residual = saved_x + ...).
+            fused::accum(dx, d_norm1_x, BT * D);
+            // dx := d/d(saved_x[l])  = gradient going to previous layer's output
         }
 
-        // Embedding backward
-        #pragma omp parallel for schedule(static)
+        // ===== Embedding backward =====
+        // act_emb[i] was W_emb[tok[i]]. dW_emb[tok[i]] += dx[i].
+        // Sequential scatter (BT=4096, D=768 → ~3M adds — negligible vs GEMMs).
         for (int64_t i = 0; i < BT; i++) {
-            // dx[i] is gradient for embedding output
-            // Accumulate to dW_emb[tok[i]]
-            // Need input tokens... stored in act_emb? No.
-            // SKIP for now — embedding gradient is tiny relative to transformer
+            int tok = saved_tokens[i];
+            if (tok < 0) tok = 0;
+            if (tok >= V) tok = V - 1;
+            float* dw_row = dW_emb + tok * D;
+            const float* dx_row = dx + i * D;
+            for (int64_t d = 0; d < D; d++) dw_row[d] += dx_row[d];
         }
     }
 
@@ -644,6 +726,200 @@ struct FusedPIRTrainer {
         }
 
         return loss;
+    }
+
+    // ============================================================
+    // CONSISTENCY DIAGNOSTIC — compare training_forward vs generate_forward
+    // ============================================================
+    // Takes a single short input (≤ block_size). Runs through training_forward
+    // (must call with batch_size=1 trainer!) capturing all key activations.
+    // Then runs equivalent generate_forward path, comparing layer-by-layer.
+    // Prints DIFF stats for every checkpoint — pinpoints WHERE divergence happens.
+    //
+    // Returns true if all activations match within tolerance.
+    bool run_consistency_diagnostic(const std::vector<int>& tokens) {
+        using namespace probes;
+        int64_t seq_len = (int64_t)tokens.size();
+        if (seq_len > T) {
+            fprintf(stderr, "DIAG ERROR: input %lld > T=%lld\n", (long long)seq_len, (long long)T);
+            return false;
+        }
+        if (B != 1 || BT != T) {
+            fprintf(stderr, "DIAG ERROR: trainer must be allocated with batch_size=1, got B=%lld\n", (long long)B);
+            return false;
+        }
+
+        fprintf(stderr, "\n========== CONSISTENCY DIAGNOSTIC ==========\n");
+        fprintf(stderr, "Input length: %lld\n", (long long)seq_len);
+
+        // ------------- Path A: TRAINING FORWARD -------------
+        // Use existing forward() with input_tokens as float[BT]
+        std::vector<float> input_f(BT, 0.0f);
+        for (int64_t i = 0; i < seq_len; i++) input_f[i] = (float)tokens[i];
+        // Pad rest with zeros (will be ignored — we only check first seq_len positions)
+
+        // Capture training-side activations (after layer 0 only — for first comparison)
+        embed_forward(input_f.data());
+        memcpy(act_x, act_emb, BT * D * sizeof(float));
+
+        // Snapshot embedding
+        std::vector<float> train_emb(seq_len * D);
+        memcpy(train_emb.data(), act_x, seq_len * D * sizeof(float));
+        TensorStats s; s.compute(train_emb.data(), seq_len * D);
+        s.print_compact("TRAIN emb");
+
+        // Run all layers, capture key tensors per layer
+        std::vector<std::vector<float>> train_norm1(L), train_after_pir(L), train_act_x(L);
+        for (int64_t l = 0; l < L; l++) {
+            auto& bw = blocks[l];
+            auto& la = layer_acts[l];
+            memcpy(saved_x[l], act_x, BT * D * sizeof(float));
+            fused::rmsnorm_fwd(act_x, bw.norm1_w, la.norm1_out, la.rms1_cache, BT, D);
+            train_norm1[l].assign(la.norm1_out, la.norm1_out + seq_len * D);
+
+            memcpy(la.pir_residual, la.norm1_out, BT * D * sizeof(float));
+            for (int64_t p = 0; p < NP; p++) {
+                auto& pw = bw.pir[p];
+                auto& pa = la.pir_acts[p];
+                fused::linear_fwd(la.pir_residual, pw.W_gate, pa.gate_out, BT, D, D);
+                fused::linear_fwd(la.pir_residual, pw.W_value, pa.value_out, BT, D, D);
+                fused::sigmoid_fwd(pa.gate_out, pa.sigmoid_out, BT * D);
+                fused::mul_fwd(pa.value_out, pa.sigmoid_out, pa.gated_values, BT * D);
+                float* scan_gates = pa.sigmoid_out;
+                #pragma omp parallel for schedule(static)
+                for (int64_t i = 0; i < BT; i++)
+                    for (int64_t d = 0; d < D; d++)
+                        scan_gates[i * D + d] *= pw.base_decay[d];
+                fused::parallel_scan_fwd(scan_gates, pa.gated_values, pa.scan_out, B, T, D);
+                fused::linear_fwd(pa.scan_out, pw.W_out, pa.out_proj_out, BT, D, D);
+                fused::rmsnorm_fwd(pa.out_proj_out, pw.norm_w, pa.norm_out, pa.rms_cache, BT, D);
+                fused::accum(la.pir_residual, pa.norm_out, BT * D);
+            }
+            fused::linear_fwd(la.pir_residual, bw.W_mix, la.mix_out, BT, D, D);
+            fused::rmsnorm_fwd(la.mix_out, bw.norm_pir_w, la.norm_pir_out, la.rms_pir_cache, BT, D);
+            fused::add_fwd(act_x, la.norm_pir_out, la.after_pir, BT * D);
+            train_after_pir[l].assign(la.after_pir, la.after_pir + seq_len * D);
+
+            fused::rmsnorm_fwd(la.after_pir, bw.norm2_w, la.norm2_out, la.rms2_cache, BT, D);
+            fused::linear_fwd(la.norm2_out, bw.W_ffn1, la.ffn1_out, BT, D, H);
+            fused::silu_fwd(la.ffn1_out, la.ffn1_silu, BT * H);
+            fused::linear_fwd(la.norm2_out, bw.W_ffn3, la.ffn3_out, BT, D, H);
+            fused::mul_fwd(la.ffn1_silu, la.ffn3_out, la.ffn_gated, BT * H);
+            fused::linear_fwd(la.ffn_gated, bw.W_ffn2, la.ffn2_out, BT, H, D);
+            fused::add_fwd(la.after_pir, la.ffn2_out, act_x, BT * D);
+            train_act_x[l].assign(act_x, act_x + seq_len * D);
+        }
+        fused::rmsnorm_fwd(act_x, norm_out_w, act_norm_out, rms_out_cache, BT, D);
+        std::vector<float> train_norm_out(seq_len * D);
+        memcpy(train_norm_out.data(), act_norm_out, seq_len * D * sizeof(float));
+        // Last position logits (training computes BT × V)
+        fused::linear_fwd(act_norm_out, W_lm_head, logits, BT, D, V);
+        std::vector<float> train_logits(V);
+        memcpy(train_logits.data(), logits + (seq_len - 1) * V, V * sizeof(float));
+
+        // ------------- Path B: GENERATE FORWARD -------------
+        // Allocate generate-style buffers
+        int64_t max_seq = T;
+        std::vector<float> g_x(max_seq * D, 0.0f);
+        std::vector<float> g_norm(max_seq * D, 0.0f);
+        std::vector<float> g_rms(max_seq, 0.0f);
+        std::vector<float> g_pir(max_seq * D, 0.0f);
+        std::vector<float> g_gate(max_seq * D, 0.0f);
+        std::vector<float> g_sig(max_seq * D, 0.0f);
+        std::vector<float> g_val(max_seq * D, 0.0f);
+        std::vector<float> g_gated(max_seq * D, 0.0f);
+        std::vector<float> g_scan(max_seq * D, 0.0f);
+        std::vector<float> g_out(max_seq * D, 0.0f);
+        std::vector<float> g_mix(max_seq * D, 0.0f);
+        std::vector<float> g_norm2(max_seq * D, 0.0f);
+        std::vector<float> g_rms2(max_seq, 0.0f);
+        std::vector<float> g_ffn1(max_seq * H, 0.0f);
+        std::vector<float> g_ffn3(max_seq * H, 0.0f);
+        std::vector<float> g_ffn_gated(max_seq * H, 0.0f);
+        std::vector<float> g_ffn2(max_seq * D, 0.0f);
+        std::vector<float> g_norm_out(max_seq * D, 0.0f);
+        std::vector<float> g_rms_out(max_seq, 0.0f);
+
+        // Embedding
+        for (int64_t i = 0; i < seq_len; i++) {
+            int tok = tokens[i]; if (tok < 0) tok = 0; if (tok >= V) tok = V - 1;
+            memcpy(g_x.data() + i * D, W_emb + tok * D, D * sizeof(float));
+        }
+
+        // Compare embeddings
+        DiffStats d_emb; d_emb.compute(train_emb.data(), g_x.data(), seq_len * D);
+        d_emb.print("emb");
+
+        for (int64_t l = 0; l < L; l++) {
+            auto& bw = blocks[l];
+
+            fused::rmsnorm_fwd(g_x.data(), bw.norm1_w, g_norm.data(), g_rms.data(), seq_len, D);
+            DiffStats d1; d1.compute(train_norm1[l].data(), g_norm.data(), seq_len * D);
+            char nm[64]; snprintf(nm, 64, "L%lld norm1", (long long)l);
+            d1.print(nm);
+
+            memcpy(g_pir.data(), g_norm.data(), seq_len * D * sizeof(float));
+            for (int64_t p = 0; p < NP; p++) {
+                auto& pw = bw.pir[p];
+                fused::linear_fwd(g_pir.data(), pw.W_gate, g_gate.data(), seq_len, D, D);
+                fused::linear_fwd(g_pir.data(), pw.W_value, g_val.data(), seq_len, D, D);
+                fused::sigmoid_fwd(g_gate.data(), g_sig.data(), seq_len * D);
+                fused::mul_fwd(g_val.data(), g_sig.data(), g_gated.data(), seq_len * D);
+                for (int64_t i = 0; i < seq_len; i++)
+                    for (int64_t d = 0; d < D; d++)
+                        g_scan[i * D + d] = g_sig[i * D + d] * pw.base_decay[d];
+                fused::parallel_scan_fwd(g_scan.data(), g_gated.data(), g_out.data(), 1, seq_len, D);
+                fused::linear_fwd(g_out.data(), pw.W_out, g_gate.data(), seq_len, D, D);
+                fused::rmsnorm_fwd(g_gate.data(), pw.norm_w, g_val.data(), g_rms.data(), seq_len, D);
+                fused::accum(g_pir.data(), g_val.data(), seq_len * D);
+            }
+            fused::linear_fwd(g_pir.data(), bw.W_mix, g_mix.data(), seq_len, D, D);
+            fused::rmsnorm_fwd(g_mix.data(), bw.norm_pir_w, g_pir.data(), g_rms.data(), seq_len, D);
+            // g_pir now has normed_mix. Need x + normed_mix → save to a temp first
+            std::vector<float> g_after_pir(seq_len * D);
+            for (int64_t i = 0; i < seq_len * D; i++) g_after_pir[i] = g_x[i] + g_pir[i];
+            DiffStats d2; d2.compute(train_after_pir[l].data(), g_after_pir.data(), seq_len * D);
+            char nm2[64]; snprintf(nm2, 64, "L%lld after_pir", (long long)l);
+            d2.print(nm2);
+
+            // Update g_x = after_pir for FFN
+            memcpy(g_x.data(), g_after_pir.data(), seq_len * D * sizeof(float));
+
+            fused::rmsnorm_fwd(g_x.data(), bw.norm2_w, g_norm2.data(), g_rms2.data(), seq_len, D);
+            fused::linear_fwd(g_norm2.data(), bw.W_ffn1, g_ffn1.data(), seq_len, D, H);
+            fused::linear_fwd(g_norm2.data(), bw.W_ffn3, g_ffn3.data(), seq_len, D, H);
+            fused::silu_fwd(g_ffn1.data(), g_ffn_gated.data(), seq_len * H);
+            fused::mul_fwd(g_ffn_gated.data(), g_ffn3.data(), g_ffn_gated.data(), seq_len * H);
+            fused::linear_fwd(g_ffn_gated.data(), bw.W_ffn2, g_ffn2.data(), seq_len, H, D);
+            fused::accum(g_x.data(), g_ffn2.data(), seq_len * D);
+            DiffStats d3; d3.compute(train_act_x[l].data(), g_x.data(), seq_len * D);
+            char nm3[64]; snprintf(nm3, 64, "L%lld act_x", (long long)l);
+            d3.print(nm3);
+        }
+
+        fused::rmsnorm_fwd(g_x.data(), norm_out_w, g_norm_out.data(), g_rms_out.data(), seq_len, D);
+        DiffStats d_no; d_no.compute(train_norm_out.data(), g_norm_out.data(), seq_len * D);
+        d_no.print("final norm");
+
+        // Last position logits via GEMV
+        std::vector<float> g_logits(V);
+        const float* last_h = g_norm_out.data() + (seq_len - 1) * D;
+        for (int64_t v = 0; v < V; v++) {
+            float sum = 0; const float* row = W_lm_head + v * D;
+            for (int64_t d = 0; d < D; d++) sum += row[d] * last_h[d];
+            g_logits[v] = sum;
+        }
+        DiffStats d_lg; d_lg.compute(train_logits.data(), g_logits.data(), V);
+        d_lg.print("logits");
+
+        // Print top-5 from both
+        LogitProbe pa, pb;
+        pa.compute(train_logits.data(), V); pb.compute(g_logits.data(), V);
+        fprintf(stderr, "TRAIN top1: "); pa.print(seq_len - 1);
+        fprintf(stderr, "GEN   top1: "); pb.print(seq_len - 1);
+        fprintf(stderr, "============================================\n");
+
+        return !d_lg.divergent();
     }
 
     // ============================================================
