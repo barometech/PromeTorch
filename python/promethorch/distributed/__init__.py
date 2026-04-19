@@ -113,10 +113,27 @@ else:
             self.poll_us = 1000
             self.strategy = FSDPConfig.ShardingStrategy.FULL_SHARD
 
+    class _NoSyncCtx:
+        """Pure-Python fallback context manager for DDP.no_sync()."""
+        def __init__(self, ddp):
+            self._ddp = ddp
+            self._prev = True
+
+        def __enter__(self):
+            self._prev = self._ddp.require_grad_sync
+            self._ddp.require_grad_sync = False
+            return self
+
+        def __exit__(self, exc_type, exc_val, tb):
+            self._ddp.require_grad_sync = self._prev
+            return False
+
     class DistributedDataParallel:
         def __init__(self, module, process_group, broadcast_parameters=True):
             self.module = module
             self.process_group = process_group
+            # Default True preserves legacy behaviour (every sync call runs).
+            self.require_grad_sync = True
 
         def forward(self, x):
             return self.module(x)
@@ -124,8 +141,20 @@ else:
         def __call__(self, x):
             return self.forward(x)
 
-        def finish_gradient_synchronization(self): pass
-        def sync_gradients(self): pass
+        def finish_gradient_synchronization(self):
+            # No real AllReduce in fallback (world_size always 1), but honour
+            # the no_sync() flag so caller code is identical to the C++ path.
+            if not self.require_grad_sync:
+                return
+
+        def sync_gradients(self):
+            if not self.require_grad_sync:
+                return
+
+        def no_sync(self):
+            """Context manager that suppresses gradient sync within the
+            with-block. See C++ DDPNoSyncGuard / Python DDP.no_sync docs."""
+            return _NoSyncCtx(self)
 
     class FullyShardedDataParallel:
         def __init__(self, module, config):
