@@ -85,6 +85,15 @@ from ._C import (
     __version__,
 )
 
+# PyTorch-compatible .pt/.pth (ZIP+pickle) save/load — optional.
+try:
+    from ._pytorch_io import save_pytorch, load_pytorch
+except ImportError:
+    def save_pytorch(*_a, **_k):
+        raise RuntimeError("save_pytorch: _C extension lacks this binding; rebuild.")
+    def load_pytorch(*_a, **_k):
+        raise RuntimeError("load_pytorch: _C extension lacks this binding; rebuild.")
+
 # Import submodules. These may fail on stale builds where the C extension is
 # missing newer symbols (e.g. BatchNorm1d). We swallow the error so that
 # core ops and helpers like ``promethorch.transformers_compat`` remain
@@ -105,6 +114,64 @@ try:
 except ImportError as _e:
     import warnings as _w
     _w.warn(f"promethorch.data unavailable: {_e}. Rebuild the _C extension.")
+
+# ----------------------------------------------------------------------------
+# New submodules: lazy imports so a pre-existing _C.pyd without
+# bindings_new.cpp still lets `import promethorch` succeed. Each submodule
+# provides its own Python-level fallback for the missing C++ symbols.
+# ----------------------------------------------------------------------------
+def _lazy_import(_name: str):
+    import importlib as _il
+    try:
+        return _il.import_module(f"promethorch.{_name}")
+    except Exception as _e:
+        import warnings as _w
+        _w.warn(f"promethorch.{_name} unavailable: {_e}")
+        return None
+
+# Eagerly attach each as an attribute so `pt.nn.parallel` etc. work without
+# the caller doing a separate `import`.
+for _sub in ("distributed", "trainer", "onnx", "mlir", "mobile",
+             "jit", "vision", "quantization", "serve"):
+    _mod = _lazy_import(_sub)
+    if _mod is not None:
+        globals()[_sub] = _mod
+
+# nn.parallel attaches to the nn submodule. On stale _C builds where
+# promethorch.nn's own __init__.py fails, create a lightweight placeholder
+# module so pt.nn.parallel remains accessible.
+try:
+    import importlib as _il
+    import types as _types
+    import sys as _sys
+    if "nn" not in globals() or globals().get("nn") is None:
+        _nn_stub = _types.ModuleType("promethorch.nn")
+        _nn_stub.__path__ = [__import__('os').path.join(
+            __import__('os').path.dirname(__file__), "nn")]
+        _sys.modules.setdefault("promethorch.nn", _nn_stub)
+        globals()["nn"] = _nn_stub
+    try:
+        _parallel = _il.import_module("promethorch.nn.parallel")
+        setattr(globals()["nn"], "parallel", _parallel)
+    except Exception as _pe:
+        import warnings as _w
+        _w.warn(f"promethorch.nn.parallel unavailable: {_pe}")
+except Exception as _e:
+    import warnings as _w
+    _w.warn(f"promethorch.nn.parallel setup failed: {_e}")
+
+# Replace the base `autograd` namespace with the new submodule that offers
+# jvp / vmap / forward-mode AD alongside the existing backward helpers.
+try:
+    import importlib as _il
+    autograd = _il.import_module("promethorch.autograd")
+    # Re-expose low-level backward/grad for convenience.
+    from ._C import backward as _cpp_backward, grad as _cpp_grad  # noqa: F401
+    setattr(autograd, "backward", _cpp_backward)
+    setattr(autograd, "grad", _cpp_grad)
+except Exception as _e:
+    import warnings as _w
+    _w.warn(f"promethorch.autograd extended API unavailable: {_e}")
 
 # Convenience
 cuda = type('cuda', (), {
@@ -294,6 +361,8 @@ __all__ = [
     'load',
     'save_state_dict',
     'load_state_dict',
+    'save_pytorch',
+    'load_pytorch',
 
     # CUDA
     'cuda',
@@ -305,6 +374,16 @@ __all__ = [
     'nn',
     'optim',
     'data',
+    'distributed',
+    'trainer',
+    'onnx',
+    'mlir',
+    'mobile',
+    'jit',
+    'vision',
+    'quantization',
+    'autograd',
+    'serve',
 
     # Utils
     'manual_seed',
