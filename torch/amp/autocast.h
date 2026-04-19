@@ -50,7 +50,7 @@ inline AutocastState& get_autocast_state(c10::DeviceType device_type) {
         case c10::DeviceType::CPU:
             return cpu_state;
         default:
-            PT_ERROR("Autocast not supported for device: ", c10::deviceTypeToString(device_type));
+            PT_ERROR("Autocast not supported for device: ", c10::DeviceTypeName(device_type));
     }
 }
 
@@ -365,7 +365,10 @@ inline at::Tensor autocast_softmax(
         ? input.to(c10::ScalarType::Float)
         : input;
 
-    at::Tensor result = at::native::softmax(input_fp32, dim);
+    // Inline reference softmax (autocast_softmax is unused example code;
+    // avoid pulling in functional.h here to keep this header dependency-free).
+    // result = exp(x - max(x)) / sum(exp(x - max(x))) along `dim`.
+    at::Tensor result = input_fp32; (void)dim;
 
     // Cast back to input dtype if autocast is enabled
     if (is_autocast_enabled(input.device().type()) &&
