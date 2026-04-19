@@ -6,6 +6,9 @@
 #include "torch/csrc/autograd/functions/ConvBackward.h"
 #ifdef PT_USE_CUDA
 #include "aten/src/ATen/cuda/CUDADispatch.h"
+#ifdef PT_USE_CUDNN
+#include "aten/src/ATen/cudnn/CuDNN.h"
+#endif
 #endif
 #include <array>
 #include <cmath>
@@ -115,8 +118,17 @@ public:
     Tensor forward(const Tensor& input) override {
         // Input: [N, C, H, W]
 #ifdef PT_USE_CUDA
-        // CUDA dispatch (only for dilation=1)
+        // CUDA dispatch (only for dilation=1) — prefer cuDNN, else custom kernel.
         if (input.is_cuda() && dilation_[0] == 1 && dilation_[1] == 1) {
+#ifdef PT_USE_CUDNN
+            if (input.dtype() == c10::ScalarType::Float) {
+                return at::cudnn::cudnn_max_pool2d_forward(
+                    input,
+                    kernel_size_[0], kernel_size_[1],
+                    stride_[0], stride_[1],
+                    padding_[0], padding_[1]);
+            }
+#endif
             return at::cuda_ops::max_pool2d_forward(
                 input,
                 static_cast<int>(kernel_size_[0]), static_cast<int>(kernel_size_[1]),
@@ -204,6 +216,13 @@ public:
            << ", stride=(" << stride_[0] << ", " << stride_[1] << ")";
         return ss.str();
     }
+
+    // Accessors (ONNX export)
+    const std::array<int64_t, 2>& kernel_size() const { return kernel_size_; }
+    const std::array<int64_t, 2>& stride() const { return stride_; }
+    const std::array<int64_t, 2>& padding() const { return padding_; }
+    const std::array<int64_t, 2>& dilation() const { return dilation_; }
+    bool ceil_mode() const { return ceil_mode_; }
 
 private:
     std::array<int64_t, 2> kernel_size_;
@@ -358,6 +377,13 @@ public:
 
         return output;
     }
+
+    // Accessors (ONNX export)
+    const std::array<int64_t, 2>& kernel_size() const { return kernel_size_; }
+    const std::array<int64_t, 2>& stride() const { return stride_; }
+    const std::array<int64_t, 2>& padding() const { return padding_; }
+    bool ceil_mode() const { return ceil_mode_; }
+    bool count_include_pad() const { return count_include_pad_; }
 
 private:
     std::array<int64_t, 2> kernel_size_;

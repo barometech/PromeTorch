@@ -1590,18 +1590,122 @@ public:
         bool zero_infinity = false
     ) : reduction_(reduction), blank_(blank), zero_infinity_(zero_infinity) {}
 
+    // CTC forward-backward (Graves 2006). log_probs: [T, N, C] already log-softmax'd.
+    // targets: flat [sum(target_lengths)] LongTensor with 0 reserved if blank_==0 and
+    // interleaved. input_lengths/target_lengths: [N] LongTensors.
+    //
+    // Returns scalar (Mean/Sum reduction) or per-sample [N] tensor (None reduction).
+    // CPU-only, float32.
     Tensor forward(
         const Tensor& log_probs,
         const Tensor& targets,
         const Tensor& input_lengths,
         const Tensor& target_lengths
     ) {
-        // This would require a full CTC implementation with forward-backward algorithm
-        // For now, we provide the interface structure
-        throw std::runtime_error(
-            "CTCLoss requires a full forward-backward dynamic programming implementation. "
-            "This is a complex algorithm - please use a dedicated CTC library for production."
-        );
+        PT_CHECK_MSG(log_probs.dim() == 3, "CTCLoss: log_probs must be [T,N,C]");
+        PT_CHECK_MSG(log_probs.dtype() == c10::ScalarType::Float, "CTCLoss: log_probs must be float32");
+        PT_CHECK_MSG(targets.dtype() == c10::ScalarType::Long, "CTCLoss: targets must be LongTensor");
+        PT_CHECK_MSG(input_lengths.dtype() == c10::ScalarType::Long, "CTCLoss: input_lengths must be LongTensor");
+        PT_CHECK_MSG(target_lengths.dtype() == c10::ScalarType::Long, "CTCLoss: target_lengths must be LongTensor");
+
+        const int64_t T = log_probs.size(0);
+        const int64_t N = log_probs.size(1);
+        const int64_t C = log_probs.size(2);
+
+        Tensor lp = log_probs.is_contiguous() ? log_probs : log_probs.contiguous();
+        const float* lp_data = lp.data_ptr<float>();
+        const int64_t* tgt = targets.data_ptr<int64_t>();
+        const int64_t* in_len = input_lengths.data_ptr<int64_t>();
+        const int64_t* t_len = target_lengths.data_ptr<int64_t>();
+
+        // Compute offsets into the flat targets tensor.
+        std::vector<int64_t> tgt_offset(N, 0);
+        {
+            int64_t acc = 0;
+            for (int64_t n = 0; n < N; ++n) {
+                tgt_offset[n] = acc;
+                acc += t_len[n];
+            }
+        }
+
+        const int64_t blank = blank_;
+        const float NEG_INF = -std::numeric_limits<float>::infinity();
+
+        Tensor per_sample_loss = at::empty({N}, at::TensorOptions().dtype(c10::ScalarType::Float));
+        float* losses = per_sample_loss.mutable_data_ptr<float>();
+
+        #pragma omp parallel for schedule(static)
+        for (int64_t n = 0; n < N; ++n) {
+            int64_t U_raw = t_len[n];
+            int64_t Ti = in_len[n];
+            // Extended target sequence (with blanks interleaved): length S = 2U+1.
+            int64_t S = 2 * U_raw + 1;
+            std::vector<int64_t> ext(S);
+            for (int64_t i = 0; i < U_raw; ++i) {
+                ext[2*i] = blank;
+                ext[2*i + 1] = tgt[tgt_offset[n] + i];
+            }
+            ext[2 * U_raw] = blank;
+
+            // Forward variables alpha[t, s] in log-space.
+            std::vector<float> alpha(Ti * S, NEG_INF);
+            auto lp_at = [&](int64_t t, int64_t c) {
+                return lp_data[(t * N + n) * C + c];
+            };
+
+            // Initial row
+            alpha[0 * S + 0] = lp_at(0, ext[0]);
+            if (S > 1) alpha[0 * S + 1] = lp_at(0, ext[1]);
+
+            auto logaddexp = [](float a, float b) -> float {
+                if (a == NEG_INF) return b;
+                if (b == NEG_INF) return a;
+                float m = std::max(a, b);
+                return m + std::log1pf(std::exp(-std::fabs(a - b)));
+            };
+
+            for (int64_t t = 1; t < Ti; ++t) {
+                for (int64_t s = 0; s < S; ++s) {
+                    float a = alpha[(t-1) * S + s];
+                    if (s > 0)
+                        a = logaddexp(a, alpha[(t-1) * S + s - 1]);
+                    // Skip transition: only allowed when ext[s] is a non-blank and
+                    // ext[s] != ext[s-2].
+                    if (s >= 2 && ext[s] != blank && ext[s] != ext[s-2])
+                        a = logaddexp(a, alpha[(t-1) * S + s - 2]);
+                    alpha[t * S + s] = a + lp_at(t, ext[s]);
+                }
+            }
+
+            float term_a = alpha[(Ti-1) * S + (S-1)];
+            float term_b = (S >= 2) ? alpha[(Ti-1) * S + (S-2)] : NEG_INF;
+            float log_p = logaddexp(term_a, term_b);
+            float loss = -log_p;
+            if (zero_infinity_ && std::isinf(loss)) loss = 0.0f;
+            losses[n] = loss;
+        }
+
+        switch (reduction_) {
+            case Reduction::None: return per_sample_loss;
+            case Reduction::Sum: {
+                float s = 0.0f;
+                for (int64_t n = 0; n < N; ++n) s += losses[n];
+                return at::full({}, s, at::TensorOptions().dtype(c10::ScalarType::Float));
+            }
+            case Reduction::Mean: {
+                // Mean: divide per-sample loss by target length, then average.
+                double s = 0.0;
+                int64_t count = 0;
+                for (int64_t n = 0; n < N; ++n) {
+                    int64_t tl = std::max<int64_t>(t_len[n], 1);
+                    s += (double)losses[n] / (double)tl;
+                    count++;
+                }
+                float out = count > 0 ? (float)(s / count) : 0.0f;
+                return at::full({}, out, at::TensorOptions().dtype(c10::ScalarType::Float));
+            }
+        }
+        return per_sample_loss;
     }
 
     Tensor forward(const Tensor& input) override {

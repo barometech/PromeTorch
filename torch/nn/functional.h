@@ -3,6 +3,7 @@
 #include "aten/src/ATen/ATen.h"
 #include "aten/src/ATen/native/cpu/tuda/TudaVec.h"
 #include "aten/src/ATen/native/cpu/tuda/TudaMath.h"
+#include "aten/src/ATen/native/Attention.h"
 #include <cmath>
 #include <algorithm>
 #include <limits>
@@ -1080,7 +1081,7 @@ inline Tensor cross_entropy(
     double label_smoothing = 0.0,
     const std::string& reduction = "mean"
 ) {
-    // Simplified implementation - assumes input is (N, C) and target is (N)
+    // input: [N, C], target: [N] (float holding int class). Supports mean/sum/none.
     int64_t batch_size = input.size(0);
     int64_t num_classes = input.size(1);
 
@@ -1088,6 +1089,9 @@ inline Tensor cross_entropy(
     const float* tgt_data = target.data_ptr<float>();
     const float* w_data = weight ? weight->data_ptr<float>() : nullptr;
 
+    // Per-sample loss buffer (also used for reduction=none output).
+    std::vector<float> per_sample(batch_size, 0.0f);
+    std::vector<bool>  valid(batch_size, false);
     double total_loss = 0.0;
     double weight_sum = 0.0;
     int64_t count = 0;
@@ -1125,14 +1129,18 @@ inline Tensor cross_entropy(
         }
 
         float w = w_data ? w_data[class_idx] : 1.0f;
+        per_sample[b] = loss * w;
+        valid[b] = true;
         total_loss += loss * w;
         weight_sum += w;
         count++;
     }
 
     if (reduction == "none") {
-        // Would need per-sample losses
-        throw std::runtime_error("reduction='none' not implemented for cross_entropy");
+        Tensor out = at::empty({batch_size}, at::TensorOptions().dtype(c10::ScalarType::Float));
+        float* od = out.mutable_data_ptr<float>();
+        for (int64_t b = 0; b < batch_size; ++b) od[b] = valid[b] ? per_sample[b] : 0.0f;
+        return out;
     }
 
     if (reduction == "mean") {
@@ -1529,6 +1537,25 @@ inline Tensor affine_grid(const Tensor& theta, const std::vector<int64_t>& size,
     });
 
     return grid;
+}
+
+// ============================================================================
+// scaled_dot_product_attention — thin wrapper around at::scaled_dot_product_attention.
+// On CUDA-compiled builds with head_dim in {64,128}, delegates to FlashAttention.
+// CPU (and any other head_dim): explicit softmax(QK^T / sqrt(d))V reference impl.
+// Q/K/V shape: [B, N, H, D].
+// ============================================================================
+inline at::Tensor scaled_dot_product_attention(
+    const at::Tensor& query,
+    const at::Tensor& key,
+    const at::Tensor& value,
+    const at::Tensor& attn_mask = at::Tensor(),
+    float dropout_p = 0.0f,
+    bool is_causal = false,
+    float scale = -1.0f)
+{
+    return at::scaled_dot_product_attention(
+        query, key, value, attn_mask, dropout_p, is_causal, scale);
 }
 
 } // namespace functional
