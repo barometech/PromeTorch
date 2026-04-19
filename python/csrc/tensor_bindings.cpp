@@ -372,20 +372,53 @@ void init_tensor_bindings(py::module& m) {
             return t.to(c10::Device(c10::DeviceType::CPU));
         })
 
-        // Operators
-        .def(-py::self)
-        .def(py::self + py::self)
-        .def(py::self - py::self)
-        .def(py::self * py::self)
-        .def(py::self / py::self)
-        .def(py::self + float())
-        .def(py::self - float())
-        .def(py::self * float())
-        .def(py::self / float())
-        .def(float() + py::self)
-        .def(float() - py::self)
-        .def(float() * py::self)
-        .def(float() / py::self)
+        // Operators — route through *_autograd wrappers so graph is built
+        // when any operand requires grad. compute_requires_grad() inside the
+        // wrapper short-circuits when nothing needs grad (GradMode off or all
+        // leaves detached), so this path is equivalent to raw aten in that
+        // case — no overhead penalty for inference.
+        .def("__neg__", [](const at::Tensor& a) {
+            return torch::autograd::neg_autograd(a);
+        })
+        .def("__add__", [](const at::Tensor& a, const at::Tensor& b) {
+            return torch::autograd::add_autograd(a, b);
+        })
+        .def("__sub__", [](const at::Tensor& a, const at::Tensor& b) {
+            return torch::autograd::sub_autograd(a, b);
+        })
+        .def("__mul__", [](const at::Tensor& a, const at::Tensor& b) {
+            return torch::autograd::mul_autograd(a, b);
+        })
+        .def("__truediv__", [](const at::Tensor& a, const at::Tensor& b) {
+            return torch::autograd::div_autograd(a, b);
+        })
+        // Tensor-scalar (t op s)
+        .def("__add__", [](const at::Tensor& a, double s) {
+            return torch::autograd::add_scalar_autograd(a, at::Scalar(s));
+        })
+        .def("__sub__", [](const at::Tensor& a, double s) {
+            return torch::autograd::sub_scalar_autograd(a, at::Scalar(s));
+        })
+        .def("__mul__", [](const at::Tensor& a, double s) {
+            return torch::autograd::mul_scalar_autograd(a, at::Scalar(s));
+        })
+        .def("__truediv__", [](const at::Tensor& a, double s) {
+            return torch::autograd::div_scalar_autograd(a, at::Scalar(s));
+        })
+        // Scalar-tensor (s op t) — add/mul commute, sub/div do not
+        .def("__radd__", [](const at::Tensor& a, double s) {
+            return torch::autograd::add_scalar_autograd(a, at::Scalar(s));
+        })
+        .def("__rsub__", [](const at::Tensor& a, double s) {
+            // s - t = (-t) + s  (see rsub_scalar_autograd)
+            return torch::autograd::rsub_scalar_autograd(at::Scalar(s), a);
+        })
+        .def("__rmul__", [](const at::Tensor& a, double s) {
+            return torch::autograd::mul_scalar_autograd(a, at::Scalar(s));
+        })
+        .def("__rtruediv__", [](const at::Tensor& a, double s) {
+            return torch::autograd::rdiv_scalar_autograd(at::Scalar(s), a);
+        })
         .def(py::self == py::self)
         .def(py::self != py::self)
         .def(py::self < py::self)
