@@ -99,6 +99,7 @@ EXPORTS
 ?launch_q4km_gemv@cuda@at@@YAXPEBXPEBMPEAMHH_JPEAUCUstream_st@@@Z
 ?launch_q4km_persistent_gemv@cuda@at@@YAXPEBXPEBMPEAMHH_JPEAUCUstream_st@@@Z
 ?launch_q4km_persistent_gemv_accumulate@cuda@at@@YAXPEBXPEBMPEAMHH_JPEAUCUstream_st@@@Z
+?launch_q4km_persistent_gemv_v2@cuda@at@@YAXPEBXPEBMPEAMHH_JPEAUCUstream_st@@@Z
 ?launch_q4km_q8_gemv@cuda@at@@YAXPEBX0PEAMHH_JPEAUCUstream_st@@@Z
 ?launch_q5k_gemv@cuda@at@@YAXPEBXPEBMPEAMHH_JPEAUCUstream_st@@@Z
 ?launch_q6k_gemv@cuda@at@@YAXPEBXPEBMPEAMHH_JPEAUCUstream_st@@@Z
