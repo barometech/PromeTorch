@@ -383,12 +383,11 @@ CPU-portable, compile на Elbrus LCC. Плюс EMA + clip_grad_norm_ (`torch/op
   GPU — GGUF inference" section above.
 
 ### Compile-verified, runtime-untested
-Нет доступа к соответствующему железу для verification:
-- cuDNN RNN/LSTM/GRU (нужен full cuDNN stack + real model input)
+Нет доступа к соответствующему железу / path не подключён:
+- cuDNN RNN/LSTM/GRU — legacy API headers были removed в cuDNN 9; guard добавлен 2026-04-19 (`CUDNN_VERSION < 9000`), сам cuDNN-accelerated RNN путь на cuDNN 9 теперь no-op. На cuDNN 8 headers компилируются, но end-to-end test с real model input не прогонялся. LSTM/GRU fall back на pure-C++ forward который работает (verified in examples/mnist 10-models — LSTM 93-95%, GRU 98.44%).
 - MPS Apple Metal (нужен Mac)
 - ROCm/HIP (нужен AMD GPU)
-- Autocast policy table (scaffolding есть, но не wired в каждую Tensor op entry point
-  — autocast(Half) включает set_enabled но ops не смотрят policy автоматически)
+- Autocast policy table — ~100-line policy table в `autocast_policy.h` готов, `to_autograd` + `ToBackward` foundation добавлены 2026-04-19 (`8f87e57`). Осталось wiring в `Linear::forward`/`Conv2d::forward`/`MultiheadAttention::forward` + FP16 `mm` через cuBLAS. Пока в production `autocast(Half)` флажок включается, но фактическая mixed-precision тренировка не включается автоматически per-op.
 
 ### Партиал / requires extension
 - **LLM serving engine** — forward loop + KV cache + sampling работают, `load_weights_()`
