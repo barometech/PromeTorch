@@ -133,16 +133,16 @@ inline Tensor cudnn_convolution_forward(
         handle,
         &alpha,
         inputDesc.get(),
-        input.data_ptr<void>(),
+        input.data_ptr(),
         filterDesc.get(),
-        weight.data_ptr<void>(),
+        weight.data_ptr(),
         convDesc.get(),
         algo,
         workspace,
         workspaceSize,
         &beta,
         outputDesc.get(),
-        output.mutable_data_ptr<void>()
+        output.mutable_data_ptr()
     ));
 
     return output;
@@ -222,16 +222,16 @@ inline Tensor cudnn_convolution_backward_data(
         handle,
         &alpha,
         filterDesc.get(),
-        weight.data_ptr<void>(),
+        weight.data_ptr(),
         gradOutputDesc.get(),
-        grad_output.data_ptr<void>(),
+        grad_output.data_ptr(),
         convDesc.get(),
         algo,
         workspace,
         workspaceSize,
         &beta,
         gradInputDesc.get(),
-        grad_input.mutable_data_ptr<void>()
+        grad_input.mutable_data_ptr()
     ));
 
     return grad_input;
@@ -311,16 +311,16 @@ inline Tensor cudnn_convolution_backward_filter(
         handle,
         &alpha,
         inputDesc.get(),
-        input.data_ptr<void>(),
+        input.data_ptr(),
         gradOutputDesc.get(),
-        grad_output.data_ptr<void>(),
+        grad_output.data_ptr(),
         convDesc.get(),
         algo,
         workspace,
         workspaceSize,
         &beta,
         gradFilterDesc.get(),
-        grad_weight.mutable_data_ptr<void>()
+        grad_weight.mutable_data_ptr()
     ));
 
     return grad_weight;
@@ -402,21 +402,21 @@ inline Tensor cudnn_convolution_bias_activation(
         handle,
         &alpha1,
         inputDesc.get(),
-        input.data_ptr<void>(),
+        input.data_ptr(),
         filterDesc.get(),
-        weight.data_ptr<void>(),
+        weight.data_ptr(),
         convDesc.get(),
         algo,
         workspace,
         workspaceSize,
         &alpha2,
         outputDesc.get(),  // z descriptor (for residual, we use output itself)
-        output.data_ptr<void>(),  // z data
+        output.data_ptr(),  // z data
         biasDesc.get(),
-        bias.data_ptr<void>(),
+        bias.data_ptr(),
         actDesc.get(),
         outputDesc.get(),
-        output.mutable_data_ptr<void>()
+        output.mutable_data_ptr()
     ));
 
     return output;

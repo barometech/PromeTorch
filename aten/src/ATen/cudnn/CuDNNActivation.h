@@ -47,10 +47,10 @@ inline Tensor cudnn_activation_forward(
         actDesc.get(),
         &alpha,
         inputDesc.get(),
-        input.data_ptr<void>(),
+        input.data_ptr(),
         &beta,
         inputDesc.get(),
-        output.mutable_data_ptr<void>()
+        output.mutable_data_ptr()
     ));
 
     return output;
@@ -91,14 +91,14 @@ inline Tensor cudnn_activation_backward(
         actDesc.get(),
         &alpha,
         tensorDesc.get(),
-        output.data_ptr<void>(),
+        output.data_ptr(),
         tensorDesc.get(),
-        grad_output.data_ptr<void>(),
+        grad_output.data_ptr(),
         tensorDesc.get(),
-        input.data_ptr<void>(),
+        input.data_ptr(),
         &beta,
         tensorDesc.get(),
-        grad_input.mutable_data_ptr<void>()
+        grad_input.mutable_data_ptr()
     ));
 
     return grad_input;
@@ -224,10 +224,10 @@ inline Tensor cudnn_softmax_forward(
         CUDNN_SOFTMAX_MODE_CHANNEL,  // Apply softmax over C
         &alpha,
         tensorDesc.get(),
-        input.data_ptr<void>(),
+        input.data_ptr(),
         &beta,
         tensorDesc.get(),
-        output.mutable_data_ptr<void>()
+        output.mutable_data_ptr()
     ));
 
     return output;
@@ -265,12 +265,12 @@ inline Tensor cudnn_softmax_backward(
         CUDNN_SOFTMAX_MODE_CHANNEL,
         &alpha,
         tensorDesc.get(),
-        output.data_ptr<void>(),
+        output.data_ptr(),
         tensorDesc.get(),
-        grad_output.data_ptr<void>(),
+        grad_output.data_ptr(),
         &beta,
         tensorDesc.get(),
-        grad_input.mutable_data_ptr<void>()
+        grad_input.mutable_data_ptr()
     ));
 
     return grad_input;

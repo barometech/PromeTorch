@@ -46,9 +46,12 @@
 #include "aten/src/ATen/cudnn/CuDNNPooling.h"
 #include "aten/src/ATen/cudnn/CuDNNBatchNorm.h"
 #include "aten/src/ATen/cudnn/CuDNNActivation.h"
-#ifdef PT_USE_CUDNN
-#include "aten/src/ATen/cudnn/CuDNNRNN.h"
-#endif
+// NOTE: CuDNNRNN.h is intentionally NOT pulled in here. It uses the legacy
+// cuDNN 7 RNN API (cudnnSetRNNDescriptor_v6 etc.), which was removed in
+// cuDNN 9.  Users of the RNN wrapper include CuDNNRNN.h directly from
+// torch/nn/modules/rnn.h under their own #ifdef guard, so this aggregate
+// header does not need it and we avoid dragging the deprecated API into
+// every conv/pool/bn translation unit.
 
 namespace at {
 namespace cudnn {

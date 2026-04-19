@@ -69,18 +69,18 @@ inline std::tuple<Tensor, Tensor, Tensor> cudnn_batch_norm_forward_training(
         &alpha,
         &beta_param,
         inputDesc.get(),
-        input.data_ptr<void>(),
+        input.data_ptr(),
         inputDesc.get(),  // output has same descriptor
-        output.mutable_data_ptr<void>(),
+        output.mutable_data_ptr(),
         bnDescRaw,
-        gamma.data_ptr<void>(),
-        beta.data_ptr<void>(),
+        gamma.data_ptr(),
+        beta.data_ptr(),
         momentum,
-        running_mean.mutable_data_ptr<void>(),
-        running_var.mutable_data_ptr<void>(),
+        running_mean.mutable_data_ptr(),
+        running_var.mutable_data_ptr(),
         epsilon,
-        save_mean.mutable_data_ptr<void>(),
-        save_inv_var.mutable_data_ptr<void>()
+        save_mean.mutable_data_ptr(),
+        save_inv_var.mutable_data_ptr()
     ));
 
     CUDNN_CHECK(cudnnDestroyTensorDescriptor(bnDescRaw));
@@ -130,14 +130,14 @@ inline Tensor cudnn_batch_norm_forward_inference(
         &alpha,
         &beta_param,
         inputDesc.get(),
-        input.data_ptr<void>(),
+        input.data_ptr(),
         inputDesc.get(),
-        output.mutable_data_ptr<void>(),
+        output.mutable_data_ptr(),
         bnDescRaw,
-        gamma.data_ptr<void>(),
-        beta.data_ptr<void>(),
-        running_mean.data_ptr<void>(),
-        running_var.data_ptr<void>(),
+        gamma.data_ptr(),
+        beta.data_ptr(),
+        running_mean.data_ptr(),
+        running_var.data_ptr(),
         epsilon
     ));
 
@@ -196,18 +196,18 @@ inline std::tuple<Tensor, Tensor, Tensor> cudnn_batch_norm_backward(
         &alpha_param,
         &beta_param,
         inputDesc.get(),
-        input.data_ptr<void>(),
+        input.data_ptr(),
         inputDesc.get(),
-        grad_output.data_ptr<void>(),
+        grad_output.data_ptr(),
         inputDesc.get(),
-        grad_input.mutable_data_ptr<void>(),
+        grad_input.mutable_data_ptr(),
         bnDescRaw,
-        gamma.data_ptr<void>(),
-        grad_gamma.mutable_data_ptr<void>(),
-        grad_beta.mutable_data_ptr<void>(),
+        gamma.data_ptr(),
+        grad_gamma.mutable_data_ptr(),
+        grad_beta.mutable_data_ptr(),
         epsilon,
-        save_mean.data_ptr<void>(),
-        save_inv_var.data_ptr<void>()
+        save_mean.data_ptr(),
+        save_inv_var.data_ptr()
     ));
 
     CUDNN_CHECK(cudnnDestroyTensorDescriptor(bnDescRaw));
@@ -259,14 +259,14 @@ inline Tensor cudnn_batch_norm1d_forward_inference(
         &alpha,
         &beta_param,
         inputDesc.get(),
-        input.data_ptr<void>(),
+        input.data_ptr(),
         inputDesc.get(),
-        output.mutable_data_ptr<void>(),
+        output.mutable_data_ptr(),
         bnDescRaw,
-        gamma.data_ptr<void>(),
-        beta.data_ptr<void>(),
-        running_mean.data_ptr<void>(),
-        running_var.data_ptr<void>(),
+        gamma.data_ptr(),
+        beta.data_ptr(),
+        running_mean.data_ptr(),
+        running_var.data_ptr(),
         epsilon
     ));
 

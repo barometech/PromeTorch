@@ -28,8 +28,12 @@ cmake_output.txt
 
 # Data files (large)
 data/mnist/
+data/cifar-10-batches-bin/
+data/cifar-10-binary.tar.gz
+data/cifar-100-*/
 *.ubyte
 *.ptor
+*.tar.gz
 
 # Temp
 .claude/
