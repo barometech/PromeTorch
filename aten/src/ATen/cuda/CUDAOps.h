@@ -165,6 +165,16 @@ ATEN_CUDA_API void launch_gemm(
     cudaStream_t stream = nullptr
 );
 
+// Native tiled GEMM — no cuBLAS, uses hand-written kernels from CUDABlas.cu.
+// Slower than launch_gemm (cuBLAS) but works without cuBLAS at link time.
+ATEN_CUDA_API void launch_gemm_native(
+    const float* A, const float* B, float* C,
+    int M, int N, int K,
+    float alpha, float beta,
+    bool trans_a, bool trans_b,
+    cudaStream_t stream = nullptr
+);
+
 // Batched GEMM: batch matrix multiplications
 ATEN_CUDA_API void launch_batched_gemm(
     const float* A, const float* B, float* C,
