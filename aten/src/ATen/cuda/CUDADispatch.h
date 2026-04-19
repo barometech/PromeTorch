@@ -255,8 +255,8 @@ inline Tensor tanh(const Tensor& input) {
     auto output = empty_cuda(input.sizes().vec(), input.dtype(), input.device().index());
     if (input.dtype() == c10::ScalarType::Half) {
         at::cuda::launch_tanh_fp16(
-            reinterpret_cast<const __half*>(input.data_ptr()),
-            reinterpret_cast<__half*>(output.mutable_data_ptr()),
+            reinterpret_cast<const __half*>(input.data_ptr<c10::Half>()),
+            reinterpret_cast<__half*>(output.mutable_data_ptr<c10::Half>()),
             input.numel(), nullptr);
     } else {
         at::cuda::launch_tanh(input.data_ptr<float>(), output.mutable_data_ptr<float>(), input.numel(), nullptr);
@@ -268,8 +268,8 @@ inline Tensor sigmoid(const Tensor& input) {
     auto output = empty_cuda(input.sizes().vec(), input.dtype(), input.device().index());
     if (input.dtype() == c10::ScalarType::Half) {
         at::cuda::launch_sigmoid_fp16(
-            reinterpret_cast<const __half*>(input.data_ptr()),
-            reinterpret_cast<__half*>(output.mutable_data_ptr()),
+            reinterpret_cast<const __half*>(input.data_ptr<c10::Half>()),
+            reinterpret_cast<__half*>(output.mutable_data_ptr<c10::Half>()),
             input.numel(), nullptr);
     } else {
         at::cuda::launch_sigmoid(input.data_ptr<float>(), output.mutable_data_ptr<float>(), input.numel(), nullptr);
@@ -281,8 +281,8 @@ inline Tensor relu(const Tensor& input) {
     auto output = empty_cuda(input.sizes().vec(), input.dtype(), input.device().index());
     if (input.dtype() == c10::ScalarType::Half) {
         at::cuda::launch_relu_fp16(
-            reinterpret_cast<const __half*>(input.data_ptr()),
-            reinterpret_cast<__half*>(output.mutable_data_ptr()),
+            reinterpret_cast<const __half*>(input.data_ptr<c10::Half>()),
+            reinterpret_cast<__half*>(output.mutable_data_ptr<c10::Half>()),
             input.numel(), nullptr);
     } else {
         at::cuda::launch_relu(input.data_ptr<float>(), output.mutable_data_ptr<float>(), input.numel(), nullptr);
@@ -294,8 +294,8 @@ inline Tensor silu(const Tensor& input) {
     auto output = empty_cuda(input.sizes().vec(), input.dtype(), input.device().index());
     if (input.dtype() == c10::ScalarType::Half) {
         at::cuda::launch_silu_fp16(
-            reinterpret_cast<const __half*>(input.data_ptr()),
-            reinterpret_cast<__half*>(output.mutable_data_ptr()),
+            reinterpret_cast<const __half*>(input.data_ptr<c10::Half>()),
+            reinterpret_cast<__half*>(output.mutable_data_ptr<c10::Half>()),
             input.numel(), nullptr);
     } else {
         at::cuda::launch_silu(input.data_ptr<float>(), output.mutable_data_ptr<float>(), input.numel(), nullptr);
@@ -307,8 +307,8 @@ inline Tensor gelu(const Tensor& input) {
     auto output = empty_cuda(input.sizes().vec(), input.dtype(), input.device().index());
     if (input.dtype() == c10::ScalarType::Half) {
         at::cuda::launch_gelu_fp16(
-            reinterpret_cast<const __half*>(input.data_ptr()),
-            reinterpret_cast<__half*>(output.mutable_data_ptr()),
+            reinterpret_cast<const __half*>(input.data_ptr<c10::Half>()),
+            reinterpret_cast<__half*>(output.mutable_data_ptr<c10::Half>()),
             input.numel(), nullptr);
     } else {
         at::cuda::launch_gelu(input.data_ptr<float>(), output.mutable_data_ptr<float>(), input.numel(), nullptr);
@@ -385,9 +385,9 @@ inline Tensor add(const Tensor& a, const Tensor& b) {
     auto output = empty_cuda(ac.sizes().vec(), ac.dtype(), ac.device().index());
     if (ac.dtype() == c10::ScalarType::Half) {
         at::cuda::launch_add_fp16(
-            reinterpret_cast<const __half*>(ac.data_ptr()),
-            reinterpret_cast<const __half*>(bc.data_ptr()),
-            reinterpret_cast<__half*>(output.mutable_data_ptr()),
+            reinterpret_cast<const __half*>(ac.data_ptr<c10::Half>()),
+            reinterpret_cast<const __half*>(bc.data_ptr<c10::Half>()),
+            reinterpret_cast<__half*>(output.mutable_data_ptr<c10::Half>()),
             ac.numel(), nullptr);
     } else {
         at::cuda::launch_add(ac.data_ptr<float>(), bc.data_ptr<float>(), output.mutable_data_ptr<float>(), ac.numel(), nullptr);
@@ -403,9 +403,9 @@ inline Tensor sub(const Tensor& a, const Tensor& b) {
     auto output = empty_cuda(ac.sizes().vec(), ac.dtype(), ac.device().index());
     if (ac.dtype() == c10::ScalarType::Half) {
         at::cuda::launch_sub_fp16(
-            reinterpret_cast<const __half*>(ac.data_ptr()),
-            reinterpret_cast<const __half*>(bc.data_ptr()),
-            reinterpret_cast<__half*>(output.mutable_data_ptr()),
+            reinterpret_cast<const __half*>(ac.data_ptr<c10::Half>()),
+            reinterpret_cast<const __half*>(bc.data_ptr<c10::Half>()),
+            reinterpret_cast<__half*>(output.mutable_data_ptr<c10::Half>()),
             ac.numel(), nullptr);
     } else {
         at::cuda::launch_sub(ac.data_ptr<float>(), bc.data_ptr<float>(), output.mutable_data_ptr<float>(), ac.numel(), nullptr);
@@ -421,9 +421,9 @@ inline Tensor mul(const Tensor& a, const Tensor& b) {
     auto output = empty_cuda(ac.sizes().vec(), ac.dtype(), ac.device().index());
     if (ac.dtype() == c10::ScalarType::Half) {
         at::cuda::launch_mul_fp16(
-            reinterpret_cast<const __half*>(ac.data_ptr()),
-            reinterpret_cast<const __half*>(bc.data_ptr()),
-            reinterpret_cast<__half*>(output.mutable_data_ptr()),
+            reinterpret_cast<const __half*>(ac.data_ptr<c10::Half>()),
+            reinterpret_cast<const __half*>(bc.data_ptr<c10::Half>()),
+            reinterpret_cast<__half*>(output.mutable_data_ptr<c10::Half>()),
             ac.numel(), nullptr);
     } else {
         at::cuda::launch_mul(ac.data_ptr<float>(), bc.data_ptr<float>(), output.mutable_data_ptr<float>(), ac.numel(), nullptr);
@@ -439,9 +439,9 @@ inline Tensor div(const Tensor& a, const Tensor& b) {
     auto output = empty_cuda(ac.sizes().vec(), ac.dtype(), ac.device().index());
     if (ac.dtype() == c10::ScalarType::Half) {
         at::cuda::launch_div_fp16(
-            reinterpret_cast<const __half*>(ac.data_ptr()),
-            reinterpret_cast<const __half*>(bc.data_ptr()),
-            reinterpret_cast<__half*>(output.mutable_data_ptr()),
+            reinterpret_cast<const __half*>(ac.data_ptr<c10::Half>()),
+            reinterpret_cast<const __half*>(bc.data_ptr<c10::Half>()),
+            reinterpret_cast<__half*>(output.mutable_data_ptr<c10::Half>()),
             ac.numel(), nullptr);
     } else {
         at::cuda::launch_div(ac.data_ptr<float>(), bc.data_ptr<float>(), output.mutable_data_ptr<float>(), ac.numel(), nullptr);
@@ -502,9 +502,9 @@ inline Tensor add_broadcast(const Tensor& a, const Tensor& b) {
     auto output = empty_cuda(a.sizes().vec(), a.dtype(), a.device().index());
     if (a.dtype() == c10::ScalarType::Half) {
         at::cuda::launch_add_broadcast_fp16(
-            reinterpret_cast<const __half*>(a.data_ptr()),
-            reinterpret_cast<const __half*>(b.data_ptr()),
-            reinterpret_cast<__half*>(output.mutable_data_ptr()),
+            reinterpret_cast<const __half*>(a.data_ptr<c10::Half>()),
+            reinterpret_cast<const __half*>(b.data_ptr<c10::Half>()),
+            reinterpret_cast<__half*>(output.mutable_data_ptr<c10::Half>()),
             outer, inner, nullptr);
     } else {
         at::cuda::launch_add_broadcast_col(
@@ -673,8 +673,8 @@ inline Tensor softmax(const Tensor& input, int dim) {
     auto output = empty_cuda(sizes, input.dtype(), input.device().index());
     if (input.dtype() == c10::ScalarType::Half) {
         at::cuda::launch_softmax_fp16(
-            reinterpret_cast<const __half*>(input.data_ptr()),
-            reinterpret_cast<__half*>(output.mutable_data_ptr()),
+            reinterpret_cast<const __half*>(input.data_ptr<c10::Half>()),
+            reinterpret_cast<__half*>(output.mutable_data_ptr<c10::Half>()),
             outer_size, dim_size, inner_size, nullptr);
     } else {
         at::cuda::launch_softmax(input.data_ptr<float>(), output.mutable_data_ptr<float>(),
