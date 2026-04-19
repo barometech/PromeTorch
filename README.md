@@ -156,9 +156,13 @@ matmul (roadmap in `TEST_PLAN.md` §4). Consumer GPU numbers will be lower
 
 На CPU с Adam loss/accuracy совпадают с PyTorch 2.7.1 baseline в пределах ±0.5%.
 
-**Каких задач нет в этой таблице:** самостоятельного обучения Transformer на больших
-датасетах, ViT, ResNet, VAE. Заготовки `examples/transformer/` и `examples/vit/` в репо
-есть, но никогда не собирались end-to-end.
+**Дополнительные тренировки, добавленные 2026-04-19:**
+- `examples/shakespeare/` — char-level Transformer LM, CPU: loss 4.48→2.46 за 3000 iters, генерирует speaker-tags + English phonotactics.
+- `examples/transformer/` — sentiment classifier, CPU 85.8% val acc за 5 эпох (CUDA forward crash — pre-existing LayerNorm CUDA gap).
+- `examples/vit/` — Vision Transformer на MNIST, training loop починен (autograd chain через reshape/select/CLS-pool).
+- `examples/cifar/` — ResNet-20 на CIFAR-10 (новый).
+- `examples/gan/` — DCGAN на MNIST (новый, ConvTranspose2d backward добавлен).
+- `examples/vae/` — VAE на MNIST (новый), CPU 20 эпох → test ELBO 103.7, generates digit-like samples.
 
 ### NM Quad (профиль на удалённой плате НТЦ Модуль)
 
