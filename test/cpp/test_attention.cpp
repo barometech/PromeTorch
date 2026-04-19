@@ -13,7 +13,6 @@
 #include <gtest/gtest.h>
 #include "torch/csrc/autograd/autograd.h"
 #include "aten/src/ATen/native/Attention.h"
-#include "torch/nn/functional.h"
 #include <cmath>
 #include <vector>
 
