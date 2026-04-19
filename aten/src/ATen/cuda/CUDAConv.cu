@@ -8,6 +8,11 @@
 #include <cstdint>
 #include <cstdio>
 
+// Export launch_* symbols so external TUs (e.g. training examples that
+// link against aten_cuda.dll) can resolve them. Without this, the
+// functions are defined but not in the DLL export table on Windows.
+#include "aten/src/ATen/cuda/CUDAOps.h"
+
 namespace at {
 namespace cuda {
 
@@ -93,7 +98,7 @@ __global__ void conv2d_forward_kernel(
 }
 
 // Launch conv2d forward
-void launch_conv2d_forward(
+ATEN_CUDA_API void launch_conv2d_forward(
     const float* input,
     const float* weight,
     const float* bias,
@@ -179,7 +184,7 @@ __global__ void max_pool2d_forward_kernel(
     output[out_idx] = max_val;
 }
 
-void launch_max_pool2d_forward(
+ATEN_CUDA_API void launch_max_pool2d_forward(
     const float* input,
     float* output,
     int batch_size,
@@ -267,7 +272,7 @@ __global__ void avg_pool2d_forward_kernel(
     output[out_idx] = (count > 0) ? (sum / count) : 0.0f;
 }
 
-void launch_avg_pool2d_forward(
+ATEN_CUDA_API void launch_avg_pool2d_forward(
     const float* input,
     float* output,
     int batch_size,
@@ -344,7 +349,7 @@ __global__ void adaptive_avg_pool2d_forward_kernel(
     output[out_idx] = (count > 0) ? (sum / count) : 0.0f;
 }
 
-void launch_adaptive_avg_pool2d_forward(
+ATEN_CUDA_API void launch_adaptive_avg_pool2d_forward(
     const float* input,
     float* output,
     int batch_size,
@@ -403,7 +408,7 @@ __global__ void batch_norm2d_forward_kernel(
     output[idx] = g * x_norm + b;
 }
 
-void launch_batch_norm2d_forward(
+ATEN_CUDA_API void launch_batch_norm2d_forward(
     const float* input,
     const float* gamma,
     const float* beta,

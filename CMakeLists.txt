@@ -442,6 +442,17 @@ if(PT_USE_CUDA)
         CUDA_SEPARABLE_COMPILATION OFF
         POSITION_INDEPENDENT_CODE ON
     )
+    # nvcc does not reliably forward __declspec(dllexport) to host-side
+    # functions defined in .cu files, so ATEN_CUDA_API on the launch_* defs
+    # does not end up as /EXPORT in the resulting object and they are missing
+    # from the final DLL. Fix: inject an explicit module-definition file that
+    # names the host launchers we need cross-DLL. This is narrower (and
+    # safer) than WINDOWS_EXPORT_ALL_SYMBOLS, which also re-exports every RTTI
+    # / std:: template symbol and produces ODR conflicts with c10.dll.
+    if(MSVC AND PT_USE_CUDA AND PT_BUILD_SHARED_LIBS)
+        target_sources(aten_cuda PRIVATE
+            ${CMAKE_SOURCE_DIR}/aten/src/ATen/cuda/aten_cuda_exports.def)
+    endif()
 endif()
 
 # ROCm/HIP path: build aten_cuda from the hipified sources under

@@ -259,6 +259,13 @@ public:
         return impl_->mutable_data<T>();
     }
 
+    // Untyped mutable pointer — matches the untyped data_ptr() overload above
+    // and is useful for APIs (cuDNN, cuBLAS, etc.) that take void*.
+    void* mutable_data_ptr() {
+        PT_CHECK(defined());
+        return impl_->mutable_data();
+    }
+
     // Get single item (for scalar tensors)
     template<typename T>
     T item() const {

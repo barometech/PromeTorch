@@ -64,10 +64,10 @@ inline Tensor cudnn_max_pool2d_forward(
         poolDesc.get(),
         &alpha,
         inputDesc.get(),
-        input.data_ptr<void>(),
+        input.data_ptr(),
         &beta,
         outputDesc.get(),
-        output.mutable_data_ptr<void>()
+        output.mutable_data_ptr()
     ));
 
     return output;
@@ -119,14 +119,14 @@ inline Tensor cudnn_max_pool2d_backward(
         poolDesc.get(),
         &alpha,
         outputDesc.get(),
-        output.data_ptr<void>(),
+        output.data_ptr(),
         outputDesc.get(),
-        grad_output.data_ptr<void>(),
+        grad_output.data_ptr(),
         inputDesc.get(),
-        input.data_ptr<void>(),
+        input.data_ptr(),
         &beta,
         inputDesc.get(),
-        grad_input.mutable_data_ptr<void>()
+        grad_input.mutable_data_ptr()
     ));
 
     return grad_input;
@@ -181,10 +181,10 @@ inline Tensor cudnn_avg_pool2d_forward(
         poolDesc.get(),
         &alpha,
         inputDesc.get(),
-        input.data_ptr<void>(),
+        input.data_ptr(),
         &beta,
         outputDesc.get(),
-        output.mutable_data_ptr<void>()
+        output.mutable_data_ptr()
     ));
 
     return output;
@@ -244,14 +244,14 @@ inline Tensor cudnn_avg_pool2d_backward(
         poolDesc.get(),
         &alpha,
         outputDesc.get(),
-        output.data_ptr<void>(),     // Not used for avg pooling
+        output.data_ptr(),     // Not used for avg pooling
         outputDesc.get(),
-        grad_output.data_ptr<void>(),
+        grad_output.data_ptr(),
         inputDesc.get(),
-        input.data_ptr<void>(),      // Not used for avg pooling
+        input.data_ptr(),      // Not used for avg pooling
         &beta,
         inputDesc.get(),
-        grad_input.mutable_data_ptr<void>()
+        grad_input.mutable_data_ptr()
     ));
 
     return grad_input;
