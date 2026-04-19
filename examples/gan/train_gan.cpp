@@ -15,7 +15,16 @@
 // Samples are written as 4x4 PPM grids every 5 epochs.
 // ============================================================================
 
-#include "torch/nn/nn.h"
+// Narrow includes: avoid pulling CuDNNRNN.h through torch/nn/nn.h
+#include "torch/nn/parameter.h"
+#include "torch/nn/module.h"
+#include "torch/nn/init.h"
+#include "torch/nn/modules/container.h"
+#include "torch/nn/modules/linear.h"
+#include "torch/nn/modules/conv.h"
+#include "torch/nn/modules/normalization.h"
+#include "torch/nn/modules/activation.h"
+#include "torch/nn/modules/loss.h"
 #include "torch/optim/optim.h"
 #include "torch/csrc/autograd/autograd.h"
 #ifdef PT_USE_CUDA
@@ -304,8 +313,13 @@ int main(int argc, char* argv[]) {
     if (g_device.is_cuda()) { G->to(g_device); D->to(g_device); }
 #endif
 
-    std::cout << "G params: " << count_parameters(*G) << std::endl;
-    std::cout << "D params: " << count_parameters(*D) << std::endl;
+    auto count_params = [](Module& m) {
+        int64_t n = 0;
+        for (auto* p : m.parameters()) if (p->requires_grad()) n += p->data().numel();
+        return n;
+    };
+    std::cout << "G params: " << count_params(*G) << std::endl;
+    std::cout << "D params: " << count_params(*D) << std::endl;
 
     // Optimizers (Adam, beta1=0.5 per DCGAN paper)
     AdamOptions gopt(lr); gopt.betas(beta1, 0.999);

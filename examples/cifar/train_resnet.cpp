@@ -20,10 +20,17 @@
 // Unpack into:  data/cifar-10-batches-bin/
 // ============================================================================
 
-#include "torch/nn/nn.h"
+// We include only the subset of torch/nn we actually need. The full
+// "torch/nn/nn.h" pulls in modules/rnn.h which in turn includes
+// aten/src/ATen/cudnn/CuDNNRNN.h when PT_USE_CUDNN is defined globally;
+// that header uses the legacy cuDNN RNN API which was removed in cuDNN 9
+// and fails to compile against the toolkit on this machine.  Since
+// training ResNet-20 does not need RNN, we side-step the issue.
+#include "torch/nn/module.h"
+#include "torch/nn/modules/loss.h"
+#include "torch/csrc/autograd/autograd.h"
 #include "torch/optim/optim.h"
 #include "torch/optim/lr_scheduler.h"
-#include "torch/csrc/autograd/autograd.h"
 #include "torch/vision/resnet.h"
 #ifdef PT_USE_CUDA
 #include "aten/src/ATen/cuda/CUDADispatch.h"
@@ -79,7 +86,8 @@ struct CifarDataset {
 };
 
 // Read one .bin file (10000 records of 3073 bytes) and append to ds.
-// Returns true on success.
+// Returns true on success. We reserve up-front so the 154 MB train buffer
+// is allocated once instead of being grown record-by-record.
 static bool append_cifar_bin(const std::string& path, CifarDataset& ds) {
     std::ifstream f(path, std::ios::binary);
     if (!f) {
@@ -88,6 +96,9 @@ static bool append_cifar_bin(const std::string& path, CifarDataset& ds) {
     }
     constexpr int64_t kPerRecord = 1 + CifarDataset::CHW;   // 3073
     constexpr int64_t kRecords = 10000;
+
+    ds.labels.reserve(ds.labels.size() + kRecords);
+    ds.images.reserve(ds.images.size() + kRecords * CifarDataset::CHW);
 
     std::vector<uint8_t> buf(kPerRecord);
     for (int64_t i = 0; i < kRecords; ++i) {
