@@ -1,29 +1,40 @@
 // ============================================================================
 // Shakespeare Character-Level Language Model Training
 // ============================================================================
-// This example trains a small Transformer model on Shakespeare text for
+// Trains a small decoder-only Transformer on Shakespeare text for
 // character-level text generation.
 //
 // Usage:
-//   ./shakespeare_train [path_to_shakespeare.txt]
+//   shakespeare_train [--device cpu|cuda] [--epochs N] [--batch_size B]
+//                     [--lr LR] [--block_size S] [--data PATH]
 //
-// If no path is provided, uses a small built-in sample.
+// Fixes (vs original):
+//   - Single CrossEntropyLoss forward + torch::autograd::backward({loss}).
+//     No more manual "inject gradient into logits.set_grad()" hack.
+//   - optimizer.zero_grad() moved BEFORE forward (standard order).
+//   - Logits [S, B, V] reshaped to [S*B, V], targets [S, B] reshaped to [S*B]
+//     to match CrossEntropyLoss expected shape.
+//   - Optional --device cuda: model.to(cuda) and inputs moved to cuda.
 
 #include "model.h"
 #include "torch/nn/nn.h"
 #include "torch/optim/optim.h"
+#include "torch/csrc/autograd/autograd.h"
+#include "c10/core/Device.h"
 #include <iostream>
 #include <fstream>
 #include <sstream>
 #include <chrono>
 #include <iomanip>
+#include <string>
+#include <cstring>
 
 using namespace shakespeare;
 using namespace torch;
 using namespace torch::nn;
 using namespace torch::optim;
 
-// Default Shakespeare sample (from Hamlet)
+// Default Shakespeare sample (from Hamlet) — tiny fallback if no file provided
 const char* DEFAULT_TEXT = R"(
 HAMLET: To be, or not to be, that is the question:
 Whether 'tis nobler in the mind to suffer
@@ -34,167 +45,99 @@ No more; and by a sleep, to say we end
 The heart-ache, and the thousand natural shocks
 That Flesh is heir to? 'Tis a consummation
 Devoutly to be wished. To die, to sleep,
-To sleep, perchance to Dream; aye, there's the rub,
-For in that sleep of death, what dreams may come,
-When we have shuffled off this mortal coil,
-Must give us pause. There's the respect
-That makes Calamity of so long life:
-For who would bear the Whips and Scorns of time,
-The Oppressor's wrong, the proud man's Contumely,
-The pangs of despised Love, the Law's delay,
-The insolence of Office, and the Spurns
-That patient merit of the unworthy takes,
-When he himself might his Quietus make
-With a bare Bodkin? Who would Fardels bear,
-To grunt and sweat under a weary life,
-But that the dread of something after death,
-The undiscovered Country, from whose bourn
-No Traveller returns, Puzzles the will,
-And makes us rather bear those ills we have,
-Than fly to others that we know not of.
-Thus Conscience does make Cowards of us all,
-And thus the Native hue of Resolution
-Is sicklied o'er, with the pale cast of Thought,
-And enterprises of great pitch and moment,
-With this regard their Currents turn awry,
-And lose the name of Action. Soft you now,
-The fair Ophelia? Nymph, in thy Orisons
-Be all my sins remembered.
-
-KING CLAUDIUS: How fares our cousin Hamlet?
-
-HAMLET: Excellent, i' faith; of the chameleon's dish: I eat
-the air, promise-crammed: you cannot feed capons so.
-
-KING CLAUDIUS: I have nothing with this answer, Hamlet; these words
-are not mine.
-
-HAMLET: No, nor mine now.
+To sleep, perchance to Dream; aye, there's the rub.
 )";
 
-// Cross-entropy loss for language modeling
-float cross_entropy_loss(const Tensor& logits, const Tensor& targets, int64_t vocab_size) {
-    // logits: [seq_len, batch, vocab_size]
-    // targets: [seq_len, batch]
-    int64_t seq_len = logits.size(0);
-    int64_t batch_size = logits.size(1);
-    int64_t total_tokens = seq_len * batch_size;
+struct Args {
+    std::string device = "cpu";
+    int64_t epochs = 10;
+    int64_t batch_size = 32;
+    double lr = 3e-4;
+    int64_t block_size = 64;
+    int64_t max_iters = 0;       // 0 = derived from epochs
+    int64_t log_every = 25;
+    int64_t gen_tokens = 200;
+    std::string data_path;       // empty -> use data/tiny_shakespeare.txt if exists
+};
 
-    const float* logits_data = logits.data_ptr<float>();
-    const float* targets_data = targets.data_ptr<float>();
-
-    float loss = 0.0f;
-
-    for (int64_t s = 0; s < seq_len; ++s) {
-        for (int64_t b = 0; b < batch_size; ++b) {
-            int64_t target_idx = static_cast<int64_t>(targets_data[s * batch_size + b]);
-            int64_t offset = (s * batch_size + b) * vocab_size;
-
-            // Log-softmax for numerical stability
-            float max_logit = logits_data[offset];
-            for (int64_t v = 1; v < vocab_size; ++v) {
-                max_logit = std::max(max_logit, logits_data[offset + v]);
-            }
-
-            float sum_exp = 0.0f;
-            for (int64_t v = 0; v < vocab_size; ++v) {
-                sum_exp += std::exp(logits_data[offset + v] - max_logit);
-            }
-
-            float log_softmax = logits_data[offset + target_idx] - max_logit - std::log(sum_exp);
-            loss -= log_softmax;
-        }
-    }
-
-    return loss / static_cast<float>(total_tokens);
+static void print_usage() {
+    std::cout << "Usage: shakespeare_train [options]\n"
+              << "  --device cpu|cuda    (default cpu)\n"
+              << "  --epochs N           (default 10)\n"
+              << "  --batch_size B       (default 32)\n"
+              << "  --lr LR              (default 3e-4)\n"
+              << "  --block_size S       (default 64)\n"
+              << "  --data PATH          (default data/tiny_shakespeare.txt)\n"
+              << "  --gen_tokens N       (default 200)\n";
 }
 
-// Compute cross-entropy loss with gradient
-Tensor cross_entropy_loss_with_grad(const Tensor& logits, const Tensor& targets, int64_t vocab_size) {
-    // logits: [seq_len, batch, vocab_size]
-    // targets: [seq_len, batch]
-    int64_t seq_len = logits.size(0);
-    int64_t batch_size = logits.size(1);
-    int64_t total_tokens = seq_len * batch_size;
-
-    // For now, we compute the loss manually and store gradient
-    Tensor loss_tensor = at::zeros({});
-    float* loss_data = loss_tensor.mutable_data_ptr<float>();
-
-    const float* logits_data = logits.data_ptr<float>();
-    const float* targets_data = targets.data_ptr<float>();
-
-    // Compute softmax and loss
-    Tensor grad = at::zeros(logits.sizes());
-    float* grad_data = grad.mutable_data_ptr<float>();
-
-    float total_loss = 0.0f;
-
-    for (int64_t s = 0; s < seq_len; ++s) {
-        for (int64_t b = 0; b < batch_size; ++b) {
-            int64_t target_idx = static_cast<int64_t>(targets_data[s * batch_size + b]);
-            int64_t offset = (s * batch_size + b) * vocab_size;
-
-            // Compute softmax
-            float max_logit = logits_data[offset];
-            for (int64_t v = 1; v < vocab_size; ++v) {
-                max_logit = std::max(max_logit, logits_data[offset + v]);
+static Args parse_args(int argc, char* argv[]) {
+    Args a;
+    for (int i = 1; i < argc; ++i) {
+        std::string k = argv[i];
+        auto next = [&](const char* name) -> std::string {
+            if (i + 1 >= argc) {
+                std::cerr << "Missing value for " << name << std::endl;
+                std::exit(1);
             }
-
-            float sum_exp = 0.0f;
-            for (int64_t v = 0; v < vocab_size; ++v) {
-                float exp_val = std::exp(logits_data[offset + v] - max_logit);
-                grad_data[offset + v] = exp_val;
-                sum_exp += exp_val;
-            }
-
-            // Normalize to get softmax
-            for (int64_t v = 0; v < vocab_size; ++v) {
-                grad_data[offset + v] /= sum_exp;
-            }
-
-            // Cross-entropy gradient: softmax - one_hot(target)
-            // grad = p - y where p is softmax, y is one-hot
-            grad_data[offset + target_idx] -= 1.0f;
-
-            // Scale by 1/total_tokens for mean reduction
-            for (int64_t v = 0; v < vocab_size; ++v) {
-                grad_data[offset + v] /= static_cast<float>(total_tokens);
-            }
-
-            // Compute loss
-            float log_softmax = logits_data[offset + target_idx] - max_logit - std::log(sum_exp);
-            total_loss -= log_softmax;
+            return std::string(argv[++i]);
+        };
+        if (k == "--device") a.device = next("--device");
+        else if (k == "--epochs") a.epochs = std::stoll(next("--epochs"));
+        else if (k == "--batch_size") a.batch_size = std::stoll(next("--batch_size"));
+        else if (k == "--lr") a.lr = std::stod(next("--lr"));
+        else if (k == "--block_size") a.block_size = std::stoll(next("--block_size"));
+        else if (k == "--data") a.data_path = next("--data");
+        else if (k == "--gen_tokens") a.gen_tokens = std::stoll(next("--gen_tokens"));
+        else if (k == "--help" || k == "-h") { print_usage(); std::exit(0); }
+        else if (!k.empty() && k[0] != '-' && a.data_path.empty()) {
+            // Positional arg: data path
+            a.data_path = k;
+        } else {
+            std::cerr << "Unknown arg: " << k << std::endl;
+            print_usage();
+            std::exit(1);
         }
     }
-
-    loss_data[0] = total_loss / static_cast<float>(total_tokens);
-
-    // Store gradient on the tensor via the public setter.
-    const_cast<Tensor&>(logits).set_grad(grad);
-
-    return loss_tensor;
+    return a;
 }
 
 int main(int argc, char* argv[]) {
+    Args args = parse_args(argc, argv);
+
     std::cout << "========================================" << std::endl;
     std::cout << "PromeTorch Shakespeare Language Model" << std::endl;
     std::cout << "========================================" << std::endl;
 
-    // Load text
+    // Resolve data path: explicit -> default tiny_shakespeare.txt -> embedded
     std::string text;
-    if (argc > 1) {
-        std::ifstream file(argv[1]);
+    std::string path = args.data_path;
+    if (path.empty()) {
+        // Try default locations
+        const char* candidates[] = {
+            "data/tiny_shakespeare.txt",
+            "../data/tiny_shakespeare.txt",
+            "../../data/tiny_shakespeare.txt",
+            "../../../data/tiny_shakespeare.txt",
+        };
+        for (const char* c : candidates) {
+            std::ifstream f(c);
+            if (f.is_open()) { path = c; break; }
+        }
+    }
+    if (!path.empty()) {
+        std::ifstream file(path);
         if (file.is_open()) {
             std::stringstream buffer;
             buffer << file.rdbuf();
             text = buffer.str();
-            std::cout << "Loaded text from: " << argv[1] << std::endl;
+            std::cout << "Loaded text from: " << path << std::endl;
         } else {
-            std::cerr << "Could not open file: " << argv[1] << std::endl;
-            return 1;
+            std::cerr << "Could not open file: " << path
+                      << " — falling back to embedded sample." << std::endl;
         }
-    } else {
+    }
+    if (text.empty()) {
         text = DEFAULT_TEXT;
         std::cout << "Using built-in Shakespeare sample" << std::endl;
     }
@@ -206,21 +149,33 @@ int main(int argc, char* argv[]) {
     tokenizer.build_vocab(text);
     std::cout << "Vocabulary size: " << tokenizer.vocab_size() << " characters" << std::endl;
 
-    // Tokenize text
     std::vector<int64_t> tokens = tokenizer.encode(text);
     std::cout << "Total tokens: " << tokens.size() << std::endl;
 
+    // Device
+    bool use_cuda = (args.device == "cuda");
+#ifndef PT_USE_CUDA
+    if (use_cuda) {
+        std::cerr << "Build has no CUDA support; falling back to CPU." << std::endl;
+        use_cuda = false;
+    }
+#endif
+    std::cout << "Device: " << (use_cuda ? "cuda" : "cpu") << std::endl;
+
     // Model hyperparameters
     int64_t vocab_size = tokenizer.vocab_size();
-    int64_t d_model = 128;      // Embedding dimension
-    int64_t nhead = 4;          // Number of attention heads
-    int64_t num_layers = 3;     // Number of transformer layers
-    int64_t dim_feedforward = 256;  // FFN dimension
+    int64_t d_model = 128;
+    int64_t nhead = 4;
+    int64_t num_layers = 3;
+    int64_t dim_feedforward = 256;
     double dropout = 0.1;
-    int64_t block_size = 64;    // Context window size
-    int64_t batch_size = 8;
-    int64_t max_iters = 500;
-    double learning_rate = 3e-4;
+    int64_t block_size = args.block_size;
+    int64_t batch_size = args.batch_size;
+
+    if (static_cast<int64_t>(tokens.size()) < block_size + 1) {
+        std::cerr << "Text too short for block_size=" << block_size << std::endl;
+        return 1;
+    }
 
     std::cout << "\nModel configuration:" << std::endl;
     std::cout << "  d_model: " << d_model << std::endl;
@@ -229,84 +184,144 @@ int main(int argc, char* argv[]) {
     std::cout << "  dim_feedforward: " << dim_feedforward << std::endl;
     std::cout << "  block_size: " << block_size << std::endl;
     std::cout << "  batch_size: " << batch_size << std::endl;
+    std::cout << "  epochs: " << args.epochs << std::endl;
+    std::cout << "  lr: " << args.lr << std::endl;
 
-    // Create model
     auto model = std::make_shared<TransformerLM>(
         vocab_size, d_model, nhead, num_layers, dim_feedforward, dropout, block_size
     );
 
     std::cout << "\nModel parameters: " << count_parameters(*model) << std::endl;
 
-    // Create dataset
+#ifdef PT_USE_CUDA
+    if (use_cuda) {
+        model->to(c10::Device(c10::DeviceType::CUDA, 0));
+        std::cout << "Model moved to CUDA" << std::endl;
+    }
+#endif
+
+    // Dataset
     TextDataset dataset(tokens, block_size);
     std::cout << "Training examples: " << dataset.size() << std::endl;
 
-    // Create optimizer
-    Adam optimizer(model->parameters(), learning_rate);
+    // Derive iters per epoch so loss measurement scales with dataset size
+    int64_t iters_per_epoch = std::max<int64_t>(
+        1, static_cast<int64_t>(dataset.size()) / batch_size);
+    // Cap epoch size to avoid absurd runtimes on huge shakespeare corpus
+    iters_per_epoch = std::min<int64_t>(iters_per_epoch, 500);
+    int64_t total_iters = iters_per_epoch * args.epochs;
+    std::cout << "Iters/epoch: " << iters_per_epoch
+              << ", total iters: " << total_iters << std::endl;
 
-    // Training loop
+    // Optimizer
+    Adam optimizer(model->parameters(), args.lr);
+
+    // Loss
+    CrossEntropyLoss criterion;
+
     std::cout << "\nStarting training..." << std::endl;
     std::random_device rd;
     std::mt19937 gen(rd());
 
     auto start_time = std::chrono::high_resolution_clock::now();
 
-    for (int64_t iter = 0; iter < max_iters; ++iter) {
+    for (int64_t epoch = 0; epoch < args.epochs; ++epoch) {
         model->train();
 
-        // Get batch
-        auto [input, target] = dataset.get_batch(batch_size, gen);
+        double epoch_loss_sum = 0.0;
+        int64_t epoch_loss_count = 0;
 
-        // Forward pass
-        Tensor logits = model->forward(input);
+        for (int64_t it = 0; it < iters_per_epoch; ++it) {
+            int64_t global_it = epoch * iters_per_epoch + it;
 
-        // Compute loss
-        float loss = cross_entropy_loss(logits, target, vocab_size);
+            // Get batch: input [S, B], target [S, B] (float-encoded indices)
+            auto [input, target] = dataset.get_batch(batch_size, gen);
 
-        // Print progress
-        if (iter % 50 == 0 || iter == max_iters - 1) {
-            auto current_time = std::chrono::high_resolution_clock::now();
-            auto duration = std::chrono::duration_cast<std::chrono::seconds>(
-                current_time - start_time
-            ).count();
+#ifdef PT_USE_CUDA
+            if (use_cuda) {
+                input = at::to_cuda(input);
+                target = at::to_cuda(target);
+            }
+#endif
 
-            std::cout << "Iter " << std::setw(4) << iter
-                      << " | Loss: " << std::fixed << std::setprecision(4) << loss
-                      << " | Time: " << duration << "s" << std::endl;
+            // Standard order: zero grads BEFORE forward
+            optimizer.zero_grad();
+
+            // Forward: [S, B] -> [S, B, V]
+            Tensor logits = model->forward(input);
+
+            // Reshape for CrossEntropyLoss: [N, V] and [N]
+            int64_t S = logits.size(0);
+            int64_t B = logits.size(1);
+            int64_t V = logits.size(2);
+            Tensor logits_flat  = logits.reshape({S * B, V});
+            Tensor target_flat  = target.reshape({S * B});
+
+            Tensor loss = criterion.forward(logits_flat, target_flat);
+
+            float loss_val = 0.0f;
+            {
+                Tensor loss_cpu = loss;
+#ifdef PT_USE_CUDA
+                if (loss_cpu.is_cuda()) loss_cpu = at::to_cpu(loss_cpu);
+#endif
+                loss_val = loss_cpu.data_ptr<float>()[0];
+            }
+            epoch_loss_sum += loss_val;
+            epoch_loss_count++;
+
+            // Backward through full autograd graph (this is the fix — no more
+            // manual set_grad(grad) on logits)
+            torch::autograd::backward({loss});
+
+            // Gradient clipping (stabilizes training)
+            torch::nn::clip_grad_norm_(*model, 1.0);
+
+            optimizer.step();
+
+            if (global_it % args.log_every == 0 || global_it == total_iters - 1) {
+                auto now = std::chrono::high_resolution_clock::now();
+                auto secs = std::chrono::duration_cast<std::chrono::seconds>(
+                    now - start_time).count();
+                std::cout << "Epoch " << std::setw(2) << (epoch + 1)
+                          << "/" << args.epochs
+                          << " | Iter " << std::setw(5) << global_it
+                          << " | Loss: " << std::fixed << std::setprecision(4) << loss_val
+                          << " | Time: " << secs << "s" << std::endl;
+            }
         }
 
-        // Zero gradients
-        optimizer.zero_grad();
-
-        // Backward pass (simplified - manual gradient computation for output)
-        cross_entropy_loss_with_grad(logits, target, vocab_size);
-
-        // Update parameters
-        optimizer.step();
+        double avg = epoch_loss_count > 0 ? epoch_loss_sum / epoch_loss_count : 0.0;
+        std::cout << ">>> Epoch " << (epoch + 1) << " avg loss: "
+                  << std::fixed << std::setprecision(4) << avg << std::endl;
     }
 
     auto end_time = std::chrono::high_resolution_clock::now();
-    auto total_duration = std::chrono::duration_cast<std::chrono::seconds>(
-        end_time - start_time
-    ).count();
-
-    std::cout << "\nTraining completed in " << total_duration << " seconds" << std::endl;
+    auto total_secs = std::chrono::duration_cast<std::chrono::seconds>(
+        end_time - start_time).count();
+    std::cout << "\nTraining completed in " << total_secs << " seconds" << std::endl;
 
     // Generate sample text
     std::cout << "\n========================================" << std::endl;
     std::cout << "Generated Text:" << std::endl;
     std::cout << "========================================" << std::endl;
 
-    // Start with "HAMLET:"
+    // Move model back to CPU for generation (generate() uses CPU-style data_ptr reads)
+#ifdef PT_USE_CUDA
+    if (use_cuda) {
+        model->to(c10::Device(c10::DeviceType::CPU, 0));
+    }
+#endif
+
     std::string prompt = "HAMLET:";
     std::vector<int64_t> prompt_tokens = tokenizer.encode(prompt);
 
     model->eval();
     std::vector<int64_t> generated = model->generate(
         prompt_tokens,
-        200,   // Generate 200 characters
-        0.8,   // Temperature
-        true   // Sample
+        args.gen_tokens,
+        0.8,
+        true
     );
 
     std::string generated_text = tokenizer.decode(generated);

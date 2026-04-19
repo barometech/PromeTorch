@@ -19,6 +19,7 @@
 #include <vector>
 #include <random>
 #include <algorithm>
+#include <cmath>
 
 #ifdef _MSC_VER
 #include <stdlib.h>
@@ -106,12 +107,22 @@ std::vector<uint8_t> load_mnist_labels(const std::string& path) {
 // ============================================================================
 // Patch Embedding Layer
 // ============================================================================
+//
+// Extracts non-overlapping patches from image via reshape+permute (device-
+// agnostic), then projects to embed_dim.
+// For x: [B, C, H, W] with patch size P and H=W=S:
+//   reshape  -> [B, C, H/P, P, W/P, P]
+//   permute  -> [B, H/P, W/P, C, P, P]  (dims 0,2,4,1,3,5)
+//   reshape  -> [B, N, D]  where N=(H/P)*(W/P), D=C*P*P
+//   linear   -> [B, N, embed_dim]
+// ============================================================================
 
 class PatchEmbedding : public Module {
 public:
     PatchEmbedding(int64_t img_size, int64_t patch_size, int64_t in_channels, int64_t embed_dim)
         : Module("PatchEmbedding"),
-          img_size_(img_size), patch_size_(patch_size), embed_dim_(embed_dim) {
+          img_size_(img_size), patch_size_(patch_size),
+          in_channels_(in_channels), embed_dim_(embed_dim) {
 
         num_patches_ = (img_size / patch_size) * (img_size / patch_size);
         patch_dim_ = in_channels * patch_size * patch_size;
@@ -137,42 +148,17 @@ public:
         int64_t H = sizes[2];
         int64_t W = sizes[3];
 
-        int64_t num_patches_h = H / patch_size_;
-        int64_t num_patches_w = W / patch_size_;
+        int64_t P = patch_size_;
+        int64_t Hp = H / P;
+        int64_t Wp = W / P;
 
-        // Extract patches manually
-        Tensor patches = at::empty({B, num_patches_, patch_dim_});
-        Tensor x_cpu = move_to_cpu(x);
-        const float* x_ptr = x_cpu.data_ptr<float>();
-        float* p_ptr = patches.mutable_data_ptr<float>();
+        // Fold spatial dims into patches via reshape+permute (device-agnostic).
+        // [B,C,H,W] -> [B,C,Hp,P,Wp,P] -> [B,Hp,Wp,C,P,P] -> [B, Hp*Wp, C*P*P]
+        Tensor folded = x.reshape({B, C, Hp, P, Wp, P});
+        Tensor perm = folded.permute({0, 2, 4, 1, 3, 5});
+        Tensor patches = perm.reshape({B, num_patches_, patch_dim_});
 
-        for (int64_t b = 0; b < B; ++b) {
-            int64_t patch_idx = 0;
-            for (int64_t ph = 0; ph < num_patches_h; ++ph) {
-                for (int64_t pw = 0; pw < num_patches_w; ++pw) {
-                    int64_t flat_idx = 0;
-                    for (int64_t c = 0; c < C; ++c) {
-                        for (int64_t py = 0; py < patch_size_; ++py) {
-                            for (int64_t px = 0; px < patch_size_; ++px) {
-                                int64_t y = ph * patch_size_ + py;
-                                int64_t x_coord = pw * patch_size_ + px;
-                                int64_t src_idx = b * C * H * W + c * H * W + y * W + x_coord;
-                                int64_t dst_idx = b * num_patches_ * patch_dim_ +
-                                                  patch_idx * patch_dim_ + flat_idx;
-                                p_ptr[dst_idx] = x_ptr[src_idx];
-                                flat_idx++;
-                            }
-                        }
-                    }
-                    patch_idx++;
-                }
-            }
-        }
-
-        patches = to_device(patches);
-
-        // Project patches
-        // Reshape: [B * num_patches, patch_dim]
+        // Project patches through Linear. Linear handles 3D via internal reshape.
         Tensor flat = patches.reshape({B * num_patches_, patch_dim_});
         Tensor embedded = proj->forward(flat);
         embedded = embedded.reshape({B, num_patches_, embed_dim_});
@@ -184,7 +170,7 @@ public:
     int64_t num_patches() const { return num_patches_; }
 
 private:
-    int64_t img_size_, patch_size_, embed_dim_;
+    int64_t img_size_, patch_size_, in_channels_, embed_dim_;
     int64_t num_patches_, patch_dim_;
     std::shared_ptr<Linear> proj;
 };
@@ -210,18 +196,32 @@ public:
         register_module("patch_embed", patch_embed);
 
         int64_t num_patches = patch_embed->num_patches();
+        int64_t seq_len = num_patches + 1;  // +1 for CLS
 
-        // CLS token (learnable)
-        cls_token = at::randn({1, 1, embed_dim}).mul(at::Scalar(0.02f));
+        // CLS token (learnable Parameter — must be registered for grad update)
+        Tensor cls_init = at::randn({1, 1, embed_dim}).mul(at::Scalar(0.02f));
+        register_parameter("cls_token", Parameter(cls_init));
 
-        // Position embedding (learnable, +1 for CLS)
-        pos_embed = std::make_shared<Embedding>(num_patches + 1, embed_dim);
-        register_module("pos_embed", pos_embed);
+        // Sinusoidal positional encoding (non-learnable buffer, broadcasts on add)
+        // Shape [1, seq_len, embed_dim]
+        Tensor pe = at::zeros({1, seq_len, embed_dim});
+        float* pe_data = pe.mutable_data_ptr<float>();
+        for (int64_t pos = 0; pos < seq_len; ++pos) {
+            for (int64_t i = 0; i < embed_dim; i += 2) {
+                double div_term = std::exp(-static_cast<double>(i) * std::log(10000.0) / embed_dim);
+                pe_data[pos * embed_dim + i] = static_cast<float>(std::sin(pos * div_term));
+                if (i + 1 < embed_dim) {
+                    pe_data[pos * embed_dim + i + 1] = static_cast<float>(std::cos(pos * div_term));
+                }
+            }
+        }
+        register_buffer("pos_embed", Buffer(pe));
 
-        // Transformer encoder layers
+        // Transformer encoder layers — batch_first=true since we feed [B, L, E]
         for (int64_t i = 0; i < n_layers; ++i) {
             auto layer = std::make_shared<TransformerEncoderLayer>(
-                embed_dim, n_heads, embed_dim * 4, 0.1f);
+                embed_dim, n_heads, embed_dim * 4, 0.1f,
+                "gelu", 1e-5, /*batch_first=*/true, /*norm_first=*/true);
             encoder_layers.push_back(layer);
             register_module("encoder_" + std::to_string(i), layer);
         }
@@ -245,31 +245,25 @@ public:
         Tensor patches = patch_embed->forward(x);  // [B, num_patches, embed_dim]
         LOG_TENSOR("patches", patches);
 
-        int64_t num_patches = patches.sizes()[1];
-
-        // Expand and prepend CLS token
-        Tensor cls = to_device(cls_token);
-        // Broadcast cls to batch: [1, 1, embed] -> [B, 1, embed]
-        std::vector<Tensor> cls_tokens;
+        // Prepend CLS token. Broadcast learnable [1,1,E] to [B,1,E] via repeat
+        // across batch dim using cat (autograd-aware so grad flows to cls_token).
+        Parameter* cls_param = get_parameter("cls_token");
+        Tensor cls = cls_param->data();  // [1, 1, E]
+        std::vector<Tensor> cls_copies;
+        cls_copies.reserve(B);
         for (int64_t b = 0; b < B; ++b) {
-            cls_tokens.push_back(cls);
+            cls_copies.push_back(cls);
         }
-        Tensor cls_batch = at::cat(cls_tokens, 0);  // [B, 1, embed]
+        Tensor cls_batch = torch::autograd::cat_autograd(cls_copies, 0);  // [B, 1, E]
 
         // Concatenate: [B, 1+num_patches, embed]
-        Tensor tokens = at::cat({cls_batch, patches}, 1);
+        Tensor tokens = torch::autograd::cat_autograd({cls_batch, patches}, 1);
         LOG_TENSOR("tokens_with_cls", tokens);
 
-        // Add positional embedding
-        Tensor positions = at::empty({1, num_patches + 1});
-        float* pos_ptr = positions.mutable_data_ptr<float>();
-        for (int64_t i = 0; i < num_patches + 1; ++i) {
-            pos_ptr[i] = static_cast<float>(i);
-        }
-        positions = to_device(positions);
-
-        Tensor pos_emb = pos_embed->forward(positions);  // [1, seq_len, embed]
-        tokens = tokens.add(pos_emb);
+        // Add sinusoidal positional encoding (broadcasts [1, L, E] + [B, L, E])
+        Buffer* pe_buf = get_buffer("pos_embed");
+        Tensor pe = pe_buf->data();
+        tokens = tokens.add(pe);
 
         // Transformer encoder
         Tensor h = tokens;
@@ -294,8 +288,6 @@ public:
 private:
     int64_t embed_dim_;
     std::shared_ptr<PatchEmbedding> patch_embed;
-    Tensor cls_token;
-    std::shared_ptr<Embedding> pos_embed;
     std::vector<std::shared_ptr<TransformerEncoderLayer>> encoder_layers;
     std::shared_ptr<LayerNorm> norm;
     std::shared_ptr<Linear> head;
@@ -370,6 +362,7 @@ int main(int argc, char* argv[]) {
     auto model = std::make_shared<ViT>(
         28, patch_size, 1, embed_dim, n_heads, n_layers, 10);
     LOG_MEMORY("After model creation");
+    LOG_INFO("Num parameters: " + std::to_string(model->num_parameters()));
 
 #ifdef PT_USE_CUDA
     if (g_device.is_cuda()) {
@@ -422,7 +415,8 @@ int main(int argc, char* argv[]) {
                 int64_t idx = indices[batch_start + i];
                 tgt_ptr[i] = static_cast<float>(train_labels[idx]);
                 for (int j = 0; j < 784; ++j) {
-                    in_ptr[i * 784 + j] = train_images[idx][j] / 255.0f;
+                    // Standard MNIST normalization
+                    in_ptr[i * 784 + j] = (train_images[idx][j] / 255.0f - 0.1307f) / 0.3081f;
                 }
             }
 
@@ -483,35 +477,38 @@ int main(int argc, char* argv[]) {
         model->eval();
         int64_t test_correct = 0;
 
-        for (int64_t batch_start = 0; batch_start < n_test; batch_start += batch_size) {
-            int64_t batch_end = std::min(batch_start + batch_size, n_test);
-            int64_t B = batch_end - batch_start;
+        {
+            torch::autograd::NoGradGuard no_grad;
+            for (int64_t batch_start = 0; batch_start < n_test; batch_start += batch_size) {
+                int64_t batch_end = std::min(batch_start + batch_size, n_test);
+                int64_t B = batch_end - batch_start;
 
-            Tensor inputs = at::empty({B, 1, 28, 28});
-            float* in_ptr = inputs.mutable_data_ptr<float>();
+                Tensor inputs = at::empty({B, 1, 28, 28});
+                float* in_ptr = inputs.mutable_data_ptr<float>();
 
-            for (int64_t i = 0; i < B; ++i) {
-                int64_t idx = batch_start + i;
-                for (int j = 0; j < 784; ++j) {
-                    in_ptr[i * 784 + j] = test_images[idx][j] / 255.0f;
-                }
-            }
-
-            inputs = to_device(inputs);
-            Tensor logits = model->forward(inputs);
-            Tensor logits_cpu = move_to_cpu(logits);
-            const float* log_ptr = logits_cpu.data_ptr<float>();
-
-            for (int64_t i = 0; i < B; ++i) {
-                int pred = 0;
-                float max_val = log_ptr[i * 10];
-                for (int c = 1; c < 10; ++c) {
-                    if (log_ptr[i * 10 + c] > max_val) {
-                        max_val = log_ptr[i * 10 + c];
-                        pred = c;
+                for (int64_t i = 0; i < B; ++i) {
+                    int64_t idx = batch_start + i;
+                    for (int j = 0; j < 784; ++j) {
+                        in_ptr[i * 784 + j] = (test_images[idx][j] / 255.0f - 0.1307f) / 0.3081f;
                     }
                 }
-                if (pred == test_labels[batch_start + i]) test_correct++;
+
+                inputs = to_device(inputs);
+                Tensor logits = model->forward(inputs);
+                Tensor logits_cpu = move_to_cpu(logits);
+                const float* log_ptr = logits_cpu.data_ptr<float>();
+
+                for (int64_t i = 0; i < B; ++i) {
+                    int pred = 0;
+                    float max_val = log_ptr[i * 10];
+                    for (int c = 1; c < 10; ++c) {
+                        if (log_ptr[i * 10 + c] > max_val) {
+                            max_val = log_ptr[i * 10 + c];
+                            pred = c;
+                        }
+                    }
+                    if (pred == test_labels[batch_start + i]) test_correct++;
+                }
             }
         }
 
