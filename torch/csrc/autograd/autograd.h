@@ -36,6 +36,8 @@
 #include "torch/csrc/autograd/functions/IndexBackward.h"
 #include "torch/csrc/autograd/functions/FusedBackward.h"
 #include "torch/csrc/autograd/functions/ConvBackward.h"
+#include "torch/csrc/autograd/functions/AttentionBackward.h"
+#include "aten/src/ATen/native/Attention.h"
 
 namespace torch {
 namespace autograd {
@@ -1027,6 +1029,91 @@ inline Tensor boolean_index_autograd(const Tensor& self, const Tensor& mask) {
     return result;
 }
 
+// ----------------------------------------------------------------------------
+// where(condition, x, y) — gradients flow to x and y only (cond is bool).
+// ----------------------------------------------------------------------------
+inline Tensor where_autograd(const Tensor& condition,
+                             const Tensor& x, const Tensor& y) {
+    Tensor result = at::native::where(condition, x, y);
+    if (compute_requires_grad(x, y)) {
+        auto grad_fn = NodePool<WhereBackward>::make_shared(
+            condition, x.sizes().vec(), y.sizes().vec(), result.dtype());
+        grad_fn->add_input_metadata(x);
+        grad_fn->add_input_metadata(y);
+        set_grad_fn(result, grad_fn);
+        result.set_requires_grad(true);
+    }
+    return result;
+}
+
+// ----------------------------------------------------------------------------
+// masked_fill(input, mask, scalar_value) — out-of-place variant with grad.
+// ----------------------------------------------------------------------------
+inline Tensor masked_fill_autograd(const Tensor& self,
+                                   const Tensor& mask, Scalar value) {
+    Tensor result = at::native::masked_fill(self, mask, value);
+    if (compute_requires_grad(self)) {
+        auto grad_fn = NodePool<MaskedFillBackward>::make_shared(mask);
+        grad_fn->add_input_metadata(self);
+        set_grad_fn(result, grad_fn);
+        result.set_requires_grad(true);
+    }
+    return result;
+}
+
+// ----------------------------------------------------------------------------
+// gather(self, dim, index) — grad_input = zeros.scatter_add_(dim, idx, grad).
+// ----------------------------------------------------------------------------
+inline Tensor gather_autograd(const Tensor& self, int64_t dim,
+                              const Tensor& index) {
+    Tensor result = at::native::gather(self, dim, index);
+    if (compute_requires_grad(self)) {
+        auto grad_fn = NodePool<GatherBackward>::make_shared(
+            self.sizes().vec(), index, dim, self.dtype());
+        grad_fn->add_input_metadata(self);
+        set_grad_fn(result, grad_fn);
+        result.set_requires_grad(true);
+    }
+    return result;
+}
+
+// ----------------------------------------------------------------------------
+// scatter_add(self, dim, index, src) — out-of-place variant with grad.
+// Grad flows to self (identity) and src (gather of grad_out at idx).
+// ----------------------------------------------------------------------------
+inline Tensor scatter_add_autograd(const Tensor& self, int64_t dim,
+                                   const Tensor& index, const Tensor& src) {
+    Tensor result = self.clone();
+    at::native::scatter_add_(result, dim, index, src);
+    bool self_grad = compute_requires_grad(self);
+    bool src_grad = compute_requires_grad(src);
+    if (self_grad || src_grad) {
+        auto grad_fn = NodePool<ScatterAddBackward>::make_shared(
+            index, dim, self_grad, src_grad);
+        grad_fn->add_input_metadata(self);
+        grad_fn->add_input_metadata(src);
+        set_grad_fn(result, grad_fn);
+        result.set_requires_grad(true);
+    }
+    return result;
+}
+
+// ----------------------------------------------------------------------------
+// norm(input, p, dim, keepdim) — per-dim p-norm with grad.
+// ----------------------------------------------------------------------------
+inline Tensor norm_autograd(const Tensor& self, Scalar p,
+                            int64_t dim, bool keepdim = false) {
+    Tensor result = at::native::norm(self, p, dim, keepdim);
+    if (compute_requires_grad(self)) {
+        auto grad_fn = NodePool<NormDimBackward>::make_shared(
+            self, result, p.toDouble(), dim, keepdim);
+        grad_fn->add_input_metadata(self);
+        set_grad_fn(result, grad_fn);
+        result.set_requires_grad(true);
+    }
+    return result;
+}
+
 // ============================================================================
 // Fused Linear Operations with Autograd
 // ============================================================================
@@ -1393,6 +1480,116 @@ inline Tensor cat_autograd(const std::vector<Tensor>& tensors, int64_t dim) {
         set_grad_fn(result, grad_fn);
         result.set_requires_grad(true);
     }
+    return result;
+}
+
+// ============================================================================
+// scaled_dot_product_attention (autograd wrapper)
+// ----------------------------------------------------------------------------
+// Mirrors the shape rules of at::native::scaled_dot_product_attention and
+// attaches SdpaBackward so grad flows to Q, K, V. attn_mask does NOT receive
+// gradient (matches PyTorch: mask is treated as non-differentiable).
+// ============================================================================
+inline Tensor scaled_dot_product_attention_autograd(
+    const Tensor& query,
+    const Tensor& key,
+    const Tensor& value,
+    const Tensor& attn_mask = Tensor(),
+    float dropout_p = 0.0f,
+    bool is_causal = false,
+    float scale = -1.0f)
+{
+    // Fast path: no grad tracking → call native directly.
+    const bool needs_grad = compute_requires_grad(query) ||
+                            compute_requires_grad(key)   ||
+                            compute_requires_grad(value);
+
+    if (!needs_grad) {
+        return at::native::scaled_dot_product_attention(
+            query, key, value, attn_mask, dropout_p, is_causal, scale);
+    }
+
+    PT_CHECK_MSG(query.dim() >= 2 && key.dim() == query.dim() && value.dim() == query.dim(),
+                 "scaled_dot_product_attention: Q/K/V must share rank and be >= 2D");
+    PT_CHECK_MSG(!(is_causal && attn_mask.defined()),
+                 "scaled_dot_product_attention: is_causal and attn_mask are mutually exclusive");
+    PT_CHECK_MSG(query.dtype() == c10::ScalarType::Float,
+                 "scaled_dot_product_attention autograd path requires float32 on CPU");
+
+    const int64_t nd = query.dim();
+    const int64_t D = query.size(nd - 1);
+    const float softmax_scale = (scale < 0.0f) ? (1.0f / std::sqrt((float)D)) : scale;
+
+    // Canonicalize to [B, N, H, D] (detached copies — the grad-tracked inputs are the
+    // caller's tensors; SdpaBackward holds pure-data snapshots for recomputation).
+    // Canonical layout: [B, N, H, D]. 4D input is assumed to be [B, N, H, D]
+    // (matching the FlashAttention CUDA kernel). For >=5D we flatten leading
+    // batch dims, assuming shape [..., N, H, D].
+    auto to_canonical = [](const Tensor& t) -> Tensor {
+        const int64_t nd = t.dim();
+        if (nd == 2)       return t.unsqueeze(0).unsqueeze(2);  // [N, D] → [1, N, 1, D]
+        else if (nd == 3)  return t.unsqueeze(2);               // [B, N, D] → [B, N, 1, D]
+        else if (nd == 4)  return t;                            // [B, N, H, D]
+        else {
+            int64_t D_loc = t.size(nd - 1);
+            int64_t H_loc = t.size(nd - 2);
+            int64_t N_loc = t.size(nd - 3);
+            int64_t Bp = 1;
+            for (int64_t i = 0; i < nd - 3; ++i) Bp *= t.size(i);
+            return t.reshape({Bp, N_loc, H_loc, D_loc});
+        }
+    };
+
+    Tensor qc = to_canonical(query).contiguous();
+    Tensor kc = to_canonical(key).contiguous();
+    Tensor vc = to_canonical(value).contiguous();
+
+    const int64_t B   = qc.size(0);
+    const int64_t N_q = qc.size(1);
+    const int64_t H   = qc.size(2);
+    const int64_t N_k = kc.size(1);
+
+    // Allocate buffers for backward: probs and (optional) dropout mask.
+    Tensor probs = at::empty({B, H, N_q, N_k},
+                             at::TensorOptions().dtype(c10::ScalarType::Float));
+    Tensor drop_mask;
+    // Always allocate dropout_mask for simplicity — we fill with 1.0 when p=0.
+    drop_mask = at::empty({B, H, N_q, N_k},
+                          at::TensorOptions().dtype(c10::ScalarType::Float));
+
+    // Seed the dropout RNG deterministically per-call (OK for backward since we
+    // save the mask; seed value itself does not need to be persisted).
+    static std::random_device s_rd;
+    uint64_t seed = (uint64_t)s_rd() | ((uint64_t)s_rd() << 32);
+
+    Tensor out_canonical = at::native::sdpa_forward_cpu_impl(
+        qc, kc, vc, attn_mask, dropout_p, is_causal, softmax_scale,
+        /*training=*/(dropout_p > 0.0f), seed, &probs, &drop_mask);
+
+    // Un-canonicalize output to caller's layout.
+    Tensor result;
+    if (nd == 2) {
+        result = out_canonical.squeeze(2).squeeze(0);
+    } else if (nd == 3) {
+        result = out_canonical.squeeze(2);
+    } else if (nd == 4) {
+        result = out_canonical;              // already [B, N, H, D]
+    } else {
+        std::vector<int64_t> final_shape = query.sizes().vec();
+        final_shape[nd - 3] = out_canonical.size(1);  // N
+        final_shape[nd - 2] = out_canonical.size(2);  // H
+        final_shape[nd - 1] = out_canonical.size(3);  // D
+        result = out_canonical.reshape(final_shape);
+    }
+
+    // Attach SdpaBackward — keeps canonical Q/K/V/probs/drop_mask alive.
+    auto grad_fn = std::make_shared<SdpaBackward>(
+        qc, kc, vc, probs, drop_mask, softmax_scale, (int)nd);
+    grad_fn->add_input_metadata(query);
+    grad_fn->add_input_metadata(key);
+    grad_fn->add_input_metadata(value);
+    set_grad_fn(result, grad_fn);
+    result.set_requires_grad(true);
     return result;
 }
 

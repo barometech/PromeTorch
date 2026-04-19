@@ -267,6 +267,199 @@ struct Conv2dBackward : public Node {
 };
 
 // ============================================================================
+// ConvTranspose2d Backward
+// ============================================================================
+// Forward (equivalent formulation):
+//   col = W_flat^T @ input_flat         where W_flat: [Cin, Cout/g * kH * kW]
+//                                             input_flat: [Cin, N*OH*OW]? no —
+//   For each batch sample n and group g, we treat input as [Cin_g, IH*IW]
+//   and compute col_buf[Cout_g * kH * kW, IH * IW] = W_t[Cout_g*kH*kW, Cin_g] @ input[Cin_g, IH*IW]
+//   then col2im(col_buf) → output[Cout_g, OH, OW].
+//
+// Backward:
+//   grad_input  = W_flat @ im2col(grad_output)   (regular conv2d-forward of grad_output with W)
+//   grad_weight = input_flat @ im2col(grad_output)^T   (roles swapped)
+//   grad_bias   = grad_output.sum({0,2,3})
+//
+// Weight layout: [Cin, Cout/groups, kH, kW]  (PyTorch convention, matches fwd here).
+// ============================================================================
+
+struct ConvTranspose2dBackward : public Node {
+    Tensor saved_input_;
+    Tensor saved_weight_;
+    bool has_bias_;
+    int64_t in_channels_, out_channels_, groups_;
+    std::array<int64_t, 2> kernel_size_, stride_, padding_, dilation_;
+    std::array<int64_t, 4> input_shape_;  // [N, Cin, IH, IW]
+    std::array<int64_t, 2> output_hw_;    // [OH, OW]
+
+    ConvTranspose2dBackward(const Tensor& input, const Tensor& weight, bool has_bias,
+                            int64_t in_channels, int64_t out_channels, int64_t groups,
+                            std::array<int64_t, 2> kernel_size,
+                            std::array<int64_t, 2> stride,
+                            std::array<int64_t, 2> padding,
+                            std::array<int64_t, 2> dilation,
+                            int64_t out_H, int64_t out_W)
+        : saved_input_(input), saved_weight_(weight), has_bias_(has_bias)
+        , in_channels_(in_channels), out_channels_(out_channels), groups_(groups)
+        , kernel_size_(kernel_size), stride_(stride), padding_(padding), dilation_(dilation)
+        , input_shape_({input.size(0), input.size(1), input.size(2), input.size(3)})
+        , output_hw_({out_H, out_W})
+    {}
+
+    void release_saved_tensors() override {
+        saved_input_ = Tensor();
+        saved_weight_ = Tensor();
+    }
+
+    variable_list apply(variable_list&& grads) override {
+        auto& grad_output = grads[0];
+        if (!grad_output.defined()) {
+            return {Tensor(), Tensor(), Tensor()};
+        }
+
+        // CPU-only compute path: bounce CUDA grads through host.
+        Tensor grad_out = grad_output;
+#ifdef PT_USE_CUDA
+        const bool grad_on_cuda = grad_output.is_cuda();
+        if (grad_on_cuda) grad_out = at::to_cpu(grad_output);
+#endif
+        grad_out = grad_out.is_contiguous() ? grad_out : grad_out.contiguous();
+        Tensor weight = saved_weight_.is_contiguous() ? saved_weight_ : saved_weight_.contiguous();
+        Tensor input = saved_input_.is_contiguous() ? saved_input_ : saved_input_.contiguous();
+
+        int64_t N  = input_shape_[0];
+        int64_t IH = input_shape_[2], IW = input_shape_[3];
+        int64_t OH = output_hw_[0],   OW = output_hw_[1];
+        int64_t kH = kernel_size_[0], kW = kernel_size_[1];
+
+        int64_t group_in_ch  = in_channels_  / groups_;
+        int64_t group_out_ch = out_channels_ / groups_;
+
+        // im2col over grad_output, using the SAME stride/padding/dilation as fwd:
+        // this gives grad_col[Cout_g * kH * kW, IH * IW]
+        int64_t col_height = group_out_ch * kH * kW;  // K
+        int64_t col_width  = IH * IW;                  // N (input spatial)
+
+        const float* grad_out_data = grad_out.data_ptr<float>();
+        const float* weight_data   = weight.data_ptr<float>();
+        const float* input_data    = input.data_ptr<float>();
+
+        std::vector<float> grad_col(col_height * col_width);
+
+        Tensor grad_input;
+        bool need_input_grad  = should_compute_output(0);
+        bool need_weight_grad = should_compute_output(1);
+
+        if (need_input_grad) {
+            grad_input = at::zeros({N, in_channels_, IH, IW});
+        }
+        Tensor grad_weight;
+        if (need_weight_grad) {
+            grad_weight = at::zeros({in_channels_, group_out_ch, kH, kW});
+        }
+        float* gi_data = need_input_grad  ? grad_input.mutable_data_ptr<float>()  : nullptr;
+        float* gw_data = need_weight_grad ? grad_weight.mutable_data_ptr<float>() : nullptr;
+
+        for (int64_t n = 0; n < N; ++n) {
+            for (int64_t g = 0; g < groups_; ++g) {
+                // grad_output slice for this sample/group: [group_out_ch, OH, OW]
+                const float* go_ptr = grad_out_data +
+                    n * out_channels_ * OH * OW +
+                    g * group_out_ch * OH * OW;
+
+                // Skip the costly im2col when neither input nor weight grads are needed.
+                if (!need_input_grad && !need_weight_grad) continue;
+
+                // im2col on grad_output to produce grad_col[col_height, col_width].
+                // This is exactly Conv2d::im2col over a [group_out_ch, OH, OW] tensor
+                // with the fwd's stride/padding/dilation, producing spatial dim IH*IW.
+                Conv2dBackward::im2col(
+                    go_ptr, grad_col.data(),
+                    group_out_ch, OH, OW,
+                    kH, kW,
+                    padding_[0], padding_[1],
+                    stride_[0],  stride_[1],
+                    dilation_[0], dilation_[1],
+                    IH, IW
+                );
+
+                // Weight slice: [group_in_ch, group_out_ch, kH, kW], row-major.
+                // Reshape logically as W_flat[group_in_ch, col_height].
+                const float* w_ptr = weight_data +
+                    g * group_in_ch * col_height;
+
+                // grad_input[group_in_ch, col_width] = W_flat @ grad_col
+                if (need_input_grad) {
+                    float* gi_ptr = gi_data +
+                        n * in_channels_ * IH * IW +
+                        g * group_in_ch * IH * IW;
+
+                    // gi[ic, j] = sum_k W[ic, k] * gc[k, j]
+                    for (int64_t ic = 0; ic < group_in_ch; ++ic) {
+                        const float* w_row = w_ptr + ic * col_height;
+                        float* gi_row = gi_ptr + ic * col_width;
+                        for (int64_t k = 0; k < col_height; ++k) {
+                            float wv = w_row[k];
+                            const float* gc_row = grad_col.data() + k * col_width;
+                            for (int64_t j = 0; j < col_width; ++j) {
+                                gi_row[j] += wv * gc_row[j];
+                            }
+                        }
+                    }
+                }
+
+                // grad_weight[group_in_ch, col_height] += input_flat @ grad_col^T
+                //   input_flat[ic, j] = input[ic, j]  (treating IH*IW as j)
+                //   gw[ic, k] += sum_j input[ic, j] * gc[k, j]
+                if (need_weight_grad) {
+                    const float* in_ptr = input_data +
+                        n * in_channels_ * IH * IW +
+                        g * group_in_ch * IH * IW;
+
+                    float* gw_ptr = gw_data + g * group_in_ch * col_height;
+
+                    for (int64_t ic = 0; ic < group_in_ch; ++ic) {
+                        const float* in_row = in_ptr + ic * col_width;
+                        float* gw_row = gw_ptr + ic * col_height;
+                        for (int64_t k = 0; k < col_height; ++k) {
+                            const float* gc_row = grad_col.data() + k * col_width;
+                            float sum = 0.0f;
+                            for (int64_t j = 0; j < col_width; ++j) {
+                                sum += in_row[j] * gc_row[j];
+                            }
+                            gw_row[k] += sum;
+                        }
+                    }
+                }
+            }
+        }
+
+        // grad_bias = grad_output.sum({0, 2, 3})  → [C_out]
+        Tensor grad_bias;
+        if (has_bias_ && should_compute_output(2)) {
+            grad_bias = at::zeros({out_channels_});
+            float* gb_data = grad_bias.mutable_data_ptr<float>();
+            for (int64_t n = 0; n < N; ++n) {
+                for (int64_t c = 0; c < out_channels_; ++c) {
+                    const float* go_c = grad_out_data +
+                        n * out_channels_ * OH * OW + c * OH * OW;
+                    float sum = 0.0f;
+                    for (int64_t j = 0; j < OH * OW; ++j) sum += go_c[j];
+                    gb_data[c] += sum;
+                }
+            }
+        }
+
+        saved_input_ = Tensor();
+        saved_weight_ = Tensor();
+        return {grad_input, grad_weight, grad_bias};
+    }
+
+    std::string name() const override { return "ConvTranspose2dBackward"; }
+};
+
+// ============================================================================
 // BatchNorm2d Backward
 // ============================================================================
 // Forward: y = gamma * (x - mean) / sqrt(var + eps) + beta

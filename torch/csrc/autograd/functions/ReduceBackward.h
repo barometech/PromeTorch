@@ -478,6 +478,140 @@ struct NormBackward : public Node {
 };
 
 // ============================================================================
+// NormDimBackward - Norm along a single dimension
+// Forward:
+//   out = norm(input, p, dim, keepdim)
+// Backward (per outer/inner slice, along the reduced dim):
+//   p == 2:  grad_in = grad_out * input / out               (broadcast over dim)
+//   p == 1:  grad_in = grad_out * sign(input)
+//   p == inf: grad_in only at argmax |input|
+//   general: grad_in = grad_out * sign(input) * |input|^(p-1) / out^(p-1)
+// Shapes handled in raw pointer domain to match ReduceOps norm(p, dim).
+// ============================================================================
+struct NormDimBackward : public Node {
+    Tensor self_;      // saved input
+    Tensor result_;    // saved norm output
+    double p_;
+    int64_t dim_;
+    bool keepdim_;
+    std::vector<int64_t> input_sizes_;
+
+    NormDimBackward(const Tensor& self, const Tensor& result,
+                    double p, int64_t dim, bool keepdim)
+        : self_(self), result_(result), p_(p), dim_(dim), keepdim_(keepdim),
+          input_sizes_(self.sizes().vec()) {}
+
+    void release_saved_tensors() override {
+        self_ = Tensor();
+        result_ = Tensor();
+    }
+
+    variable_list apply(variable_list&& grads) override {
+        auto& grad = grads[0];
+        if (!grad.defined()) {
+            self_ = Tensor(); result_ = Tensor();
+            return {Tensor()};
+        }
+
+        int64_t ndim = static_cast<int64_t>(input_sizes_.size());
+        int64_t actual_dim = dim_ < 0 ? dim_ + ndim : dim_;
+
+        Tensor self_c = self_.contiguous();
+        Tensor grad_c = grad.contiguous();
+        Tensor result_c = result_.contiguous();
+        Tensor grad_in = at::empty(input_sizes_,
+            at::TensorOptions().dtype(self_.dtype()).device(self_.device()));
+
+        PT_DISPATCH_FLOATING_TYPES(self_.dtype(), "norm_dim_backward", [&] {
+            const scalar_t* in = self_c.data_ptr<scalar_t>();
+            const scalar_t* g  = grad_c.data_ptr<scalar_t>();
+            const scalar_t* r  = result_c.data_ptr<scalar_t>();
+            scalar_t* out = grad_in.mutable_data_ptr<scalar_t>();
+
+            int64_t dim_size = input_sizes_[actual_dim];
+            int64_t outer = 1, inner = 1;
+            for (int64_t i = 0; i < actual_dim; ++i) outer *= input_sizes_[i];
+            for (int64_t i = actual_dim + 1; i < ndim; ++i) inner *= input_sizes_[i];
+
+            // grad/result share "reduced" layout: outer * inner elements
+            // regardless of keepdim (keepdim only affects shape metadata).
+
+            if (p_ == 2.0) {
+                for (int64_t o = 0; o < outer; ++o) {
+                    for (int64_t in_i = 0; in_i < inner; ++in_i) {
+                        double rv = static_cast<double>(r[o * inner + in_i]);
+                        double gv = static_cast<double>(g[o * inner + in_i]);
+                        double inv = rv == 0 ? 0.0 : 1.0 / rv;
+                        for (int64_t d = 0; d < dim_size; ++d) {
+                            int64_t idx = (o * dim_size + d) * inner + in_i;
+                            out[idx] = static_cast<scalar_t>(gv * static_cast<double>(in[idx]) * inv);
+                        }
+                    }
+                }
+            } else if (p_ == 1.0) {
+                for (int64_t o = 0; o < outer; ++o) {
+                    for (int64_t in_i = 0; in_i < inner; ++in_i) {
+                        double gv = static_cast<double>(g[o * inner + in_i]);
+                        for (int64_t d = 0; d < dim_size; ++d) {
+                            int64_t idx = (o * dim_size + d) * inner + in_i;
+                            double v = static_cast<double>(in[idx]);
+                            double s = (v > 0) - (v < 0);
+                            out[idx] = static_cast<scalar_t>(gv * s);
+                        }
+                    }
+                }
+            } else if (std::isinf(p_)) {
+                // grad only flows to argmax |x| along the reduced dim
+                for (int64_t o = 0; o < outer; ++o) {
+                    for (int64_t in_i = 0; in_i < inner; ++in_i) {
+                        double max_abs = -1.0;
+                        int64_t max_d = 0;
+                        for (int64_t d = 0; d < dim_size; ++d) {
+                            int64_t idx = (o * dim_size + d) * inner + in_i;
+                            double v = std::abs(static_cast<double>(in[idx]));
+                            if (v > max_abs) { max_abs = v; max_d = d; }
+                        }
+                        double gv = static_cast<double>(g[o * inner + in_i]);
+                        for (int64_t d = 0; d < dim_size; ++d) {
+                            int64_t idx = (o * dim_size + d) * inner + in_i;
+                            if (d == max_d) {
+                                double v = static_cast<double>(in[idx]);
+                                double s = (v > 0) - (v < 0);
+                                out[idx] = static_cast<scalar_t>(gv * s);
+                            } else {
+                                out[idx] = 0;
+                            }
+                        }
+                    }
+                }
+            } else {
+                // grad = g * sign(x) * |x|^(p-1) / out^(p-1)
+                for (int64_t o = 0; o < outer; ++o) {
+                    for (int64_t in_i = 0; in_i < inner; ++in_i) {
+                        double rv = static_cast<double>(r[o * inner + in_i]);
+                        double gv = static_cast<double>(g[o * inner + in_i]);
+                        double denom = std::pow(rv, p_ - 1.0);
+                        double inv = denom == 0 ? 0.0 : 1.0 / denom;
+                        for (int64_t d = 0; d < dim_size; ++d) {
+                            int64_t idx = (o * dim_size + d) * inner + in_i;
+                            double v = static_cast<double>(in[idx]);
+                            double s = (v > 0) - (v < 0);
+                            out[idx] = static_cast<scalar_t>(
+                                gv * s * std::pow(std::abs(v), p_ - 1.0) * inv);
+                        }
+                    }
+                }
+            }
+        });
+
+        self_ = Tensor(); result_ = Tensor();
+        return {grad_in};
+    }
+
+    std::string name() const override { return "NormDimBackward"; }
+};
+
+// ============================================================================
 // Cumsum Backward: reverse cumsum
 // backward of cumsum(x, dim) = flip(cumsum(flip(grad, dim), dim), dim)
 // ============================================================================
@@ -723,6 +857,52 @@ struct TopkBackward : public Node {
         return {result};
     }
     std::string name() const override { return "TopkBackward"; }
+};
+
+// ============================================================================
+// LogSumExp Backward: d lse(x)/dx = softmax(x) along reduced dim.
+// grad_input = exp(x - lse_result) * grad_output, broadcast along reduced dim.
+// ============================================================================
+
+struct LogSumExpBackward : public Node {
+    Tensor self_;
+    Tensor result_;
+    int64_t dim_;
+    bool keepdim_;
+
+    LogSumExpBackward(const Tensor& self, const Tensor& result,
+                       int64_t dim, bool keepdim)
+        : self_(self), result_(result), dim_(dim), keepdim_(keepdim) {
+        if (dim_ < 0) dim_ += self_.dim();
+    }
+
+    void release_saved_tensors() override {
+        self_ = Tensor();
+        result_ = Tensor();
+    }
+
+    variable_list apply(variable_list&& grads) override {
+        auto& grad = grads[0];
+        if (!grad.defined()) return {Tensor()};
+
+        // Make the reduced dim available for broadcasting.
+        Tensor lse = result_;
+        Tensor g = grad;
+        if (!keepdim_) {
+            lse = lse.unsqueeze(dim_);
+            g = g.unsqueeze(dim_);
+        }
+
+        // softmax(x) = exp(x - lse).
+        Tensor expanded_lse = lse.expand(self_.sizes());
+        Tensor sm = at::native::exp(at::native::sub(self_, expanded_lse));
+        Tensor gi = at::native::mul(sm, g.expand(self_.sizes()));
+        self_ = Tensor();
+        result_ = Tensor();
+        return {gi};
+    }
+
+    std::string name() const override { return "LogSumExpBackward"; }
 };
 
 } // namespace autograd
