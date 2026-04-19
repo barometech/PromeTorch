@@ -16,6 +16,7 @@
 //   - RAdam: Rectified Adam
 //   - NAdam: Nesterov-accelerated Adam
 //   - Adamax: Adam with infinity norm
+//   - ASGD: Averaged SGD (Polyak averaging)
 //   - LBFGS: Limited-memory BFGS with Strong Wolfe line search
 //
 // Learning Rate Schedulers:
@@ -64,7 +65,12 @@
 #include "torch/optim/radam.h"
 #include "torch/optim/nadam.h"
 #include "torch/optim/adamax.h"
+#include "torch/optim/asgd.h"
 #include "torch/optim/lbfgs.h"
+#include "torch/optim/lion.h"
+#include "torch/optim/sophia.h"
+#include "torch/optim/lamb.h"
+#include "torch/optim/adafactor.h"
 #include "torch/optim/lr_scheduler.h"
 
 namespace torch {
@@ -140,6 +146,15 @@ inline Adamax make_adamax(std::vector<Parameter*> params, double lr = 0.002,
     AdamaxOptions opts(lr);
     opts.betas(beta1, beta2);
     return Adamax(std::move(params), opts);
+}
+
+// Create ASGD optimizer with common options
+inline ASGD make_asgd(std::vector<Parameter*> params, double lr = 0.01,
+                       double lambd = 1e-4, double alpha = 0.75) {
+    ASGDOptions opts(lr);
+    opts.lambd_(lambd);
+    opts.alpha_(alpha);
+    return ASGD(std::move(params), opts);
 }
 
 // Create LBFGS optimizer with common options
