@@ -503,6 +503,7 @@ public:
     bool use_cuda_ = false;
     bool use_quant_gemv_ = false;  // Q4_K_M decode acceleration
     bool use_fp16_weights_ = false;  // Dequant-at-load FP16 weights + cuBLAS HGEMV decode path
+    bool use_llama_gemv_ = false;  // Route Q4_K GEMV through launch_q4km_persistent_gemv_v2 (llama.cpp-style)
     size_t fp16_weights_bytes_ = 0;  // Total FP16 weight VRAM (for reporting)
     bool output_weight_needs_float32_ = false;  // true if output.weight has no Q4_K_M
 
@@ -1928,7 +1929,9 @@ public:
         if (use_quant_gemv_ && qw.valid) {
             int K = static_cast<int>(qw.cols);
             int Nr = static_cast<int>(qw.rows);
-            if (qw.is_q4k() && qw.gpu_data) {
+            if (use_llama_gemv_ && qw.is_q4k() && qw.gpu_data) {
+                at::cuda::launch_q4km_persistent_gemv_v2(qw.gpu_data, x, y, K, Nr, qw.row_stride_bytes, stream);
+            } else if (qw.is_q4k() && qw.gpu_data) {
                 at::cuda::launch_q4km_persistent_gemv(qw.gpu_data, x, y, K, Nr, qw.row_stride_bytes, stream);
             } else if (qw.is_q6k() && qw.gpu_data) {
                 at::cuda::launch_q6k_gemv(qw.gpu_data, x, y, K, Nr, qw.row_stride_bytes, stream);
