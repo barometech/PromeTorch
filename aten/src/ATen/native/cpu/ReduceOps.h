@@ -905,6 +905,93 @@ inline Tensor cumsum(const Tensor& self, int64_t dim) {
     return result;
 }
 
+// ============================================================================
+// LogSumExp — numerically stable log(sum(exp(x))) along a dim.
+// Trick: lse(x) = max(x) + log(sum(exp(x - max(x)))).
+// ============================================================================
+
+inline Tensor logsumexp(const Tensor& self, int64_t dim, bool keepdim = false) {
+    int64_t ndim = self.dim();
+    if (dim < 0) dim += ndim;
+    PT_CHECK(dim >= 0 && dim < ndim);
+
+    Tensor input = self.is_contiguous() ? self : self.contiguous();
+
+    std::vector<int64_t> out_shape;
+    for (int64_t i = 0; i < ndim; ++i) {
+        if (i == dim) { if (keepdim) out_shape.push_back(1); }
+        else out_shape.push_back(input.size(i));
+    }
+    if (out_shape.empty()) out_shape.push_back(1);
+
+    Tensor result = empty(out_shape, TensorOptions().dtype(self.dtype()).device(self.device()));
+
+    int64_t outer_size = 1;
+    for (int64_t i = 0; i < dim; ++i) outer_size *= input.size(i);
+    int64_t reduce_size = input.size(dim);
+    int64_t inner_size = 1;
+    for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= input.size(i);
+
+    PT_DISPATCH_FLOATING_TYPES(self.dtype(), "logsumexp", [&] {
+        const scalar_t* in = input.data_ptr<scalar_t>();
+        scalar_t* out = result.mutable_data_ptr<scalar_t>();
+        int64_t total_work = outer_size * inner_size;
+
+        for (int64_t idx = 0; idx < total_work; ++idx) {
+            int64_t outer = idx / inner_size;
+            int64_t inner = idx % inner_size;
+
+            // max(x) for stability
+            scalar_t max_val = in[(outer * reduce_size + 0) * inner_size + inner];
+            for (int64_t r = 1; r < reduce_size; ++r) {
+                scalar_t v = in[(outer * reduce_size + r) * inner_size + inner];
+                if (v > max_val) max_val = v;
+            }
+
+            // Handle -inf (all elements -inf) → result is -inf.
+            if (!std::isfinite(max_val)) {
+                out[outer * inner_size + inner] = max_val;
+                continue;
+            }
+
+            // sum(exp(x - max))
+            double sum_exp = 0.0;
+            for (int64_t r = 0; r < reduce_size; ++r) {
+                double v = static_cast<double>(in[(outer * reduce_size + r) * inner_size + inner]);
+                sum_exp += std::exp(v - static_cast<double>(max_val));
+            }
+            out[outer * inner_size + inner] =
+                static_cast<scalar_t>(std::log(sum_exp)) + max_val;
+        }
+    });
+
+    return result;
+}
+
+// logsumexp over the entire tensor — convenience wrapper.
+inline Tensor logsumexp(const Tensor& self) {
+    Tensor flat = self.contiguous();
+    // Fold to 1D via direct computation (avoid creating a temp via .view).
+    Tensor result = empty({}, TensorOptions().dtype(self.dtype()).device(self.device()));
+    PT_DISPATCH_FLOATING_TYPES(self.dtype(), "logsumexp_all", [&] {
+        const scalar_t* d = flat.data_ptr<scalar_t>();
+        int64_t n = flat.numel();
+        scalar_t max_val = d[0];
+        for (int64_t i = 1; i < n; ++i) if (d[i] > max_val) max_val = d[i];
+        if (!std::isfinite(max_val)) {
+            result.mutable_data_ptr<scalar_t>()[0] = max_val;
+            return;
+        }
+        double sum_exp = 0.0;
+        for (int64_t i = 0; i < n; ++i) {
+            sum_exp += std::exp(static_cast<double>(d[i]) - static_cast<double>(max_val));
+        }
+        result.mutable_data_ptr<scalar_t>()[0] =
+            static_cast<scalar_t>(std::log(sum_exp)) + max_val;
+    });
+    return result;
+}
+
 // Cumulative product along dimension
 inline Tensor cumprod(const Tensor& self, int64_t dim) {
     int64_t ndim = self.dim();

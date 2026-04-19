@@ -777,5 +777,130 @@ inline Tensor atan2(const Tensor& y, const Tensor& x) {
     return out;
 }
 
+// ============================================================================
+// one_hot — convert LongTensor [..., N] -> [..., N, num_classes] with 1 at idx.
+// If num_classes == -1 we infer from max value in indices.
+// ============================================================================
+
+inline Tensor one_hot(const Tensor& indices, int64_t num_classes = -1) {
+    PT_CHECK_MSG(indices.dtype() == c10::ScalarType::Long,
+                 "one_hot: indices must be LongTensor");
+    Tensor idx = indices.is_contiguous() ? indices : indices.contiguous();
+    const int64_t* idx_data = idx.data_ptr<int64_t>();
+    int64_t n = idx.numel();
+
+    if (num_classes < 0) {
+        int64_t m = 0;
+        for (int64_t i = 0; i < n; ++i) {
+            if (idx_data[i] > m) m = idx_data[i];
+        }
+        num_classes = m + 1;
+    }
+    PT_CHECK_MSG(num_classes > 0, "one_hot: num_classes must be > 0");
+
+    std::vector<int64_t> out_shape(idx.sizes().begin(), idx.sizes().end());
+    out_shape.push_back(num_classes);
+
+    Tensor out = zeros(out_shape,
+                       TensorOptions().dtype(c10::ScalarType::Long).device(indices.device()));
+    int64_t* op = out.mutable_data_ptr<int64_t>();
+
+    for (int64_t i = 0; i < n; ++i) {
+        int64_t c = idx_data[i];
+        PT_CHECK_MSG(c >= 0 && c < num_classes,
+                     "one_hot: index out of range [0, num_classes)");
+        op[i * num_classes + c] = 1;
+    }
+    return out;
+}
+
+// ============================================================================
+// allclose — single bool, reduction of isclose().
+// ============================================================================
+
+inline bool allclose(const Tensor& a, const Tensor& b,
+                     double rtol = 1e-5,
+                     double atol = 1e-8,
+                     bool equal_nan = false) {
+    PT_CHECK_MSG(a.sizes() == b.sizes(), "allclose: shape mismatch");
+    Tensor mask = isclose(a, b, rtol, atol, equal_nan);
+    const bool* mp = mask.data_ptr<bool>();
+    int64_t n = mask.numel();
+    for (int64_t i = 0; i < n; ++i) {
+        if (!mp[i]) return false;
+    }
+    return true;
+}
+
+// ============================================================================
+// equal — exact element-wise equality reduced to a single bool.
+// Shape mismatch -> false (matches torch.equal).
+// ============================================================================
+
+inline bool equal(const Tensor& a, const Tensor& b) {
+    if (a.sizes() != b.sizes()) return false;
+    if (a.dtype() != b.dtype()) return false;
+    Tensor ac = a.is_contiguous() ? a : a.contiguous();
+    Tensor bc = b.is_contiguous() ? b : b.contiguous();
+    bool out = true;
+    int64_t n = ac.numel();
+    PT_DISPATCH_ALL_TYPES(ac.dtype(), "equal", [&] {
+        const scalar_t* ap = ac.data_ptr<scalar_t>();
+        const scalar_t* bp = bc.data_ptr<scalar_t>();
+        for (int64_t i = 0; i < n && out; ++i) {
+            if (ap[i] != bp[i]) out = false;
+        }
+    });
+    return out;
+}
+
+// ============================================================================
+// floor_divide — element-wise a // b.
+// For integer dtypes we follow Python floor-division semantics (round toward
+// -inf, not toward zero), which differs from C's trunc-divide for negatives.
+// For float dtypes we use std::floor on the true quotient.
+// ============================================================================
+
+inline Tensor floor_divide(const Tensor& a, const Tensor& b) {
+    PT_CHECK_MSG(a.sizes() == b.sizes(),
+                 "floor_divide: shape mismatch (broadcast first)");
+    PT_CHECK_MSG(a.dtype() == b.dtype(),
+                 "floor_divide: dtype mismatch");
+    Tensor ac = a.is_contiguous() ? a : a.contiguous();
+    Tensor bc = b.is_contiguous() ? b : b.contiguous();
+    Tensor out = empty(a.sizes(),
+                       TensorOptions().dtype(a.dtype()).device(a.device()));
+    int64_t n = ac.numel();
+    c10::ScalarType dt = a.dtype();
+
+    if (dt == c10::ScalarType::Float || dt == c10::ScalarType::Double) {
+        PT_DISPATCH_FLOATING_TYPES(dt, "floor_divide_float", [&] {
+            const scalar_t* ap = ac.data_ptr<scalar_t>();
+            const scalar_t* bp = bc.data_ptr<scalar_t>();
+            scalar_t* op = out.mutable_data_ptr<scalar_t>();
+            for (int64_t i = 0; i < n; ++i) {
+                op[i] = std::floor(ap[i] / bp[i]);
+            }
+        });
+    } else {
+        PT_DISPATCH_ALL_TYPES(dt, "floor_divide_int", [&] {
+            const scalar_t* ap = ac.data_ptr<scalar_t>();
+            const scalar_t* bp = bc.data_ptr<scalar_t>();
+            scalar_t* op = out.mutable_data_ptr<scalar_t>();
+            for (int64_t i = 0; i < n; ++i) {
+                scalar_t x = ap[i], y = bp[i];
+                PT_CHECK_MSG(y != 0, "floor_divide: integer divide by zero");
+                // Python-style floor division: truncate then adjust if remainder
+                // has opposite sign of divisor.
+                scalar_t q = x / y;
+                scalar_t r = x - q * y;
+                if ((r != 0) && ((r < 0) != (y < 0))) q -= 1;
+                op[i] = q;
+            }
+        });
+    }
+    return out;
+}
+
 }  // namespace native
 }  // namespace at
