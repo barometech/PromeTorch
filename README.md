@@ -93,20 +93,26 @@ Astra/ALT/RED/Elbrus OS. Autograd engine работает одинаково н�
 
 ### NVIDIA GPU — GGUF inference
 
-Inference GGUF-моделей (квантизация Q4_K_M) через custom INT4 warp-cooperative GEMV:
+Inference GGUF-моделей (квантизация Q4_K_M) через custom INT4 warp-cooperative GEMV.
 
-| Модель | PromeTorch | Hardware | Ollama | vs Ollama |
-|--------|-----------|----------|--------|-----------|
-| qwen3:4b | **49.9 tok/s** | **NVIDIA A100** (CUDA Graph) | 165 tok/s | 30% |
-| qwen3:4b | **11.3 tok/s** | RTX consumer-class GPU | — | — |
-| deepseek-r1:8b | 30.5 tok/s | A100 | 133 tok/s | 23% |
+**Runtime-verified на A100 40GB (2026-04-19 benchmark run):**
 
-> Числа на A100 получены на арендованном сервере, воспроизводится через `benchmark_gguf.py`.
-> Large gap vs Ollama — Ollama использует cuBLAS+cuSPARSELt+kv-page attention, у нас только
-> Q4_K GEMV + baseline RoPE. Для consumer GPU gap увеличивается.
-> Tokenizer и KV-cache корректны, output верифицирован на простых задачах
-> («2+2 → 4»); на длинных генерациях местами наблюдаются повторы — вероятно, баг в RoPE
-> rescaling при длинных context, под расследованием.
+| Модель | PromeTorch | Hardware | Ollama baseline | vs Ollama |
+|--------|-----------|----------|-----------------|-----------|
+| qwen3:4b | **86.6 tok/s** | NVIDIA A100 40GB (CUDA Graph + FP16 KV) | 165 tok/s | **52%** |
+| deepseek-r1:8b | **52.7 tok/s** | A100 | 133 tok/s | **40%** |
+
+- qwen3:4b VRAM: **8.0 GB** / 39.7 GB (quant-only mode)
+- deepseek-r1:8b VRAM: **10.2 GB** / 39.7 GB
+- Model weights move to CUDA: **0.1 s** (previously 88 s — fixed quant-only transfer)
+- FP16 KV cache: 302 MB for qwen3:4b 36 layers
+
+Output верифицирован на простых задачах («2+2 → 4»). На длинных генерациях местами
+наблюдаются повторы — вероятно, RoPE rescaling at large context.
+
+Gap vs Ollama — Ollama использует cuBLAS+cuSPARSELt+kv-page attention, у нас только
+Q4_K GEMV + flash_decode + CUDA Graph. Consumer GPU цифры будут меньше (точные зависят
+от модели карты).
 
 ### Точность обучения (10 training tasks)
 
