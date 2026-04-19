@@ -665,6 +665,121 @@ TEST(AnomalyModeTest, ThrowsOnNaNWithNodeName) {
 }
 
 // ============================================================================
+// New backward nodes: Where / MaskedFill / Gather / ScatterAdd / NormDim
+// ============================================================================
+
+// Helper: build a bool tensor from an init list (test-local).
+static Tensor make_bool_1d(std::initializer_list<bool> vals) {
+    Tensor t = at::empty({static_cast<int64_t>(vals.size())},
+                         TensorOptions().dtype(c10::ScalarType::Bool));
+    bool* p = t.mutable_data_ptr<bool>();
+    int64_t i = 0;
+    for (bool v : vals) p[i++] = v;
+    return t;
+}
+
+// Helper: build a long (int64) tensor from an init list (test-local).
+static Tensor make_long_1d(std::initializer_list<int64_t> vals) {
+    Tensor t = at::empty({static_cast<int64_t>(vals.size())},
+                         TensorOptions().dtype(c10::ScalarType::Long));
+    int64_t* p = t.mutable_data_ptr<int64_t>();
+    int64_t i = 0;
+    for (int64_t v : vals) p[i++] = v;
+    return t;
+}
+
+TEST(AutogradTest, WhereBackward) {
+    // out = where(cond, x, y). grad_x = where(cond, g, 0), grad_y = where(cond, 0, g)
+    Tensor cond = make_bool_1d({true, false, true, false});
+    Tensor x = tensor({1.0f, 2.0f, 3.0f, 4.0f});
+    Tensor y = tensor({5.0f, 6.0f, 7.0f, 8.0f});
+    x.set_requires_grad(true);
+    y.set_requires_grad(true);
+
+    Tensor out = where_autograd(cond, x, y);
+    tensor_backward(sum_autograd(out));
+
+    Tensor gx = get_grad(x);
+    Tensor gy = get_grad(y);
+    Tensor expected_gx = tensor({1.0f, 0.0f, 1.0f, 0.0f});
+    Tensor expected_gy = tensor({0.0f, 1.0f, 0.0f, 1.0f});
+    EXPECT_TRUE(tensor_approx_equal(gx, expected_gx));
+    EXPECT_TRUE(tensor_approx_equal(gy, expected_gy));
+}
+
+TEST(AutogradTest, MaskedFillBackward) {
+    // out = masked_fill(x, mask, -1). grad only flows where mask==false.
+    Tensor x = tensor({1.0f, 2.0f, 3.0f, 4.0f});
+    Tensor mask = make_bool_1d({false, true, false, true});
+    x.set_requires_grad(true);
+
+    Tensor out = masked_fill_autograd(x, mask, Scalar(-1.0f));
+    tensor_backward(sum_autograd(out));
+
+    Tensor gx = get_grad(x);
+    Tensor expected = tensor({1.0f, 0.0f, 1.0f, 0.0f});
+    EXPECT_TRUE(tensor_approx_equal(gx, expected));
+}
+
+TEST(AutogradTest, GatherBackward) {
+    // x shape [2,3], gather along dim=1 with idx shape [2,2].
+    Tensor x = tensor({1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f}).reshape({2, 3});
+    x.set_requires_grad(true);
+
+    // idx[0] = [0, 2], idx[1] = [1, 1]
+    Tensor idx = make_long_1d({0, 2, 1, 1}).reshape({2, 2});
+    Tensor out = gather_autograd(x, /*dim=*/1, idx);
+    tensor_backward(sum_autograd(out));
+
+    Tensor gx = get_grad(x);
+    // scatter_add into zeros at the gathered positions:
+    // row0: positions 0 and 2 get +1; row1: position 1 gets +2
+    Tensor expected = tensor({1.0f, 0.0f, 1.0f, 0.0f, 2.0f, 0.0f}).reshape({2, 3});
+    EXPECT_TRUE(tensor_approx_equal(gx, expected));
+}
+
+TEST(AutogradTest, ScatterAddBackward) {
+    // out = self.clone().scatter_add_(dim=0, idx, src)
+    // grad_self = grad_out ; grad_src = gather(grad_out, dim, idx)
+    Tensor self = zeros({3});
+    Tensor src = tensor({1.0f, 2.0f, 3.0f, 4.0f});
+    Tensor idx = make_long_1d({0, 1, 0, 2});
+    self.set_requires_grad(true);
+    src.set_requires_grad(true);
+
+    Tensor out = scatter_add_autograd(self, /*dim=*/0, idx, src);
+    tensor_backward(sum_autograd(out));
+
+    Tensor g_self = get_grad(self);
+    Tensor g_src = get_grad(src);
+
+    // sum_backward -> grad_out is ones({3}). grad_self = grad_out = ones({3}).
+    Tensor expected_self = ones({3});
+    // grad_src = gather(grad_out=ones({3}), dim=0, idx=[0,1,0,2]) = [1,1,1,1]
+    Tensor expected_src = ones({4});
+    EXPECT_TRUE(tensor_approx_equal(g_self, expected_self));
+    EXPECT_TRUE(tensor_approx_equal(g_src, expected_src));
+}
+
+TEST(AutogradTest, NormDimBackwardL2) {
+    // L2 norm along dim=1 for a simple 2x3 tensor.
+    // norm_row_i = sqrt(sum_j x_ij^2). d/dx_ij = x_ij / norm_row_i.
+    Tensor x = tensor({1.0f, 2.0f, 2.0f, 3.0f, 4.0f, 0.0f}).reshape({2, 3});
+    x.set_requires_grad(true);
+
+    Tensor n = norm_autograd(x, Scalar(2.0), /*dim=*/1, /*keepdim=*/false);
+    tensor_backward(sum_autograd(n));
+
+    Tensor gx = get_grad(x);
+
+    // Row 0 norm = sqrt(1+4+4)=3 → grad row = [1/3, 2/3, 2/3]
+    // Row 1 norm = sqrt(9+16+0)=5 → grad row = [3/5, 4/5, 0]
+    Tensor expected = tensor({1.0f/3.0f, 2.0f/3.0f, 2.0f/3.0f,
+                              3.0f/5.0f, 4.0f/5.0f, 0.0f}).reshape({2, 3});
+    EXPECT_TRUE(tensor_approx_equal(gx, expected, /*rtol=*/1e-3f, /*atol=*/1e-5f));
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 
