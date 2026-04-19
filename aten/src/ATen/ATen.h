@@ -757,10 +757,19 @@ inline Tensor Tensor::add(const Tensor& other, Scalar alpha) const {
 #endif
 #ifdef PT_USE_CUDA
     if (is_cuda()) {
-        if (numel() != other.numel() && dim() == 2 && other.dim() == 1 && other.size(0) == size(1)) {
+        if (numel() == other.numel()) {
+            result = cuda_ops::add(*this, other);
+        } else if (dim() == 2 && other.dim() == 1 && other.size(0) == size(1)) {
             result = cuda_ops::add_broadcast(*this, other);
         } else {
-            result = cuda_ops::add(*this, other);
+            // General broadcast: fall back to CPU. Required e.g. for
+            // [B, T, D] + [1, T, D] (positional-embedding addition in
+            // Transformer classifier). No native CUDA broadcast kernel
+            // yet — see TEST_PLAN §5.9.
+            Tensor a_cpu = at::to_cpu(*this);
+            Tensor b_cpu = other.is_cuda() ? at::to_cpu(other) : other;
+            Tensor r_cpu = native::add(a_cpu, b_cpu, alpha);
+            result = at::to_cuda(r_cpu, device().index());
         }
     } else
 #endif

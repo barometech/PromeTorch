@@ -5,6 +5,10 @@
 #include <cmath>
 #include <limits>
 
+#ifdef PT_USE_CUDA
+#include "aten/src/ATen/cuda/CUDADispatch.h"
+#endif
+
 namespace torch {
 namespace nn {
 
@@ -121,6 +125,77 @@ public:
         const Tensor& key_padding_mask = Tensor(),
         bool need_weights = true,
         bool average_attn_weights = true
+    ) {
+#ifdef PT_USE_CUDA
+        // CPU-fallback bounce: attention has no native CUDA path (softmax,
+        // batch_matmul, mask application are all raw data_ptr<float>() host
+        // code). When inputs are on CUDA, temporarily move inputs+weights to
+        // CPU, run the full attention, then move the output back to CUDA.
+        // Autograd graph is intentionally detached across the bounce (forward
+        // correctness only — see TEST_PLAN §5.9).
+        if (query.is_cuda()) {
+            // Snapshot CUDA weights, swap in CPU copies for the duration of
+            // this call, then restore (exception-safe).
+            auto* in_w  = get_parameter("in_proj_weight");
+            auto* in_b  = bias_ ? get_parameter("in_proj_bias") : nullptr;
+            auto* out_w = get_parameter("out_proj.weight");
+            auto* out_b = bias_ ? get_parameter("out_proj.bias") : nullptr;
+
+            Tensor saved_in_w  = in_w->data();
+            Tensor saved_in_b  = in_b ? in_b->data() : Tensor();
+            Tensor saved_out_w = out_w->data();
+            Tensor saved_out_b = out_b ? out_b->data() : Tensor();
+
+            auto restore = [&]() {
+                in_w->set_data(saved_in_w);
+                if (in_b)  in_b->set_data(saved_in_b);
+                out_w->set_data(saved_out_w);
+                if (out_b) out_b->set_data(saved_out_b);
+            };
+
+            in_w->set_data(at::to_cpu(saved_in_w));
+            if (in_b)  in_b->set_data(at::to_cpu(saved_in_b));
+            out_w->set_data(at::to_cpu(saved_out_w));
+            if (out_b) out_b->set_data(at::to_cpu(saved_out_b));
+
+            Tensor q_cpu = at::to_cpu(query);
+            Tensor k_cpu = at::to_cpu(key);
+            Tensor v_cpu = at::to_cpu(value);
+            Tensor am_cpu = attn_mask.defined() && attn_mask.is_cuda()
+                                ? at::to_cpu(attn_mask) : attn_mask;
+            Tensor kpm_cpu = key_padding_mask.defined() && key_padding_mask.is_cuda()
+                                ? at::to_cpu(key_padding_mask) : key_padding_mask;
+
+            std::pair<Tensor, Tensor> result;
+            try {
+                result = forward_attention_impl(
+                    q_cpu, k_cpu, v_cpu, am_cpu, kpm_cpu,
+                    need_weights, average_attn_weights);
+            } catch (...) {
+                restore();
+                throw;
+            }
+            restore();
+
+            Tensor out_cuda = at::to_cuda(result.first);
+            Tensor w_cuda = result.second.defined() ? at::to_cuda(result.second) : Tensor();
+            return {out_cuda, w_cuda};
+        }
+#endif
+        return forward_attention_impl(
+            query, key, value, attn_mask, key_padding_mask,
+            need_weights, average_attn_weights);
+    }
+
+private:
+    std::pair<Tensor, Tensor> forward_attention_impl(
+        const Tensor& query,
+        const Tensor& key,
+        const Tensor& value,
+        const Tensor& attn_mask,
+        const Tensor& key_padding_mask,
+        bool need_weights,
+        bool average_attn_weights
     ) {
         Tensor q = query;
         Tensor k = key;
@@ -258,6 +333,7 @@ public:
         return {output, weights_out};
     }
 
+public:
     // Single input forward (self-attention)
     Tensor forward(const Tensor& input) override {
         return forward_attention(input, input, input).first;
