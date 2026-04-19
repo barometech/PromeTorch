@@ -482,12 +482,160 @@ private:
         return true;
     }
 
-    bool load_weights_(const std::string& /*dir*/) {
-        // Stub. Real loader would parse safetensors header (JSON prefix +
-        // binary payload) and fill weights_. We keep this as an extension
-        // point so the Python shim can hand us weights via set_weights().
+    // Safetensors parser — header = 8-byte LE length + JSON + raw F32/F16/BF16 payload.
+    // Returns true if one or more tensors were loaded into weights_.
+    bool load_safetensors_file_(const std::string& path) {
+        std::ifstream f(path, std::ios::binary);
+        if (!f) return false;
+        uint64_t hdr_len = 0;
+        f.read(reinterpret_cast<char*>(&hdr_len), 8);
+        if (!f || hdr_len == 0 || hdr_len > (1ULL << 32)) return false;
+        std::string hdr(hdr_len, '\0');
+        f.read(hdr.data(), hdr_len);
+        if (!f) return false;
+        // Parse minimal JSON — find each key:{...} block.
+        auto find_string = [&](size_t& i) -> std::string {
+            while (i < hdr.size() && hdr[i] != '"') ++i;
+            if (i >= hdr.size()) return {};
+            ++i;
+            size_t s = i;
+            while (i < hdr.size() && hdr[i] != '"') ++i;
+            std::string out = hdr.substr(s, i - s);
+            if (i < hdr.size()) ++i;
+            return out;
+        };
+        auto find_int = [&](size_t& i) -> int64_t {
+            while (i < hdr.size() && !std::isdigit((unsigned char)hdr[i]) && hdr[i] != '-') ++i;
+            int64_t val = 0, sign = 1;
+            if (i < hdr.size() && hdr[i] == '-') { sign = -1; ++i; }
+            while (i < hdr.size() && std::isdigit((unsigned char)hdr[i])) { val = val * 10 + (hdr[i] - '0'); ++i; }
+            return val * sign;
+        };
+        size_t i = 0;
+        int loaded = 0;
+        while (i < hdr.size()) {
+            std::string name = find_string(i);
+            if (name.empty() || name == "__metadata__") continue;
+            // Find "dtype":"F32/F16/BF16" then "shape":[...] then "data_offsets":[s,e].
+            size_t dtype_pos = hdr.find("\"dtype\"", i);
+            size_t shape_pos = hdr.find("\"shape\"", i);
+            size_t offsets_pos = hdr.find("\"data_offsets\"", i);
+            if (dtype_pos == std::string::npos || shape_pos == std::string::npos ||
+                offsets_pos == std::string::npos) break;
+            size_t dp = dtype_pos + 7; std::string dtype = find_string(dp);
+            size_t sp = shape_pos + 7;
+            std::vector<int64_t> shape;
+            while (sp < hdr.size() && hdr[sp] != ']') {
+                if (std::isdigit((unsigned char)hdr[sp])) shape.push_back(find_int(sp));
+                else ++sp;
+            }
+            size_t op = offsets_pos + 14;
+            int64_t off_start = find_int(op);
+            int64_t off_end = find_int(op);
+            int64_t numel = 1;
+            for (auto d : shape) numel *= d;
+            std::vector<float> data(numel);
+            f.seekg(8 + hdr_len + off_start);
+            if (dtype == "F32") {
+                f.read(reinterpret_cast<char*>(data.data()), numel * 4);
+            } else if (dtype == "F16") {
+                std::vector<uint16_t> h(numel);
+                f.read(reinterpret_cast<char*>(h.data()), numel * 2);
+                for (int64_t k = 0; k < numel; ++k) {
+                    uint32_t s = (h[k] & 0x8000) << 16;
+                    int32_t e = ((h[k] >> 10) & 0x1F) - 15 + 127;
+                    uint32_t m = (h[k] & 0x3FF) << 13;
+                    uint32_t bits = s | (e << 23) | m;
+                    std::memcpy(&data[k], &bits, 4);
+                }
+            } else if (dtype == "BF16") {
+                std::vector<uint16_t> b(numel);
+                f.read(reinterpret_cast<char*>(b.data()), numel * 2);
+                for (int64_t k = 0; k < numel; ++k) {
+                    uint32_t bits = ((uint32_t)b[k]) << 16;
+                    std::memcpy(&data[k], &bits, 4);
+                }
+            } else {
+                continue;  // skip unsupported dtypes
+            }
+            weights_by_name_[name] = std::move(data);
+            shape_by_name_[name] = std::move(shape);
+            ++loaded;
+            // Move i past this entry
+            i = offsets_pos;
+            while (i < hdr.size() && hdr[i] != '}') ++i;
+            if (i < hdr.size()) ++i;
+        }
+        return loaded > 0;
+    }
+
+    bool load_weights_(const std::string& dir) {
+        // Try single-file safetensors first.
+        std::string single = dir + "/model.safetensors";
+        if (load_safetensors_file_(single)) {
+            return map_weights_to_layers_();
+        }
+        // Try sharded: model.safetensors.index.json lists per-shard paths.
+        std::string index_path = dir + "/model.safetensors.index.json";
+        std::ifstream idx(index_path);
+        if (idx) {
+            std::stringstream buf; buf << idx.rdbuf();
+            std::string idx_json = buf.str();
+            std::unordered_set<std::string> shards;
+            size_t pos = 0;
+            while ((pos = idx_json.find(".safetensors\"", pos)) != std::string::npos) {
+                size_t start = idx_json.rfind('"', pos);
+                if (start == std::string::npos) break;
+                shards.insert(idx_json.substr(start + 1, pos + 13 - start - 1));
+                pos += 13;
+            }
+            int total_loaded = 0;
+            for (const auto& shard : shards) {
+                if (load_safetensors_file_(dir + "/" + shard)) ++total_loaded;
+            }
+            if (total_loaded > 0) return map_weights_to_layers_();
+        }
+        // Last resort: pytorch_model.bin — requires pickle parser (not implemented here;
+        // use python/promethorch/safetensors_reader.py + transformers_compat.py instead).
         return false;
     }
+
+    // Map HF parameter names -> LlamaLayerWeights slots. Specific to Llama-like arch.
+    bool map_weights_to_layers_() {
+        auto lookup = [&](const std::string& key) -> const std::vector<float>* {
+            auto it = weights_by_name_.find(key);
+            return (it == weights_by_name_.end()) ? nullptr : &it->second;
+        };
+        auto lookup_or_empty = [&](const std::string& key) -> std::vector<float> {
+            const auto* p = lookup(key);
+            return p ? *p : std::vector<float>();
+        };
+        weights_.embed_tokens = lookup_or_empty("model.embed_tokens.weight");
+        weights_.norm = lookup_or_empty("model.norm.weight");
+        weights_.lm_head = lookup_or_empty("lm_head.weight");
+        if (weights_.lm_head.empty()) weights_.lm_head = weights_.embed_tokens;  // tied
+        weights_.layers.resize(cfg_.num_hidden_layers);
+        int loaded = 0;
+        for (int l = 0; l < cfg_.num_hidden_layers; ++l) {
+            auto& lw = weights_.layers[l];
+            std::string p = "model.layers." + std::to_string(l) + ".";
+            lw.attn_q = lookup_or_empty(p + "self_attn.q_proj.weight");
+            lw.attn_k = lookup_or_empty(p + "self_attn.k_proj.weight");
+            lw.attn_v = lookup_or_empty(p + "self_attn.v_proj.weight");
+            lw.attn_o = lookup_or_empty(p + "self_attn.o_proj.weight");
+            lw.ffn_gate = lookup_or_empty(p + "mlp.gate_proj.weight");
+            lw.ffn_up   = lookup_or_empty(p + "mlp.up_proj.weight");
+            lw.ffn_down = lookup_or_empty(p + "mlp.down_proj.weight");
+            lw.attn_norm = lookup_or_empty(p + "input_layernorm.weight");
+            lw.ffn_norm  = lookup_or_empty(p + "post_attention_layernorm.weight");
+            if (!lw.attn_q.empty()) ++loaded;
+        }
+        return loaded == cfg_.num_hidden_layers && !weights_.embed_tokens.empty();
+    }
+
+    // Raw weight storage keyed by HF parameter name — used by map_weights_to_layers_.
+    std::unordered_map<std::string, std::vector<float>> weights_by_name_;
+    std::unordered_map<std::string, std::vector<int64_t>> shape_by_name_;
 
     // -------- RoPE + cache init --------
     void init_rope_() {

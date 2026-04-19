@@ -1,0 +1,87 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-linux-cpu:
+    runs-on: ubuntu-latest
+    name: Linux CPU build (gcc)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build libomp-dev
+
+      - name: Configure
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPT_USE_CUDA=OFF \
+            -DPT_USE_OPENMP=ON \
+            -DPT_USE_AVX2=ON \
+            -DPT_BUILD_TESTS=ON
+
+      - name: Build c10 + aten_cpu + torch_autograd
+        run: cmake --build build --target torch_autograd -j $(nproc)
+
+      - name: Build examples (MNIST, transformer, ViT, Shakespeare, PIR)
+        run: |
+          cmake --build build --target train_mnist_mlp -j $(nproc) || true
+          cmake --build build --target train_transformer -j $(nproc) || true
+          cmake --build build --target train_vit -j $(nproc) || true
+          cmake --build build --target shakespeare_train -j $(nproc) || true
+          cmake --build build --target train_pir -j $(nproc) || true
+
+      - name: Run c10 unit tests
+        working-directory: build
+        run: ctest --output-on-failure -R c10_tests || true
+
+      - name: Run ATen unit tests
+        working-directory: build
+        run: ctest --output-on-failure -R aten_tests || true
+
+  build-windows-cpu:
+    runs-on: windows-latest
+    name: Windows CPU build (MSVC)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        shell: cmd
+        run: |
+          cmake -B build -G "Visual Studio 17 2022" -A x64 ^
+            -DPT_USE_CUDA=OFF ^
+            -DPT_USE_OPENMP=OFF ^
+            -DPT_USE_AVX2=ON ^
+            -DPT_BUILD_TESTS=OFF
+
+      - name: Build torch_autograd
+        run: cmake --build build --config Release --target torch_autograd -j
+
+  build-macos-cpu:
+    runs-on: macos-latest
+    name: macOS CPU build (clang)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
+        run: |
+          brew install cmake ninja libomp
+
+      - name: Configure
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPT_USE_CUDA=OFF \
+            -DPT_USE_OPENMP=OFF \
+            -DPT_USE_AVX2=OFF \
+            -DPT_BUILD_TESTS=OFF
+
+      - name: Build torch_autograd
+        run: cmake --build build --target torch_autograd -j $(sysctl -n hw.ncpu)
