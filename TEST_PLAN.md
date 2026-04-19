@@ -120,22 +120,22 @@ Two options, in increasing cost:
 
 ---
 
-## §5 Structural API gaps remaining (identified by Sonnet audit agents)
+## §5 Structural API gaps (status updated 2026-04-19 PM)
 
-These don't have a single binary to run — they are coverage gaps. Listed
-in priority order.
-
-| Priority | Gap | Where | Impact |
-|----------|-----|-------|--------|
-| 1 | `autocast` context not hooked into op dispatch | `torch/amp/autocast.h` + per-op cast wrapping in `aten/src/ATen/native/cpu/MathOps.h` | AMP appears to work but does no autocast in practice. Mixed-precision training silently runs in FP32. **Audit 2026-04-19** confirmed: `torch/amp/autocast.h` API + 100-line policy table in `autocast_policy.h` are fully built; ZERO callsites invoke them. Module forwards (`Linear::forward`, `Conv2d::forward`, `MultiheadAttention::forward`) all go straight to FP32 fast paths or `*_autograd` ops without checking `is_autocast_enabled()`. Additional blocker: `Tensor::to(dtype)` at `ATen.h:1553` does CPU sequential cast and sets `requires_grad=true` BUT does NOT wire a `grad_fn` — so even if Linear casts inputs, backward stops at the cast. **Required pre-work:** implement `to_autograd(t, dtype)` + `ToBackward` (Node that casts grad back to source dtype). **Required CUDA work:** FP16 mm dispatch (currently mm uses sgemm only; need `cublasGemmEx` FP16/HGEMV path). **Effort:** ~6h dev for module wiring + ~4h `to_autograd` plumbing + ~6h FP16 cuBLAS dispatch + verification on A100. |
-| 2 | `ParamGroup` incomplete (per-group lr/momentum/weight_decay) | `torch/optim/optimizer.h` | Layer-wise lr scheduling not possible — common for fine-tuning (e.g. discriminative LRs for BERT). |
-| 3 | `DistributedDataParallel.no_sync()` missing | `torch/distributed/ddp.h` | Gradient accumulation across micro-batches in DDP forces a sync at every step — wastes AllReduce bandwidth. |
-| 4 | `torch.no_grad()` Python binding doesn't propagate to C++ engine | `python/promethorch/__init__.py` (pybind11), `torch/csrc/autograd/grad_mode.h` | Inference Python loops still build autograd graph (wastes memory + time). BUG-C9 in audit. |
-| 5 | FlashAttention has 6 known bugs, no callsites | `aten/src/ATen/cuda/FlashAttention.cu` | Documented as broken; all production attention falls back to `sdpa_forward_cpu_impl` (slow on CUDA). |
-| 6 | Conv3d forward is a stub returning zeros | `torch/nn/modules/conv.h::Conv3dImpl::forward` | Video / 3D-medical models impossible. Lower priority (not in our 10-model set). |
-| 7 | `torch.compile` not implemented | n/a (entire missing subsystem) | No graph capture / fusion. ~2-3× speedup left on table for training. Out of scope for this plan. |
-| 8 | `create_graph=True` ignored (no double-backward) | `torch/csrc/autograd/engine.cpp` | Higher-order grads (meta-learning, MAML, gradient-penalty losses) impossible. |
-| 9 | TransformerEncoderLayer CUDA forward crash | (suspected) `torch/nn/modules/transformer.h` + missing CUDA kernel for `LayerNorm` over the right axes | Blocks GPU training of `train_transformer.exe`; CPU works. |
+| # | Status | Gap | Where | Notes |
+|---|--------|-----|-------|-------|
+| 1 | 🟡 PARTIAL | `autocast` not hooked into op dispatch | `torch/amp/autocast.h`, module forwards | Building block done (`8f87e57` to_autograd + ToBackward). Still TODO: per-op wrapping in Linear/Conv/MHA forwards + FP16 mm cuBLAS dispatch + A100 verify. |
+| 2 | 🟢 DONE | `ParamGroup` incomplete | `torch/optim/optimizer.h` + sgd/adam/rmsprop | `d3951bb`+`d519a0f`. Per-group lr/momentum/wd/betas/eps/amsgrad with NaN-sentinel inheritance, scheduler.step_group(idx) overload, full backwards-compat. |
+| 3 | 🟢 DONE | `DistributedDataParallel.no_sync()` | `torch/distributed/ddp.h` + `distributed.h` | `ab71ddf`+`ea07f99`. RAII guard + Python context manager; works on both POSIX-TCP DDP (Elbrus) and ProcessGroup-abstracted DDP. Single-process test with CountingPG mock backend verifies 1 AllReduce instead of N for N-batch accumulation. |
+| 4 | 🟢 DONE | `torch.no_grad()` Python → C++ propagation | `python/promethorch/__init__.py` | `763ebb1`. Real `_GradModeContextDecorator` flips C++ `GradMode::is_enabled()` thread-local. Stack-safe (nested). Note: separate gap surfaced — `_C.pyd` op bindings call raw aten directly (skip `*_autograd` wrappers), so `requires_grad` doesn't propagate at the Python-op boundary. Filed as new gap §5.10 below. |
+| 5 | 🔴 NOT STARTED | FlashAttention 6 known bugs, no callsites | `aten/src/ATen/cuda/FlashAttention.cu` | Production attention uses `sdpa_forward_cpu_impl` (slow on CUDA). |
+| 6 | 🔴 NOT STARTED | Conv3d forward is a stub | `torch/nn/modules/conv.h::Conv3dImpl::forward` | Lower priority. |
+| 7 | 🔴 OUT OF SCOPE | `torch.compile` not implemented | n/a (entire subsystem) | ~2-3× speedup left on table; out of scope. |
+| 8 | 🔴 NOT STARTED | `create_graph=True` ignored (no double-backward) | `torch/csrc/autograd/engine.cpp` | Higher-order grads (MAML, grad-penalty) impossible. |
+| 9 | 🔴 NOT STARTED | TransformerEncoderLayer CUDA forward crash | `torch/nn/modules/transformer.h` (suspected LayerNorm CUDA kernel missing) | Blocks GPU train_transformer; CPU works. |
+| 10 | 🟡 NEW | Python `_C.pyd` op bindings bypass `*_autograd` wrappers | `python/csrc/bindings_new.cpp` | Surfaced by no_grad agent (a7f1200e004cb3008). `t1 + t2` from Python calls raw aten directly → output never has grad_fn even when both inputs require_grad. Affects every binary op exposed to Python. |
+| 11 | 🟢 DONE | Untyped `mutable_data_ptr()` overload missing on Tensor | `aten/src/ATen/core/Tensor.h` | `a5a8cbf`. Was blocking cuDNN headers' `void*` callsites (cudnnActivationForward etc.). |
+| 12 | 🟢 DONE | nvcc dropping `__declspec(dllexport)` on `launch_*` | `aten/src/ATen/cuda/aten_cuda_exports.def` | `a5a8cbf`. Explicit module-definition file for ~150 launch_* exports. Was the silent reason train_resnet/train_gan failed to load aten_cuda.dll exports at runtime even though they compiled clean. |
 
 ---
 
@@ -149,29 +149,37 @@ in priority order.
 
 ---
 
-## §7 Order of work for next sprint
+## §7 Order of work for next sprint (updated 2026-04-19 PM)
 
-1. **Wait for the 4 background agents** (ViT MNIST, ResNet-20 CIFAR, VAE
-   MNIST, DCGAN MNIST) and fold their results into rows 6, 7, 10, 11 above.
-2. **§4** — PromeServe FP16 dequant → cuBLAS HGEMV. Single biggest user-
-   facing win.
-3. **§5 row 1** — wire autocast into dispatch (small file count, big real
-   impact for mixed-precision training claims).
-4. **§5 row 4** — propagate `torch.no_grad()` from Python to engine.
-5. **§5 rows 2-3** — ParamGroup + DDP `no_sync`.
-6. **§5 row 9** — fix TransformerEncoderLayer CUDA forward (unblocks GPU
-   transformer training).
-7. **§6** — backport RUKALLAMA integration tests, set up CI.
-8. **§5 row 5** — FlashAttention rewrite (already partially done — verify
-   and re-enable callsites).
-9. **§5 rows 6-8** — Conv3d, double-backward (lower priority, fill in as
-   needed).
+Items 4-7 in the original list closed already. New ordered queue:
+
+1. **Wait for the 4 training-to-convergence agents** (ViT MNIST, ResNet-20
+   CIFAR, VAE MNIST, DCGAN MNIST) and fold their results into rows 6, 7,
+   10, 11 of §1-§2.
+2. **§4** — PromeServe FP16 dequant → cuBLAS HGEMV. Biggest user-facing
+   win (86.6 → 150 tok/s gap).
+3. **§5 row 10 (NEW)** — fix Python op bindings to route through
+   `*_autograd` wrappers so `t1 + t2` from Python actually builds graph
+   when inputs require_grad. Surfaced by no_grad agent.
+4. **§5 row 1** — finish autocast: wire to_autograd into Linear/Conv/MHA
+   forwards (small file count) + add FP16 mm cuBLAS dispatch + A100
+   verify mixed-precision training delivers actual speedup.
+5. **§5 row 9** — fix TransformerEncoderLayer CUDA forward (unblocks GPU
+   transformer training; transformer agent confirmed CPU-OK, CUDA crash).
+6. **§6** — backport RUKALLAMA integration tests, set up CI for
+   build_cudnn.
+7. **§5 row 5** — FlashAttention rewrite (already partially done in audit
+   sprint; verify, re-enable callsites, switch sdpa_forward_cuda away
+   from CPU fallback).
+8. **§5 rows 6, 8** — Conv3d, double-backward (lower priority).
 
 ---
 
 ## §8 Already-completed in 2026-04-19 sprint
 
 For reference / commit messages map to:
+
+**Morning batch (autograd + ops + examples):**
 - `9b19480` — 5 missing backward Nodes (where/masked_fill/scatter_add/gather/norm_dim).
 - `df3f804`, `0f205af` — reshape_autograd / select_autograd correctness fixes.
 - `472a1fe` — logsumexp + LogSumExpBackward + 4 missing ops.
@@ -183,3 +191,11 @@ For reference / commit messages map to:
 - `e2b25d9` — `EXAMPLES_VERIFIED.md` baseline matrix.
 - `92f9c47` — license clarification (attribution + no-resale).
 - `83b133d` — `JOURNAL.md` 2026-04-19 entry.
+- `b802c09`, `bee0cb4` — TEST_PLAN.md created + autocast audit findings.
+
+**Afternoon batch (structural API gaps):**
+- `8f87e57` — to_autograd + ToBackward (foundation for autocast).
+- `a5a8cbf` — DLL exports `.def` file + cuDNN data_ptr fix (build infra).
+- `763ebb1` — Python no_grad/enable_grad → C++ GradMode (BUG-C9).
+- `d3951bb`, `d519a0f` — ParamGroup per-group hyperparameters + step_group rename.
+- `ab71ddf`, `ea07f99` — DDP no_sync() context manager + Python wrapper + test.
