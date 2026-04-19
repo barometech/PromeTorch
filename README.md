@@ -10,11 +10,12 @@
 >
 > ~128,000 строк C++/CUDA + ~4,500 Python. 1 разработчик. ~5 недель активной разработки + agent bursts (35 + 15).
 
-> ⚠️ **Coverage ~35-45% практической площади PyTorch.** Это solo-проект: ряд CUDA путей
-> (FP16 kernels, cuDNN RNN, MPS/ROCm) **compile-verified но runtime-untested** (нет доступа
-> к соответствующему железу). `torch.compile` — trace-based prototype, не полноценный
-> TorchInductor. Sparse tensors / FX graph mode / torch.distributions отсутствуют.
-> См. **Known Limitations** ниже — каждый gap честно задокументирован.
+> ⚠️ **Coverage ~35-45% практической площади PyTorch.** Это solo-проект: ряд путей
+> runtime-verified на своём железе (CPU x86 / Эльбрус / A100 GGUF inference),
+> другие **compile-verified only** (MPS/ROCm — нет Mac/AMD GPU, cuDNN-accelerated
+> RNN legacy API guarded for cuDNN 9). `torch.compile` — trace-based prototype,
+> не полноценный TorchInductor. Sparse tensors / FX graph mode / torch.distributions
+> отсутствуют. См. **Known Limitations** ниже — каждый gap честно задокументирован.
 
 ---
 
