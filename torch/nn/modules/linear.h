@@ -105,7 +105,11 @@ public:
         bool need_grad = torch::autograd::GradMode::is_enabled() &&
                          (input.requires_grad() || W.requires_grad());
 
-        if (!need_grad && W.dtype() == c10::ScalarType::Float) {
+        // FastOps path is CPU-only (uses at::native::fast kernels on raw ptrs).
+        // CUDA tensors fall through to the autograd path where mm_autograd
+        // dispatches a real CUDA kernel.
+        if (!need_grad && W.dtype() == c10::ScalarType::Float &&
+            input.is_cpu() && W.is_cpu()) {
             // 2D fast path: most common (MLP inference)
             if (input.dim() == 2 && input.is_contiguous()) {
                 if (fused_relu_ && has_bias_) {
@@ -154,9 +158,14 @@ public:
         // Autograd path: full gradient tracking
         // ================================================================
 
-        // Fast fused path for 2D inputs (most common: MLP training)
-        // Fuses mm + bias_add (+ optional relu) into a single op and backward node
-        if (input.dim() == 2 && W.dtype() == c10::ScalarType::Float) {
+        // Fast fused path for 2D inputs (most common: MLP training).
+        // Fuses mm + bias_add (+ optional relu) into a single op and backward
+        // node.  CPU-only — the fused kernels call at::empty (no device) and
+        // at::native::hot::sgemm_nt on raw float* pointers, which crashes when
+        // inputs live on CUDA.  CUDA falls through to the mm_autograd path
+        // which dispatches a real CUDA matmul.
+        if (input.dim() == 2 && W.dtype() == c10::ScalarType::Float &&
+            input.is_cpu() && W.is_cpu()) {
             Tensor bias_data;
             if (has_bias_) {
                 bias_data = cached_bias_->data();
