@@ -43,7 +43,7 @@ public:
 
     virtual ~LRScheduler() = default;
 
-    // Advance to next epoch and update learning rates
+    // Advance to next epoch and update learning rates for ALL param groups.
     virtual void step(int64_t epoch = -1) {
         if (epoch == -1) {
             last_epoch_++;
@@ -58,6 +58,25 @@ public:
         auto& groups = optimizer_->param_groups();
         for (size_t i = 0; i < groups.size() && i < new_lrs.size(); ++i) {
             groups[i].lr = new_lrs[i];
+        }
+    }
+
+    // Per-group step: advance the schedule and update only ONE param group's lr.
+    // Other groups keep their current lrs untouched. Useful for SequentialLR-style
+    // chains where different groups follow different schedules.
+    //
+    // Note: last_epoch_ is still advanced (the underlying schedule is stateful and
+    // shared); only the write-back is restricted to the chosen group.
+    virtual void step(size_t group_idx, int64_t epoch = -1) {
+        if (epoch == -1) {
+            last_epoch_++;
+        } else {
+            last_epoch_ = epoch;
+        }
+        std::vector<double> new_lrs = get_lr();
+        auto& groups = optimizer_->param_groups();
+        if (group_idx < groups.size() && group_idx < new_lrs.size()) {
+            groups[group_idx].lr = new_lrs[group_idx];
         }
     }
 

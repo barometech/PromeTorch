@@ -89,8 +89,8 @@ public:
             double lr = group.lr > 0 ? group.lr : options_.lr;
             double wd = group.weight_decay > 0 ? group.weight_decay : options_.weight_decay;
             double alpha = options_.alpha;
-            double eps = options_.eps;
-            double momentum = options_.momentum;
+            double eps = group.resolve_eps(options_.eps);
+            double momentum = group.resolve_momentum(options_.momentum);
             bool centered = options_.centered;
 
             for (auto* param : group.params) {

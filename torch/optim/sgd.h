@@ -78,7 +78,7 @@ public:
         for (auto& group : param_groups_) {
             double lr = group.lr > 0 ? group.lr : options_.lr;
             double wd = group.weight_decay > 0 ? group.weight_decay : options_.weight_decay;
-            double momentum = options_.momentum;
+            double momentum = group.resolve_momentum(options_.momentum);
             double dampening = options_.dampening;
             bool nesterov = options_.nesterov;
 
