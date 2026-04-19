@@ -1113,6 +1113,22 @@ if(PT_BUILD_TESTS)
 
     gtest_discover_tests(nn_modules_tests)
 
+    # Attention / SDPA Test (forward + backward, bool/causal/additive masks, dropout)
+    add_executable(attention_tests
+        test/cpp/test_attention.cpp
+    )
+    target_link_libraries(attention_tests
+        PRIVATE
+        torch_autograd
+        torch_nn
+        GTest::gtest
+        GTest::gtest_main
+    )
+    if(PT_USE_OPENMP AND OpenMP_CXX_FOUND)
+        target_link_libraries(attention_tests PRIVATE OpenMP::OpenMP_CXX)
+    endif()
+    gtest_discover_tests(attention_tests)
+
     # NN Functional Test
     add_executable(nn_functional_tests
         test/cpp/test_nn_functional_full.cpp
@@ -1280,6 +1296,7 @@ endif()
 # ============================================================================
 
 add_subdirectory(examples/mnist)
+add_subdirectory(examples/vae)
 add_subdirectory(examples/mobile)
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/examples/jit/CMakeLists.txt")
     add_subdirectory(examples/jit)
@@ -1290,8 +1307,14 @@ endif()
 add_subdirectory(examples/rnn)
 add_subdirectory(examples/transformer)
 add_subdirectory(examples/vit)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/examples/cifar/CMakeLists.txt")
+    add_subdirectory(examples/cifar)
+endif()
 add_subdirectory(examples/pir)
 add_subdirectory(examples/gguf)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/examples/gan/CMakeLists.txt")
+    add_subdirectory(examples/gan)
+endif()
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/examples/shakespeare/CMakeLists.txt")
     add_subdirectory(examples/shakespeare)
 endif()
