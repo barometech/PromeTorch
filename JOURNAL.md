@@ -3,6 +3,94 @@
 Полная история разработки проекта. Актуальные инструкции — в `CLAUDE.md`.
 Полный аудит инфраструктуры — в `INFRASTRUCTURE_AUDIT.md`.
 
+## 2026-04-19: Большой sprint закрытия гэпов vs PyTorch + лицензия
+
+### Лицензия
+**PromeTorch License** переписана для максимальной открытости:
+- BSD-3 база + 2 дополнения: атрибуция в коммерческих продуктах + запрет
+  на перепродажу самого фреймворка как продукта.
+- Внутреннее/академическое/research использование — без атрибуции.
+- Models, weights, pipelines, apps, SaaS — продавай свободно. Твоё.
+- Forks разрешены, public forks остаются под этой же лицензией.
+- Запрет: rebranding-as-framework, "Commercial Edition", paywall-core,
+  thin wrapper-as-framework, sale of source.
+- Текст: `LICENSE`, описание в `README.md` (раздел "Лицензия").
+
+### Серия коммитов
+Закрыли значительную часть API-гэпа vs PyTorch.
+
+**Autograd:**
+- `9b19480` 5 missing backward Nodes: WhereBackward, MaskedFillBackward,
+  ScatterAddBackward, GatherBackward, NormDimBackward — исправляют silent
+  zero-gradient bugs в embedding/masked-attention/weight-norm.
+- `df3f804`, `0f205af` reshape_autograd / select_autograd прокидывание
+  по `examples/shakespeare/model.h`, `examples/vit/train_vit.cpp`,
+  `examples/shakespeare/train.cpp` — `.reshape()` / `.select()` молча
+  обрывали backward chain.
+- `0f205af` `Tensor::add` вместо `at::add` для bias broadcast в Conv2d.
+
+**Operators:**
+- `472a1fe` logsumexp + LogSumExpBackward, one_hot, allclose, equal,
+  floor_divide.
+- `619aa00` Полный SDPA forward+backward CPU: маски ранг 2/3/4 (bool +
+  float), is_causal, dropout с reusable mask, любая размерность входа.
+  Тесты в `test/cpp/test_attention.cpp` (8 проходят).
+
+**NN modules:**
+- `97a11b2` ConvTranspose2d backward (ConvTranspose2dBackward) +
+  forward CPU↔CUDA bouncing для DCGAN-стиля моделей.
+
+**Optim/utils:**
+- `20d817a` 7 LR schedulers (CosineAnnealingWarmRestarts, CyclicLR,
+  PolynomialLR, LambdaLR, MultiplicativeLR, SequentialLR,
+  ChainedScheduler) + EMA + clip_grad_norm_/clip_grad_value_ +
+  checkpoint_sequential.
+
+**Examples:**
+- `ade8b88` Shakespeare/Transformer/ViT training loops fixed (правильный
+  zero_grad → forward → backward порядок, CrossEntropyLoss flat reshape).
+- `97a11b2` Новые тренировки: ResNet-20 CIFAR-10, DCGAN MNIST, VAE MNIST.
+- Vision utility: `torch/vision/resnet.h` (BasicBlock, ResNet-20 GAP head).
+
+**Performance / production:**
+- `cfbcd42` (предыдущий) GGUF MSVC parse fix + A100 verify 86.6 tok/s.
+- `ccf1fd0` GGUF: FP16 KV ON, CUDA Graph capture/replay, cublasSetStream
+  перед capture, std::cout flush gated за `PT_DEBUG_DECODE`. PromeServe:
+  thread pool с bounded queue (503 + Retry-After), per-request timeout,
+  CORS методы narrowed, header-parse bug fix (Content-Length терялся —
+  все POST приходили с body_size=0!), `/api/embeddings` 501. Результат:
+  86.6 → ~91 tok/s (cerr был ~5%, остальной gap до 150 tok/s требует
+  dequant→FP16+HGEMV рефактор — отдельная задача).
+
+**CI/Docs:**
+- `e2b25d9` `EXAMPLES_VERIFIED.md` — A100 verification matrix всех
+  бинарей (10-models 9/9 PASS, qwen3:4b 47.6 tok/s coherent, PIR
+  CUDA 0.54M params loss 3.87→2.74, mem-leak test PASS, LeNet CPU
+  не сходится — pre-existing CPU Conv bug).
+- `92f9c47` License clarification.
+
+### Ключевая находка о framework health
+**.reshape() / .select() обрывают autograd** — `Tensor::reshape()` вызывает
+ATen native reshape напрямую, минуя autograd, поэтому возвращённый view
+не имеет `grad_fn`. Все примеры использования `logits.reshape(...)` ПЕРЕД
+loss.forward() были silent gradient killers. Решение: `torch::autograd::
+reshape_autograd(...)` (и аналогично `select_autograd`).
+
+Нужно поднять это правило до соглашения: все view-операции в training
+loops должны использовать `*_autograd` варианты, иначе backward молча
+обрывается. TODO: либо переименовать, либо добавить debug-mode warning
+когда autograd-обёртка ожидается, но не используется.
+
+### Что осталось
+- **PromeServe → 150 tok/s gap (~70%)**: требуется dequant→FP16 + cuBLAS
+  HGEMV рефактор. Текущие 91 tok/s vs Ollama 165 на A100.
+- 4 фоновых агента ещё работают (ViT MNIST, ResNet-20 CIFAR, VAE MNIST,
+  DCGAN MNIST training-to-convergence).
+- LeNet CPU Conv bug (loss stuck at -log(0.1)) — pre-existing.
+- Тестовое покрытие: 434 теста для 110K LOC = ratio низкий.
+
+---
+
 ## 2026-04-16: PIR 250M тренировка — 800 steps, loss 1.04, генерация русского текста
 
 ### Полный цикл тренировки PIR 250M на Эльбрусе E8C2
