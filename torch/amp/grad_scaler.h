@@ -32,6 +32,12 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#ifdef PT_USE_CUDA
+#include <cuda_runtime.h>
+#include <cuda_fp16.h>
+#include "aten/src/ATen/cuda/CUDAOps.h"
+#endif
+
 namespace torch {
 namespace amp {
 
@@ -227,22 +233,61 @@ public:
     }
 
 private:
-    // Check if tensor contains inf or nan values
+    // Check if tensor contains inf or nan values.
+    // On CUDA tensors we launch a device-side kernel that atomic-writes into a
+    // small device flag and memcpy it back; on CPU we walk the buffer.
+    // This keeps the hot path off the host-device sync on every element.
     bool has_inf_or_nan(const at::Tensor& tensor) {
         if (!tensor.defined()) {
             return false;
         }
 
-        // For simplicity, check by iterating (CPU only for now)
-        // In production, this should be a CUDA kernel
-        at::Tensor contiguous = tensor.contiguous();
+#ifdef PT_USE_CUDA
+        if (tensor.is_cuda()) {
+            at::Tensor contiguous = tensor.is_contiguous() ? tensor : tensor.contiguous();
+            int64_t numel = contiguous.numel();
+            if (numel == 0) return false;
+
+            int* d_found = nullptr;
+            cudaError_t err = cudaMalloc(&d_found, sizeof(int));
+            if (err != cudaSuccess || d_found == nullptr) {
+                // Fallback: copy to CPU and check
+                return has_inf_or_nan_cpu(contiguous.to(c10::Device(c10::DeviceType::CPU)));
+            }
+            cudaMemset(d_found, 0, sizeof(int));
+
+            if (contiguous.dtype() == c10::ScalarType::Half) {
+                at::cuda::launch_check_inf_nan_fp16(
+                    reinterpret_cast<const __half*>(contiguous.data_ptr()),
+                    numel, d_found, nullptr);
+            } else if (contiguous.dtype() == c10::ScalarType::Float) {
+                at::cuda::launch_check_inf_nan_fp32(
+                    contiguous.data_ptr<float>(), numel, d_found, nullptr);
+            } else {
+                // Unsupported dtype on device — fall through to CPU check
+                cudaFree(d_found);
+                return has_inf_or_nan_cpu(contiguous.to(c10::Device(c10::DeviceType::CPU)));
+            }
+
+            int h_found = 0;
+            cudaMemcpy(&h_found, d_found, sizeof(int), cudaMemcpyDeviceToHost);
+            cudaFree(d_found);
+            return h_found != 0;
+        }
+#endif
+        return has_inf_or_nan_cpu(tensor);
+    }
+
+    bool has_inf_or_nan_cpu(const at::Tensor& tensor) {
+        at::Tensor contiguous = tensor.is_contiguous() ? tensor : tensor.contiguous();
         int64_t numel = contiguous.numel();
         bool found = false;
 
         PT_DISPATCH_FLOATING_TYPES(contiguous.dtype(), "has_inf_or_nan", [&] {
             const scalar_t* data = contiguous.data_ptr<scalar_t>();
             for (int64_t i = 0; i < numel; ++i) {
-                if (std::isinf(data[i]) || std::isnan(data[i])) {
+                if (std::isinf(static_cast<float>(data[i])) ||
+                    std::isnan(static_cast<float>(data[i]))) {
                     found = true;
                     return;
                 }

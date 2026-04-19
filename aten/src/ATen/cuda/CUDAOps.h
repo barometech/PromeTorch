@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cuda_runtime.h>
+#include <cuda_fp16.h>
 #include <cstdint>
 #include "c10/macros/Macros.h"
 
@@ -659,6 +660,62 @@ ATEN_CUDA_API void launch_flash_decode_fp16_graph(
     float* O, float* partial_O, float* partial_lse, float* partial_max,
     int n_heads, int n_kv_heads, int head_dim,
     const int64_t* d_past_len, int max_seq, float scale,
+    cudaStream_t stream = nullptr);
+
+// ============================================================================
+// FP16 Kernels (AMP / Automatic Mixed Precision)
+// ============================================================================
+// These mirror the float32 elementwise/activation/norm launchers above but
+// operate on __half storage with FP32 accumulation. Used when a tensor's
+// dtype == c10::ScalarType::Half under AutocastGuard.
+
+// Element-wise binary
+ATEN_CUDA_API void launch_add_fp16(const __half* a, const __half* b, __half* out, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_sub_fp16(const __half* a, const __half* b, __half* out, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_mul_fp16(const __half* a, const __half* b, __half* out, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_div_fp16(const __half* a, const __half* b, __half* out, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_add_broadcast_fp16(
+    const __half* a, const __half* b, __half* out,
+    int64_t outer_size, int64_t inner_size,
+    cudaStream_t stream = nullptr);
+
+// Activations
+ATEN_CUDA_API void launch_relu_fp16(const __half* input, __half* output, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_sigmoid_fp16(const __half* input, __half* output, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_tanh_fp16(const __half* input, __half* output, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_gelu_fp16(const __half* input, __half* output, int64_t n, cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_silu_fp16(const __half* input, __half* output, int64_t n, cudaStream_t stream = nullptr);
+
+// Fused softmax (max + exp + sum + normalize in one kernel, FP32 accumulate)
+ATEN_CUDA_API void launch_softmax_fp16(
+    const __half* input, __half* output,
+    int64_t outer_size, int64_t dim_size, int64_t inner_size,
+    cudaStream_t stream = nullptr);
+
+// LayerNorm: input [rows, hidden]; gamma/beta may be nullptr for affine=false
+ATEN_CUDA_API void launch_layernorm_fp16(
+    const __half* input,
+    const __half* gamma,
+    const __half* beta,
+    __half* output,
+    int rows, int hidden, float eps,
+    cudaStream_t stream = nullptr);
+
+// RMSNorm: input [rows, hidden]; weight may be nullptr (use identity)
+ATEN_CUDA_API void launch_rmsnorm_fp16(
+    const __half* input,
+    const __half* weight,
+    __half* output,
+    int rows, int hidden, float eps, bool add_one,
+    cudaStream_t stream = nullptr);
+
+// Device-side inf/nan check. `found_device` must point to an int on device;
+// caller zeroes it before launch and copies back afterwards to host.
+ATEN_CUDA_API void launch_check_inf_nan_fp32(
+    const float* data, int64_t n, int* found_device,
+    cudaStream_t stream = nullptr);
+ATEN_CUDA_API void launch_check_inf_nan_fp16(
+    const __half* data, int64_t n, int* found_device,
     cudaStream_t stream = nullptr);
 
 } // namespace cuda

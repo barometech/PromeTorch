@@ -13,13 +13,24 @@ project(PromeTorch
 option(PT_BUILD_SHARED_LIBS "Build shared libraries" ON)
 option(PT_BUILD_TESTS "Build tests" ON)
 option(PT_USE_CUDA "Enable CUDA support" OFF)
+option(PT_USE_ROCM "Enable AMD ROCm/HIP backend (hipify CUDA sources)" OFF)
 option(PT_USE_OPENMP "Enable OpenMP for CPU parallelization" OFF)
+
+# CUDA and ROCm share CMake's CUDA language slot but target different
+# toolchains (nvcc vs hipcc) — they cannot coexist in one build.
+if(PT_USE_CUDA AND PT_USE_ROCM)
+    message(FATAL_ERROR
+        "PT_USE_CUDA and PT_USE_ROCM are mutually exclusive. Pick one GPU "
+        "backend. ROCm builds run scripts/hipify.sh over the CUDA tree and "
+        "compile the translated sources with hipcc.")
+endif()
 option(PT_USE_AVX "Enable AVX instructions" ON)
 option(PT_USE_AVX2 "Enable AVX2 instructions" ON)
 option(PT_USE_NMCARD "Enable NM Card Mini support (emulator)" OFF)
 option(PT_USE_NMQUAD "Enable NM QUAD support (4x NM6408 hardware)" OFF)
 option(PT_USE_TUDA "Enable TUDA CPU arch dispatch (AVX2/NEON/E2K/Scalar)" ON)
 option(PT_USE_LINQ "Enable LinQ H1M accelerator (emulator)" OFF)
+option(PT_USE_MPS "Enable Apple Metal Performance Shaders backend (Apple only)" OFF)
 
 # ============================================================================
 # C++ Standard
@@ -222,6 +233,81 @@ if(PT_USE_CUDA)
 endif()
 
 # ============================================================================
+# ROCm / HIP (AMD GPUs)
+# ============================================================================
+# Strategy: one CUDA source tree. At configure time we invoke
+# scripts/hipify.sh to translate aten/src/ATen/cuda/*.{cu,h} into
+# ${CMAKE_BINARY_DIR}/hipified/... and compile those with hipcc. The
+# checked-in HIPCompat.h catches tokens hipify misses.
+#
+# Users pass -DCMAKE_CXX_COMPILER=hipcc on the cmake line (see docs/ROCM.md).
+# ============================================================================
+
+if(PT_USE_ROCM)
+    message(STATUS "ROCm/HIP backend: ENABLED")
+
+    if(NOT DEFINED ROCM_PATH)
+        if(DEFINED ENV{ROCM_PATH})
+            set(ROCM_PATH $ENV{ROCM_PATH})
+        else()
+            set(ROCM_PATH "/opt/rocm")
+        endif()
+    endif()
+    message(STATUS "  ROCM_PATH: ${ROCM_PATH}")
+
+    list(APPEND CMAKE_PREFIX_PATH "${ROCM_PATH}" "${ROCM_PATH}/lib/cmake")
+
+    # HIP as a first-class CMake language (requires CMake 3.21+). hipcc
+    # drives compilation; *.cu files are dispatched through it.
+    enable_language(HIP)
+
+    set(CMAKE_HIP_STANDARD 17)
+    set(CMAKE_HIP_STANDARD_REQUIRED ON)
+
+    if(NOT CMAKE_HIP_ARCHITECTURES)
+        set(CMAKE_HIP_ARCHITECTURES
+            gfx906   # MI50 / Radeon VII
+            gfx908   # MI100
+            gfx90a   # MI210 / MI250
+            gfx1030  # RX 6800/6900 (RDNA2)
+            gfx1100  # RX 7900 XTX (RDNA3)
+            gfx1101) # RX 7800/7700 (RDNA3)
+    endif()
+    set(CMAKE_CUDA_ARCHITECTURES "${CMAKE_HIP_ARCHITECTURES}")
+    message(STATUS "  HIP archs: ${CMAKE_HIP_ARCHITECTURES}")
+
+    find_package(hip REQUIRED)
+    find_package(rocblas REQUIRED)
+    find_package(miopen QUIET)  # cuDNN analogue — optional
+    if(miopen_FOUND)
+        message(STATUS "  MIOpen: FOUND")
+    else()
+        message(STATUS "  MIOpen: not found (convolution path disabled)")
+    endif()
+
+    # Translate CUDA sources at configure time.
+    set(PT_HIP_SRC_DIR "${CMAKE_SOURCE_DIR}/aten/src/ATen/cuda")
+    set(PT_HIP_OUT_DIR "${CMAKE_BINARY_DIR}/hipified/aten/src/ATen/cuda")
+
+    message(STATUS "  Running hipify: ${PT_HIP_SRC_DIR} -> ${PT_HIP_OUT_DIR}")
+    execute_process(
+        COMMAND bash "${CMAKE_SOURCE_DIR}/scripts/hipify.sh"
+                     "${PT_HIP_SRC_DIR}" "${PT_HIP_OUT_DIR}"
+        RESULT_VARIABLE _hipify_rc
+        OUTPUT_VARIABLE _hipify_out
+        ERROR_VARIABLE  _hipify_err)
+    if(NOT _hipify_rc EQUAL 0)
+        message(FATAL_ERROR "hipify.sh failed (rc=${_hipify_rc}):\n"
+                            "stdout: ${_hipify_out}\n"
+                            "stderr: ${_hipify_err}")
+    endif()
+    message(STATUS "  hipify: OK")
+
+    include_directories("${CMAKE_BINARY_DIR}/hipified" "${ROCM_PATH}/include")
+    add_compile_definitions(PT_USE_ROCM __HIP_PLATFORM_AMD__)
+endif()
+
+# ============================================================================
 # Include Directories
 # ============================================================================
 
@@ -290,6 +376,7 @@ set(ATEN_HEADERS
     aten/src/ATen/native/cpu/MathOps.h
     aten/src/ATen/native/cpu/ReduceOps.h
     aten/src/ATen/native/cpu/LinearAlgebra.h
+    aten/src/ATen/native/cpu/Einsum.h
     aten/src/ATen/native/cpu/ShapeOps.h
     aten/src/ATen/native/cpu/IndexOps.h
 )
@@ -298,6 +385,7 @@ set(ATEN_HEADERS
 if(PT_USE_CUDA)
     set(ATEN_CUDA_SOURCES
         aten/src/ATen/cuda/CUDAKernels.cu
+        aten/src/ATen/cuda/FP16Kernels.cu
         aten/src/ATen/cuda/CUDAReduce.cu
         aten/src/ATen/cuda/CUDABlas.cu
         aten/src/ATen/cuda/CUDAConv.cu
@@ -348,6 +436,60 @@ if(PT_USE_CUDA)
         CUDA_SEPARABLE_COMPILATION OFF
         POSITION_INDEPENDENT_CODE ON
     )
+endif()
+
+# ROCm/HIP path: build aten_cuda from the hipified sources under
+# ${CMAKE_BINARY_DIR}/hipified/. The filename stays "aten_cuda" so the rest
+# of the build graph (INTERFACE links, Python bindings) is untouched.
+if(PT_USE_ROCM)
+    set(_HIPIFIED_DIR "${CMAKE_BINARY_DIR}/hipified/aten/src/ATen/cuda")
+    set(ATEN_HIP_SOURCES
+        ${_HIPIFIED_DIR}/CUDAKernels.cu
+        ${_HIPIFIED_DIR}/CUDAReduce.cu
+        ${_HIPIFIED_DIR}/CUDABlas.cu
+        ${_HIPIFIED_DIR}/CUDAConv.cu
+        ${_HIPIFIED_DIR}/CUDAInference.cu
+        ${_HIPIFIED_DIR}/FlashDecoding.cu
+        ${_HIPIFIED_DIR}/CUDAQuantGemv.cu
+        ${_HIPIFIED_DIR}/FlashAttention.cu
+        # Allocator stays in the original tree — it's pure host C++ and the
+        # DLL-singleton constraint is identical for ROCm on Linux.
+        c10/cuda/CUDAAllocator.cpp
+    )
+    # Only pull in FP16Kernels.cu if the CUDA tree shipped it (some branches do).
+    if(EXISTS "${_HIPIFIED_DIR}/FP16Kernels.cu")
+        list(APPEND ATEN_HIP_SOURCES ${_HIPIFIED_DIR}/FP16Kernels.cu)
+    endif()
+
+    # Mark .cu files as HIP language so CMake dispatches hipcc instead of nvcc.
+    foreach(_src ${ATEN_HIP_SOURCES})
+        if(_src MATCHES "\\.cu$")
+            set_source_files_properties(${_src} PROPERTIES LANGUAGE HIP)
+        endif()
+    endforeach()
+
+    if(PT_BUILD_SHARED_LIBS)
+        add_library(aten_cuda SHARED ${ATEN_HIP_SOURCES})
+        target_compile_definitions(aten_cuda PRIVATE ATEN_CUDA_EXPORTS PT_BUILD_SHARED_LIBS)
+    else()
+        add_library(aten_cuda STATIC ${ATEN_HIP_SOURCES})
+    endif()
+
+    target_include_directories(aten_cuda PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}>
+        $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}/hipified>
+        $<INSTALL_INTERFACE:include>
+    )
+
+    target_link_libraries(aten_cuda PUBLIC c10 hip::host roc::rocblas)
+    if(miopen_FOUND)
+        target_link_libraries(aten_cuda PUBLIC MIOpen)
+        target_compile_definitions(aten_cuda PUBLIC PT_USE_MIOPEN)
+    endif()
+
+    target_compile_definitions(aten_cuda PUBLIC PT_USE_ROCM __HIP_PLATFORM_AMD__)
+
+    set_target_properties(aten_cuda PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
 
 # ATen CPU: compiled hot-path inner loops for LTO optimization on Elbrus.
@@ -434,6 +576,13 @@ if(PT_USE_CUDA)
     target_compile_definitions(aten INTERFACE PT_USE_CUDA)
 endif()
 
+if(PT_USE_ROCM)
+    # aten_cuda is built from hipified sources; code that guards on
+    # PT_USE_CUDA sees it too so callers don't have to ifdef twice.
+    target_link_libraries(aten INTERFACE aten_cuda)
+    target_compile_definitions(aten INTERFACE PT_USE_CUDA PT_USE_ROCM)
+endif()
+
 # ============================================================================
 # NM Card Mini Backend (Emulator + Hardware)
 # ============================================================================
@@ -504,6 +653,71 @@ if(PT_USE_LINQ)
 
     target_link_libraries(aten INTERFACE aten_linq)
     target_compile_definitions(aten INTERFACE PT_USE_LINQ)
+endif()
+
+# ============================================================================
+# MPS Backend (Apple Metal Performance Shaders — Apple platforms only)
+# ============================================================================
+# Enable via -DPT_USE_MPS=ON on macOS. CMake links Metal, MPS and MPSGraph
+# frameworks. If anyone toggles this on a non-Apple host, we fall back to
+# the error-only stubs (the .mm files compile the `#else` branch), so it
+# won't break the build but won't actually do anything either.
+
+if(PT_USE_MPS)
+    if(NOT APPLE)
+        message(WARNING "PT_USE_MPS=ON but CMAKE_HOST_SYSTEM is not Apple. "
+                        "MPS stubs will throw at runtime. Set OFF on Elbrus/Linux/Windows.")
+    endif()
+
+    # Objective-C++ sources. Safe to list on non-Apple hosts: CMake marks
+    # them as OBJCXX, and the #if-guards inside make them no-ops.
+    set(MPS_SOURCES
+        c10/mps/MPSAllocator.mm
+        aten/src/ATen/mps/MPSDevice.mm
+        aten/src/ATen/mps/MPSKernels.mm
+    )
+
+    if(APPLE)
+        enable_language(OBJCXX)
+        set_source_files_properties(${MPS_SOURCES} PROPERTIES
+            COMPILE_FLAGS "-fobjc-arc")
+    endif()
+
+    if(PT_BUILD_SHARED_LIBS)
+        add_library(aten_mps SHARED ${MPS_SOURCES})
+        target_compile_definitions(aten_mps PRIVATE ATEN_MPS_EXPORTS PT_BUILD_SHARED_LIBS)
+    else()
+        add_library(aten_mps STATIC ${MPS_SOURCES})
+    endif()
+
+    target_include_directories(aten_mps PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+    )
+    target_compile_definitions(aten_mps PUBLIC PT_USE_MPS)
+    target_link_libraries(aten_mps PUBLIC c10)
+
+    if(APPLE)
+        # Link against the actual Metal frameworks only when we're on Apple.
+        find_library(METAL_FRAMEWORK   Metal   REQUIRED)
+        find_library(MPS_FRAMEWORK     MetalPerformanceShaders REQUIRED)
+        find_library(MPSGRAPH_FRAMEWORK MetalPerformanceShadersGraph REQUIRED)
+        find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
+        target_link_libraries(aten_mps PUBLIC
+            ${METAL_FRAMEWORK}
+            ${MPS_FRAMEWORK}
+            ${MPSGRAPH_FRAMEWORK}
+            ${FOUNDATION_FRAMEWORK}
+        )
+    endif()
+
+    set_target_properties(aten_mps PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+        ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+    )
+
+    target_link_libraries(aten INTERFACE aten_mps)
+    target_compile_definitions(aten INTERFACE PT_USE_MPS)
 endif()
 
 if(PT_USE_OPENMP)
@@ -652,6 +866,7 @@ set(TORCH_EXTRAS_HEADERS
     torch/onnx/export.h
     # JIT compile prototype
     torch/jit/compile.h
+    torch/jit/codegen_cpp.h
     # Mobile serialization (ExecuTorch-like)
     torch/mobile/executor.h
     # MLIR text export
@@ -660,6 +875,14 @@ set(TORCH_EXTRAS_HEADERS
     torch/vision/vision.h
     torch/vision/transforms.h
     torch/vision/models.h
+    # Text (torchtext-compatible)
+    torch/text/text.h
+    torch/text/vocab.h
+    torch/text/tokenizers.h
+    # Audio (torchaudio-compatible)
+    torch/audio/audio.h
+    torch/audio/transforms.h
+    torch/audio/functional.h
     # Lightning-style trainer
     torch/trainer/trainer.h
     # Quantization (INT8 QAT)
@@ -667,13 +890,20 @@ set(TORCH_EXTRAS_HEADERS
     torch/quantization/observer.h
     torch/quantization/quantization.h
     torch/quantization/quantize.h
-    # Distributed (TCP DDP, FSDP, cluster launcher)
+    torch/quantization/quant4.h
+    # Distributed (TCP DDP, FSDP, cluster launcher, DeepSpeed-style)
     torch/distributed/ddp.h
     torch/distributed/fsdp.h
     torch/distributed/launcher.h
+    torch/distributed/deepspeed.h
+    torch/distributed/deepspeed_offload.h
+    torch/distributed/pipeline_schedule.h
+    torch/distributed/zero3.h
     # Forward-mode AD, vmap
     torch/autograd/forward_ad.h
     torch/autograd/vmap.h
+    # LLM serving engine
+    torch/serve/llm.h
 )
 
 add_library(torch_extras INTERFACE)
@@ -824,6 +1054,25 @@ if(PT_BUILD_TESTS)
 
     gtest_discover_tests(all_ops_tests)
 
+    # Auto-generated comprehensive op test suite (parameterized across
+    # ops x shapes x layouts). Targets 5000+ gtest cases.
+    add_executable(test_ops_generated
+        test/cpp/test_ops_generated.cpp
+        test/cpp/ops_spec.cpp
+    )
+
+    target_link_libraries(test_ops_generated
+        PRIVATE
+        aten
+        GTest::gtest
+        GTest::gtest_main
+    )
+
+    # gtest_discover_tests emits one ctest entry per gtest case; with thousands
+    # of cases this can make CTest config slow. Use add_test for a single
+    # umbrella entry and rely on --gtest_list_tests for the full breakdown.
+    add_test(NAME test_ops_generated COMMAND test_ops_generated)
+
     # Comprehensive Autograd Test
     add_executable(autograd_full_tests
         test/cpp/test_autograd_full.cpp
@@ -906,6 +1155,15 @@ if(PT_BUILD_TESTS)
         add_test(NAME fsdp_tests COMMAND fsdp_tests)
     endif()
 
+    # DeepSpeed-style wrappers (CPU offload, 1F1B pipeline, ZeRO-3).
+    add_executable(deepspeed_tests
+        test/cpp/test_deepspeed.cpp
+    )
+    target_link_libraries(deepspeed_tests PRIVATE torch_autograd)
+    if(NOT WIN32)
+        add_test(NAME deepspeed_tests COMMAND deepspeed_tests)
+    endif()
+
     # NM Card Mini Emulator Test (only when NMCard is enabled)
     if(PT_USE_NMCARD)
         add_executable(nmcard_tests
@@ -969,6 +1227,7 @@ if(PT_BUILD_PYTHON)
         python/csrc/autograd_bindings.cpp
         python/csrc/nn_bindings.cpp
         python/csrc/optim_bindings.cpp
+        python/csrc/bindings_new.cpp
     )
 
     target_include_directories(_C PRIVATE
@@ -989,6 +1248,11 @@ if(PT_BUILD_PYTHON)
         target_compile_definitions(_C PRIVATE PT_USE_CUDA)
     endif()
 
+    if(PT_USE_ROCM)
+        target_link_libraries(_C PRIVATE aten_cuda)
+        target_compile_definitions(_C PRIVATE PT_USE_CUDA PT_USE_ROCM)
+    endif()
+
     # Set output directory for Python package
     set_target_properties(_C PROPERTIES
         LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/python/promethorch
@@ -1005,6 +1269,9 @@ endif()
 
 add_subdirectory(examples/mnist)
 add_subdirectory(examples/mobile)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/examples/jit/CMakeLists.txt")
+    add_subdirectory(examples/jit)
+endif()
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/examples/mlir/CMakeLists.txt")
     add_subdirectory(examples/mlir)
 endif()
@@ -1031,7 +1298,7 @@ endif()
 # ============================================================================
 
 set(INSTALL_TARGETS c10 aten_cpu aten torch_autograd torch_nn torch_optim torch_data torch_extras)
-if(PT_USE_CUDA)
+if(PT_USE_CUDA OR PT_USE_ROCM)
     list(APPEND INSTALL_TARGETS aten_cuda)
 endif()
 if(PT_USE_NMCARD)
@@ -1039,6 +1306,9 @@ if(PT_USE_NMCARD)
 endif()
 if(PT_USE_LINQ)
     list(APPEND INSTALL_TARGETS aten_linq)
+endif()
+if(PT_USE_MPS)
+    list(APPEND INSTALL_TARGETS aten_mps)
 endif()
 
 install(TARGETS ${INSTALL_TARGETS}
@@ -1113,8 +1383,14 @@ if(PT_USE_CUDA AND PT_USE_CUDNN)
 else()
     message(STATUS "  cuDNN: OFF")
 endif()
+message(STATUS "  ROCm/HIP: ${PT_USE_ROCM}")
+if(PT_USE_ROCM)
+    message(STATUS "  HIP archs: ${CMAKE_HIP_ARCHITECTURES}")
+    message(STATUS "  ROCM_PATH: ${ROCM_PATH}")
+endif()
 message(STATUS "  NMCard Mini: ${PT_USE_NMCARD}")
 message(STATUS "  LinQ H1M: ${PT_USE_LINQ}")
+message(STATUS "  MPS (Apple Metal): ${PT_USE_MPS}")
 message(STATUS "  TUDA CPU Dispatch: ${PT_USE_TUDA}")
 message(STATUS "  AVX: ${PT_USE_AVX}")
 message(STATUS "  AVX2: ${PT_USE_AVX2}")
