@@ -9,6 +9,8 @@
 #include <functional>
 #include <string>
 #include <sstream>
+#include <cmath>
+#include <limits>
 
 namespace torch {
 namespace optim {
@@ -19,19 +21,72 @@ using nn::Parameter;
 // ============================================================================
 // ParamGroup - Groups parameters with shared optimizer options
 // ============================================================================
-// Allows different learning rates or other options for different parameter groups
+// Allows different learning rates and other hyperparameters per group.
+// Used for fine-tuning workflows like discriminative learning rates
+// (e.g. lower LR for backbone, higher LR for classifier head).
+//
+// Inheritance semantics:
+//   - `lr` and `weight_decay` always have concrete defaults.
+//   - `momentum`, `betas`, `eps`, `amsgrad` default to "inherit" sentinels
+//     (NaN for doubles, -1 for amsgrad) — when the optimizer sees a sentinel
+//     it falls back to its own options_. This preserves backwards-compat
+//     while allowing per-group overrides.
+//
+// Usage:
+//   std::vector<ParamGroup> groups;
+//   groups.push_back(ParamGroup(backbone_params, /*lr=*/1e-5));
+//   groups.push_back(ParamGroup(head_params,     /*lr=*/1e-3));
+//   AdamW opt(groups);
+//   // or build incrementally:
+//   AdamW opt({});
+//   opt.add_param_group(ParamGroup(backbone_params, 1e-5));
+//   opt.add_param_group(ParamGroup(head_params,     1e-3));
 
 struct ParamGroup {
     std::vector<Parameter*> params;
 
-    // Common options
+    // Concrete defaults — always honored by optimizers.
     double lr = 0.01;
     double weight_decay = 0.0;
+
+    // Per-group overrides for optimizer-specific hyperparameters.
+    // NaN means "inherit from optimizer's default options".
+    double momentum = std::numeric_limits<double>::quiet_NaN();
+    double betas[2] = {std::numeric_limits<double>::quiet_NaN(),
+                       std::numeric_limits<double>::quiet_NaN()};
+    double eps = std::numeric_limits<double>::quiet_NaN();
+
+    // Tri-state: -1 = inherit, 0 = false, 1 = true.
+    int8_t amsgrad = -1;
+
+    // Optional human-readable label (for logging / debugging).
+    std::string name;
 
     ParamGroup() = default;
 
     explicit ParamGroup(std::vector<Parameter*> params_, double lr_ = 0.01)
         : params(std::move(params_)), lr(lr_) {}
+
+    ParamGroup(std::vector<Parameter*> params_, double lr_, std::string name_)
+        : params(std::move(params_)), lr(lr_), name(std::move(name_)) {}
+
+    // Helpers for resolving "inherit" sentinels against an optimizer default.
+    static inline bool is_set(double v) { return !std::isnan(v); }
+    inline double resolve_momentum(double fallback) const {
+        return is_set(momentum) ? momentum : fallback;
+    }
+    inline double resolve_beta1(double fallback) const {
+        return is_set(betas[0]) ? betas[0] : fallback;
+    }
+    inline double resolve_beta2(double fallback) const {
+        return is_set(betas[1]) ? betas[1] : fallback;
+    }
+    inline double resolve_eps(double fallback) const {
+        return is_set(eps) ? eps : fallback;
+    }
+    inline bool resolve_amsgrad(bool fallback) const {
+        return amsgrad < 0 ? fallback : (amsgrad != 0);
+    }
 };
 
 // ============================================================================

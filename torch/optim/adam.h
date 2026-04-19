@@ -97,10 +97,10 @@ public:
         for (auto& group : param_groups_) {
             double lr = group.lr > 0 ? group.lr : options_.lr;
             double wd = group.weight_decay > 0 ? group.weight_decay : options_.weight_decay;
-            double beta1 = options_.beta1;
-            double beta2 = options_.beta2;
-            double eps = options_.eps;
-            bool amsgrad = options_.amsgrad;
+            double beta1 = group.resolve_beta1(options_.beta1);
+            double beta2 = group.resolve_beta2(options_.beta2);
+            double eps = group.resolve_eps(options_.eps);
+            bool amsgrad = group.resolve_amsgrad(options_.amsgrad);
 
             // ================================================================
             // Phase 1: Initialize states, handle CUDA params individually
@@ -287,10 +287,10 @@ public:
         for (auto& group : param_groups_) {
             double lr = group.lr > 0 ? group.lr : options_.lr;
             double wd = group.weight_decay > 0 ? group.weight_decay : options_.weight_decay;
-            double beta1 = options_.beta1;
-            double beta2 = options_.beta2;
-            double eps = options_.eps;
-            bool amsgrad = options_.amsgrad;
+            double beta1 = group.resolve_beta1(options_.beta1);
+            double beta2 = group.resolve_beta2(options_.beta2);
+            double eps = group.resolve_eps(options_.eps);
+            bool amsgrad = group.resolve_amsgrad(options_.amsgrad);
 
             // ================================================================
             // Phase 1: Initialize states, collect CPU float params for fused step
