@@ -4,6 +4,8 @@
 #include "torch/nn/init.h"
 #include "torch/csrc/autograd/autograd.h"
 #include "torch/csrc/autograd/grad_mode.h"
+#include "torch/amp/autocast.h"
+#include "torch/amp/autocast_policy.h"
 #include "aten/src/ATen/native/cpu/PromeBLAS.h"
 #include "aten/src/ATen/native/cpu/FastOps.h"
 #include "aten/src/ATen/native/cpu/tuda/TudaVec.h"
@@ -93,9 +95,49 @@ public:
         }
     }
 
-    Tensor forward(const Tensor& input) override {
+    Tensor forward(const Tensor& input_orig) override {
         // Use cached pointers (avoid map lookup on every forward call)
-        Tensor W = cached_weight_->data();  // [out_features, in_features]
+        Tensor W_orig = cached_weight_->data();  // [out_features, in_features]
+
+        // ================================================================
+        // Autocast preamble: AMP dispatch boundary
+        // ================================================================
+        // If an AutocastGuard is active on this device AND the policy table
+        // maps "linear" -> FP16, cast inputs + weight + bias to the autocast
+        // dtype *before* entering the forward body.  Uses `to_autograd` so the
+        // backward chain flows through ToBackward nodes, preserving the FP32
+        // master weights (the cached parameter data itself is untouched).
+        //
+        // When autocast is off or policy is Unchanged, the original tensors
+        // pass through by reference — zero overhead on the hot path.
+        Tensor input_cast;
+        Tensor W_cast;
+        Tensor bias_cast;
+        const Tensor* input_p = &input_orig;
+        const Tensor* W_p = &W_orig;
+        const Tensor* bias_p = has_bias_ ? &cached_bias_->data() : nullptr;
+
+        if (torch::amp::is_autocast_enabled(input_orig.device().type()) &&
+            torch::amp::policy_for("linear") == torch::amp::CastPolicy::FP16)
+        {
+            auto target = torch::amp::get_autocast_dtype(input_orig.device().type());
+            if (c10::isFloatingType(input_orig.dtype()) &&
+                input_orig.dtype() != target)
+            {
+                input_cast = torch::autograd::to_autograd(input_orig, target);
+                W_cast     = torch::autograd::to_autograd(W_orig, target);
+                input_p = &input_cast;
+                W_p     = &W_cast;
+                if (has_bias_) {
+                    bias_cast = torch::autograd::to_autograd(
+                        cached_bias_->data(), target);
+                    bias_p = &bias_cast;
+                }
+            }
+        }
+
+        const Tensor& input = *input_p;
+        const Tensor& W     = *W_p;
 
         // ================================================================
         // FAST PATH: float32, no autograd (inference or NoGradGuard)
@@ -114,10 +156,10 @@ public:
             if (input.dim() == 2 && input.is_contiguous()) {
                 if (fused_relu_ && has_bias_) {
                     return at::native::fast::fused_linear_relu_f32(
-                        input, W, cached_bias_->data());
+                        input, W, *bias_p);
                 } else if (has_bias_) {
                     return at::native::fast::fused_linear_f32(
-                        input, W, cached_bias_->data());
+                        input, W, *bias_p);
                 } else if (fused_relu_) {
                     return at::native::fast::fused_linear_relu_nobias_f32(input, W);
                 } else {
@@ -135,10 +177,10 @@ public:
                 Tensor result;
                 if (fused_relu_ && has_bias_) {
                     result = at::native::fast::fused_linear_relu_f32(
-                        x_2d, W, cached_bias_->data());
+                        x_2d, W, *bias_p);
                 } else if (has_bias_) {
                     result = at::native::fast::fused_linear_f32(
-                        x_2d, W, cached_bias_->data());
+                        x_2d, W, *bias_p);
                 } else if (fused_relu_) {
                     result = at::native::fast::fused_linear_relu_nobias_f32(x_2d, W);
                 } else {
@@ -168,7 +210,7 @@ public:
             input.is_cpu() && W.is_cpu()) {
             Tensor bias_data;
             if (has_bias_) {
-                bias_data = cached_bias_->data();
+                bias_data = *bias_p;
             }
 
             if (fused_relu_) {
@@ -200,7 +242,7 @@ public:
         }
 
         if (has_bias_) {
-            output = torch::autograd::add_autograd(output, cached_bias_->data());
+            output = torch::autograd::add_autograd(output, *bias_p);
         }
 
         return output;

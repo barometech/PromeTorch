@@ -2,9 +2,12 @@
 
 #include "torch/nn/module.h"
 #include "torch/nn/init.h"
+#include "torch/amp/autocast.h"
+#include "torch/amp/autocast_policy.h"
 #include "aten/src/ATen/native/cpu/PromeBLAS.h"
 #include "aten/src/ATen/native/cpu/hot_loops.h"
 #include "aten/src/ATen/native/cpu/tuda/TudaVec.h"
+#include "torch/csrc/autograd/autograd.h"
 #include "torch/csrc/autograd/autograd_meta.h"
 #include "torch/csrc/autograd/node.h"
 #include "torch/csrc/autograd/functions/ConvBackward.h"
@@ -363,10 +366,52 @@ public:
         }
     }
 
-    Tensor forward(const Tensor& input) override {
+    Tensor forward(const Tensor& input_orig) override {
         // Input: [N, C_in, H, W]
         auto* weight_param = get_parameter("weight");
-        Tensor W = weight_param->data();
+        Tensor W_orig = weight_param->data();
+
+        // ================================================================
+        // Autocast preamble: AMP dispatch boundary
+        // ================================================================
+        // If an AutocastGuard is active on this device AND the policy table
+        // maps "conv2d" -> FP16, cast input + weight + bias to the autocast
+        // dtype before entering the forward body.  Uses `to_autograd` so
+        // backward flows through ToBackward nodes to the FP32 master weights.
+        //
+        // When autocast is off or policy is Unchanged, the original tensors
+        // pass through by reference — zero overhead on the hot path.
+        Tensor input_cast;
+        Tensor W_cast;
+        Tensor bias_cast;
+        const Tensor* input_p = &input_orig;
+        const Tensor* W_p = &W_orig;
+        // bias tensor obtained lazily per-branch below; track the effective
+        // one here so CUDA / CPU paths can share the cast result.
+        bool bias_overridden = false;
+
+        if (torch::amp::is_autocast_enabled(input_orig.device().type()) &&
+            torch::amp::policy_for("conv2d") == torch::amp::CastPolicy::FP16)
+        {
+            auto target = torch::amp::get_autocast_dtype(input_orig.device().type());
+            if (c10::isFloatingType(input_orig.dtype()) &&
+                input_orig.dtype() != target)
+            {
+                input_cast = torch::autograd::to_autograd(input_orig, target);
+                W_cast     = torch::autograd::to_autograd(W_orig, target);
+                input_p = &input_cast;
+                W_p     = &W_cast;
+                if (has_bias_) {
+                    auto* bias_param = get_parameter("bias");
+                    bias_cast = torch::autograd::to_autograd(
+                        bias_param->data(), target);
+                    bias_overridden = true;
+                }
+            }
+        }
+
+        const Tensor& input = *input_p;
+        const Tensor& W     = *W_p;
 
 #ifdef PT_USE_CUDA
         // CUDA dispatch: prefer cuDNN for float32/groups=any; fall back to custom kernel
@@ -374,8 +419,12 @@ public:
         if (input.is_cuda()) {
             Tensor bias_tensor;
             if (has_bias_) {
-                auto* bias_param = get_parameter("bias");
-                bias_tensor = bias_param->data();
+                if (bias_overridden) {
+                    bias_tensor = bias_cast;
+                } else {
+                    auto* bias_param = get_parameter("bias");
+                    bias_tensor = bias_param->data();
+                }
             }
 #ifdef PT_USE_CUDNN
             if (input.dtype() == c10::ScalarType::Float) {
@@ -472,8 +521,10 @@ public:
 
         // Fused bias addition with AVX2
         if (has_bias_) {
-            auto* bias_param = get_parameter("bias");
-            const float* bias_data = bias_param->data().data_ptr<float>();
+            Tensor bias_data_tensor = bias_overridden
+                ? bias_cast
+                : get_parameter("bias")->data();
+            const float* bias_data = bias_data_tensor.data_ptr<float>();
 
             for (int64_t n = 0; n < batch_size; ++n) {
                 for (int64_t c = 0; c < out_channels_; ++c) {
