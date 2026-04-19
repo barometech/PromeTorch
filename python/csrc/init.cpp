@@ -13,7 +13,12 @@
 #include "torch/nn/nn.h"
 #include "torch/optim/optim.h"
 #include "torch/serialization.h"
+#include "torch/serialization_pytorch.h"
 #include "torch/data/data.h"
+
+#if defined(__APPLE__) && defined(PT_USE_MPS)
+#  include "aten/src/ATen/mps/MPSDevice.h"
+#endif
 
 namespace py = pybind11;
 
@@ -22,6 +27,7 @@ void init_tensor_bindings(py::module& m);
 void init_autograd_bindings(py::module& m);
 void init_nn_bindings(py::module& m);
 void init_optim_bindings(py::module& m);
+void init_new_bindings(py::module& m);  // bindings_new.cpp — submodules
 
 // ============================================================================
 // Device Bindings
@@ -31,6 +37,7 @@ void init_device_bindings(py::module& m) {
     py::enum_<c10::DeviceType>(m, "DeviceType")
         .value("CPU", c10::DeviceType::CPU)
         .value("CUDA", c10::DeviceType::CUDA)
+        .value("MPS", c10::DeviceType::MPS)
         .export_values();
 
     py::class_<c10::Device>(m, "device")
@@ -107,6 +114,20 @@ void init_serialization_bindings(py::module& m) {
         return torch::load_state_dict(path);
     }, py::arg("path"),
     "Load a state dict from a file");
+
+    // PyTorch-compatible .pt / .pth (ZIP + pickle) format.
+    m.def("save_pytorch", [](const std::unordered_map<std::string, at::Tensor>& sd,
+                              const std::string& path) {
+        return torch::save_pytorch(sd, path);
+    }, py::arg("state_dict"), py::arg("path"),
+    "Save a state dict in PyTorch-compatible .pt (zip+pickle) format readable "
+    "by torch.load().");
+
+    m.def("load_pytorch", [](const std::string& path) {
+        return torch::load_pytorch(path);
+    }, py::arg("path"),
+    "Load a PyTorch .pt/.pth file (restricted unpickler; accepts only "
+    "torch._utils._rebuild_tensor_v2 and standard Storage classes).");
 }
 
 // ============================================================================
@@ -193,6 +214,11 @@ PYBIND11_MODULE(_C, m) {
     py::module data = m.def_submodule("data", "Data loading utilities");
     init_data_bindings(data);
 
+    // New subsystems: parallel, distributed, trainer, export (onnx/mlir/mobile),
+    // jit, vision, quantization, forward-AD / vmap, serve.
+    // Creates submodules directly on `m` (e.g. m.parallel, m.distributed, ...).
+    init_new_bindings(m);
+
     // CUDA availability
     m.def("cuda_is_available", []() {
 #ifdef PT_USE_CUDA
@@ -211,6 +237,18 @@ PYBIND11_MODULE(_C, m) {
         return 0;
 #endif
     }, "Get number of CUDA devices");
+
+    // MPS (Apple Metal Performance Shaders) availability.
+    // Only true on macOS builds with PT_USE_MPS=ON *and* an actual MTLDevice.
+    m.def("mps_is_available", []() {
+#if defined(__APPLE__) && defined(PT_USE_MPS)
+        // MPSDevice self-initialises on first access; returns false if
+        // MTLCreateSystemDefaultDevice() gave us nil.
+        return at::mps::MPSDevice::get().is_available();
+#else
+        return false;
+#endif
+    }, "Check if Apple MPS backend is available");
 
     // Version info
     m.attr("__version__") = "0.2.0";
