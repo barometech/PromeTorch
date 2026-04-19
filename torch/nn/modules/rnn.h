@@ -11,12 +11,118 @@
 #include <cstring>
 #include <vector>
 
+#if defined(PT_USE_CUDA) && defined(PT_USE_CUDNN)
+#include "aten/src/ATen/cudnn/CuDNNRNN.h"
+#include <cuda_runtime.h>
+#endif
+
 namespace torch {
 namespace nn {
 
 using at::Tensor;
 // Note: Do NOT use 'using' for autograd functions here — pir.h defines
 // duplicate names in torch::nn, which causes ambiguity. Use fully qualified calls.
+
+#if defined(PT_USE_CUDA) && defined(PT_USE_CUDNN)
+namespace detail {
+
+// Copy a host-side (or CUDA-side) weight tensor into a cuDNN flat-params slot.
+// `src` is assumed contiguous with exactly `slot.nelem` elements.
+inline void _copy_into_rnn_slot(const at::cudnn::RNNLinLayerSlot& slot,
+                                const Tensor& src)
+{
+    if (!src.defined() || slot.ptr == nullptr || slot.nelem == 0) return;
+    cudaMemcpyKind kind = src.is_cuda() ? cudaMemcpyDeviceToDevice
+                                        : cudaMemcpyHostToDevice;
+    cudaMemcpy(slot.ptr, src.data_ptr<float>(),
+               slot.nelem * sizeof(float), kind);
+}
+
+// Build a flat cuDNN params blob out of per-layer {W_ih, W_hh, b_ih, b_hh}
+// tuples. `gates_per_layer` is 1 (RNN), 3 (GRU), or 4 (LSTM); must match
+// cfg.type. For each layer/direction we expect 4 tensors ordered:
+//   W_ih [gates*H, in_size], W_hh [gates*H, H], b_ih [gates*H], b_hh [gates*H]
+// The W_ih/W_hh rows are concatenated [gate0 ; gate1 ; ...] in PyTorch order,
+// which matches cuDNN linear-layer indexing for LSTM (i,f,g,o) and GRU (r,z,n).
+inline Tensor _pack_cudnn_rnn_params(
+    const at::cudnn::CuDNNRNNConfig& cfg,
+    int gates_per_layer,
+    const std::vector<Tensor>& W_ih_list,  // size = num_layers * dirs
+    const std::vector<Tensor>& W_hh_list,
+    const std::vector<Tensor>& b_ih_list,  // may contain undefined Tensors
+    const std::vector<Tensor>& b_hh_list)
+{
+    size_t bytes = at::cudnn::cudnn_rnn_flat_params_size(cfg);
+    int64_t nelem = static_cast<int64_t>(bytes / sizeof(float));
+    Tensor flat = at::empty({nelem},
+        at::TensorOptions().dtype(c10::ScalarType::Float).device(c10::kCUDA()));
+    cudaMemset(flat.mutable_data_ptr<void>(), 0, bytes);
+
+    int dirs = cfg.num_directions();
+    int64_t H = cfg.hidden_size;
+
+    for (int layer = 0; layer < cfg.num_layers; ++layer) {
+        for (int dir = 0; dir < dirs; ++dir) {
+            int ld = layer * dirs + dir;
+            for (int g = 0; g < gates_per_layer; ++g) {
+                // Slice W_ih row range [g*H : (g+1)*H] from the full matrix.
+                // We copy the entire gate block by pointer arithmetic on the
+                // contiguous matrix — so require contiguous tensors.
+                const Tensor& W_ih = W_ih_list[ld];
+                const Tensor& W_hh = W_hh_list[ld];
+                Tensor W_ih_c = W_ih.contiguous();
+                Tensor W_hh_c = W_hh.contiguous();
+
+                int64_t in_size  = W_ih_c.size(1);
+                int64_t hid_size = W_hh_c.size(1);
+
+                auto slot_ih = at::cudnn::cudnn_rnn_get_lin_layer_matrix(
+                    flat, cfg, layer, dir, g);
+                auto slot_hh = at::cudnn::cudnn_rnn_get_lin_layer_matrix(
+                    flat, cfg, layer, dir, g + gates_per_layer);
+
+                // W_ih gate block: rows [g*H .. (g+1)*H) → H * in_size floats
+                cudaMemcpyKind kind_ih = W_ih_c.is_cuda() ? cudaMemcpyDeviceToDevice
+                                                         : cudaMemcpyHostToDevice;
+                cudaMemcpy(slot_ih.ptr,
+                           W_ih_c.data_ptr<float>() + g * H * in_size,
+                           H * in_size * sizeof(float), kind_ih);
+
+                cudaMemcpyKind kind_hh = W_hh_c.is_cuda() ? cudaMemcpyDeviceToDevice
+                                                         : cudaMemcpyHostToDevice;
+                cudaMemcpy(slot_hh.ptr,
+                           W_hh_c.data_ptr<float>() + g * H * hid_size,
+                           H * hid_size * sizeof(float), kind_hh);
+
+                // Biases (if present): single gate block of H floats.
+                if (b_ih_list[ld].defined()) {
+                    Tensor b_ih_c = b_ih_list[ld].contiguous();
+                    auto slot_b_ih = at::cudnn::cudnn_rnn_get_lin_layer_bias(
+                        flat, cfg, layer, dir, g);
+                    cudaMemcpyKind k = b_ih_c.is_cuda() ? cudaMemcpyDeviceToDevice
+                                                       : cudaMemcpyHostToDevice;
+                    cudaMemcpy(slot_b_ih.ptr,
+                               b_ih_c.data_ptr<float>() + g * H,
+                               H * sizeof(float), k);
+                }
+                if (b_hh_list[ld].defined()) {
+                    Tensor b_hh_c = b_hh_list[ld].contiguous();
+                    auto slot_b_hh = at::cudnn::cudnn_rnn_get_lin_layer_bias(
+                        flat, cfg, layer, dir, g + gates_per_layer);
+                    cudaMemcpyKind k = b_hh_c.is_cuda() ? cudaMemcpyDeviceToDevice
+                                                       : cudaMemcpyHostToDevice;
+                    cudaMemcpy(slot_b_hh.ptr,
+                               b_hh_c.data_ptr<float>() + g * H,
+                               H * sizeof(float), k);
+                }
+            }
+        }
+    }
+    return flat;
+}
+
+} // namespace detail
+#endif // PT_USE_CUDA && PT_USE_CUDNN
 
 // ============================================================================
 // RNNCellImpl — h' = tanh(W_ih @ x + b_ih + W_hh @ h + b_hh)
@@ -330,6 +436,46 @@ public:
             hx = at::zeros({num_layers_ * num_directions, batch, hidden_size_});
         }
 
+#if defined(PT_USE_CUDA) && defined(PT_USE_CUDNN)
+        if (x.is_cuda() && !torch::autograd::GradMode::is_enabled()
+            && x.dtype() == c10::ScalarType::Float) {
+            at::cudnn::CuDNNRNNConfig cfg;
+            cfg.type          = at::cudnn::CuDNNRNNConfig::RNNType::RNN_TANH;
+            cfg.input_size    = input_size_;
+            cfg.hidden_size   = hidden_size_;
+            cfg.num_layers    = num_layers_;
+            cfg.bidirectional = bidirectional_;
+            cfg.dropout       = static_cast<float>(dropout_);
+
+            std::vector<Tensor> W_ih_list, W_hh_list, b_ih_list, b_hh_list;
+            for (int64_t layer = 0; layer < num_layers_; ++layer) {
+                for (int64_t dir = 0; dir < num_directions; ++dir) {
+                    auto cell = cells_[layer * num_directions + dir];
+                    auto ih_mod = cell->get_submodule("ih");
+                    auto hh_mod = cell->get_submodule("hh");
+                    auto* w_ih_p = ih_mod->get_parameter("weight");
+                    auto* w_hh_p = hh_mod->get_parameter("weight");
+                    auto* b_ih_p = ih_mod->get_parameter("bias");
+                    auto* b_hh_p = hh_mod->get_parameter("bias");
+                    W_ih_list.push_back(w_ih_p ? w_ih_p->data() : Tensor());
+                    W_hh_list.push_back(w_hh_p ? w_hh_p->data() : Tensor());
+                    b_ih_list.push_back((b_ih_p && b_ih_p->data().defined()) ? b_ih_p->data() : Tensor());
+                    b_hh_list.push_back((b_hh_p && b_hh_p->data().defined()) ? b_hh_p->data() : Tensor());
+                }
+            }
+            Tensor flat = detail::_pack_cudnn_rnn_params(
+                cfg, /*gates_per_layer=*/1, W_ih_list, W_hh_list, b_ih_list, b_hh_list);
+
+            Tensor cx_empty;
+            auto res = at::cudnn::cudnn_rnn_forward(
+                x.contiguous(), hx.contiguous(), cx_empty, flat, cfg, /*train=*/false);
+            Tensor out = std::get<0>(res);
+            Tensor hy  = std::get<1>(res);
+            if (batch_first_) out = out.transpose(0, 1).contiguous();
+            return {out, hy};
+        }
+#endif
+
         // Collect final hidden states
         std::vector<Tensor> h_n_list;
 
@@ -446,6 +592,52 @@ public:
 
         Tensor hx = h0.defined() ? h0 : at::zeros({num_layers_ * num_directions, batch, hidden_size_});
         Tensor cx = c0.defined() ? c0 : at::zeros({num_layers_ * num_directions, batch, hidden_size_});
+
+#if defined(PT_USE_CUDA) && defined(PT_USE_CUDNN)
+        // ================================================================
+        // CUDA + cuDNN fast path (inference only for now; no grad_fn wired).
+        // ================================================================
+        if (x.is_cuda() && !torch::autograd::GradMode::is_enabled()
+            && x.dtype() == c10::ScalarType::Float) {
+            at::cudnn::CuDNNRNNConfig cfg;
+            cfg.type          = at::cudnn::CuDNNRNNConfig::RNNType::LSTM;
+            cfg.input_size    = input_size_;
+            cfg.hidden_size   = hidden_size_;
+            cfg.num_layers    = num_layers_;
+            cfg.bidirectional = bidirectional_;
+            cfg.dropout       = static_cast<float>(dropout_);
+
+            std::vector<Tensor> W_ih_list, W_hh_list, b_ih_list, b_hh_list;
+            for (int layer = 0; layer < num_layers_; ++layer) {
+                for (int dir = 0; dir < num_directions; ++dir) {
+                    auto cell = std::dynamic_pointer_cast<LSTMCellImpl>(
+                        cells_[layer * num_directions + dir]);
+                    auto ih_mod = cell->get_submodule("ih");
+                    auto hh_mod = cell->get_submodule("hh");
+                    auto* w_ih_p = ih_mod->get_parameter("weight");
+                    auto* w_hh_p = hh_mod->get_parameter("weight");
+                    auto* b_ih_p = ih_mod->get_parameter("bias");
+                    auto* b_hh_p = hh_mod->get_parameter("bias");
+                    W_ih_list.push_back(w_ih_p ? w_ih_p->data() : Tensor());
+                    W_hh_list.push_back(w_hh_p ? w_hh_p->data() : Tensor());
+                    b_ih_list.push_back((b_ih_p && b_ih_p->data().defined()) ? b_ih_p->data() : Tensor());
+                    b_hh_list.push_back((b_hh_p && b_hh_p->data().defined()) ? b_hh_p->data() : Tensor());
+                }
+            }
+            Tensor flat = detail::_pack_cudnn_rnn_params(
+                cfg, /*gates_per_layer=*/4,
+                W_ih_list, W_hh_list, b_ih_list, b_hh_list);
+
+            auto res = at::cudnn::cudnn_rnn_forward(
+                x.contiguous(), hx.contiguous(), cx.contiguous(),
+                flat, cfg, /*train=*/false);
+            Tensor out = std::get<0>(res);
+            Tensor hy  = std::get<1>(res);
+            Tensor cy  = std::get<2>(res);
+            if (batch_first_) out = out.transpose(0, 1).contiguous();
+            return {out, hy, cy};
+        }
+#endif
 
         // ================================================================
         // Fast path: non-bidirectional, no autograd — pre-allocate output
@@ -601,6 +793,46 @@ public:
         int64_t batch = x.size(1);
 
         Tensor hx = h0.defined() ? h0 : at::zeros({num_layers_ * num_directions, batch, hidden_size_});
+
+#if defined(PT_USE_CUDA) && defined(PT_USE_CUDNN)
+        if (x.is_cuda() && !torch::autograd::GradMode::is_enabled()
+            && x.dtype() == c10::ScalarType::Float) {
+            at::cudnn::CuDNNRNNConfig cfg;
+            cfg.type          = at::cudnn::CuDNNRNNConfig::RNNType::GRU;
+            cfg.input_size    = input_size_;
+            cfg.hidden_size   = hidden_size_;
+            cfg.num_layers    = num_layers_;
+            cfg.bidirectional = bidirectional_;
+            cfg.dropout       = static_cast<float>(dropout_);
+
+            std::vector<Tensor> W_ih_list, W_hh_list, b_ih_list, b_hh_list;
+            for (int64_t layer = 0; layer < num_layers_; ++layer) {
+                for (int64_t dir = 0; dir < num_directions; ++dir) {
+                    auto cell = cells_[layer * num_directions + dir];
+                    auto ih_mod = cell->get_submodule("ih");
+                    auto hh_mod = cell->get_submodule("hh");
+                    auto* w_ih_p = ih_mod->get_parameter("weight");
+                    auto* w_hh_p = hh_mod->get_parameter("weight");
+                    auto* b_ih_p = ih_mod->get_parameter("bias");
+                    auto* b_hh_p = hh_mod->get_parameter("bias");
+                    W_ih_list.push_back(w_ih_p ? w_ih_p->data() : Tensor());
+                    W_hh_list.push_back(w_hh_p ? w_hh_p->data() : Tensor());
+                    b_ih_list.push_back((b_ih_p && b_ih_p->data().defined()) ? b_ih_p->data() : Tensor());
+                    b_hh_list.push_back((b_hh_p && b_hh_p->data().defined()) ? b_hh_p->data() : Tensor());
+                }
+            }
+            Tensor flat = detail::_pack_cudnn_rnn_params(
+                cfg, /*gates_per_layer=*/3, W_ih_list, W_hh_list, b_ih_list, b_hh_list);
+
+            Tensor cx_empty;
+            auto res = at::cudnn::cudnn_rnn_forward(
+                x.contiguous(), hx.contiguous(), cx_empty, flat, cfg, /*train=*/false);
+            Tensor out = std::get<0>(res);
+            Tensor hy  = std::get<1>(res);
+            if (batch_first_) out = out.transpose(0, 1).contiguous();
+            return {out, hy};
+        }
+#endif
 
         std::vector<Tensor> h_n_list;
         Tensor layer_input = x;
