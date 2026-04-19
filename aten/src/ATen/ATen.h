@@ -30,6 +30,8 @@
 #include "aten/src/ATen/native/cpu/ShapeOps.h"
 #include "aten/src/ATen/native/cpu/IndexOps.h"
 #include "aten/src/ATen/native/cpu/FFTOps.h"
+#include "aten/src/ATen/native/cpu/Einsum.h"
+#include "aten/src/ATen/native/cpu/OpsExpansion.h"
 
 // Autograd support for Tensor binary ops (add/sub/mul/div)
 #include "torch/csrc/autograd/grad_mode.h"
@@ -1934,5 +1936,67 @@ namespace fft {
     inline Tensor fftshift(const Tensor& t, c10::IntArrayRef dims = {}) { return at::native::fftshift(t, dims); }
     inline Tensor ifftshift(const Tensor& t, c10::IntArrayRef dims = {}) { return at::native::ifftshift(t, dims); }
 }
+
+// ============================================================================
+// OpsExpansion aliases — user-facing (torch::op_name)
+// ============================================================================
+
+// Shape / view
+using at::native::squeeze_dim;
+using at::native::unbind;
+using at::native::movedim;
+using at::native::permute_dims;
+using at::native::view_as;
+using at::native::reshape_as;
+using at::native::expand_as;
+using at::native::broadcast_to;
+using at::native::split_sizes;
+using at::native::pad;
+using at::native::pad_constant;
+using at::native::pad_reflect;
+using at::native::pad_replicate;
+using at::native::unfold_window;
+using at::native::fold_window;
+using at::native::tile;
+using at::native::stack_along_dim;
+using at::native::meshgrid_ij;
+using at::native::cartesian_prod;
+
+// Index
+using at::native::gather_dim;
+using at::native::scatter_dim;
+using at::native::scatter_add_dim;
+using at::native::index_add;
+using at::native::index_copy;
+using at::native::masked_scatter;
+
+// Reduce
+using at::native::argmax_dim;
+using at::native::argmin_dim;
+using at::native::topk_along_dim;
+using at::native::all_reduce;
+using at::native::any_reduce;
+
+// Linalg
+using at::native::diagonal;
+using at::native::outer_product;
+using at::native::kron;
+
+// Logical
+using at::native::logical_and;
+using at::native::logical_or;
+using at::native::logical_not;
+using at::native::logical_xor;
+
+// Float classification
+using at::native::isfinite;
+using at::native::isinf;
+using at::native::isnan;
+using at::native::isclose;
+
+// Misc elementwise
+using at::native::lerp;
+using at::native::hypot;
+using at::native::atan2;
 
 } // namespace torch

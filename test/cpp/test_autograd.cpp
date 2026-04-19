@@ -614,6 +614,57 @@ TEST(AutogradTest, SoftmaxCrossEntropyLike) {
 }
 
 // ============================================================================
+// Hooks & AnomalyMode
+// ============================================================================
+
+TEST(HooksTest, DoublingHookChangesAccumulatedGrad) {
+    // Leaf parameter with requires_grad
+    Tensor w = ones({4});
+    w.set_requires_grad(true);
+
+    // Register a hook that doubles the incoming gradient.
+    auto h = register_hook(w, [](const Tensor& g) -> Tensor {
+        return g.mul(Scalar(2.0f));
+    });
+
+    // Trivial graph: loss = sum(w * w) => d loss / d w = 2 * w = 2
+    // With doubling hook => accumulated grad = 2 * (2*w) = 4
+    Tensor loss = sum_autograd(mul_autograd(w, w));
+    tensor_backward(loss);
+
+    Tensor g = get_grad(w);
+    ASSERT_TRUE(g.defined());
+    const float* gp = g.data_ptr<float>();
+    for (int i = 0; i < 4; ++i) {
+        EXPECT_NEAR(gp[i], 4.0f, 1e-5f) << "idx=" << i;
+    }
+    remove_hook(h);
+}
+
+TEST(AnomalyModeTest, ThrowsOnNaNWithNodeName) {
+    // Create a tensor that will produce NaN in forward: log(0) = -inf,
+    // and differentiating log at 0 yields 1/0 => inf in backward.
+    Tensor x = zeros({1});
+    x.set_requires_grad(true);
+    Tensor y = log_autograd(x);       // y = -inf
+    Tensor loss = sum_autograd(y);
+
+    AnomalyGuard guard;
+    bool threw = false;
+    std::string msg;
+    try {
+        tensor_backward(loss);
+    } catch (const std::runtime_error& e) {
+        threw = true;
+        msg = e.what();
+    }
+    EXPECT_TRUE(threw) << "AnomalyMode should throw on NaN/Inf gradient";
+    // The error message should mention a node name (LogBackward, SumBackward
+    // or AccumulateGrad) and mention AnomalyMode.
+    EXPECT_NE(msg.find("AnomalyMode"), std::string::npos) << msg;
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 

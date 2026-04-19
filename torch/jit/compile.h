@@ -37,12 +37,19 @@
 
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
 #include <vector>
 
 #ifdef _OPENMP
 #include <omp.h>
+#endif
+
+// Threshold (element count) above which CompiledFn tries the codegen path.
+// Can be overridden at compile time or at runtime via PROMETORCH_JIT_THRESH.
+#ifndef PROMETORCH_JIT_CODEGEN_THRESHOLD
+    #define PROMETORCH_JIT_CODEGEN_THRESHOLD 100000
 #endif
 
 namespace torch {
@@ -99,6 +106,44 @@ struct MicroOp {
     float scalar = 0.0f;     // for *_S ops
     int64_t rhs_value_id = -1; // for *_T ops, id of the second tensor input
 };
+
+// ----------------------------------------------------------------------------
+// Runtime hook for the C++ codegen backend. torch/jit/codegen_cpp.h registers
+// itself here on first inclusion so compile.h has no hard dependency on the
+// codegen implementation (which needs dlopen / filesystem / subprocess).
+//
+// The hook takes a chain and returns a compiled kernel function pointer or
+// nullptr on failure (interpreter fallback will be used).
+// ----------------------------------------------------------------------------
+using CodegenFusedKernelFn = void (*)(const float** inputs, int num_inputs,
+                                      float* output, int64_t n);
+using CodegenHookFn = CodegenFusedKernelFn (*)(const std::vector<MicroOp>&);
+
+inline CodegenHookFn& codegen_hook() {
+    static CodegenHookFn hook = nullptr;
+    return hook;
+}
+
+// Decide whether codegen is allowed at runtime. Controlled by env var
+// PROMETORCH_JIT (on/off) and minimum tensor size PROMETORCH_JIT_THRESH.
+inline bool codegen_enabled(int64_t n) {
+    static const bool s_off = [](){
+        const char* v = std::getenv("PROMETORCH_JIT");
+        return v && (std::strcmp(v, "0") == 0 ||
+                     std::strcmp(v, "off") == 0 ||
+                     std::strcmp(v, "OFF") == 0);
+    }();
+    if (s_off) return false;
+    static const int64_t s_thresh = [](){
+        const char* v = std::getenv("PROMETORCH_JIT_THRESH");
+        if (!v || !*v) return int64_t(PROMETORCH_JIT_CODEGEN_THRESHOLD);
+        char* end = nullptr;
+        long long x = std::strtoll(v, &end, 10);
+        return (end && *end == '\0' && x > 0)
+            ? int64_t(x) : int64_t(PROMETORCH_JIT_CODEGEN_THRESHOLD);
+    }();
+    return n >= s_thresh && codegen_hook() != nullptr;
+}
 
 struct OpRecord {
     Op op;
@@ -468,12 +513,22 @@ public:
     // mutable so operator() can be const and still update caches.
     mutable std::vector<at::Tensor> output_cache;
 
+    // Per-record compiled kernel cache (populated lazily on first replay if
+    // tensor size exceeds threshold and codegen is wired). -1 = not tried,
+    // 0 = tried and failed (use interpreter), 1 = compiled_fn valid.
+    mutable std::vector<int8_t> codegen_state;
+    mutable std::vector<CodegenFusedKernelFn> codegen_kernels;
+
     size_t trace_len() const { return program.size(); }
     size_t raw_trace_len() const { return original_trace_len; }
 
     at::Tensor operator()(const at::Tensor& input) const {
         if (output_cache.size() != program.size())
             output_cache.assign(program.size(), at::Tensor());
+        if (codegen_state.size() != program.size()) {
+            codegen_state.assign(program.size(), int8_t(-1));
+            codegen_kernels.assign(program.size(), nullptr);
+        }
 
         // value-id -> Tensor. nullopt-equivalent = undefined Tensor.
         std::vector<at::Tensor> values(value_count);
@@ -505,21 +560,46 @@ public:
                     }
                     int64_t n = out.numel();
 
-                    // Build CompiledMicro array on the stack-ish (small).
-                    std::vector<CompiledMicro> chain(r.chain.size());
-                    for (size_t i = 0; i < r.chain.size(); ++i) {
-                        const auto& m = r.chain[i];
-                        chain[i].op = static_cast<uint8_t>(m.op);
-                        chain[i].scalar = m.scalar;
-                        chain[i].rhs = nullptr;
-                        if (is_binary_tensor_ewise(m.op)) {
-                            auto& rt = values[m.rhs_value_id];
-                            if (!rt.is_contiguous()) rt = rt.contiguous();
-                            chain[i].rhs = rt.data_ptr<float>();
-                        }
+                    // Try the codegen path for large tensors.
+                    if (codegen_state[pi] == -1 && codegen_enabled(n)) {
+                        auto fn = codegen_hook()(r.chain);
+                        codegen_kernels[pi] = fn;
+                        codegen_state[pi] = fn ? int8_t(1) : int8_t(0);
                     }
-                    run_fused_chain(chain, base.data_ptr<float>(),
-                                    out.mutable_data_ptr<float>(), n);
+
+                    if (codegen_state[pi] == 1 && codegen_kernels[pi]) {
+                        // Collect rhs buffers in chain order for the codegen
+                        // kernel. Layout matches emit_cpp_fused_kernel().
+                        std::vector<const float*> ins;
+                        ins.reserve(r.chain.size() + 1);
+                        ins.push_back(base.data_ptr<float>());
+                        for (const auto& m : r.chain) {
+                            if (is_binary_tensor_ewise(m.op)) {
+                                auto& rt = values[m.rhs_value_id];
+                                if (!rt.is_contiguous()) rt = rt.contiguous();
+                                ins.push_back(rt.data_ptr<float>());
+                            }
+                        }
+                        codegen_kernels[pi](
+                            ins.data(), static_cast<int>(ins.size()),
+                            out.mutable_data_ptr<float>(), n);
+                    } else {
+                        // Interpreter fallback.
+                        std::vector<CompiledMicro> chain(r.chain.size());
+                        for (size_t i = 0; i < r.chain.size(); ++i) {
+                            const auto& m = r.chain[i];
+                            chain[i].op = static_cast<uint8_t>(m.op);
+                            chain[i].scalar = m.scalar;
+                            chain[i].rhs = nullptr;
+                            if (is_binary_tensor_ewise(m.op)) {
+                                auto& rt = values[m.rhs_value_id];
+                                if (!rt.is_contiguous()) rt = rt.contiguous();
+                                chain[i].rhs = rt.data_ptr<float>();
+                            }
+                        }
+                        run_fused_chain(chain, base.data_ptr<float>(),
+                                        out.mutable_data_ptr<float>(), n);
+                    }
                     values[r.output_id] = out;
                     break;
                 }

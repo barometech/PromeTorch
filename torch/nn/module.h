@@ -1,6 +1,7 @@
 #pragma once
 
 #include "torch/nn/parameter.h"
+#include "torch/csrc/autograd/hooks.h"
 #include "aten/src/ATen/ATen.h"
 #include <memory>
 #include <string>
@@ -28,6 +29,9 @@ using ModulePtr = std::shared_ptr<Module>;
 using ForwardPreHook = std::function<void(Module&, const Tensor&)>;
 using ForwardHook = std::function<void(Module&, const Tensor&, const Tensor&)>;
 using ForwardHookWithReturn = std::function<Tensor(Module&, const Tensor&, const Tensor&)>;
+// Backward hook: called with parameter name + incoming grad, may return
+// modified grad (undefined Tensor = no change).
+using BackwardHook = std::function<Tensor(Module&, const std::string&, const Tensor&)>;
 
 // Handle for removing hooks
 struct HookHandle {
@@ -566,6 +570,53 @@ public:
         forward_hooks_with_return_.erase(handle.id);
     }
 
+    // Register a hook that fires for every parameter gradient before it is
+    // accumulated into param.grad. Internally attaches a tensor-level
+    // torch::autograd::register_hook() to each (named) parameter currently
+    // owned by this module (recursively). Returned HookHandle removes all
+    // underlying tensor hooks on remove.
+    HookHandle register_backward_hook(BackwardHook hook) {
+        int64_t id = next_hook_id_++;
+        auto shared_hook = std::make_shared<BackwardHook>(std::move(hook));
+        std::vector<torch::autograd::GradHookHandle> handles;
+        // Walk own parameters
+        for (auto& name : parameter_order_) {
+            auto& param = parameters_[name];
+            Tensor& t = param.data();
+            if (!t.defined() || !t.requires_grad()) continue;
+            Module* self = this;
+            std::string pname = name;
+            auto h = torch::autograd::register_hook(
+                t,
+                [self, shared_hook, pname](const Tensor& g) -> Tensor {
+                    if (!*shared_hook) return Tensor();
+                    return (*shared_hook)(*self, pname, g);
+                });
+            handles.push_back(std::move(h));
+        }
+        // Recurse into submodules so one call covers the whole tree
+        for (auto& sm_name : submodule_order_) {
+            auto& sm = submodules_[sm_name];
+            if (!sm) continue;
+            auto sub_handle = sm->register_backward_hook(
+                [shared_hook](Module& m, const std::string& p, const Tensor& g)
+                -> Tensor {
+                    if (!*shared_hook) return Tensor();
+                    return (*shared_hook)(m, p, g);
+                });
+            (void)sub_handle;  // lifetime owned by submodule; we key by id
+        }
+        backward_hook_handles_[id] = std::move(handles);
+        return HookHandle(id);
+    }
+
+    void remove_backward_hook(const HookHandle& h) {
+        auto it = backward_hook_handles_.find(h.id);
+        if (it == backward_hook_handles_.end()) return;
+        for (auto& gh : it->second) torch::autograd::remove_hook(gh);
+        backward_hook_handles_.erase(it);
+    }
+
     // ========================================================================
     // Apply Function to All Modules
     // ========================================================================
@@ -602,6 +653,8 @@ protected:
     std::map<int64_t, ForwardPreHook> forward_pre_hooks_;
     std::map<int64_t, ForwardHook> forward_hooks_;
     std::map<int64_t, ForwardHookWithReturn> forward_hooks_with_return_;
+    // id -> list of underlying tensor-level grad hooks (for removal)
+    std::map<int64_t, std::vector<torch::autograd::GradHookHandle>> backward_hook_handles_;
     inline static std::atomic<int64_t> next_hook_id_{0};
 };
 

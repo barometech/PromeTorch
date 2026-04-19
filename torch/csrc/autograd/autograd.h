@@ -15,6 +15,8 @@
 #include "torch/csrc/autograd/node_pool.h"
 #include "torch/csrc/autograd/autograd_meta.h"
 #include "torch/csrc/autograd/engine.h"
+#include "torch/csrc/autograd/hooks.h"
+#include "torch/csrc/autograd/anomaly_mode.h"
 
 // Compiled inner loops for LTO on Elbrus
 #include "aten/src/ATen/native/cpu/hot_loops.h"
@@ -91,6 +93,20 @@ inline variable_list AccumulateGrad::apply(variable_list&& grads) {
     // and ignore strides, so non-contiguous gradients produce wrong results
     // in gradient accumulation and SGD updates.
     Tensor grad_contig = grad.is_contiguous() ? grad : grad.contiguous();
+
+    // Run pre-accumulate grad_hooks_ (PyTorch tensor.register_hook() semantics):
+    // hooks see the incoming gradient and may return a replacement gradient
+    // that is then accumulated into tensor.grad. Undefined return = no change.
+    {
+        auto* maybe_impl = raw_meta->is_autograd_meta_impl_
+                            ? static_cast<AutogradMetaImpl*>(raw_meta) : nullptr;
+        if (maybe_impl && !maybe_impl->grad_hooks_.empty()) {
+            Tensor hooked = run_grad_hooks(maybe_impl, grad_contig);
+            if (hooked.defined()) {
+                grad_contig = hooked.is_contiguous() ? hooked : hooked.contiguous();
+            }
+        }
+    }
 
     // Accumulate gradient (using base class grad_ field)
     if (!raw_meta->grad_) {
