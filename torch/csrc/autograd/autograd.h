@@ -690,6 +690,105 @@ inline Tensor pow_autograd(const Tensor& self, const Tensor& exponent) {
     return make_result_with_grad2<PowBackward>(result, self, exponent, self, exponent, result);
 }
 
+// ============================================================================
+// Scalar arithmetic with autograd (tensor op scalar → tensor)
+// ============================================================================
+// Python-op-bindings use these: `t + 2.0` / `2.0 * t` / `t / 3.0` need the
+// gradient to keep flowing to `t`. The raw `Tensor::add(Scalar)` etc. skip
+// autograd. These wrappers compute inside NoGradGuard then attach the
+// matching {Add,Mul,Div}ScalarBackward node. SubScalar is expressed as
+// AddScalar(-s) because d/dt[t - s] = 1 (same as add).
+
+inline Tensor add_scalar_autograd(const Tensor& self, Scalar other) {
+    Tensor result;
+    {
+        NoGradGuard no_grad;
+        result = self.add(other);
+    }
+    if (compute_requires_grad(self)) {
+        auto grad_fn = NodePool<AddScalarBackward>::make_shared();
+        grad_fn->add_input_metadata(self);
+        set_grad_fn(result, grad_fn);
+        result.set_requires_grad(true);
+    }
+    return result;
+}
+
+inline Tensor sub_scalar_autograd(const Tensor& self, Scalar other) {
+    // t - s has the same gradient as t + s (both pass through grad unchanged).
+    Tensor result;
+    {
+        NoGradGuard no_grad;
+        result = self.sub(other);
+    }
+    if (compute_requires_grad(self)) {
+        auto grad_fn = NodePool<AddScalarBackward>::make_shared();
+        grad_fn->add_input_metadata(self);
+        set_grad_fn(result, grad_fn);
+        result.set_requires_grad(true);
+    }
+    return result;
+}
+
+inline Tensor mul_scalar_autograd(const Tensor& self, Scalar other) {
+    Tensor result;
+    {
+        NoGradGuard no_grad;
+        result = self.mul(other);
+    }
+    if (compute_requires_grad(self)) {
+        auto grad_fn = NodePool<MulScalarBackward>::make_shared(other);
+        grad_fn->add_input_metadata(self);
+        set_grad_fn(result, grad_fn);
+        result.set_requires_grad(true);
+    }
+    return result;
+}
+
+inline Tensor div_scalar_autograd(const Tensor& self, Scalar other) {
+    Tensor result;
+    {
+        NoGradGuard no_grad;
+        result = self.div(other);
+    }
+    if (compute_requires_grad(self)) {
+        auto grad_fn = NodePool<DivScalarBackward>::make_shared(other);
+        grad_fn->add_input_metadata(self);
+        set_grad_fn(result, grad_fn);
+        result.set_requires_grad(true);
+    }
+    return result;
+}
+
+// Right-side scalar variants for `s - t` and `s / t` (addition and multiplication
+// commute, so `s + t` and `s * t` just forward to the left-side variants above).
+//
+// For s - t: d/dt[s - t] = -1, so the grad flowing back to t is -upstream.
+// We compute via neg then add_scalar so both pieces are autograd-wired.
+inline Tensor rsub_scalar_autograd(Scalar scalar, const Tensor& self) {
+    return add_scalar_autograd(neg_autograd(self), scalar);
+}
+
+// For s / t: d/dt[s / t] = -s / t^2. Express as s * t.reciprocal() and defer
+// to mul_scalar_autograd + ReciprocalBackward (already exists). Used rarely;
+// if a future caller needs higher numerical stability, add a dedicated
+// RDivScalarBackward node.
+inline Tensor rdiv_scalar_autograd(Scalar scalar, const Tensor& self) {
+    Tensor inv;
+    {
+        NoGradGuard no_grad;
+        inv = self.reciprocal();
+    }
+    if (compute_requires_grad(self)) {
+        // ReciprocalBackward(result) uses result=1/x to compute -grad*result^2.
+        auto grad_fn = NodePool<ReciprocalBackward>::make_shared(inv);
+        grad_fn->add_input_metadata(self);
+        set_grad_fn(inv, grad_fn);
+        inv.set_requires_grad(true);
+    }
+    return mul_scalar_autograd(inv, scalar);
+}
+
 inline Tensor pow_autograd(const Tensor& self, Scalar exponent) {
     Tensor result = self.pow(exponent);  // No CUDA dispatch yet
     return make_result_with_grad<PowScalarBackward>(result, self, self, exponent);
