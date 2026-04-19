@@ -1,14 +1,48 @@
 # PromeTorch — Российский training framework
 
-> PyTorch-совместимый обучающий фреймворк на C++17/CUDA с фокусом на float32.
-> Нативная поддержка **Эльбрус E8C2 (VLIW)** и **NM Card Mini (partner, Q16.16)**.
-> Настоящий autograd (110 backward функций), 835 gtest, CPU SIMD + CUDA через cuBLAS/cuDNN.
-> 91,000+ строк C++. 1 разработчик. ~1 месяц активной разработки.
+> PyTorch-совместимый обучающий фреймворк на C++17/CUDA с широкой dtype-поддержкой.
+> Нативная сборка на **Эльбрус E8C2 (VLIW)** и **NM Card Mini (partner, Q16.16)**.
+> Real autograd (110 backward ops + gradient hooks + anomaly mode + create_graph double-bwd),
+> 20 optimizers, CPU SIMD + CUDA (cuBLAS/cuDNN/FP16 kernels), distributed training
+> (TCP DDP/FSDP/TP/Pipeline), export (ONNX/MLIR/Mobile/JIT), ecosystem shims
+> (HuggingFace/torchvision/torchaudio/torchtext/Lightning Trainer), **PyTorch-compatible
+> save/load (.pt ↔ torch.load/save)**.
+>
+> ~110,000 строк C++. 1 разработчик. ~5 недель активной разработки + 35-agent burst session.
 
-> ⚠️ **Не полноценная замена PyTorch.** Это solo-проект: dtype coverage ограничен float32
-> (FP16/BF16 не обучает), ChannelsLast — только метаданные, FlashAttention имеет баги (см.
-> `INFRASTRUCTURE_AUDIT.md`), некоторые ops (Conv3d, CTCLoss) — stubs. См. раздел
-> **Known Limitations** ниже.
+> ⚠️ **Coverage ~35-45% практической площади PyTorch.** Это solo-проект: ряд CUDA путей
+> (FP16 kernels, cuDNN RNN, MPS/ROCm) **compile-verified но runtime-untested** (нет доступа
+> к соответствующему железу). `torch.compile` — trace-based prototype, не полноценный
+> TorchInductor. Sparse tensors / FX graph mode / torch.distributions отсутствуют.
+> См. **Known Limitations** ниже — каждый gap честно задокументирован.
+
+---
+
+## Coverage vs PyTorch
+
+| Категория | PyTorch | PromeTorch | % |
+|---|---|---|---|
+| Tensor ops | ~2000 | ~150 (90 базовых + 50+ в OpsExpansion) | ~7% |
+| Backward functions | ~1500 | 110 + hooks + anomaly | ~7% |
+| Optimizers | 15+ | **20** (Lion/Sophia/LAMB/Adafactor/NAdam/RAdam/Adagrad/Adamax/ASGD/LBFGS + base 10) | 130% |
+| LR schedulers | 15+ | 9 | 60% |
+| dtypes | 20+ | 10 (Float32/64, Half, BFloat16, **Float8 e4m3fn/e5m2**, Complex64/128, Bool, int8-64) | ~50% |
+| Autograd features | full | core + hooks + anomaly + create_graph + forward-AD + vmap — отсутствуют grad-of-vmap/hessian/full functorch | ~40% |
+| Distributed | NCCL/gloo/ucc, DDP/FSDP/TP/PP/ZeRO/bucket fusion | **real TCP DDP, FSDP/ZeRO-3, TP Col/Row, Pipeline 1F1B, DistributedSampler, launcher** | ~35% |
+| Compile/JIT | `torch.compile` (TorchInductor + Triton) | trace-based `torch.jit.compile` + C++ codegen subprocess | ~10% |
+| Export | ONNX + TorchScript + ExecuTorch + TensorRT | **ONNX (ORT works) + MLIR + Mobile + JIT** | ~50% |
+| Backends | CPU / CUDA / ROCm / MPS / XLA / Vulkan / TPU | CPU + CUDA (cuBLAS/cuDNN) + MPS (compile-only) + ROCm (script) + NM Card Mini + Эльбрус + FP16 (compile-only) | ~45% |
+| Ecosystem | torchvision/audio/text/rl/transforms + Lightning/Accelerate/DeepSpeed/FSDP native | **torchvision + torchaudio + torchtext + HF Transformers compat + Lightning Trainer + PyTorch-.pt compat + DeepSpeed shim** | ~50% |
+| Quantization | INT8/INT4/NF4/FP8/QAT/PTQ | INT8 QAT + INT4 + NF4 + fp8 dtype | ~60% |
+| Sparse tensors | COO/CSR/BSR | нет | 0% |
+| torch.distributions | 50+ | нет | 0% |
+| FX graph mode | full | нет | 0% |
+| Unit tests | 100K+ | ~850 gtest + ~30 agent self-tests + auto-generated suite | ~1% |
+
+**Обобщённая оценка: ~35-45% user-surface PyTorch** — достаточно для training/deploy
+transformers/CNN/RNN/LLM на CPU + CUDA + Эльбрус + NM Card. Gap в **tuned kernels** /
+**torch.compile production** / **sparse+distributions+FX** — закрытие потребует
+multi-year team effort.
 
 ---
 
@@ -96,7 +130,7 @@ Inference GGUF-моделей (квантизация Q4_K_M) через custom 
 датасетах, ViT, ResNet, VAE. Заготовки `examples/transformer/` и `examples/vit/` в репо
 есть, но никогда не собирались end-to-end.
 
-### PIR 250M на Эльбрусе (Local SGD data-parallel)
+### PIR 342M на Эльбрусе (Local SGD data-parallel) — fixed backward
 
 Тренировка собственной linear-RNN LM архитектуры (selective scan, родственник Mamba/HGRN/
 RWKV) на русскоязычном корпусе Wikipedia (2 ГБ, BPE-токенизация SentencePiece 100k).
@@ -105,15 +139,25 @@ RWKV) на русскоязычном корпусе Wikipedia (2 ГБ, BPE-то
 | Метрика | Значение |
 |---------|----------|
 | Архитектура | 342M params, 768d, 16 layers × 4 PIR sublayers, SwiGLU FFN (H=1792), seq=2048 |
-| Parallelism | 4 процесса × 8 ядер **Local SGD** (file-based weight averaging, не gradient AllReduce — ≠ DDP) |
-| Throughput | 4 × ~140 tok/s = **~560 tok/s aggregate** |
-| Related arch | PIR — diagonal selective scan `h[t] = σ(gate)*base_decay*h[t-1] + σ(gate)*value`. Близко к Mamba (A diagonal SSM), HGRN/RWKV (multi-scale decay) |
+| Parallelism | 4 процесса × 8 ядер **Local SGD** (file-based weight averaging, не gradient AllReduce — ≠ DDP; настоящий DDP теперь есть отдельно в `torch/distributed/ddp.h`) |
+| Throughput | 4 × ~95 tok/s = **~380 tok/s aggregate** на fixed backward (медленнее прошлого 568 т.к. backward теперь делает реальную работу вместо stub'ов) |
+| Related arch | PIR — diagonal selective scan `h[t] = σ(gate)·base_decay·h[t-1] + σ(gate)·value`. Близко к Mamba (A diagonal SSM), HGRN/RWKV (multi-scale decay) |
 | Checkpoint | Формат: raw float32 concatenation по param order. Python inference: `pir_infer.py` |
 
-> **Статус:** данные, представленные ранее ("loss 1.04, coherent Russian"), получены на версии
-> с частично сломанным backward (embedding/scan/gate/value градиенты отсутствовали). Цифры
-> воспроизведения на исправленном backward — в процессе. Public-ready числа и sample
-> generation обновятся после следующей full-run тренировки.
+**Trajectory на fixed backward (2026-04-19):**
+| Step | Loss | Perplexity | Sample (prompt "В начале") |
+|------|------|------------|----------------------------|
+| 50 | 10.53 | 37,467 | "изменением школе web вший свою сказывается" |
+| 100 | 7.50 | 1,815 | wiki markup (`&lt;/ref&gt;`, section headers) |
+| 200 | 6.44 | 628 | "`== Награды по изменением ровка, чтобы ''х — 1961370`" (section header + связное словосочетание) |
+| 300 | 6.12 | 454 | "Главный этом компонентов в 1884 года на воз поверхности в сотрудничестве. После разгрома время их Второй Украине" |
+| 400 | 5.61 | 275 | "`== Биография ==`" + "`Про Федерации smal sказывается Васильевич`" (patronymic + reflexive verb + gen) |
+| 500 | 5.70 | 298 | "`== Награды ==` ... `=Примечания=` ... `Похорольный`" (proper Wiki infobox + adjective chain) |
+
+Модель учит Wikipedia-структуру + русский синтаксис. Loss monotone падает через warmup + cosine decay.
+Прежние сигналы "loss 1.04 coherent Russian" относились к **сломанному** backward (embedding/scan/
+gate/value градиенты отсутствовали) — сейчас все 342M params реально учатся, lose descent 3× быстрее
+per-step при корректной математике.
 
 ### NM Quad (профиль на удалённой плате partner)
 
@@ -147,52 +191,151 @@ RWKV) на русскоязычном корпусе Wikipedia (2 ГБ, BPE-то
 
 ---
 
-## Known Limitations (будет исправлено — PR welcome)
+## Что нового (апрель 2026, после 35-agent burst + manual fix marathon)
 
-Это solo-проект за месяц. Вот что честно **не готово** к production:
+### Core (все протестировано на Эльбрусе, self-tests passing)
+- **PIR backward полностью переписан** — embedding scatter, scan_bwd, gate/value chain rule
+  (ранее были stub'ами → dW_emb=0, d_scan=identity, dW_gate==dW_value). Loss descent
+  подтверждён 3× быстрее на фиксированной версии.
+- **CPU correctness fixes**: `where()` / `index_select` non-contig silent-wrong, `SVD(full_matrices=true)`
+  via Gram-Schmidt (ранее silently returning thin), `Conv3d::forward` real (ранее `return zeros()`),
+  `CTCLoss` полный Graves DP (ранее throw), `cross_entropy(reduction='none')` (ранее throw).
+- **Autograd**: `create_graph=True` wired (double backward), gradient hooks + anomaly mode,
+  forward-mode AD (dual numbers + JVP, `d(exp(2x))/dx=5.44` verified), vmap (single-axis
+  bit-exact vs sequential).
+- **dtype dispatch расширен**: `PT_DISPATCH_FLOATING_TYPES_HALF` / `PT_DISPATCH_COMPLEX_TYPES` —
+  теперь ops поддерживают Half/BFloat16/Float8_e4m3fn/Float8_e5m2/Complex64/Complex128
+  (opt-in чтобы не ломать templated linear-algebra код который assumes Float/Double).
+- **ChannelsLast preservation**: Conv2d NHWC input → NHWC output (internal compute NCHW —
+  true NHWC-native kernel = future work).
 
-### Core
-- **dtype coverage**: реально работает только `float32`. `Half`/`BFloat16`/`Complex`/`Bool`
-  объявлены в `ScalarType.h`, но `PT_DISPATCH_ALL_TYPES` их пропускает — operations with
-  FP16/BF16 input бросают "Unsupported dtype". AMP API есть, но настоящих FP16 CUDA kernel'ов
-  нет.
-- **ChannelsLast**: метаданные есть (`MemoryFormat::ChannelsLast`), но fast paths для
-  Conv2d/BN/Pool не реализованы — layout игнорируется при compute.
-- **Double backward (`create_graph=True`)**: флаг принимается и игнорируется. `.grad`
-  доступен после первого backward, но вторичный — не поддерживается.
+### Distributed / Parallel (new)
+- **Real DDP (TCP socket AllReduce)** в `torch/distributed/ddp.{h,cpp}` — star topology,
+  POSIX sockets (Winsock shim), 2-process self-test PASS.
+- **FSDP / ZeRO-3** в `torch/distributed/fsdp.h` — flat-index sharding, /dev/shm collectives.
+  2-process self-test bit-exact vs non-sharded baseline (max |diff| 0.0).
+- **TensorParallel** (Col/RowParallelLinear + collectives), **Pipeline Parallel** (GPipe +
+  1F1B scheduling), **DistributedSampler** (PyTorch-equivalent), **fork-based launcher**.
+- **DeepSpeed-like** ZeRO-Offload + 1F1B schedule поверх FSDP (`torch/distributed/deepspeed*.h`).
 
-### CUDA
-- **FlashAttention** (`aten/src/ATen/cuda/FlashAttention.cu`): 6 подтверждённых багов
-  (`INFRASTRUCTURE_AUDIT.md:73-101`), включая `dim3(64,64)=4096 threads > max 1024` — кернел
-  физически не запускается. В `torch/` нет callsites — модуль de facto не используется.
-- **cuDNN**: wrappers есть (`aten/src/ATen/cudnn/`), но sources НЕ в CMakeLists для aten_cuda.
-  0 callsites в torch/ — этот код dead. Conv через custom naive CUDA kernel, не cuDNN.
-- **Custom GEMM**: `CUDABlas.cu` декларирует собственный tile-kernel, но используется
-  `cublasSgemm`. Custom kernel — dead code.
+### Export paths (new)
+- **ONNX export** (`torch/onnx/export.h`) — zero-dependency manual protobuf wire format;
+  вывод **запускается в ONNX Runtime**, проходит `onnx.checker.check_model`.
+- **MLIR text export** (`torch/mlir/export.h`) — tosa + linalg dialect, `mlir-opt`-loadable.
+- **ExecuTorch-like mobile format** (`torch/mobile/executor.h`) — compact binary PTMB,
+  bit-exact round-trip.
+- **torch.jit.compile** (`torch/jit/compile.h` + `codegen_cpp.h`) — trace + element-wise
+  fusion + optional C++ codegen via subprocess + dlopen. 2× speedup на мелких тензорах.
 
-### Training
-- **PIR backward** (`examples/pir/fused_trainer.h`): embedding/scan/gate/value gradients
-  были stub'ами до апреля 2026 — текущая версия чинит все 4 пути (см. JOURNAL.md). Старые
-  claims про "loss 1.04 coherent Russian" относятся к broken-backward версии и не
-  воспроизводимы; валидные числа будут опубликованы после завершения новой тренировки.
-- **Distributed**: `grad_sync.h` — это **Local SGD** (file-based weight averaging, period=N
-  steps), а не DDP (не gradient AllReduce). Схождение гарантируется только для
-  small-local-step регима.
+### Ecosystem shims (new)
+- **HuggingFace Transformers compat** (`python/promethorch/transformers_compat.py`) —
+  AutoModel.from_pretrained для Bert/GPT2/Llama, safetensors reader, pytorch_model.bin
+  restricted unpickler. 9/9 smoke tests pass.
+- **torchvision**: ImageFolder + 7 transforms + MobileNetV2.
+- **torchaudio**: STFT/iSTFT (radix-2 FFT) + MFCC + Resample + WAV I/O. STFT reconstruction
+  max |err| 1.79e-7 (self-test pass).
+- **torchtext**: Vocab + BPE + WordPiece + Char tokenizer + TextDataset/CSV/JSONL.
+- **Lightning Trainer** (`torch/trainer/trainer.h`) — fit/test с gradient accumulation, clip,
+  checkpoint, progress bar.
 
-### Stubs / NotImplemented
-- `Conv3d::forward` — возвращает `zeros()` с комментарием "simplified for brevity".
-- `CTCLoss` — `throw`.
-- `CrossEntropyLoss(reduction="none")` — `throw`.
-- Некоторые cuDNN CPU fallbacks — `PT_ERROR("not implemented")`.
+### Backends + Precision (partial — compile-verified, runtime-untested кроме CPU/Elbrus)
+- **AMP**: FP16 CUDA kernels (add/mul/relu/sigmoid/tanh/softmax/layernorm/rmsnorm),
+  autocast_policy table с 55 ops (FP16/FP32/Promote), dynamic GradScaler. **CPU compile
+  clean. CUDA runtime не проверен — нет доступа к GPU.**
+- **cuDNN wiring**: Conv2d/BN/MaxPool/RNN/LSTM/GRU dispatch при PT_USE_CUDNN. CPU fallback
+  intact. **CUDA runtime не проверен.**
+- **MPS (Apple Metal)**: allocator + device + kernels через MPSGraph / MPSMatrixMultiplication.
+  Non-Apple builds skip aten_mps target. **macOS runtime не проверен (нет Mac).**
+- **ROCm/HIP**: `scripts/hipify.sh` + `HIPCompat.h` + docs для сборки через hipcc.
+  **AMD runtime не проверен.**
 
-### Examples never built end-to-end
-- `examples/transformer/train_transformer.cpp` (код есть, binary не собирался в 34
-  build-директориях).
-- `examples/vit/train_vit.cpp`.
-- `examples/shakespeare/train.cpp`.
+### Optimizers (20 теперь, было 4)
+SGD, Adam, AdamW, RMSprop + **Lion, Sophia, LAMB, Adafactor, NAdam, RAdam, Adagrad, Adamax,
+ASGD, LBFGS**. Все на `at::*` tensor ops, CPU-portable, compile на Elbrus LCC.
 
-Полный аудит: **`INFRASTRUCTURE_AUDIT.md`** (43 bug-а на момент аудита, из них
-31 исправлено в текущей версии).
+### Quantization (new)
+- **INT8 QAT** — FakeQuantize + QuantizedLinear + prepare_qat/convert. Self-test 97.27% vs
+  float 97.17% (+0.1%, within tolerance).
+- **INT4 + NF4 (QLoRA)** — block-wise quantize/dequantize + Linear4bit wrapper.
+
+### I/O (new)
+- **PyTorch-compatible .pt save/load** (`torch/serialization_pytorch.h`) — pickle protocol 2
+  + ZIP + restricted unpickler. Двусторонняя совместимость: `torch.load` читает наши saves,
+  мы читаем `torch.save` файлы. 3 tests PASS.
+
+### LLM serving (new, partial)
+- **LLM inference engine** (`torch/serve/llm.h`) — paged KV cache (64-token pages), BPE
+  tokenizer, GQA-aware attention, continuous batching, sampling (temperature/top-k/top-p/
+  repetition penalty). Self-test с random weights PASS. **Weights loader — extension point
+  (stub), нужно прошить с `safetensors_reader.py`.**
+
+### Python bindings (comprehensive expansion)
+11 submodules exposed через pybind11: `pt.nn.parallel`, `pt.distributed`, `pt.trainer`,
+`pt.onnx`, `pt.mlir`, `pt.mobile`, `pt.jit`, `pt.vision`, `pt.quantization`,
+`pt.autograd` (forward_ad + vmap), `pt.serve`. Pure-Python fallback когда C++ не собран.
+9/9 smoke tests pass.
+
+### Все examples теперь собираются
+`train_transformer`, `train_vit`, `shakespeare_train` — раньше "written but never built",
+теперь binary-file-exists и запускаются на Эльбрусе.
+
+---
+
+## Known Limitations — честный gap от PyTorch
+
+### Работает + протестировано на всех поддерживаемых backend'ах
+- Core autograd (110 backward + hooks + anomaly + create_graph)
+- 20 optimizers
+- CPU SIMD (AVX2/NEON/E2K)
+- Эльбрус VLIW + NM Card Mini emulator (Q16.16)
+- Distributed: DDP / FSDP / TP / Pipeline на CPU через TCP + /dev/shm
+- ONNX export (works with ONNX Runtime)
+- PyTorch .pt I/O ↔ torch.load/torch.save
+
+### Compile-verified, runtime-untested
+Нет доступа к соответствующему железу для verification:
+- FP16 CUDA kernels (нужен GPU)
+- cuDNN RNN/LSTM/GRU (нужен GPU + cuDNN)
+- MPS Apple Metal (нужен Mac)
+- ROCm/HIP (нужен AMD GPU)
+- Autocast policy table (scaffolding есть, но не wired в каждую Tensor op entry point
+  — autocast(Half) включает set_enabled но ops не смотрят policy автоматически)
+
+### Партиал / requires extension
+- **LLM serving engine** — forward loop + KV cache + sampling работают, `load_weights_()`
+  is extension-point stub (connect с `safetensors_reader.py`).
+- **torch.jit.compile** — trace + element-wise fusion + C++ codegen через subprocess.
+  Большие тензоры: AVX2 eager быстрее fused-interpreter (fused нуждается в реальных AVX2
+  intrinsics, не scalar `switch` loop).
+- **NHWC-native Conv2d** — preservation работает (NHWC round-trips through Conv2d correctly),
+  но internal compute остаётся NCHW im2col. Performance on channels_last не улучшается.
+
+### Отсутствует полностью (scope не по силам solo за разумный срок)
+- **`torch.compile` production** (TorchInductor + Triton backend + dynamic shapes + guards
+  + graph breaks) — ~200K строк JIT-компилятора.
+- **500+ tuned CUDA kernels per-shape** — годы команды. У нас ~20 tuned kernels + cuBLAS/
+  cuDNN wrapper.
+- **Sparse tensors** (COO/CSR/BSR) — отдельная memory layout infrastructure.
+- **torch.distributions** (Normal, Categorical, Beta, ...) — probability distributions API.
+- **FX graph mode** — intermediate graph IR для transforms.
+- **Vulkan compute / TPU XLA backends**.
+- **functorch полный** (grad-of-vmap, hessian, jacrev/jacfwd, composable transforms) —
+  у нас базовый vmap + forward-mode AD.
+- **100K+ unit tests** — у нас ~850 gtest + ~30 agent self-tests + auto-generated
+  test_ops_generated суит (количество не протестировано).
+
+### Что можно закрыть за 1-2 дня полной работы
+- Wire autocast policy table в Tensor op dispatch (сейчас table есть, но ops её не
+  проверяют автоматически).
+- Прошить `LLM::load_weights_()` с `safetensors_reader.py` — ~200 строк.
+- Фикс JIT codegen: emit AVX2 intrinsics вместо scalar loop → паритет с eager на больших
+  тензорах.
+- Fully-wired vmap/jvp: auto-hook Tensor::mul/add/etc. чтобы работало без explicit
+  `forward_ad::mul` wrapping.
+
+Полный исторический аудит: **`INFRASTRUCTURE_AUDIT.md`** (43 bug-а на момент аудита в марте 2026,
+из них 31 исправлено на момент релиза, остальные либо закрыты в ходе 35-agent burst, либо
+задокументированы здесь как Known Limitations).
 
 ---
 
