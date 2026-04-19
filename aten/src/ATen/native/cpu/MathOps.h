@@ -171,9 +171,84 @@ inline Tensor& name##_(Tensor& self) { \
     return self; \
 }
 
+// neg / abs: defined manually (not via DEFINE_UNARY_OP) because they must
+// also accept complex tensors. Real path matches DEFINE_UNARY_OP exactly.
+inline Tensor neg(const Tensor& self) {
+    if (self.is_trusted()) {
+        Tensor result = at::empty(self.sizes());
+        hot::neg_loop(self.data_ptr<float>(),
+                      result.mutable_data_ptr<float>(), self.numel());
+        return result;
+    }
+    if (c10::isComplexType(self.dtype())) {
+        Tensor input = self.is_contiguous() ? self : self.contiguous();
+        Tensor result = empty(input.sizes(), TensorOptions().dtype(input.dtype()).device(input.device()));
+        PT_DISPATCH_COMPLEX_TYPES(input.dtype(), "neg_complex", [&] {
+            const scalar_t* in = input.data_ptr<scalar_t>();
+            scalar_t* out = result.mutable_data_ptr<scalar_t>();
+            int64_t n = input.numel();
+            for (int64_t i = 0; i < n; ++i) out[i] = -in[i];
+        });
+        return result;
+    }
+    Tensor input = self.is_contiguous() ? self : self.contiguous();
+    Tensor result = empty_like(input);
+    if (input.dtype() == c10::ScalarType::Float) {
+        hot::neg_loop(input.data_ptr<float>(),
+                      result.mutable_data_ptr<float>(), input.numel());
+        return result;
+    }
+    PT_DISPATCH_FLOATING_TYPES(input.dtype(), "neg", [&] {
+        const scalar_t* in = input.data_ptr<scalar_t>();
+        scalar_t* out = result.mutable_data_ptr<scalar_t>();
+        int64_t n = input.numel();
+        for (int64_t i = 0; i < n; ++i) out[i] = unary_ops::neg_val<scalar_t>(in[i]);
+    });
+    return result;
+}
+
+inline Tensor abs(const Tensor& self) {
+    if (self.is_trusted()) {
+        Tensor result = at::empty(self.sizes());
+        hot::abs_loop(self.data_ptr<float>(),
+                      result.mutable_data_ptr<float>(), self.numel());
+        return result;
+    }
+    if (c10::isComplexType(self.dtype())) {
+        Tensor input = self.is_contiguous() ? self : self.contiguous();
+        c10::ScalarType out_dtype = (input.dtype() == c10::ScalarType::ComplexDouble)
+                                    ? c10::ScalarType::Double : c10::ScalarType::Float;
+        Tensor result = empty(input.sizes(), TensorOptions().dtype(out_dtype).device(input.device()));
+        PT_DISPATCH_COMPLEX_TYPES(input.dtype(), "abs_complex", [&] {
+            const scalar_t* in = input.data_ptr<scalar_t>();
+            using real_t = decltype(scalar_t().re);
+            real_t* out = result.mutable_data_ptr<real_t>();
+            int64_t n = input.numel();
+            for (int64_t i = 0; i < n; ++i) {
+                real_t r = in[i].re;
+                real_t im = in[i].im;
+                out[i] = std::sqrt(r * r + im * im);
+            }
+        });
+        return result;
+    }
+    Tensor input = self.is_contiguous() ? self : self.contiguous();
+    Tensor result = empty_like(input);
+    if (input.dtype() == c10::ScalarType::Float) {
+        hot::abs_loop(input.data_ptr<float>(),
+                      result.mutable_data_ptr<float>(), input.numel());
+        return result;
+    }
+    PT_DISPATCH_FLOATING_TYPES(input.dtype(), "abs", [&] {
+        const scalar_t* in = input.data_ptr<scalar_t>();
+        scalar_t* out = result.mutable_data_ptr<scalar_t>();
+        int64_t n = input.numel();
+        for (int64_t i = 0; i < n; ++i) out[i] = unary_ops::abs_val<scalar_t>(in[i]);
+    });
+    return result;
+}
+
 // Unary ops with TUDA VecF (portable across AVX2/NEON/E2K/Scalar)
-DEFINE_UNARY_OP(neg,        tuda::neg_vec(v),        unary_ops::neg_val)
-DEFINE_UNARY_OP(abs,        tuda::abs_vec(v),        unary_ops::abs_val)
 DEFINE_UNARY_OP(sqrt,       tuda::sqrt_vec(v),       unary_ops::sqrt_val)
 DEFINE_UNARY_OP(rsqrt,      tuda::rsqrt_vec(v),      unary_ops::rsqrt_val)
 DEFINE_UNARY_OP(square,     tuda::square_vec(v),     unary_ops::square_val)
@@ -210,6 +285,56 @@ DEFINE_UNARY_OP_INPLACE(round,   tuda::round_vec(v),      unary_ops::round_val)
 
 #undef DEFINE_UNARY_OP
 #undef DEFINE_UNARY_OP_INPLACE
+
+// ============================================================================
+// Complex-specific unary ops: conj, real, imag
+// (neg/abs already accept complex via the explicit definitions above.)
+// ============================================================================
+
+// conj(z) = (re, -im). Defined only for complex tensors.
+inline Tensor conj(const Tensor& self) {
+    Tensor input = self.is_contiguous() ? self : self.contiguous();
+    Tensor result = empty(input.sizes(), TensorOptions().dtype(input.dtype()).device(input.device()));
+    PT_DISPATCH_COMPLEX_TYPES(input.dtype(), "conj", [&] {
+        const scalar_t* in = input.data_ptr<scalar_t>();
+        scalar_t* out = result.mutable_data_ptr<scalar_t>();
+        int64_t n = input.numel();
+        for (int64_t i = 0; i < n; ++i) { out[i].re = in[i].re; out[i].im = -in[i].im; }
+    });
+    return result;
+}
+
+// real(z) = re. Returns Float for ComplexFloat, Double for ComplexDouble.
+inline Tensor real(const Tensor& self) {
+    Tensor input = self.is_contiguous() ? self : self.contiguous();
+    c10::ScalarType out_dtype = (input.dtype() == c10::ScalarType::ComplexDouble)
+                                ? c10::ScalarType::Double : c10::ScalarType::Float;
+    Tensor result = empty(input.sizes(), TensorOptions().dtype(out_dtype).device(input.device()));
+    PT_DISPATCH_COMPLEX_TYPES(input.dtype(), "real", [&] {
+        const scalar_t* in = input.data_ptr<scalar_t>();
+        using real_t = decltype(scalar_t().re);
+        real_t* out = result.mutable_data_ptr<real_t>();
+        int64_t n = input.numel();
+        for (int64_t i = 0; i < n; ++i) out[i] = in[i].re;
+    });
+    return result;
+}
+
+// imag(z) = im.
+inline Tensor imag(const Tensor& self) {
+    Tensor input = self.is_contiguous() ? self : self.contiguous();
+    c10::ScalarType out_dtype = (input.dtype() == c10::ScalarType::ComplexDouble)
+                                ? c10::ScalarType::Double : c10::ScalarType::Float;
+    Tensor result = empty(input.sizes(), TensorOptions().dtype(out_dtype).device(input.device()));
+    PT_DISPATCH_COMPLEX_TYPES(input.dtype(), "imag", [&] {
+        const scalar_t* in = input.data_ptr<scalar_t>();
+        using real_t = decltype(scalar_t().re);
+        real_t* out = result.mutable_data_ptr<real_t>();
+        int64_t n = input.numel();
+        for (int64_t i = 0; i < n; ++i) out[i] = in[i].im;
+    });
+    return result;
+}
 
 // Zero and fill
 inline Tensor& zero_(Tensor& self) {
@@ -476,6 +601,30 @@ inline Tensor add(const Tensor& self, const Tensor& other, Scalar alpha = 1) {
     c10::ScalarType result_dtype = c10::promoteTypes(self.dtype(), other.dtype());
     Tensor result = empty(result_shape, TensorOptions().dtype(result_dtype).device(self.device()));
 
+    if (c10::isComplexType(result_dtype)) {
+        Tensor a_c = self.contiguous();
+        Tensor b_c = other.contiguous();
+        double alpha_d = alpha.toDouble();
+        PT_DISPATCH_COMPLEX_TYPES(result_dtype, "add_complex", [&] {
+            // c10::complex has a complex(double) ctor.
+            scalar_t alpha_val(alpha_d);
+            const scalar_t* ap = a_c.data_ptr<scalar_t>();
+            const scalar_t* bp = b_c.data_ptr<scalar_t>();
+            scalar_t* out = result.mutable_data_ptr<scalar_t>();
+            int64_t n = result.numel();
+            if (a_c.sizes() == b_c.sizes()) {
+                for (int64_t i = 0; i < n; ++i) out[i] = ap[i] + alpha_val * bp[i];
+            } else {
+                for (int64_t i = 0; i < n; ++i) {
+                    int64_t idx_a = detail::broadcast_index(i, result.sizes(), a_c.sizes(), a_c.strides());
+                    int64_t idx_b = detail::broadcast_index(i, result.sizes(), b_c.sizes(), b_c.strides());
+                    out[i] = ap[idx_a] + alpha_val * bp[idx_b];
+                }
+            }
+        });
+        return result;
+    }
+
     PT_DISPATCH_ALL_TYPES(result_dtype, "add", [&] {
         scalar_t alpha_val = alpha.to<scalar_t>();
         scalar_t* out = result.mutable_data_ptr<scalar_t>();
@@ -484,12 +633,12 @@ inline Tensor add(const Tensor& self, const Tensor& other, Scalar alpha = 1) {
         if (self.sizes() == other.sizes() && self.is_contiguous() && other.is_contiguous()) {
             const scalar_t* a = self.data_ptr<scalar_t>();
             const scalar_t* b = other.data_ptr<scalar_t>();
-    
+
             for (int64_t i = 0; i < n; ++i) out[i] = a[i] + alpha_val * b[i];
         } else {
             const scalar_t* a = self.data_ptr<scalar_t>();
             const scalar_t* b = other.data_ptr<scalar_t>();
-    
+
             for (int64_t i = 0; i < n; ++i) {
                 int64_t idx_a = detail::broadcast_index(i, result.sizes(), self.sizes(), self.strides());
                 int64_t idx_b = detail::broadcast_index(i, result.sizes(), other.sizes(), other.strides());
@@ -544,6 +693,27 @@ inline Tensor mul(const Tensor& self, const Tensor& other) {
     c10::ScalarType result_dtype = c10::promoteTypes(self.dtype(), other.dtype());
     Tensor result = empty(result_shape, TensorOptions().dtype(result_dtype).device(self.device()));
 
+    if (c10::isComplexType(result_dtype)) {
+        Tensor a_c = self.contiguous();
+        Tensor b_c = other.contiguous();
+        PT_DISPATCH_COMPLEX_TYPES(result_dtype, "mul_complex", [&] {
+            const scalar_t* ap = a_c.data_ptr<scalar_t>();
+            const scalar_t* bp = b_c.data_ptr<scalar_t>();
+            scalar_t* out = result.mutable_data_ptr<scalar_t>();
+            int64_t n = result.numel();
+            if (a_c.sizes() == b_c.sizes()) {
+                for (int64_t i = 0; i < n; ++i) out[i] = ap[i] * bp[i];
+            } else {
+                for (int64_t i = 0; i < n; ++i) {
+                    int64_t idx_a = detail::broadcast_index(i, result.sizes(), a_c.sizes(), a_c.strides());
+                    int64_t idx_b = detail::broadcast_index(i, result.sizes(), b_c.sizes(), b_c.strides());
+                    out[i] = ap[idx_a] * bp[idx_b];
+                }
+            }
+        });
+        return result;
+    }
+
     PT_DISPATCH_ALL_TYPES(result_dtype, "mul", [&] {
         scalar_t* out = result.mutable_data_ptr<scalar_t>();
         int64_t n = result.numel();
@@ -594,6 +764,27 @@ inline Tensor div(const Tensor& self, const Tensor& other) {
     }
 
     Tensor result = empty(result_shape, TensorOptions().dtype(result_dtype).device(self.device()));
+
+    if (c10::isComplexType(result_dtype)) {
+        Tensor a_c = self.contiguous();
+        Tensor b_c = other.contiguous();
+        PT_DISPATCH_COMPLEX_TYPES(result_dtype, "div_complex", [&] {
+            const scalar_t* ap = a_c.data_ptr<scalar_t>();
+            const scalar_t* bp = b_c.data_ptr<scalar_t>();
+            scalar_t* out = result.mutable_data_ptr<scalar_t>();
+            int64_t n = result.numel();
+            if (a_c.sizes() == b_c.sizes()) {
+                for (int64_t i = 0; i < n; ++i) out[i] = ap[i] / bp[i];
+            } else {
+                for (int64_t i = 0; i < n; ++i) {
+                    int64_t idx_a = detail::broadcast_index(i, result.sizes(), a_c.sizes(), a_c.strides());
+                    int64_t idx_b = detail::broadcast_index(i, result.sizes(), b_c.sizes(), b_c.strides());
+                    out[i] = ap[idx_a] / bp[idx_b];
+                }
+            }
+        });
+        return result;
+    }
 
     PT_DISPATCH_FLOATING_TYPES(result_dtype, "div", [&] {
         scalar_t* out = result.mutable_data_ptr<scalar_t>();
