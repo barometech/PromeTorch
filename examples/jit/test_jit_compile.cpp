@@ -9,6 +9,7 @@
 #include "torch/csrc/autograd/autograd.h"
 #include "aten/src/ATen/native/cpu/hot_loops.h"
 #include "torch/jit/compile.h"
+#include "torch/jit/codegen_cpp.h"
 
 #include <chrono>
 #include <cmath>
@@ -113,6 +114,50 @@ int main() {
     double tb_jit = (now_ms() - t0) / big_iters;
     std::printf("[bench 1024x1024] eager: %.3f ms  jit: %.3f ms  speedup: "
                 "%.2fx\n", tb_eager, tb_jit, tb_eager / tb_jit);
+
+    // --- Codegen-only path verification ----------------------------------
+    // Force interpreter for baseline measurement, then force codegen.
+    {
+        // Verify codegen emits correct results.
+        Tensor y_cg = compiled_big(xb);
+        Tensor y_eg = xb.mul(at::Scalar(2.0f)).add(at::Scalar(1.0f)).relu();
+        double d = max_abs_diff(y_cg, y_eg);
+        std::printf("[codegen verify 1024x1024] max|cg-eager| = %.3e\n", d);
+        if (d > 1e-5) { std::printf("FAIL: codegen numeric mismatch\n");
+                        return 2; }
+    }
+    // Report whether codegen actually kicked in:
+    bool cg_used = false;
+    for (auto s : compiled_big.codegen_state) if (s == 1) { cg_used = true;
+                                                            break; }
+    std::printf("[codegen status] hook=%p  used=%s\n",
+                (void*)torch::jit::codegen_hook(), cg_used ? "yes" : "no");
+
+    // Bench interpreter-only path (env PROMETORCH_JIT=0 not possible
+    // mid-process, so measure via a fresh compile with threshold above n).
+    {
+        // Clone by re-compiling the same trace and bumping threshold so
+        // codegen is skipped.
+        auto interp_only = compile(
+            [](TracedTensor x) -> TracedTensor {
+                auto a = traced_mul(x, 2.0f);
+                auto b = traced_add(a, 1.0f);
+                auto c = traced_relu(b);
+                return c;
+            }, xb);
+        // manually mark all records as codegen-failed (state=0)
+        interp_only.codegen_state.assign(interp_only.program.size(),
+                                         int8_t(0));
+        interp_only.codegen_kernels.assign(interp_only.program.size(),
+                                           nullptr);
+        for (int i = 0; i < 20; ++i) (void)interp_only(xb);
+        t0 = now_ms();
+        for (int i = 0; i < big_iters; ++i) (void)interp_only(xb);
+        double tb_interp = (now_ms() - t0) / big_iters;
+        std::printf("[bench 1024x1024 interp-only] %.3f ms  "
+                    "codegen speedup vs interp: %.2fx\n",
+                    tb_interp, tb_interp / tb_jit);
+    }
 
     // Longer chain — fusion benefit compounds (more eager allocations saved).
     Tensor xc = at::randn({64, 64});
