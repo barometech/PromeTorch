@@ -495,6 +495,9 @@ at::Tensor DistributedDataParallel::forward(const std::vector<at::Tensor>& input
 
 void DistributedDataParallel::allreduce_grads() {
     if (cfg_.world_size <= 1) return;
+    // no_sync(): user is doing gradient accumulation across micro-batches.
+    // Skip the AllReduce; .grad accumulates locally for the next forward.
+    if (!require_grad_sync_) return;
 
     const float inv = 1.0f / (float)cfg_.world_size;
     auto params = module_->parameters(/*recurse=*/true);
