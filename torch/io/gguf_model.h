@@ -1291,7 +1291,10 @@ public:
             cudaStreamCreate(&decode_stream_);
             static bool smem_inited = false;
             if (!smem_inited) {
-                int max_K = static_cast<int>(std::max({H, q_dim, kv_dim, inter}));
+                // MSVC + windows.h max macro collision: use extra parens to bypass macro expansion.
+                int64_t m1 = (H > q_dim) ? (int64_t)H : (int64_t)q_dim;
+                int64_t m2 = (kv_dim > inter) ? (int64_t)kv_dim : (int64_t)inter;
+                int max_K = static_cast<int>(m1 > m2 ? m1 : m2);
                 at::cuda::init_cuda_kernel_smem_attributes(max_K, static_cast<int>(inter));
                 smem_inited = true;
             }
