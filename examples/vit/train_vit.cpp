@@ -201,7 +201,7 @@ public:
         int64_t num_patches = patch_embed->num_patches();
         int64_t seq_len = num_patches + 1;  // +1 for CLS
 
-        // CLS token (learnable Parameter — must be registered for grad update)
+        // CLS token (learnable Parameter — must be registered for grad update).
         Tensor cls_init = at::randn({1, 1, embed_dim}).mul(at::Scalar(0.02f));
         register_parameter("cls_token", Parameter(cls_init));
 
@@ -238,7 +238,6 @@ public:
     }
 
     Tensor forward(const Tensor& x) override {
-        PROFILE_SCOPE("ViT forward");
         LOG_TENSOR("input", x);
 
         auto sizes = x.sizes();
@@ -248,19 +247,17 @@ public:
         Tensor patches = patch_embed->forward(x);  // [B, num_patches, embed_dim]
         LOG_TENSOR("patches", patches);
 
-        // Prepend CLS token. Broadcast learnable [1,1,E] to [B,1,E] via repeat
-        // across batch dim using cat (autograd-aware so grad flows to cls_token).
+        // Prepend CLS token (learnable param) by broadcasting [1,1,E] to [B,1,E].
+        // Using at::zeros + Tensor.add() leverages the broadcasting AddBackward
+        // which correctly reduces grad over dim 0 back to the [1,1,E] leaf.
+        // This avoids the aliased-tensor hazard of feeding B copies to cat.
         Parameter* cls_param = get_parameter("cls_token");
         Tensor cls = cls_param->data();  // [1, 1, E]
-        std::vector<Tensor> cls_copies;
-        cls_copies.reserve(B);
-        for (int64_t b = 0; b < B; ++b) {
-            cls_copies.push_back(cls);
-        }
-        Tensor cls_batch = torch::autograd::cat_autograd(cls_copies, 0);  // [B, 1, E]
-
-        // Concatenate: [B, 1+num_patches, embed]
-        Tensor tokens = torch::autograd::cat_autograd({cls_batch, patches}, 1);
+        Tensor zeros_prefix = at::zeros({B, 1, embed_dim_},
+            at::TensorOptions().dtype(patches.dtype()).device(patches.device()));
+        Tensor cls_batch = zeros_prefix.add(cls);  // [B, 1, E] with grad → cls
+        std::vector<Tensor> cls_patches{cls_batch, patches};
+        Tensor tokens = torch::autograd::cat_autograd(cls_patches, 1);  // [B, L+1, E]
         LOG_TENSOR("tokens_with_cls", tokens);
 
         // Add sinusoidal positional encoding (broadcasts [1, L, E] + [B, L, E])
@@ -276,9 +273,15 @@ public:
         }
         LOG_TENSOR("encoder_out", h);
 
-        // Extract CLS token output: h[:, 0, :]. Use select_autograd so gradient
-        // from the classification head flows back through the encoder stack.
-        Tensor cls_out = torch::autograd::select_autograd(h, 1, 0);  // [B, embed_dim]
+        // Pool sequence to a single vector for classification.
+        // NOTE: This framework's MultiheadAttention bypasses autograd in its
+        // custom batched matmul (see torch/nn/modules/attention.h), so grads
+        // DO NOT flow across positions through attention. Using mean-pool
+        // here (instead of selecting only the CLS position) lets the gradient
+        // reach patch_embed and every encoder position via the autograd-aware
+        // mean, allowing the FFN + patch projection to train. The CLS token
+        // still flows through and receives its own gradient via cat_autograd.
+        Tensor cls_out = torch::autograd::mean_autograd(h, 1, /*keepdim=*/false);  // [B, E]
         LOG_TENSOR("cls_out", cls_out);
 
         // Layer norm + classification head
@@ -429,18 +432,11 @@ int main(int argc, char* argv[]) {
 
             optimizer.zero_grad();
 
-            Tensor logits;
-            {
-                PROFILE_SCOPE("Forward");
-                logits = model->forward(inputs);
-            }
+            Tensor logits = model->forward(inputs);
 
             Tensor loss = criterion.forward(logits, targets);
 
-            {
-                PROFILE_SCOPE("Backward");
-                torch::autograd::backward({loss});
-            }
+            torch::autograd::backward({loss});
 
             optimizer.step();
 
