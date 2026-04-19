@@ -197,6 +197,81 @@ per-step при корректной математике.
 
 ---
 
+## Что нового (2026-04-19 — structural sprint)
+
+Закрытые в этот день гэпы (см. коммиты от `9b19480` до `151e463`):
+
+**Autograd / correctness:**
+- **5 missing backward Nodes** (`where`, `masked_fill`, `scatter_add`, `gather`, `norm(dim)`)
+  — ранее silent zero-gradient bugs в embedding / masked-attention / weight-norm путях.
+- **`.reshape()` / `.select()` autograd-aware обёртки** — `torch::autograd::reshape_autograd`
+  и `select_autograd`. Нативный `Tensor::reshape()` обрывал backward chain в every
+  training loop. Все примеры (Shakespeare / ViT / Transformer) починены.
+- **`to_autograd` + `ToBackward`** — dtype cast с корректным backward (foundation для autocast).
+- **SDPA forward+backward CPU** — маски ранг 2/3/4 (bool + float), `is_causal`, dropout с
+  reusable mask. Тесты в `test/cpp/test_attention.cpp` — 8/8 PASS.
+- **`Tensor::reshape` → `reshape_autograd`** в PositionalEncoding / embed / Linear fallback
+  — больше не «отрезает» градиент.
+
+**Critical CUDA fix (151e463):**
+- **Linear::forward CPU-only fast path теперь gated на `is_cpu()`** — раньше
+  `fused_linear_autograd` крашил на CUDA (`at::empty` без device + `sgemm_nt` на raw
+  pointers из device memory). Это блокировало КАЖДУЮ модель с 2D Linear + FP32 на CUDA
+  (VAE / ViT / DCGAN агенты зафиксировали). Починен — CUDA падает в общий `mm_autograd` путь.
+
+**Optim:**
+- **ParamGroup с per-group overrides** (lr, momentum, betas, eps, amsgrad, weight_decay) —
+  discriminative learning rates для fine-tuning (BERT-style). Backwards-compat.
+- **7 новых LR schedulers**: `CosineAnnealingWarmRestarts`, `CyclicLR`, `PolynomialLR`,
+  `LambdaLR`, `MultiplicativeLR`, `SequentialLR`, `ChainedScheduler`.
+- **EMA** (`torch/optim/ema.h`) + **clip_grad_norm_** / **clip_grad_value_**.
+
+**Distributed:**
+- **DDP `no_sync()` context manager** — skip AllReduce across gradient accumulation
+  micro-batches (1 sync за N шагов вместо N). RAII C++ guard + Python wrapper. Работает
+  на POSIX-TCP DDP (Эльбрус) и ProcessGroup-abstracted DDP. Verified single-process test
+  с `CountingPG` mock.
+
+**Python:**
+- **`no_grad` / `enable_grad` Python → C++ GradMode propagation** (BUG-C9 closed).
+  Inference Python loops больше не строят autograd graph.
+
+**Build / CUDA:**
+- **Explicit DLL exports** (`aten_cuda_exports.def`) — nvcc не пробрасывал `__declspec(dllexport)`
+  корректно, и каждый `launch_*` compile-OK но runtime-unresolvable. Ship file с ~150
+  exports — unblock'ает train_resnet / train_gan / test_gguf_inference на Windows MSVC
+  shared builds.
+- **cuDNN `data_ptr<void>()` → `data_ptr()` / `mutable_data_ptr()`** fixes в
+  CuDNNActivation / BatchNorm / Convolution / Pooling — unblock PT_USE_CUDNN build.
+
+**Ops (missing API):**
+- `logsumexp` + `LogSumExpBackward`, `one_hot`, `allclose`, `equal`, `floor_divide`.
+
+**NN modules:**
+- **ConvTranspose2d forward+backward** (`ConvTranspose2dBackward`) — нужен для DCGAN.
+  CPU-only compute, CPU↔CUDA bouncing for CUDA inputs.
+
+**New examples:**
+- **ResNet-20 CIFAR-10** (`examples/cifar/`), **DCGAN MNIST** (`examples/gan/`),
+  **VAE MNIST** (`examples/vae/`). VAE trained 20 epochs CPU → test ELBO 103.7.
+  Shakespeare verified loss 4.48 (broken) → 2.46 (fixed, generates speaker-tags +
+  English phonotactics).
+
+**License (PromeTorch License):**
+- Открыли репозиторий публично. Лицензия = BSD-3 + две позиции: атрибуция в коммерческих
+  продуктах (`Powered by PromeTorch — https://github.com/barometech/PromeTorch`) +
+  запрет на перепродажу фреймворка как продукта. Модели, pipeline'ы, apps, SaaS,
+  форки — **свободно**.
+
+**Полный план тестирования / sprint queue:** см. [TEST_PLAN.md](TEST_PLAN.md) — каждая
+out-of-scope фича имеет target metric, file:line pointer, acceptance criteria.
+
+**A100 verification matrix** (`EXAMPLES_VERIFIED.md`): 5/7 бинарей PASS на A100, включая
+train_10_models (LSTM 93.75%, GRU 98.44%, Deep-MLP 97.23%), PIR CUDA (loss 3.87→2.74),
+GGUF qwen3:4b 86.6 tok/s coherent.
+
+---
+
 ## Что нового (апрель 2026, после 35-agent burst + manual fix marathon)
 
 ### Core (все протестировано на Эльбрусе, self-tests passing)
@@ -341,12 +416,21 @@ ASGD, LBFGS**. Все на `at::*` tensor ops, CPU-portable, compile на Elbrus
   test_ops_generated суит (количество не протестировано).
 
 ### Что можно закрыть за 1-2 дня полной работы
-- Wire autocast policy table в Tensor op dispatch (сейчас table есть, но ops её не
-  проверяют автоматически).
+- **Wire autocast policy table в Linear/Conv/MHA forwards**. Building block (`to_autograd`
+  + `ToBackward`) уже есть (commit `8f87e57`). Осталось per-op wrapping в module forwards
+  + FP16 mm cuBLAS dispatch (cublasGemmEx) + A100 verify. Roadmap в [TEST_PLAN.md](TEST_PLAN.md) §5.1.
+- **PromeServe 86.6 → 150 tok/s на qwen3:4b**: one-shot dequant Q4_K → FP16 при загрузке
+  + cublasHgemv для всех matmul вместо custom quant GEMV (~8 GB VRAM вместо 5 на A100,
+  помещается с запасом). План в [TEST_PLAN.md](TEST_PLAN.md) §4.
+- **Python `_C.pyd` op bindings bypass `*_autograd`** — `t1 + t2` из Python вызывает raw
+  aten, grad не прокидывается. Surfaced by no_grad audit (a7f1200e). §5.10 в TEST_PLAN.
+- **TransformerEncoderLayer CUDA forward crash** — CPU работает, CUDA падает (suspected
+  LayerNorm CUDA kernel gap). Блокирует GPU-обучение transformer.
+- **MultiheadAttention bypass autograd в custom batched matmul** — ViT агент зафиксировал,
+  grad не проходит поперёк positions через attention. Workaround в examples/vit: mean-pool.
+- **FlashAttention wiring** — headers есть, 0 callsites. Нужно подключить к sdpa_forward_cuda.
 - Прошить `LLM::load_weights_()` с `safetensors_reader.py` — ~200 строк.
-- Фикс JIT codegen: emit AVX2 intrinsics вместо scalar loop → паритет с eager на больших
-  тензорах.
-- Fully-wired vmap/jvp: auto-hook Tensor::mul/add/etc. чтобы работало без explicit
+- Fully-wired vmap/jvp: auto-hook `Tensor::mul/add/etc` чтобы работало без explicit
   `forward_ad::mul` wrapping.
 
 Полный исторический аудит: **`INFRASTRUCTURE_AUDIT.md`** (43 bug-а на момент аудита в марте 2026,
