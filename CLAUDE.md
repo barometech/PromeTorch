@@ -1,7 +1,17 @@
-## ТЕКУЩИЙ СТАТУС: PIR 250M ТРЕНИРУЕТСЯ НА ЭЛЬБРУСЕ
+## ТЕКУЩИЙ СТАТУС: PIR 342M — FIXED BACKWARD, RE-TRAINING (2026-04-18)
 
-**4-процесс DDP, 568 tok/s, loss 1.41 (step 200). Checkpoint сохранён.**
-**Генерация: русскоязычный текст с правильной морфологией ("В России", "полагается", "специального страны задача").**
+**4-процесс Local SGD** (file-based weight averaging, НЕ DDP gradient AllReduce!),
+BPE vocab 100k, Russian Wikipedia 2GB.
+
+**КРИТИЧНЫЙ ФИКС 2026-04-18:** backward() в fused_trainer.h был частично stub'ом:
+- `embedding backward` — SKIP (dW_emb всегда 0)
+- `parallel_scan backward` — identity passthrough (TODO comment)
+- `gate/value backward` — dW_gate и dW_value получали одинаковый grad (математически неверно)
+
+Старые результаты "loss 1.04, coherent Russian" относились к этой broken версии — фактически
+LM head + FFN + mix_proj учились на byte-level, а PIR-блок тренировался на нулевом
+градиенте. Первые 5 шагов новой (исправленной) тренировки: loss 11.52 → 11.43 (Δ=-0.09/5
+vs старое Δ=-0.03/5 — 3× быстрее descent). Реальные числа будут после завершения.
 
 **НЕ делать полумеры, workaround'ы, "пока на 1 потоке". ТОЛЬКО полное решение.**
 **НЕ использовать агентов для критических операций (Gemini API, SSH). Только Bash напрямую.**
@@ -39,29 +49,30 @@
 
 ---
 
-## Статус проекта
+## Статус проекта (честная таблица после аудита 2026-04-18)
 
-**17 основных фаз + 7 критических фич ЗАВЕРШЕНЫ.** ~93,000+ строк C++/CUDA/Python, 631 файл (352 source).
+**~91,000 строк C++/CUDA/Python.** Честные статусы после 5-агентного аудита:
 
-| Фаза | Компонент | Статус |
+| Фаза | Компонент | Реальный статус |
 |------|-----------|--------|
-| 1 | c10 core (Allocator, Device, Storage, TensorImpl) | DONE |
-| 2 | ATen (MathOps, ReduceOps, LinearAlgebra, ShapeOps, IndexOps) | DONE |
-| 3 | Autograd (engine, 50+ backward functions) | DONE |
-| 4 | NN Modules (50+ слоёв: Linear, Conv, BN, Transformer, PIR) | DONE |
+| 1 | c10 core (Allocator, Device, Storage, TensorImpl) | DONE (float32; fp16/bf16 — объявлены но не dispatch'атся) |
+| 2 | ATen CPU ops (MathOps, ReduceOps, LinAlg, ShapeOps, IndexOps) | DONE (~90 ops, ±0.5% match PyTorch на тестах) |
+| 3 | Autograd (engine, 110 backward functions) | DONE (real BFS, multi-output, no_grad; BUT create_graph ignored → no double-bwd) |
+| 4 | NN Modules (Linear, Conv, BN, Transformer, PIR) | DONE (Conv3d — stub, CTCLoss — throw) |
 | 5 | Optimizers (SGD, Adam, AdamW, RMSprop) | DONE |
 | 6 | LR Schedulers (9 видов) | DONE |
 | 7 | Data Loading (Dataset, DataLoader, Sampler) | DONE |
-| 8 | Transformer (Encoder, Decoder, MultiheadAttention) | DONE |
-| 9 | PIR Architecture (RMSNorm, RoPE, PIR270M) | DONE |
-| 10 | CUDA Backend (собственные kernels: GEMM, reduce, element-wise) | DONE |
-| 11 | Python Bindings (pybind11) | DONE |
-| 12 | cuDNN Integration (conv, pool, batchnorm, activations) | DONE |
-| 13 | Mixed Precision AMP (GradScaler, Autocast) | DONE |
-| 14 | FlashAttention (O(N) memory, causal masking) | DONE |
-| 15 | NM Card Mini Backend (эмулятор, Q16.16, 32 теста, MNIST 93.64%) | DONE |
-| 16 | NM Quad Backend (4-чип, 64 ядра, SIMD 100x, 705 tok/s) | DONE |
-| 17 | PIR 250M DDP Training on Elbrus (4×142=568 tok/s, loss 1.04) | DONE |
+| 8 | Transformer (Encoder, Decoder, MultiheadAttention) | PARTIAL (код есть, end-to-end training никогда не билдился) |
+| 9 | PIR Architecture | DONE (родственник Mamba/HGRN/RWKV — diagonal selective scan) |
+| 10 | CUDA Backend — GEMM/reduce/element-wise | PARTIAL (GEMM — `cublasSgemm`, custom kernel dead code; reduce/elem-wise real) |
+| 11 | Python Bindings (pybind11) | PARTIAL (no_grad не подключён к C++ engine — BUG-C9) |
+| 12 | cuDNN Integration | **BROKEN** (headers есть, 0 callsites в torch/, не в CMakeLists aten_cuda) |
+| 13 | Mixed Precision AMP | PARTIAL (API есть, FP16 CUDA kernels нет, has_inf_or_nan работает на CPU) |
+| 14 | FlashAttention | **BROKEN** (6 подтверждённых багов, `dim3(64,64)` не запускается, нет callsites) |
+| 15 | NM Card Mini Backend (Q16.16 эмулятор) | DONE (34 tests, MNIST 93.64% на эмуляторе; реальная карта — только 1-core inference) |
+| 16 | NM Quad Backend | PARTIAL (100× vs own scalar; max 16 cores stable; 705 tok/s на toy GPT tiny_shakespeare loss 4.45 = microbenchmark, не converged training) |
+| 17 | PIR 342M training on Elbrus | DONE (Local SGD, BPE 100k; backward fixed 2026-04-18; числа в re-train) |
+| 18 | GGUF inference | DONE (Q4_K/Q6_K; 49.9 tok/s **на A100**, ~11 tok/s на consumer GPU) |
 
 ---
 
@@ -201,9 +212,9 @@ examples/
 
 ---
 
-## Эльбрус PIR DDP
+## Эльбрус PIR Local SGD
 
-### Запуск тренировки (4-процесс DDP на 32 ядрах E8C2)
+### Запуск тренировки (4-процесс Local SGD на 32 ядрах E8C2)
 ```bash
 loginctl enable-linger user  # ОБЯЗАТЕЛЬНО после reboot!
 for node in 0 1 2 3; do
