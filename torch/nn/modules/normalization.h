@@ -405,12 +405,36 @@ public:
             norm_size *= input.size(i);
         }
 
+#ifdef PT_USE_CUDA
+        // CPU-fallback bounce: no native LayerNorm CUDA kernel yet, and the
+        // body below uses raw host pointers. For CUDA tensors, copy to CPU,
+        // compute, then copy back. Autograd graph is intentionally not wired
+        // across the device bounce (forward correctness only — see TEST_PLAN §5.9).
+        const bool on_cuda = input.is_cuda();
+        Tensor input_eff = on_cuda ? at::to_cpu(input) : input;
+        Tensor output = input_eff.clone();
+        float* out_data = output.mutable_data_ptr<float>();
+        const float* in_data = input_eff.data_ptr<float>();
+
+        Tensor gamma_tensor, beta_tensor;
+        const float* gamma = nullptr;
+        const float* beta = nullptr;
+        if (elementwise_affine_) {
+            Tensor w = get_parameter("weight")->data();
+            Tensor b = get_parameter("bias")->data();
+            gamma_tensor = w.is_cuda() ? at::to_cpu(w) : w;
+            beta_tensor  = b.is_cuda() ? at::to_cpu(b) : b;
+            gamma = gamma_tensor.data_ptr<float>();
+            beta  = beta_tensor.data_ptr<float>();
+        }
+#else
         Tensor output = input.clone();
         float* out_data = output.mutable_data_ptr<float>();
         const float* in_data = input.data_ptr<float>();
 
         const float* gamma = elementwise_affine_ ? get_parameter("weight")->data().data_ptr<float>() : nullptr;
         const float* beta = elementwise_affine_ ? get_parameter("bias")->data().data_ptr<float>() : nullptr;
+#endif
 
         // Normalize each batch element
         for (int64_t b = 0; b < batch_size; ++b) {
@@ -440,7 +464,15 @@ public:
             }
         }
 
-        // Wire autograd backward
+#ifdef PT_USE_CUDA
+        // Move output back to CUDA if input was on CUDA. Skip autograd wiring
+        // because the device bounce already detaches the grad chain.
+        if (on_cuda) {
+            return at::to_cuda(output);
+        }
+#endif
+
+        // Wire autograd backward (CPU path only — CUDA path above returns early).
         if (autograd::GradMode::is_enabled()) {
             bool needs_grad = input.requires_grad();
             if (elementwise_affine_) {
