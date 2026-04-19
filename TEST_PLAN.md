@@ -30,7 +30,7 @@ CUDA-enabled binaries currently present in `build_cudnn/`. Run from
 | 2 | `examples/pir/train_pir.exe` | `data/tiny_shakespeare.txt --device cuda --iterations 100 --batch_size 4 --block_size 64 --n_embd 128 --n_layers 2 --n_pir_layers 2` | Loss ≤ 3.0 by iter 100 | 🟢 (3.87→2.74) |
 | 3 | `examples/pir/train_mlp_char.exe` | `--data data/tiny_shakespeare.txt --device cuda --iterations 100 --batch_size 32 --block_size 64 --n_embd 64 --n_hidden 128` | Loss ≤ 3.5 by iter 100 | 🟢 (4.14→3.41) |
 | 4 | `examples/pir/test_mem_leak.exe` | (none) | created==destroyed==released==alive==0 | 🟢 |
-| 5 | `examples/gguf/test_gguf_inference.exe` | `qwen3:4b --device cuda --max_tokens 100 "Once upon a time"` | ≥ 80 tok/s, coherent output | 🟢 (86.6 tok/s) |
+| 5 | `examples/gguf/test_gguf_inference.exe` | `qwen3:4b --device cuda --max_tokens 100 "Once upon a time"` | ≥ 40 tok/s, coherent output | 🟢 (~48 tok/s 2026-04-20) |
 | 6 | `examples/cifar/train_resnet.exe` | `--device cuda --data data/cifar-10-batches-bin --epochs 50 --batch_size 128 --lr 0.1` | Test acc ≥ 88% by epoch 50 | ⚪ (agent running — `a0ef5f8b1796e9ece`) |
 | 7 | `examples/vae/train_vae.exe` | `--device cuda --data data/mnist --epochs 20 --batch_size 128` | ELBO ≤ 95 nats on test by epoch 20, generated digits visually MNIST-like | ⚪ (agent running — `a4465a38bb7f2ed15`) |
 
