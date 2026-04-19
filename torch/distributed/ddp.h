@@ -74,6 +74,28 @@ void barrier();
 // ----------------------------------------------------------------------------
 // DistributedDataParallel — wraps a module, syncs grads each backward
 // ----------------------------------------------------------------------------
+//
+// Gradient-accumulation tip — use no_sync():
+//   For every micro-batch except the last, wrap the forward+backward in a
+//   NoSyncGuard so that allreduce_grads() becomes a no-op. On the FINAL
+//   micro-batch, do NOT use the guard: that one call to allreduce_grads()
+//   then averages the locally-accumulated gradient across all ranks.
+//   This saves N-1 of every N AllReduces during gradient accumulation.
+//
+//   Example (N=4 micro-batches, 1 optimizer step):
+//     for (int mb = 0; mb < 4; ++mb) {
+//         bool last = (mb == 3);
+//         std::optional<torch::distributed::DDPNoSyncGuard> guard;
+//         if (!last) guard.emplace(*ddp);
+//         auto out  = ddp->forward(batches[mb]);
+//         auto loss = loss_fn(out, labels[mb]);
+//         loss.backward();          // accumulates into .grad locally
+//     }
+//     ddp->allreduce_grads();       // single AllReduce of the summed grad
+//     optimizer.step();
+//
+// Backwards-compat: if you never touch require_grad_sync()/no_sync(),
+// behaviour is identical to the previous version (always sync).
 class DistributedDataParallel : public nn::Module {
 public:
     DistributedDataParallel(std::shared_ptr<nn::Module> module,
@@ -89,7 +111,14 @@ public:
     // Sums all parameter gradients across ranks AND divides by world_size
     // (so that the resulting gradient is the average across ranks — the standard
     // DDP semantic).
+    //
+    // When require_grad_sync() is false (set via NoSyncGuard / no_sync()) this
+    // call is a no-op — grads stay rank-local until sync is re-enabled.
     void allreduce_grads();
+
+    // ---- no_sync support (gradient accumulation across micro-batches) ----
+    bool require_grad_sync() const  { return require_grad_sync_; }
+    void set_require_grad_sync(bool v) { require_grad_sync_ = v; }
 
     std::shared_ptr<nn::Module> module() const { return module_; }
     int rank() const { return cfg_.rank; }
@@ -98,6 +127,39 @@ public:
 private:
     std::shared_ptr<nn::Module> module_;
     DDPConfig cfg_;
+    // When false, allreduce_grads() returns immediately. Toggled by
+    // DDPNoSyncGuard. Default true preserves the legacy behaviour.
+    bool require_grad_sync_ = true;
+};
+
+// RAII guard: while alive, suppresses allreduce_grads() on the wrapped DDP.
+// Mirrors the style of torch::autograd::NoGradGuard.
+//
+//   {
+//       torch::distributed::DDPNoSyncGuard g(*ddp);
+//       loss.backward();      // grads accumulate locally; no AllReduce
+//   } // guard destructor restores previous state
+//
+// Nestable: each guard saves and restores the prior flag value, so
+// nested guards behave correctly.
+class DDPNoSyncGuard {
+public:
+    explicit DDPNoSyncGuard(DistributedDataParallel& ddp)
+        : ddp_(ddp), prev_(ddp.require_grad_sync()) {
+        ddp_.set_require_grad_sync(false);
+    }
+    ~DDPNoSyncGuard() {
+        ddp_.set_require_grad_sync(prev_);
+    }
+
+    DDPNoSyncGuard(const DDPNoSyncGuard&)            = delete;
+    DDPNoSyncGuard& operator=(const DDPNoSyncGuard&) = delete;
+    DDPNoSyncGuard(DDPNoSyncGuard&&)                 = delete;
+    DDPNoSyncGuard& operator=(DDPNoSyncGuard&&)      = delete;
+
+private:
+    DistributedDataParallel& ddp_;
+    bool                     prev_;
 };
 
 }  // namespace distributed

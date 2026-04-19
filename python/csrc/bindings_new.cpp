@@ -145,6 +145,7 @@ void init_distributed_bindings(py::module& m) {
     using torch::distributed::ProcessGroup;
     using torch::distributed::ProcessGroupPtr;
     using torch::distributed::DistributedDataParallel;
+    using torch::distributed::DDPNoSyncGuard;
     using torch::distributed::FullyShardedDataParallel;
     using torch::distributed::FSDPConfig;
     using torch::distributed::DistArgs;
@@ -199,6 +200,40 @@ void init_distributed_bindings(py::module& m) {
     m.def("scatter", &torch::distributed::dist::scatter,
           py::arg("tensor"), py::arg("rank"));
 
+    // ----- DDP no_sync() context-manager helper -----
+    //
+    // Python pattern:
+    //   with ddp.no_sync():
+    //       loss.backward()           # accumulates locally, no AllReduce
+    //   loss.backward()               # this one syncs
+    //
+    // We can't bind the C++ DDPNoSyncGuard directly (it's a stack-RAII type,
+    // non-movable, holds a reference). Instead expose a tiny Python-level
+    // helper that toggles DistributedDataParallel::set_require_grad_sync()
+    // on __enter__/__exit__ — semantically identical to the C++ guard.
+    struct PyDDPNoSyncCtx {
+        std::shared_ptr<DistributedDataParallel> ddp;
+        bool prev = true;
+        bool entered = false;
+    };
+    py::class_<PyDDPNoSyncCtx, std::shared_ptr<PyDDPNoSyncCtx>>(m, "_DDPNoSyncCtx")
+        .def("__enter__", [](PyDDPNoSyncCtx& self) {
+            if (self.entered) {
+                throw std::runtime_error("DDP.no_sync() context already entered");
+            }
+            self.prev = self.ddp->require_grad_sync();
+            self.ddp->set_require_grad_sync(false);
+            self.entered = true;
+        })
+        .def("__exit__", [](PyDDPNoSyncCtx& self,
+                            py::object, py::object, py::object) {
+            if (self.entered) {
+                self.ddp->set_require_grad_sync(self.prev);
+                self.entered = false;
+            }
+            return false;  // don't swallow exceptions
+        });
+
     // DDP
     py::class_<DistributedDataParallel, torch::nn::Module,
                std::shared_ptr<DistributedDataParallel>>(m, "DistributedDataParallel")
@@ -214,6 +249,30 @@ void init_distributed_bindings(py::module& m) {
         .def("finish_gradient_synchronization",
              &DistributedDataParallel::finish_gradient_synchronization)
         .def("sync_gradients", &DistributedDataParallel::sync_gradients)
+        // ---- no_sync() / require_grad_sync — gradient accumulation ----
+        // Python:
+        //   with ddp.no_sync():
+        //       for mb in micro_batches[:-1]:
+        //           loss_fn(ddp(mb.x), mb.y).backward()   # local accum only
+        //   # final micro-batch outside the guard:
+        //   loss_fn(ddp(last.x), last.y).backward()
+        //   ddp.finish_gradient_synchronization()         # one AllReduce
+        //   optim.step()
+        // Saves N-1 AllReduces per N-step accumulation.
+        .def_property("require_grad_sync",
+                      &DistributedDataParallel::require_grad_sync,
+                      &DistributedDataParallel::set_require_grad_sync)
+        .def("no_sync",
+             [](std::shared_ptr<DistributedDataParallel> self) {
+                 auto ctx = std::make_shared<PyDDPNoSyncCtx>();
+                 ctx->ddp = std::move(self);
+                 return ctx;
+             },
+             "Context manager that suppresses gradient AllReduce within "
+             "the with-block. Use across the first N-1 of N gradient "
+             "accumulation micro-batches; the Nth backward (without "
+             "no_sync) plus a single finish_gradient_synchronization() "
+             "averages the accumulated grad across all ranks.")
         .def_property_readonly("module", &DistributedDataParallel::module)
         .def_property_readonly("process_group",
             &DistributedDataParallel::process_group);
