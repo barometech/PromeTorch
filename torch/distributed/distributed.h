@@ -557,6 +557,26 @@ private:
 //   // ... backward ...
 //   ddp->finish_gradient_synchronization();
 //   optimizer.step();
+//
+// no_sync() — gradient accumulation across micro-batches:
+//   When training with gradient accumulation (N micro-batches per
+//   optimizer step), running an AllReduce after every micro-batch wastes
+//   N-1 AllReduces of bandwidth. Wrap the first N-1 micro-batches in a
+//   DDPNoSyncGuard so finish_gradient_synchronization() / sync_gradients()
+//   become no-ops; on the Nth micro-batch (without the guard) the single
+//   sync averages the locally-accumulated gradient across all ranks.
+//
+//     for (int mb = 0; mb < N; ++mb) {
+//         std::optional<DDPNoSyncGuard> g;
+//         if (mb < N - 1) g.emplace(*ddp);
+//         auto loss = loss_fn(ddp->forward(x[mb]), y[mb]);
+//         loss.backward();
+//     }
+//     ddp->finish_gradient_synchronization();   // single AllReduce
+//     optimizer.step();
+//
+//   Backwards-compat: code that never touches no_sync()/require_grad_sync()
+//   sees the previous behaviour (every sync call performs AllReduce).
 
 class DistributedDataParallel : public nn::Module {
 public:
@@ -602,8 +622,12 @@ public:
     // Gradient synchronization — call AFTER backward(), BEFORE step()
     // ================================================================
 
-    // AllReduce all parameter gradients, then divide by world_size
+    // AllReduce all parameter gradients, then divide by world_size.
+    // No-op when require_grad_sync_ is false (used by DDPNoSyncGuard for
+    // gradient accumulation across micro-batches).
     void finish_gradient_synchronization() {
+        if (!require_grad_sync_) return;
+
         auto params = module_->parameters(/*recurse=*/true);
         int ws = process_group_->world_size();
 
@@ -630,8 +654,11 @@ public:
         }
     }
 
-    // Convenience: sync gradients using ReduceOp::AVG directly
+    // Convenience: sync gradients using ReduceOp::AVG directly.
+    // No-op when require_grad_sync_ is false (DDPNoSyncGuard).
     void sync_gradients() {
+        if (!require_grad_sync_) return;
+
         auto params = module_->parameters(/*recurse=*/true);
 
         for (auto* param : params) {
@@ -651,9 +678,17 @@ public:
     std::shared_ptr<nn::Module> module() const { return module_; }
     ProcessGroupPtr process_group() const { return process_group_; }
 
+    // ---- no_sync support (gradient accumulation across micro-batches) ----
+    bool require_grad_sync() const     { return require_grad_sync_; }
+    void set_require_grad_sync(bool v) { require_grad_sync_ = v; }
+
 private:
     std::shared_ptr<nn::Module> module_;
     ProcessGroupPtr process_group_;
+    // When false, finish_gradient_synchronization() and sync_gradients()
+    // are no-ops. Toggled by DDPNoSyncGuard. Default true preserves
+    // legacy behaviour (every call performs AllReduce).
+    bool require_grad_sync_ = true;
 
     // Broadcast all parameters from rank 0 to ensure identical starting weights
     void broadcast_params_from_rank0() {
@@ -671,6 +706,39 @@ private:
             }
         }
     }
+};
+
+// ============================================================================
+// DDPNoSyncGuard — RAII guard that disables gradient AllReduce on a DDP
+// ============================================================================
+// While alive, finish_gradient_synchronization() and sync_gradients() on
+// the wrapped DDP become no-ops. Style mirrors torch::autograd::NoGradGuard.
+//
+//   {
+//       torch::distributed::DDPNoSyncGuard g(*ddp);
+//       // forward + backward here: grads accumulate locally, no AllReduce
+//   } // destructor restores previous flag
+//
+// Nestable: each guard saves and restores the prior value. Non-copyable
+// and non-movable (RAII binding to a specific DDP instance).
+class DDPNoSyncGuard {
+public:
+    explicit DDPNoSyncGuard(DistributedDataParallel& ddp)
+        : ddp_(ddp), prev_(ddp.require_grad_sync()) {
+        ddp_.set_require_grad_sync(false);
+    }
+    ~DDPNoSyncGuard() {
+        ddp_.set_require_grad_sync(prev_);
+    }
+
+    DDPNoSyncGuard(const DDPNoSyncGuard&)            = delete;
+    DDPNoSyncGuard& operator=(const DDPNoSyncGuard&) = delete;
+    DDPNoSyncGuard(DDPNoSyncGuard&&)                 = delete;
+    DDPNoSyncGuard& operator=(DDPNoSyncGuard&&)      = delete;
+
+private:
+    DistributedDataParallel& ddp_;
+    bool                     prev_;
 };
 
 // ============================================================================
