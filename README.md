@@ -133,11 +133,18 @@ Coherent on most simple prompts. qwen3:4b quantized is a small model —
 complex reasoning tasks (long code completions, multi-step math) show
 some topic drift. That's model-quality territory, not runtime.
 
-**Gap vs Ollama:** Ollama uses cuBLAS tensor-core HGEMM + kv-page attention;
-we use custom Q4_K GEMV + flash_decode + CUDA Graph. Closing to ≥130 tok/s
-requires **one-shot dequant Q4_K → FP16 at load + cublasHgemv** for every
-matmul (roadmap in `TEST_PLAN.md` §4). Consumer GPU numbers will be lower
-(exact depends on card bandwidth).
+**Gap vs Ollama:** Ollama uses hand-tuned llama.cpp Q4_K GEMV that
+saturates A100 HBM2e better than ours + paged attention. We use custom
+Q4_K fused kernels + flash_decode + CUDA Graph.
+
+**Tested 2026-04-20: Q4_K → FP16 dequant + cublasHgemv does NOT speed up
+decode.** Shipped as `--fp16-weights` opt-in (commit `6623fe3`), but
+empirically runs ~6% slower than the existing Q4_K fused path on A100
+(44 vs 47 tok/s). Single-token decode is bandwidth-bound: FP16 reads
+2.36× more memory per forward pass (5.9 GB vs 2.5 GB Q4_K), and Tensor
+Cores don't help N=1 GEMV shapes. See [TEST_PLAN.md §4.3-4.4](TEST_PLAN.md)
+for the post-mortem + proposed paths (port llama.cpp kernels ~30-50%,
+continuous batching, INT4 throughout).
 
 ### Точность обучения (10 training tasks)
 
@@ -965,7 +972,7 @@ scripts/                      Build-скрипты для российских �
 
 | Приоритет | Задача | Детали |
 |-----------|--------|--------|
-| Критический | PromeServe inference 48 → 150 tok/s на A100 | One-shot dequant Q4_K → FP16 при load + `cublasHgemv` для всех matmul (вместо custom quant GEMV). TEST_PLAN §4. |
+| Критический | PromeServe inference 47 → 100+ tok/s на A100 | Dequant Q4_K → FP16 path протестирован и **не даёт speedup** для N=1 decode (bandwidth-bound; FP16 читает 2.36× больше памяти). Shipped as `--fp16-weights` opt-in. Реальные пути к 100+ tok/s: port llama.cpp `mul_mat_q4_K_q8_1` (~30-50% gain), continuous batching (Tensor Cores любят GEMM), INT4 throughout. См. [TEST_PLAN.md §4](TEST_PLAN.md). |
 | Высокий | Autocast wiring в module forwards | `to_autograd` + `ToBackward` foundation сделан (8f87e57). Нужно per-op cast в `Linear::forward`, `Conv2d::forward`, `MultiheadAttention::forward` + FP16 `mm` через `cublasGemmEx`. TEST_PLAN §5.1. |
 | Высокий | Python `_C.pyd` op bindings → `*_autograd` wrappers | `t1 + t2` из Python вызывает raw aten, `requires_grad` не прокидывается через Python boundary. TEST_PLAN §5.10. |
 | Высокий | TransformerEncoderLayer CUDA forward crash | CPU работает (85.8% val acc), CUDA падает — подозрение на LayerNorm CUDA kernel gap. TEST_PLAN §5.9. |
