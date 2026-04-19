@@ -413,8 +413,6 @@ int main(int argc, char* argv[]) {
     int64_t batch_size = 128;
     double lr = 1e-3;
 
-    std::cout << "[VAE] starting main(), argc=" << argc << std::endl;
-    std::cout.flush();
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
         if (a == "--data"   && i + 1 < argc) data_dir   = argv[++i];
@@ -423,7 +421,6 @@ int main(int argc, char* argv[]) {
         else if (a == "--batch_size" && i + 1 < argc) batch_size = std::atoll(argv[++i]);
         else if (a == "--lr" && i + 1 < argc) lr = std::atof(argv[++i]);
     }
-    std::cout << "[VAE] args parsed" << std::endl; std::cout.flush();
 
     if (device_str == "cuda" || device_str == "gpu") {
 #ifdef PT_USE_CUDA
@@ -453,19 +450,11 @@ int main(int argc, char* argv[]) {
               << "  test=" << test_images.size() << "\n"; std::cout.flush();
 
     // --- Build model + optimizer ---
-    std::cout << "  [dbg] creating VAE model..." << std::endl; std::cout.flush();
     auto model = std::make_shared<VAE>(784, 400, 20);
-    std::cout << "  [dbg] model created" << std::endl; std::cout.flush();
 #ifdef PT_USE_CUDA
-    if (g_device.is_cuda()) {
-        std::cout << "  [dbg] moving to CUDA..." << std::endl; std::cout.flush();
-        model->to(g_device);
-        std::cout << "  [dbg] on CUDA" << std::endl; std::cout.flush();
-    }
+    if (g_device.is_cuda()) model->to(g_device);
 #endif
-    std::cout << "  [dbg] creating optimizer..." << std::endl; std::cout.flush();
     Adam optimizer(model->parameters(), AdamOptions(lr));
-    std::cout << "  [dbg] optimizer ready" << std::endl; std::cout.flush();
 
     int64_t N = static_cast<int64_t>(train_images.size());
 
@@ -485,17 +474,11 @@ int main(int argc, char* argv[]) {
             Tensor x = make_batch(train_images, indices, i, i + B);
             x = to_device(x);
 
-            if (i == 0 && epoch == 1) { std::cout << "  [dbg] zero_grad..." << std::endl; std::cout.flush(); }
             model->zero_grad();
-            if (i == 0 && epoch == 1) { std::cout << "  [dbg] forward..." << std::endl; std::cout.flush(); }
             auto out = model->forward_vae(x);
-            if (i == 0 && epoch == 1) { std::cout << "  [dbg] forward OK, loss..." << std::endl; std::cout.flush(); }
             Tensor loss = vae_loss(out.recon, x, out.mu, out.logvar, B);
-            if (i == 0 && epoch == 1) { std::cout << "  [dbg] loss=" << move_to_cpu(loss).data_ptr<float>()[0] << ", backward..." << std::endl; std::cout.flush(); }
             torch::autograd::backward({loss});
-            if (i == 0 && epoch == 1) { std::cout << "  [dbg] backward OK, step..." << std::endl; std::cout.flush(); }
             optimizer.step();
-            if (i == 0 && epoch == 1) { std::cout << "  [dbg] step OK" << std::endl; std::cout.flush(); }
 
             epoch_loss += move_to_cpu(loss).data_ptr<float>()[0];
             ++batches;
