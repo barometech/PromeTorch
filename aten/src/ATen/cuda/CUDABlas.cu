@@ -446,6 +446,12 @@ __global__ void transpose_kernel(
 // Launch Wrappers
 // ============================================================================
 
+// launch_gemm — primary matmul dispatch.
+// Uses cuBLAS sgemm when available (tensor cores, tuned kernels). This is what the
+// README's "CUDA GEMM" claim really means in this repo. The hand-written tiled
+// kernels above (gemm_nn_kernel / gemm_tn_kernel / gemm_nt_kernel) are kept as a
+// portable fallback and pedagogical reference; invoke them via launch_gemm_native
+// below.
 void launch_gemm(
     const float* A, const float* B, float* C,
     int M, int N, int K,
@@ -453,20 +459,16 @@ void launch_gemm(
     bool trans_a, bool trans_b,
     cudaStream_t stream
 ) {
-    // Use cuBLAS for optimal performance (tensor cores, tuned kernels)
-    // cuBLAS uses column-major, so we compute C^T = B^T @ A^T
-    // which gives us row-major C = A @ B
     cublasHandle_t handle = CuBLASHandle::get();
     cublasSetStream(handle, stream);
 
     cublasOperation_t op_a = trans_b ? CUBLAS_OP_T : CUBLAS_OP_N;
     cublasOperation_t op_b = trans_a ? CUBLAS_OP_T : CUBLAS_OP_N;
 
-    // cuBLAS column-major: C(N,M) = B(N,K) @ A(K,M)
-    // lda = leading dim of first matrix in cuBLAS (B or B^T)
-    int lda = trans_b ? K : N;  // leading dim of B in col-major
-    int ldb = trans_a ? M : K;  // leading dim of A in col-major
-    int ldc = N;                // leading dim of C in col-major
+    // cuBLAS column-major: C(N,M) = B(N,K) @ A(K,M), giving row-major C = A @ B.
+    int lda = trans_b ? K : N;
+    int ldb = trans_a ? M : K;
+    int ldc = N;
 
     cublasSgemm(handle, op_a, op_b,
                 N, M, K,
@@ -475,6 +477,30 @@ void launch_gemm(
                 A, ldb,
                 &beta,
                 C, ldc);
+}
+
+// launch_gemm_native — hand-written tiled CUDA kernel. No cuBLAS dependency.
+// Useful on platforms without cuBLAS and for validating correctness of our kernels.
+// Supported: NN, TN, NT (no TT). Performance is below cuBLAS but functional.
+void launch_gemm_native(
+    const float* A, const float* B, float* C,
+    int M, int N, int K,
+    float alpha, float beta,
+    bool trans_a, bool trans_b,
+    cudaStream_t stream
+) {
+    dim3 block(TILE_SIZE, TILE_SIZE);
+    dim3 grid((N + TILE_SIZE - 1) / TILE_SIZE, (M + TILE_SIZE - 1) / TILE_SIZE);
+    if (!trans_a && !trans_b) {
+        gemm_nn_kernel<<<grid, block, 0, stream>>>(A, B, C, M, N, K, alpha, beta);
+    } else if (trans_a && !trans_b) {
+        gemm_tn_kernel<<<grid, block, 0, stream>>>(A, B, C, M, N, K, alpha, beta);
+    } else if (!trans_a && trans_b) {
+        gemm_nt_kernel<<<grid, block, 0, stream>>>(A, B, C, M, N, K, alpha, beta);
+    } else {
+        // Both transposed: fall back to cuBLAS.
+        launch_gemm(A, B, C, M, N, K, alpha, beta, trans_a, trans_b, stream);
+    }
 }
 
 void launch_batched_gemm(

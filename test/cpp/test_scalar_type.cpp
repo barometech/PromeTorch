@@ -158,3 +158,55 @@ TEST(BFloat16Test, Arithmetic) {
     BFloat16 prod = a * b;
     EXPECT_NEAR(static_cast<float>(prod), 6.0f, 0.1f);
 }
+
+// ============================================================================
+// c10::complex<T> Tests — header-only complex scalar arithmetic
+// ============================================================================
+
+TEST(ComplexTest, BasicArithmetic) {
+    using c10::Complex64;
+
+    Complex64 a(1.0f, 2.0f);
+    Complex64 b(3.0f, 4.0f);
+
+    // (1+2i) * (3+4i) = (3 - 8) + (4 + 6)i = -5 + 10i
+    Complex64 prod = a * b;
+    EXPECT_FLOAT_EQ(prod.re, -5.0f);
+    EXPECT_FLOAT_EQ(prod.im, 10.0f);
+
+    // (1+2i) + (3+4i) = 4 + 6i
+    Complex64 sum = a + b;
+    EXPECT_FLOAT_EQ(sum.re, 4.0f);
+    EXPECT_FLOAT_EQ(sum.im, 6.0f);
+
+    // (1+2i) - (3+4i) = -2 - 2i
+    Complex64 diff = a - b;
+    EXPECT_FLOAT_EQ(diff.re, -2.0f);
+    EXPECT_FLOAT_EQ(diff.im, -2.0f);
+
+    // -(1+2i) = -1 - 2i
+    Complex64 neg = -a;
+    EXPECT_FLOAT_EQ(neg.re, -1.0f);
+    EXPECT_FLOAT_EQ(neg.im, -2.0f);
+
+    // conj(3+4i) = 3-4i
+    Complex64 cb = c10::conj(b);
+    EXPECT_FLOAT_EQ(cb.re, 3.0f);
+    EXPECT_FLOAT_EQ(cb.im, -4.0f);
+
+    // |3+4i| = 5
+    EXPECT_FLOAT_EQ(c10::abs(b), 5.0f);
+
+    // Equality
+    EXPECT_TRUE(a == Complex64(1.0f, 2.0f));
+    EXPECT_TRUE(a != b);
+}
+
+TEST(ComplexTest, Division) {
+    using c10::Complex128;
+    Complex128 a(1.0, 2.0);
+    Complex128 b(1.0, 0.0);
+    Complex128 q = a / b;
+    EXPECT_DOUBLE_EQ(q.re, 1.0);
+    EXPECT_DOUBLE_EQ(q.im, 2.0);
+}

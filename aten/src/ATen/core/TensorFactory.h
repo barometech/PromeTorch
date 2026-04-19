@@ -190,6 +190,15 @@ inline Tensor ones(
 ) {
     Tensor result = empty(sizes, options);
 
+    if (options.dtype() == c10::ScalarType::ComplexFloat) {
+        detail::fill_tensor<c10::complex<float>>(result, c10::complex<float>(1.0f, 0.0f));
+        return result;
+    }
+    if (options.dtype() == c10::ScalarType::ComplexDouble) {
+        detail::fill_tensor<c10::complex<double>>(result, c10::complex<double>(1.0, 0.0));
+        return result;
+    }
+
     PT_DISPATCH_ALL_TYPES(options.dtype(), "ones", [&] {
         detail::fill_tensor<scalar_t>(result, static_cast<scalar_t>(1));
     });
