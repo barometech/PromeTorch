@@ -1657,7 +1657,7 @@ public:
             alpha[0 * S + 0] = lp_at(0, ext[0]);
             if (S > 1) alpha[0 * S + 1] = lp_at(0, ext[1]);
 
-            auto logaddexp = [](float a, float b) -> float {
+            auto logaddexp = [NEG_INF](float a, float b) -> float {
                 if (a == NEG_INF) return b;
                 if (b == NEG_INF) return a;
                 float m = std::max(a, b);

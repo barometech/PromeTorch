@@ -453,6 +453,14 @@ struct ConvTranspose2dBackward : public Node {
 
         saved_input_ = Tensor();
         saved_weight_ = Tensor();
+
+#ifdef PT_USE_CUDA
+        if (grad_on_cuda) {
+            if (grad_input.defined())  grad_input  = at::to_cuda(grad_input);
+            if (grad_weight.defined()) grad_weight = at::to_cuda(grad_weight);
+            if (grad_bias.defined())   grad_bias   = at::to_cuda(grad_bias);
+        }
+#endif
         return {grad_input, grad_weight, grad_bias};
     }
 
