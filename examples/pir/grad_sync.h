@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cstdint>
 #include <string>
 #include <vector>
 #include <unistd.h>
@@ -49,17 +50,37 @@ struct GradSync {
         return true;
     }
 
+    // Compute simple hash of float array (XOR of bit-cast ints, every 1000th element)
+    // Used to verify all ranks have same weights after sync.
+    static uint64_t weights_hash(const float* w, int64_t n) {
+        uint64_t h = 0;
+        for (int64_t i = 0; i < n; i += 1000) {
+            uint32_t bits;
+            std::memcpy(&bits, w + i, 4);
+            h ^= ((uint64_t)bits << 32) | bits;
+            h = (h * 1099511628211ULL) ^ i;
+        }
+        return h;
+    }
+
     // sync() is used for weight averaging in Local SGD
     void sync(float* flat_weights, float* /*unused*/) {
         sync_gen_++;
+        uint64_t h_before = weights_hash(flat_weights, total_params_);
 
         // 1. Write my weights to file
         char my_file[128];
         snprintf(my_file, sizeof(my_file), "/tmp/pir_w_%d.bin", rank_);
         FILE* f = fopen(my_file, "wb");
         if (f) {
-            fwrite(flat_weights, sizeof(float), total_params_, f);
+            size_t wrote = fwrite(flat_weights, sizeof(float), total_params_, f);
             fclose(f);
+            if ((int64_t)wrote != total_params_) {
+                fprintf(stderr, "GradSync rank %d: SHORT WRITE %zu/%lld at gen %d\n",
+                        rank_, wrote, (long long)total_params_, sync_gen_);
+            }
+        } else {
+            fprintf(stderr, "GradSync rank %d: fopen FAILED for %s\n", rank_, my_file);
         }
 
         // Signal: I wrote my weights
@@ -95,10 +116,19 @@ struct GradSync {
                 snprintf(wf, sizeof(wf), "/tmp/pir_w_%d.bin", r);
                 FILE* wfp = fopen(wf, "rb");
                 if (wfp) {
-                    fread(tmp.data(), sizeof(float), total_params_, wfp);
+                    size_t got = fread(tmp.data(), sizeof(float), total_params_, wfp);
                     fclose(wfp);
+                    if ((int64_t)got != total_params_) {
+                        fprintf(stderr, "GradSync rank 0: SHORT READ from rank %d: %zu/%lld at gen %d\n",
+                                r, got, (long long)total_params_, sync_gen_);
+                    }
+                    uint64_t h_r = weights_hash(tmp.data(), total_params_);
+                    fprintf(stderr, "[GradSync avg gen=%d] rank %d hash=%016llx\n",
+                            sync_gen_, r, (unsigned long long)h_r);
                     for (int64_t i = 0; i < total_params_; i++)
                         avg[i] += tmp[i] * inv_n;
+                } else {
+                    fprintf(stderr, "GradSync rank 0: fopen FAILED for %s\n", wf);
                 }
             }
 
@@ -137,10 +167,18 @@ struct GradSync {
             }
             f = fopen("/tmp/pir_w_avg.bin", "rb");
             if (f) {
-                fread(flat_weights, sizeof(float), total_params_, f);
+                size_t got = fread(flat_weights, sizeof(float), total_params_, f);
                 fclose(f);
+                if ((int64_t)got != total_params_) {
+                    fprintf(stderr, "GradSync rank %d: SHORT READ %zu/%lld at gen %d\n",
+                            rank_, got, (long long)total_params_, sync_gen_);
+                }
             }
         }
+        // Hash AFTER sync — all ranks should print same value
+        uint64_t h_after = weights_hash(flat_weights, total_params_);
+        fprintf(stderr, "[GradSync rank=%d gen=%d] before=%016llx after=%016llx\n",
+                rank_, sync_gen_, (unsigned long long)h_before, (unsigned long long)h_after);
     }
 
     void sync_weights(float* flat_params) {
