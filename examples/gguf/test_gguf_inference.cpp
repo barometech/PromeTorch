@@ -35,6 +35,7 @@ void print_usage(const char* argv0) {
     std::cout << "  --raw            No chat template (default, good for completions)" << std::endl;
     std::cout << "  --profile        Enable GPU profiling (timing breakdown)" << std::endl;
     std::cout << "  --fp16-weights   Dequant Q4_K -> FP16 at load; cuBLAS HGEMV decode (CUDA only)" << std::endl;
+    std::cout << "  --llama-gemv     Use llama.cpp-style Q4_K GEMV v2 kernel (CUDA only)" << std::endl;
 }
 
 int main(int argc, char* argv[]) {
@@ -51,6 +52,7 @@ int main(int argc, char* argv[]) {
     bool use_chat = false;
     bool use_profile = false;
     bool use_fp16_weights = false;
+    bool use_llama_gemv = false;
     int max_tokens = 128;
     float temperature = 0.7f;
     int top_k = 40;
@@ -78,6 +80,8 @@ int main(int argc, char* argv[]) {
             use_profile = true;
         } else if (arg == "--fp16-weights" || arg == "--fp16_weights") {
             use_fp16_weights = true;
+        } else if (arg == "--llama-gemv" || arg == "--llama_gemv") {
+            use_llama_gemv = true;
         } else if ((arg == "--max-tokens" || arg == "--max_tokens") && i + 1 < argc) {
             max_tokens = std::atoi(argv[++i]);
         } else if ((arg == "--temp" || arg == "--temperature") && i + 1 < argc) {
@@ -170,6 +174,12 @@ int main(int argc, char* argv[]) {
                 bool ok = model.dequant_all_to_fp16();
                 std::cout << "[Model] FP16 weights path: "
                           << (ok ? "ENABLED" : "FAILED / using quant fallback") << std::endl;
+            }
+
+            // Optional: route Q4_K GEMV through llama.cpp-style v2 kernel
+            if (use_llama_gemv) {
+                model.use_llama_gemv_ = true;
+                std::cout << "[Model] llama-style Q4_K GEMV v2: ENABLED" << std::endl;
             }
         }
 

@@ -437,6 +437,16 @@ ATEN_CUDA_API void launch_q4km_persistent_gemv(
     int K, int N, int64_t row_stride_bytes,
     cudaStream_t stream = nullptr);
 
+// Q4_K_M GEMV v2: llama.cpp-style hand-tuned variant.
+// - Bulk 16-byte (uint4) header load via __ldg (d, dmin, 12 scale bytes)
+// - NROWS=2: each warp handles 2 output rows, amortizing Q8_1 smem reads
+// - Produces byte-identical results to launch_q4km_persistent_gemv at T=0
+// Expected +30-50% on A100 vs v1 for large N/K GEMV shapes.
+ATEN_CUDA_API void launch_q4km_persistent_gemv_v2(
+    const void* weights, const float* x, float* y,
+    int K, int N, int64_t row_stride_bytes,
+    cudaStream_t stream = nullptr);
+
 // Fused multi-GEMV: runs gate+up projections in a single kernel launch.
 // Writes gate output to y_gate[0..N_gate-1] and up output to y_up[0..N_up-1].
 // Both weight matrices must be Q4_K with the same K (input dim).

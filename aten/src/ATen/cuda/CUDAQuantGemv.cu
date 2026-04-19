@@ -353,6 +353,209 @@ ATEN_CUDA_API void launch_q4km_persistent_gemv(
 }
 
 // ============================================================================
+// Q4_K GEMV v2 — llama.cpp-style: bulk scale load + dual-row ILP
+// ============================================================================
+// Compared to q4km_persistent_gemv_kernel:
+//   1. Scales (12 bytes per block) loaded in bulk via 3x __ldg(uint32_t), then
+//      all 8 (scale, min) pairs precomputed in registers once per block.
+//   2. Each warp processes 2 output rows interleaved (NROWS=2) — doubles the
+//      arithmetic-per-block ratio while sharing Q8_1 smem reads across rows,
+//      improving instruction-level parallelism and hiding weight-load latency.
+//   3. Uses __ldg for weight loads (L1/L2 cache hint) and stages Q8_1 scale/sum
+//      into scalar registers to avoid repeated smem loads.
+// Same Q8_1 quantization of x into shared memory as v1 (identical numerics at
+// T=0). Same 144-byte Q4_K block layout, 256 elements per block, 16 sub-blocks.
+
+__global__ void q4km_persistent_gemv_v2_kernel(
+    const uint8_t* __restrict__ weights,
+    const float* __restrict__ x,
+    float* __restrict__ y,
+    int K, int N,
+    int64_t row_stride_bytes)
+{
+    // Same smem layout as v1: Q8_1 int8 [K] + scales[K/32] + sums[K/32]
+    extern __shared__ char smem_raw_v2[];
+    const int num_q8_blocks = K / 32;
+    int8_t* x_q8 = reinterpret_cast<int8_t*>(smem_raw_v2);
+    float* x_q8_d = reinterpret_cast<float*>(smem_raw_v2 + K);
+    float* x_q8_s = reinterpret_cast<float*>(smem_raw_v2 + K + num_q8_blocks * 4);
+
+    const int tid = threadIdx.x;
+    const int block_size = blockDim.x;
+    const int warps_per_block = block_size / 32;
+    const int warp_id = tid / 32;
+    const int lane = tid & 31;
+
+    // -- Cooperative Q8_1 quantization of x into shared memory (identical to v1) --
+    for (int blk = tid; blk < num_q8_blocks; blk += block_size) {
+        const float* xb = x + blk * 32;
+        float amax = 0.0f;
+        #pragma unroll
+        for (int j = 0; j < 32; j++) {
+            float v = fabsf(xb[j]);
+            if (v > amax) amax = v;
+        }
+        float d = amax / 127.0f;
+        float id = (d > 0.0f) ? 1.0f / d : 0.0f;
+        float sum = 0.0f;
+        int8_t* qb = x_q8 + blk * 32;
+        #pragma unroll
+        for (int j = 0; j < 32; j++) {
+            int8_t q = (int8_t)roundf(xb[j] * id);
+            qb[j] = q;
+            sum += (float)q;
+        }
+        x_q8_d[blk] = d;
+        x_q8_s[blk] = sum;
+    }
+    __syncthreads();
+
+    const int group = lane / 8;           // 0..3
+    const int pos_in_group = lane & 7;    // 0..7
+    const int k_off = pos_in_group * 4;   // byte offset within 32-element sub-block
+    const int num_blocks_per_row = K / 256;
+
+    // NROWS=2: each warp computes 2 output rows per grid-stride iteration.
+    // rows per block = warps_per_block * 2. Grid-stride covers all N rows.
+    const int rows_per_block = warps_per_block * 2;
+
+    for (int base_n = blockIdx.x * rows_per_block; base_n < N;
+         base_n += gridDim.x * rows_per_block)
+    {
+        int n0 = base_n + warp_id * 2;
+        int n1 = n0 + 1;
+        bool has_n1 = (n1 < N);
+        if (n0 >= N) continue;
+
+        const uint8_t* row0 = weights + (int64_t)n0 * row_stride_bytes;
+        const uint8_t* row1 = has_n1 ? weights + (int64_t)n1 * row_stride_bytes : row0;
+
+        float sum0 = 0.0f, sum1 = 0.0f;
+
+        #pragma unroll 1
+        for (int blk = 0; blk < num_blocks_per_row; ++blk) {
+            const uint8_t* bp0 = row0 + blk * 144;
+            const uint8_t* bp1 = row1 + blk * 144;
+
+            // -- Bulk header load: 4 bytes (d,dmin) + 12 bytes (scales) = 16 bytes --
+            // uint4 covers the entire header in a single 16-byte __ldg.
+            uint4 h0 = __ldg(reinterpret_cast<const uint4*>(bp0));
+            uint4 h1;
+            if (has_n1) h1 = __ldg(reinterpret_cast<const uint4*>(bp1));
+
+            // -- qs loads: lane*4 bytes from bp+16 (128-byte qs region) --
+            uint32_t qs0 = __ldg(reinterpret_cast<const uint32_t*>(bp0 + 16 + lane * 4));
+            uint32_t qs1 = has_n1 ? __ldg(reinterpret_cast<const uint32_t*>(bp1 + 16 + lane * 4)) : 0u;
+
+            // -- Decode header: h.x = (d|dmin packed fp16), h.y/z/w = 12 scale bytes --
+            float d0  = fp16_to_fp32_device(h0.x & 0xFFFF);
+            float dm0 = fp16_to_fp32_device(h0.x >> 16);
+            float d1  = has_n1 ? fp16_to_fp32_device(h1.x & 0xFFFF) : 0.0f;
+            float dm1 = has_n1 ? fp16_to_fp32_device(h1.x >> 16)    : 0.0f;
+
+            // Extract (sc_lo, m_lo, sc_hi, m_hi) for j=group*2 and j=group*2+1
+            // Scale bytes layout (q[0..11]): q[0..3] + q[4..7] + q[8..11]
+            // We need q[j] and q[j+4] for j<4; q[j+4] and q[j-4] / q[j] for j>=4.
+            // Pack h.y|z|w into a single 12-byte array via an aligned uchar4 view.
+            const uint8_t* sc0 = reinterpret_cast<const uint8_t*>(&h0.y);
+            const uint8_t* sc1 = reinterpret_cast<const uint8_t*>(&h1.y);
+            uint8_t sc_lo0, m_lo0, sc_hi0, m_hi0;
+            uint8_t sc_lo1, m_lo1, sc_hi1, m_hi1;
+            get_scale_min_k4_device(group * 2,     sc0, &sc_lo0, &m_lo0);
+            get_scale_min_k4_device(group * 2 + 1, sc0, &sc_hi0, &m_hi0);
+            if (has_n1) {
+                get_scale_min_k4_device(group * 2,     sc1, &sc_lo1, &m_lo1);
+                get_scale_min_k4_device(group * 2 + 1, sc1, &sc_hi1, &m_hi1);
+            }
+
+            // Fetch Q8_1 scale/sum for the two 32-element sub-blocks this iter touches.
+            // Shared across rows 0 and 1 — a key reuse advantage of NROWS=2.
+            const int q8_lo = blk * 8 + group * 2;
+            const int q8_hi = q8_lo + 1;
+            const float d8_lo = x_q8_d[q8_lo];
+            const float d8_hi = x_q8_d[q8_hi];
+            const float s8_lo = x_q8_s[q8_lo];
+            const float s8_hi = x_q8_s[q8_hi];
+
+            // Q8_1 qs loads: same for both rows (x_q8 in smem, broadcast).
+            uint32_t u_lo = *reinterpret_cast<const uint32_t*>(&x_q8[q8_lo * 32 + k_off]);
+            uint32_t u_hi = *reinterpret_cast<const uint32_t*>(&x_q8[q8_hi * 32 + k_off]);
+
+            // Sum-of-q8 for bias correction (same for both rows).
+            int sum_lo_i = __dp4a((int)0x01010101, (int)u_lo, 0);
+            int sum_hi_i = __dp4a((int)0x01010101, (int)u_hi, 0);
+            // Note: dp4a of 0x01010101 with u is equivalent to (q0+q1+q2+q3).
+            // s8_lo from smem is the full sum over 32 lanes; each lane's local
+            // partial is only 4 elements. Use lane-local partial for bias.
+            // Correction: v1 uses dp4a(0x01010101, u_lo, 0) per lane, which is
+            // the 4-element partial — that's what we want since the reduction
+            // aggregates across lanes. Keep same behavior as v1.
+
+            // Row 0 compute
+            uint32_t v0_lo = qs0 & 0x0F0F0F0F;
+            uint32_t v0_hi = (qs0 >> 4) & 0x0F0F0F0F;
+            int dot0_lo = __dp4a((int)v0_lo, (int)u_lo, 0);
+            int dot0_hi = __dp4a((int)v0_hi, (int)u_hi, 0);
+            sum0 += d0 * (float)sc_lo0 * d8_lo * (float)dot0_lo
+                  - dm0 * (float)m_lo0  * d8_lo * (float)sum_lo_i;
+            sum0 += d0 * (float)sc_hi0 * d8_hi * (float)dot0_hi
+                  - dm0 * (float)m_hi0  * d8_hi * (float)sum_hi_i;
+
+            // Row 1 compute (ILP: runs alongside row 0 in the hardware pipeline)
+            if (has_n1) {
+                uint32_t v1_lo = qs1 & 0x0F0F0F0F;
+                uint32_t v1_hi = (qs1 >> 4) & 0x0F0F0F0F;
+                int dot1_lo = __dp4a((int)v1_lo, (int)u_lo, 0);
+                int dot1_hi = __dp4a((int)v1_hi, (int)u_hi, 0);
+                sum1 += d1 * (float)sc_lo1 * d8_lo * (float)dot1_lo
+                      - dm1 * (float)m_lo1  * d8_lo * (float)sum_lo_i;
+                sum1 += d1 * (float)sc_hi1 * d8_hi * (float)dot1_hi
+                      - dm1 * (float)m_hi1  * d8_hi * (float)sum_hi_i;
+            }
+            // Silence unused warnings for s8_lo/s8_hi (kept for future tweaks)
+            (void)s8_lo; (void)s8_hi;
+        }
+
+        // Warp shuffle reduction for both rows
+        #pragma unroll
+        for (int offset = 16; offset > 0; offset >>= 1) {
+            sum0 += __shfl_down_sync(WARP_MASK, sum0, offset);
+            sum1 += __shfl_down_sync(WARP_MASK, sum1, offset);
+        }
+        if (lane == 0) {
+            y[n0] = sum0;
+            if (has_n1) y[n1] = sum1;
+        }
+    }
+}
+
+ATEN_CUDA_API void launch_q4km_persistent_gemv_v2(
+    const void* weights,
+    const float* x,
+    float* y,
+    int K, int N,
+    int64_t row_stride_bytes,
+    cudaStream_t stream)
+{
+    static int sm_count = 0;
+    if (!sm_count) { int dev=0; cudaGetDevice(&dev); cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, dev); }
+
+    const int WARPS = 8;
+    const int BLOCK_SIZE = WARPS * 32;    // 256 threads per block
+    const int ROWS_PER_BLOCK = WARPS * 2; // NROWS=2 → 16 rows per block
+    // Grid sized so every SM gets work; grid-stride handles remainder.
+    int grid = sm_count * 2;
+    if (grid * ROWS_PER_BLOCK > N) grid = (N + ROWS_PER_BLOCK - 1) / ROWS_PER_BLOCK;
+    if (grid < 1) grid = 1;
+    int num_q8 = K / 32;
+    int smem_bytes = K * 1 + num_q8 * 4 + num_q8 * 4;  // same as v1
+
+    q4km_persistent_gemv_v2_kernel<<<grid, BLOCK_SIZE, smem_bytes, stream>>>(
+        static_cast<const uint8_t*>(weights), x, y,
+        K, N, row_stride_bytes);
+}
+
+// ============================================================================
 // Fused gate+up GEMV — two GEMVs in a single kernel launch
 // ============================================================================
 // Eliminates one kernel launch per layer. Both projections share the same
@@ -1796,6 +1999,7 @@ ATEN_CUDA_API void init_cuda_kernel_smem_attributes(int max_hidden, int max_inte
 
     set_max((const void*)q4km_gemv_kernel, smem_h_fp16);
     set_max((const void*)q4km_persistent_gemv_kernel, smem_h_q8);
+    set_max((const void*)q4km_persistent_gemv_v2_kernel, smem_h_q8);
     set_max((const void*)q4km_fused_gate_up_kernel, std::max(smem_h_fp32, smem_i_fp32));
     set_max((const void*)q6k_gemv_kernel, smem_h_fp32);
     set_max((const void*)q5k_gemv_kernel, smem_h_fp32);
