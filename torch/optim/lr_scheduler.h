@@ -10,6 +10,8 @@
 #include <vector>
 #include <algorithm>
 #include <functional>
+#include <memory>
+#include <limits>
 
 namespace torch {
 namespace optim {
@@ -440,6 +442,381 @@ private:
     double initial_lr_;
     double min_lr_;
     int64_t step_count_;
+};
+
+// ============================================================================
+// CosineAnnealingWarmRestarts - SGDR schedule (Loshchilov & Hutter 2017)
+// ============================================================================
+// Starts with cycle of length T_0. After each cycle finishes, the next cycle
+// length is multiplied by T_mult. Within a cycle, LR anneals from base_lr
+// down to eta_min via cosine.
+//   lr = eta_min + (base_lr - eta_min) * (1 + cos(pi * T_cur / T_i)) / 2
+
+class CosineAnnealingWarmRestarts : public LRScheduler {
+public:
+    CosineAnnealingWarmRestarts(
+        Optimizer& optimizer,
+        int64_t T_0,
+        int64_t T_mult = 1,
+        double eta_min = 0.0
+    )
+        : LRScheduler(optimizer)
+        , T_0_(T_0)
+        , T_mult_(T_mult)
+        , eta_min_(eta_min)
+        , T_i_(T_0)
+        , T_cur_(0) {
+        if (T_0_ <= 0) throw std::runtime_error("T_0 must be positive");
+        if (T_mult_ < 1) throw std::runtime_error("T_mult must be >= 1");
+    }
+
+    // Override step() to track T_cur / T_i across restarts
+    void step(int64_t epoch = -1) override {
+        if (epoch == -1) {
+            last_epoch_++;
+            T_cur_++;
+            if (T_cur_ >= T_i_) {
+                T_cur_ = 0;
+                T_i_ *= T_mult_;
+            }
+        } else {
+            last_epoch_ = epoch;
+            // Recompute T_cur / T_i from scratch for the given absolute epoch
+            int64_t rem = epoch;
+            int64_t T_i = T_0_;
+            while (rem >= T_i) {
+                rem -= T_i;
+                T_i *= T_mult_;
+            }
+            T_cur_ = rem;
+            T_i_ = T_i;
+        }
+
+        auto lrs = get_lr();
+        auto& groups = optimizer_->param_groups();
+        for (size_t i = 0; i < groups.size() && i < lrs.size(); ++i) {
+            groups[i].lr = lrs[i];
+        }
+    }
+
+    std::vector<double> get_lr() override {
+        std::vector<double> lrs;
+        lrs.reserve(base_lrs_.size());
+        double cos_factor = (1.0 + std::cos(M_PI * T_cur_ / static_cast<double>(T_i_))) / 2.0;
+        for (double base_lr : base_lrs_) {
+            lrs.push_back(eta_min_ + (base_lr - eta_min_) * cos_factor);
+        }
+        return lrs;
+    }
+
+private:
+    int64_t T_0_;
+    int64_t T_mult_;
+    double eta_min_;
+    int64_t T_i_;     // current cycle length
+    int64_t T_cur_;   // position within current cycle
+};
+
+// ============================================================================
+// CyclicLR - Triangular cycle between base_lr and max_lr
+// ============================================================================
+// Modes:
+//   Triangular       : symmetric up/down each cycle
+//   Triangular2      : like Triangular, but amplitude halves each cycle
+//   ExpRange         : amplitude scaled by gamma^iteration
+// step_size_up   - iterations in increasing half of cycle
+// step_size_down - iterations in decreasing half (defaults to step_size_up)
+
+class CyclicLR : public LRScheduler {
+public:
+    enum class Mode { Triangular, Triangular2, ExpRange };
+
+    CyclicLR(
+        Optimizer& optimizer,
+        double base_lr,
+        double max_lr,
+        int64_t step_size_up = 2000,
+        int64_t step_size_down = -1,
+        Mode mode = Mode::Triangular,
+        double gamma = 1.0
+    )
+        : LRScheduler(optimizer)
+        , base_lr_(base_lr)
+        , max_lr_(max_lr)
+        , step_size_up_(step_size_up)
+        , step_size_down_(step_size_down < 0 ? step_size_up : step_size_down)
+        , mode_(mode)
+        , gamma_(gamma) {
+        // Override base_lrs_ with user-supplied base_lr
+        for (auto& g : optimizer.param_groups()) {
+            g.lr = base_lr_;
+        }
+        for (auto& bl : base_lrs_) bl = base_lr_;
+    }
+
+    std::vector<double> get_lr() override {
+        int64_t total_size = step_size_up_ + step_size_down_;
+        int64_t cycle = last_epoch_ / total_size;
+        int64_t pos = last_epoch_ - cycle * total_size;
+
+        double x;
+        if (pos < step_size_up_) {
+            x = static_cast<double>(pos) / step_size_up_;
+        } else {
+            x = 1.0 - static_cast<double>(pos - step_size_up_) / step_size_down_;
+        }
+
+        double amplitude = max_lr_ - base_lr_;
+        double scale = 1.0;
+        if (mode_ == Mode::Triangular2) {
+            scale = 1.0 / std::pow(2.0, static_cast<double>(cycle));
+        } else if (mode_ == Mode::ExpRange) {
+            scale = std::pow(gamma_, static_cast<double>(last_epoch_));
+        }
+
+        double lr = base_lr_ + amplitude * x * scale;
+        return std::vector<double>(base_lrs_.size(), lr);
+    }
+
+private:
+    double base_lr_;
+    double max_lr_;
+    int64_t step_size_up_;
+    int64_t step_size_down_;
+    Mode mode_;
+    double gamma_;
+};
+
+// ============================================================================
+// PolynomialLR - Polynomial decay
+// ============================================================================
+// lr = initial_lr * (1 - step / max_step)^power  (clamped at 0 after max_step)
+
+class PolynomialLR : public LRScheduler {
+public:
+    PolynomialLR(Optimizer& optimizer, int64_t total_iters, double power = 1.0)
+        : LRScheduler(optimizer), total_iters_(total_iters), power_(power) {}
+
+    std::vector<double> get_lr() override {
+        std::vector<double> lrs;
+        lrs.reserve(base_lrs_.size());
+        double factor;
+        if (last_epoch_ >= total_iters_) {
+            factor = 0.0;
+        } else {
+            double frac = 1.0 - static_cast<double>(last_epoch_) / total_iters_;
+            factor = std::pow(frac, power_);
+        }
+        for (double base_lr : base_lrs_) lrs.push_back(base_lr * factor);
+        return lrs;
+    }
+
+private:
+    int64_t total_iters_;
+    double power_;
+};
+
+// ============================================================================
+// LambdaLR - User-supplied function of step
+// ============================================================================
+// lr = base_lr * lambda_fn(last_epoch)
+// If a per-group lambda vector is supplied, it must match param_groups().size().
+
+class LambdaLR : public LRScheduler {
+public:
+    using LambdaFn = std::function<double(int64_t)>;
+
+    LambdaLR(Optimizer& optimizer, LambdaFn fn)
+        : LRScheduler(optimizer) {
+        fns_.resize(optimizer.param_groups().size(), std::move(fn));
+    }
+
+    LambdaLR(Optimizer& optimizer, std::vector<LambdaFn> fns)
+        : LRScheduler(optimizer), fns_(std::move(fns)) {
+        if (fns_.size() != optimizer.param_groups().size()) {
+            throw std::runtime_error(
+                "LambdaLR: number of lambdas must match number of param_groups");
+        }
+    }
+
+    std::vector<double> get_lr() override {
+        std::vector<double> lrs;
+        lrs.reserve(base_lrs_.size());
+        for (size_t i = 0; i < base_lrs_.size(); ++i) {
+            lrs.push_back(base_lrs_[i] * fns_[i](last_epoch_));
+        }
+        return lrs;
+    }
+
+private:
+    std::vector<LambdaFn> fns_;
+};
+
+// ============================================================================
+// MultiplicativeLR - Multiply current LR by lambda_fn(step) each step
+// ============================================================================
+// lr_{t} = lr_{t-1} * lambda_fn(last_epoch)   (uses current group lr, not base)
+
+class MultiplicativeLR : public LRScheduler {
+public:
+    using LambdaFn = std::function<double(int64_t)>;
+
+    MultiplicativeLR(Optimizer& optimizer, LambdaFn fn)
+        : LRScheduler(optimizer) {
+        fns_.resize(optimizer.param_groups().size(), std::move(fn));
+    }
+
+    MultiplicativeLR(Optimizer& optimizer, std::vector<LambdaFn> fns)
+        : LRScheduler(optimizer), fns_(std::move(fns)) {
+        if (fns_.size() != optimizer.param_groups().size()) {
+            throw std::runtime_error(
+                "MultiplicativeLR: lambda count must match param_groups");
+        }
+    }
+
+    // Multiplicative update is stateful: apply factor to current lr directly.
+    void step(int64_t epoch = -1) override {
+        if (epoch == -1) {
+            last_epoch_++;
+        } else {
+            last_epoch_ = epoch;
+        }
+        auto& groups = optimizer_->param_groups();
+        if (last_epoch_ == 0) {
+            // At epoch 0, lr stays at base_lr (no multiplication applied).
+            return;
+        }
+        for (size_t i = 0; i < groups.size() && i < fns_.size(); ++i) {
+            groups[i].lr *= fns_[i](last_epoch_);
+        }
+    }
+
+    // get_lr here is not used internally (step overridden) but provided for API symmetry
+    std::vector<double> get_lr() override {
+        std::vector<double> lrs;
+        lrs.reserve(optimizer_->param_groups().size());
+        for (const auto& g : optimizer_->param_groups()) lrs.push_back(g.lr);
+        return lrs;
+    }
+
+private:
+    std::vector<LambdaFn> fns_;
+};
+
+// ============================================================================
+// SequentialLR - Chain multiple schedulers back-to-back
+// ============================================================================
+// Runs scheduler[0] for milestones[0] steps, then scheduler[1] for
+// (milestones[1] - milestones[0]) steps, etc. milestones[i] is the step
+// index at which the (i+1)-th scheduler takes over.
+
+class SequentialLR {
+public:
+    SequentialLR(
+        Optimizer& optimizer,
+        std::vector<std::shared_ptr<LRScheduler>> schedulers,
+        std::vector<int64_t> milestones
+    )
+        : optimizer_(&optimizer)
+        , schedulers_(std::move(schedulers))
+        , milestones_(std::move(milestones))
+        , step_count_(-1) {
+        if (schedulers_.empty()) {
+            throw std::runtime_error("SequentialLR: schedulers must not be empty");
+        }
+        if (milestones_.size() + 1 != schedulers_.size()) {
+            throw std::runtime_error(
+                "SequentialLR: len(milestones) must equal len(schedulers) - 1");
+        }
+        for (size_t i = 1; i < milestones_.size(); ++i) {
+            if (milestones_[i] <= milestones_[i-1]) {
+                throw std::runtime_error("SequentialLR: milestones must be strictly increasing");
+            }
+        }
+    }
+
+    void step() {
+        step_count_++;
+        // Find the active scheduler: first i such that step_count_ < milestones_[i]
+        size_t active = schedulers_.size() - 1;
+        for (size_t i = 0; i < milestones_.size(); ++i) {
+            if (step_count_ < milestones_[i]) {
+                active = i;
+                break;
+            }
+        }
+        schedulers_[active]->step();
+    }
+
+    double get_last_lr() const {
+        if (optimizer_->param_groups().empty()) return 0.0;
+        return optimizer_->param_groups()[0].lr;
+    }
+
+private:
+    Optimizer* optimizer_;
+    std::vector<std::shared_ptr<LRScheduler>> schedulers_;
+    std::vector<int64_t> milestones_;
+    int64_t step_count_;
+};
+
+// ============================================================================
+// ChainedScheduler - Apply several schedulers in parallel
+// ============================================================================
+// After each step(), the final LR is the product of effects from each
+// component scheduler. Each scheduler.step() is called independently; the
+// resulting LR of the first param_group is combined multiplicatively by
+// tracking the ratio each scheduler wants vs its own base_lr.
+
+class ChainedScheduler {
+public:
+    explicit ChainedScheduler(
+        Optimizer& optimizer,
+        std::vector<std::shared_ptr<LRScheduler>> schedulers
+    )
+        : optimizer_(&optimizer), schedulers_(std::move(schedulers)) {
+        if (schedulers_.empty()) {
+            throw std::runtime_error("ChainedScheduler: schedulers must not be empty");
+        }
+        // Capture the shared base lrs (all schedulers must share the same optimizer).
+        for (const auto& g : optimizer_->param_groups()) {
+            base_lrs_.push_back(g.lr);
+        }
+    }
+
+    void step() {
+        // Compute each scheduler's desired multiplier vs its base and multiply.
+        std::vector<double> combined(base_lrs_.size(), 1.0);
+        for (auto& sch : schedulers_) {
+            auto desired = sch->get_lr();
+            // Advance the sub-scheduler's epoch counter without directly
+            // writing back to the optimizer (we'll write the combined value below).
+            // We still need to advance last_epoch_ inside the sub-scheduler; the
+            // simplest way is to call its step() and then overwrite the LR after.
+            sch->step();
+            auto post = sch->get_lr();
+            const auto& base = sch->base_lrs();
+            for (size_t i = 0; i < combined.size() && i < post.size() && i < base.size(); ++i) {
+                double denom = (base[i] != 0.0) ? base[i] : 1.0;
+                combined[i] *= post[i] / denom;
+                (void)desired;
+            }
+        }
+        auto& groups = optimizer_->param_groups();
+        for (size_t i = 0; i < groups.size() && i < combined.size(); ++i) {
+            groups[i].lr = base_lrs_[i] * combined[i];
+        }
+    }
+
+    double get_last_lr() const {
+        if (optimizer_->param_groups().empty()) return 0.0;
+        return optimizer_->param_groups()[0].lr;
+    }
+
+private:
+    Optimizer* optimizer_;
+    std::vector<std::shared_ptr<LRScheduler>> schedulers_;
+    std::vector<double> base_lrs_;
 };
 
 } // namespace optim

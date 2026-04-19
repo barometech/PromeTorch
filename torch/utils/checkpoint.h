@@ -185,5 +185,53 @@ inline Tensor checkpoint(
     return output;
 }
 
+// ============================================================================
+// checkpoint_sequential - Split a Sequential into `segments`, checkpoint each
+// ============================================================================
+// Divides the submodules of `model` into `segments` contiguous chunks and wraps
+// each chunk in a checkpoint() call. During backward, each segment re-runs its
+// forward instead of holding intermediate activations.
+//
+// NOTE: Declared here as a forward-declared template to avoid a hard dependency
+// on the full nn::Sequential header from utils/checkpoint.h. Callers include
+// "torch/nn/modules/container.h" before using this overload.
+
+template <typename SequentialT>
+inline Tensor checkpoint_sequential(
+    SequentialT& model,
+    const Tensor& input,
+    int segments
+) {
+    const int n = static_cast<int>(model.size());
+    if (segments <= 0) {
+        throw std::runtime_error("checkpoint_sequential: segments must be > 0");
+    }
+    if (n == 0) return input;
+    if (segments > n) segments = n;
+
+    // Compute segment boundaries (inclusive start, exclusive end).
+    const int seg_size = n / segments;
+    int extras = n % segments;
+
+    Tensor out = input;
+    int idx = 0;
+    for (int s = 0; s < segments; ++s) {
+        int end = idx + seg_size + (s < extras ? 1 : 0);
+        // Capture the slice [idx, end) of submodules by index.
+        int start_i = idx;
+        int end_i = end;
+        auto fn = [&model, start_i, end_i](const Tensor& x) -> Tensor {
+            Tensor t = x;
+            for (int k = start_i; k < end_i; ++k) {
+                t = model[k]->forward(t);
+            }
+            return t;
+        };
+        out = checkpoint(std::function<Tensor(const Tensor&)>(fn), out);
+        idx = end;
+    }
+    return out;
+}
+
 } // namespace utils
 } // namespace torch
