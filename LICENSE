@@ -1,21 +1,81 @@
-MIT License
+PromeTorch License
+==================
 
 Copyright (c) 2026 PromeTorch Contributors
+Based on the BSD 3-Clause "New" or "Revised" License (the base license of
+PyTorch, upon which PromeTorch is API-compatible).
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+1. Redistributions of source code must retain the above copyright notice,
+   this list of conditions and the following disclaimer.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of PromeTorch nor the names of its contributors may be
+   used to endorse or promote products derived from this software without
+   specific prior written permission.
+
+4. ADDITIONAL RESTRICTION — NO RESALE OF THE FRAMEWORK ITSELF:
+   You may NOT sell, license, sublicense, rent, lease, or otherwise
+   monetarily distribute this Software (PromeTorch), in whole or in
+   substantial part, as a standalone product, library, SDK, framework,
+   or toolkit. This includes but is not limited to:
+
+       (a) Rebranding PromeTorch and selling it as a different-named
+           framework or library;
+       (b) Selling a "commercial edition" or "enterprise version" of
+           PromeTorch with paywalled core functionality;
+       (c) Charging license fees, subscription fees, or per-seat fees
+           for access to the framework itself;
+       (d) Selling access to the source code of PromeTorch.
+
+   The Software must remain freely and openly available to everyone.
+
+5. PERMITTED COMMERCIAL USES (explicitly allowed, including at scale and
+   for profit):
+       (a) Training neural networks and machine-learning models using
+           PromeTorch, whether for research, internal business, client
+           work, or commercial products;
+       (b) Running inference with models built or trained with PromeTorch,
+           including as part of paid services, APIs, SaaS products,
+           on-premise deployments, and shipped software;
+       (c) Selling, licensing, or monetizing the neural-network models,
+           weights, training pipelines, application code, or services
+           that USE PromeTorch as a runtime dependency;
+       (d) Building and selling AI-powered applications, websites, SDKs,
+           mobile apps, or hardware products that embed PromeTorch as
+           a library or runtime;
+       (e) Consulting, integration services, custom training, fine-tuning,
+           or deployment services, where PromeTorch is the underlying
+           framework used to deliver the engagement;
+       (f) Publishing derivative models, applications, or research results
+           trained on PromeTorch, commercial or non-commercial.
+
+   In plain terms: the framework is free and open — use it to build,
+   train, and ship whatever you want, charge whatever you want for YOUR
+   models and YOUR products. Only don't rebrand the framework itself and
+   sell it as your own product.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+POSSIBILITY OF SUCH DAMAGE.
+
+Note on OSI status:
+    The additional "no resale of the framework" restriction in Section 4
+    means this license is SOURCE-AVAILABLE rather than strictly
+    OSI-compliant "open source". All standard open-source benefits
+    (free use, modification, redistribution, internal deployment,
+    commercial applications and inference) are preserved. The only
+    restriction is on reselling the framework itself as a product.
