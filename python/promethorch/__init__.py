@@ -85,10 +85,26 @@ from ._C import (
     __version__,
 )
 
-# Import submodules
-from . import nn
-from . import optim
-from . import data
+# Import submodules. These may fail on stale builds where the C extension is
+# missing newer symbols (e.g. BatchNorm1d). We swallow the error so that
+# core ops and helpers like ``promethorch.transformers_compat`` remain
+# usable; ``promethorch.nn`` will simply be unavailable until the C
+# extension is rebuilt.
+try:
+    from . import nn
+except ImportError as _e:
+    import warnings as _w
+    _w.warn(f"promethorch.nn unavailable: {_e}. Rebuild the _C extension.")
+try:
+    from . import optim
+except ImportError as _e:
+    import warnings as _w
+    _w.warn(f"promethorch.optim unavailable: {_e}. Rebuild the _C extension.")
+try:
+    from . import data
+except ImportError as _e:
+    import warnings as _w
+    _w.warn(f"promethorch.data unavailable: {_e}. Rebuild the _C extension.")
 
 # Convenience
 cuda = type('cuda', (), {
