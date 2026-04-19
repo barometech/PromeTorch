@@ -14,6 +14,10 @@
 
 #include "torch/nn/nn.h"
 #include <memory>
+#include <set>
+#include <fstream>
+#include <string>
+#include <unordered_map>
 
 namespace shakespeare {
 
