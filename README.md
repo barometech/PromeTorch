@@ -292,10 +292,15 @@ ASGD, LBFGS**. Все на `at::*` tensor ops, CPU-portable, compile на Elbrus
 - ONNX export (works with ONNX Runtime)
 - PyTorch .pt I/O ↔ torch.load/torch.save
 
+### Runtime-verified (GPU tests run 2026-04-19 on A100 40GB)
+- **FP16 CUDA kernels**: `add_fp16`, `mul_fp16`, `relu_fp16`, `sigmoid_fp16`, `tanh_fp16`,
+  `check_inf_nan_fp16` — все 7 verified on A100. max |err| vs FP32 reference 1.02e-4 .. 4.88e-4.
+  Throughput `add_fp16`: 34.25 Gelem/s. Self-test: `test_fp16_kernels.cu`, link against
+  `build_cudnn/aten_cuda.lib`.
+
 ### Compile-verified, runtime-untested
 Нет доступа к соответствующему железу для verification:
-- FP16 CUDA kernels (нужен GPU)
-- cuDNN RNN/LSTM/GRU (нужен GPU + cuDNN)
+- cuDNN RNN/LSTM/GRU (нужен full cuDNN stack + real model input)
 - MPS Apple Metal (нужен Mac)
 - ROCm/HIP (нужен AMD GPU)
 - Autocast policy table (scaffolding есть, но не wired в каждую Tensor op entry point
