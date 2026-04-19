@@ -8,6 +8,9 @@
 
 #ifdef PT_USE_CUDA
 #include "aten/src/ATen/cuda/CUDADispatch.h"
+#ifdef PT_USE_CUDNN
+#include "aten/src/ATen/cudnn/CuDNN.h"
+#endif
 #endif
 
 namespace torch {
@@ -186,22 +189,35 @@ public:
 
     Tensor forward(const Tensor& input) override {
 #ifdef PT_USE_CUDA
-        // Use CUDA kernel for inference mode on GPU
-        if (input.is_cuda() && !is_training() && track_running_stats_) {
+        // CUDA dispatch: prefer cuDNN (inference + training), fall back to custom kernel.
+        if (input.is_cuda() && track_running_stats_) {
             Buffer* rm_buf = get_buffer("running_mean");
             Buffer* rv_buf = get_buffer("running_var");
             Tensor gamma = affine_ ? get_parameter("weight")->data() : at::ones({num_features_});
             Tensor beta = affine_ ? get_parameter("bias")->data() : at::zeros({num_features_});
 
-            // Move gamma, beta, running stats to CUDA if not already
             if (!gamma.is_cuda()) gamma = at::to_cuda(gamma);
             if (!beta.is_cuda()) beta = at::to_cuda(beta);
             Tensor rm = rm_buf->data().is_cuda() ? rm_buf->data() : at::to_cuda(rm_buf->data());
             Tensor rv = rv_buf->data().is_cuda() ? rv_buf->data() : at::to_cuda(rv_buf->data());
 
-            return at::cuda_ops::batch_norm2d_forward(
-                input, gamma, beta, rm, rv, static_cast<float>(eps_)
-            );
+#ifdef PT_USE_CUDNN
+            if (input.dtype() == c10::ScalarType::Float) {
+                if (is_training()) {
+                    auto [out, save_mean, save_var] = at::cudnn::cudnn_batch_norm_forward_training(
+                        input, gamma, beta, rm, rv, momentum_, eps_);
+                    return out;
+                } else {
+                    return at::cudnn::cudnn_batch_norm_forward_inference(
+                        input, gamma, beta, rm, rv, eps_);
+                }
+            }
+#endif
+            if (!is_training()) {
+                return at::cuda_ops::batch_norm2d_forward(
+                    input, gamma, beta, rm, rv, static_cast<float>(eps_));
+            }
+            // Training without cuDNN: fall through to CPU reference.
         }
 #endif
         // Input: [N, C, H, W]
@@ -328,6 +344,13 @@ public:
         return ss.str();
     }
 
+    // Accessors (ONNX export)
+    int64_t num_features() const { return num_features_; }
+    double eps() const { return eps_; }
+    double momentum() const { return momentum_; }
+    bool affine() const { return affine_; }
+    bool track_running_stats() const { return track_running_stats_; }
+
 private:
     int64_t num_features_;
     double eps_;
@@ -427,7 +450,7 @@ public:
             }
             if (needs_grad) {
                 Tensor weight_tensor = elementwise_affine_ ? get_parameter("weight")->data() : Tensor();
-                auto grad_fn = std::make_shared<autograd::LayerNormBackward>(
+                auto grad_fn = std::make_shared<::torch::autograd::LayerNormBackward>(
                     input, weight_tensor, norm_size, eps_, elementwise_affine_
                 );
                 grad_fn->add_input_metadata(input);
@@ -557,7 +580,7 @@ public:
             }
             if (needs_grad) {
                 Tensor weight_tensor = affine_ ? get_parameter("weight")->data() : Tensor();
-                auto grad_fn = std::make_shared<autograd::GroupNormBackward>(
+                auto grad_fn = std::make_shared<::torch::autograd::GroupNormBackward>(
                     input, weight_tensor, num_groups_, eps_, affine_
                 );
                 grad_fn->add_input_metadata(input);
