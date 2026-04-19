@@ -38,9 +38,11 @@ data/cifar-100-*/
 # Temp
 .claude/
 
-# Build scripts (local)
+# Build scripts (local scratch; committed build scripts live under scripts/)
 *.bat
 *.ps1
+!scripts/*.bat
+!scripts/*.ps1
 
 # Output files
 *.png
