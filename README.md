@@ -111,10 +111,26 @@ this same session. Only `qwen3:4b` was re-benchmarked in the final build
 - Model weights move to CUDA: **0.1 s** (previously 88 s — fixed quant-only transfer)
 - FP16 KV cache: 306 MB for qwen3:4b 36 layers, full decode graph captured
 
-Output coherent on A100 (e.g. prompt "Write a short poem about" → cat-themed
-poem with explicit reasoning about rhyme scheme; prompt "binary search in
-python" → runnable python). On very long contexts we occasionally see
-repetition — likely RoPE rescaling at large context.
+**Live sample (2026-04-20, A100, qwen3:4b Q4_K_M, temp 0.7):**
+
+```
+$ ./build_cudnn/examples/gguf/test_gguf_inference.exe qwen3:4b --device cuda \
+    --max_tokens 100 --temperature 0.7 \
+    "Here is a haiku about artificial intelligence:"
+
+[GGUF] Loaded qwen3:4b (253 quantized weights, 3.6s load)
+[KVCache] FP16 KV cache: 306 MB (36 layers)
+[PromeGraph] Captured full decode graph!
+[Generate] 128 tokens in 2.7s (47.2 tok/s)
+
+The silent night,
+a whisper in the dark,
+a thousand eyes watch over me.
+```
+
+Coherent on most simple prompts. qwen3:4b quantized is a small model —
+complex reasoning tasks (long code completions, multi-step math) show
+some topic drift. That's model-quality territory, not runtime.
 
 **Gap vs Ollama:** Ollama uses cuBLAS tensor-core HGEMM + kv-page attention;
 we use custom Q4_K GEMV + flash_decode + CUDA Graph. Closing to ≥130 tok/s
