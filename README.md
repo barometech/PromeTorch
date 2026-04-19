@@ -462,6 +462,13 @@ cmake .. -DCMAKE_BUILD_TYPE=Release -DPT_USE_CUDA=ON -DPT_USE_CUDNN=ON
 cmake --build . -j$(nproc)
 ```
 
+> **NVIDIA CUDA Toolkit 12.4+ required.** cuDNN 9 is supported (legacy RNN
+> API is guarded — if you need cuDNN-accelerated LSTM/GRU specifically, use
+> cuDNN 8). The anaconda-packaged CUDA 12.9 is currently missing the
+> `nv/target` header required by `cuda_fp16.h`; point `CUDA_PATH` at the
+> standalone NVIDIA installer instead. A reference batch script
+> (`build_10m_cuda124.bat`) at the repo root does this on Windows.
+
 ### Сборка на Эльбрусе (нативно)
 
 ```bash
