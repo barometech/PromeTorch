@@ -66,8 +66,9 @@ public:
     // chains where different groups follow different schedules.
     //
     // Note: last_epoch_ is still advanced (the underlying schedule is stateful and
-    // shared); only the write-back is restricted to the chosen group.
-    virtual void step(size_t group_idx, int64_t epoch = -1) {
+    // shared); only the write-back is restricted to the chosen group. A separate
+    // method name avoids ambiguity with step(int64_t epoch).
+    virtual void step_group(size_t group_idx, int64_t epoch = -1) {
         if (epoch == -1) {
             last_epoch_++;
         } else {

@@ -7,7 +7,7 @@
 //   2. add_param_group() builds groups incrementally, post-construction.
 //   3. Per-group hyperparameter overrides (eps, betas) are honored.
 //   4. LR scheduler scales BOTH groups by the same factor (preserving ratio).
-//   5. step(group_idx) advances only one group's lr, leaves others alone.
+//   5. step_group(idx) advances only one group's lr, leaves others alone.
 //   6. Backward-compat: old single-vector ctor still works and exposes one
 //      default group via param_groups().
 //
@@ -201,10 +201,10 @@ int main() {
     }
 
     // ------------------------------------------------------------------------
-    // Test 5: scheduler.step(group_idx) advances only one group
+    // Test 5: scheduler.step_group(idx) advances only one group
     // ------------------------------------------------------------------------
     {
-        std::printf("\n[Test 5] step(group_idx) only touches that group:\n");
+        std::printf("\n[Test 5] step_group(idx) only touches that group:\n");
 
         auto p_a = make_param(0.0f);
         auto p_b = make_param(0.0f);
@@ -216,8 +216,8 @@ int main() {
         StepLR sched(opt, /*step_size=*/1, /*gamma=*/0.5);
 
         // Advance schedule + write back only to group 1.
-        sched.step((size_t)1);  // last_epoch -> 0  (factor 1.0)
-        sched.step((size_t)1);  // last_epoch -> 1  (factor 0.5)
+        sched.step_group(1);  // last_epoch -> 0  (factor 1.0)
+        sched.step_group(1);  // last_epoch -> 1  (factor 0.5)
 
         double lr0 = opt.param_groups()[0].lr;
         double lr1 = opt.param_groups()[1].lr;
