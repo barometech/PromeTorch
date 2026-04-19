@@ -1629,6 +1629,14 @@ inline void Tensor::print(std::ostream& os) const {
     }
 }
 
+// Shape / factory forwards inside namespace at — callable as at::cat, at::stack, etc.
+inline Tensor cat(const std::vector<Tensor>& tensors, int64_t dim = 0) {
+    return ::at::native::cat(tensors, dim);
+}
+inline Tensor stack(const std::vector<Tensor>& tensors, int64_t dim = 0) {
+    return ::at::native::stack(tensors, dim);
+}
+
 } // namespace at
 
 // ============================================================================

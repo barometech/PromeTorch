@@ -85,6 +85,25 @@ inline Tensor mm(const Tensor& self, const Tensor& other) {
     Tensor B = other.contiguous();
     Tensor result = zeros({M, N}, TensorOptions().dtype(result_dtype).device(A.device()));
 
+    if (c10::isComplexType(result_dtype)) {
+        // Naive O(M*N*K) complex matmul. No SIMD initially.
+        PT_DISPATCH_COMPLEX_TYPES(result_dtype, "mm_complex", [&] {
+            const scalar_t* A_data = A.data_ptr<scalar_t>();
+            const scalar_t* B_data = B.data_ptr<scalar_t>();
+            scalar_t* C = result.mutable_data_ptr<scalar_t>();
+            for (int64_t i = 0; i < M; ++i) {
+                for (int64_t j = 0; j < N; ++j) {
+                    scalar_t sum(0);
+                    for (int64_t k = 0; k < K; ++k) {
+                        sum += A_data[i * K + k] * B_data[k * N + j];
+                    }
+                    C[i * N + j] = sum;
+                }
+            }
+        });
+        return result;
+    }
+
     PT_DISPATCH_FLOATING_TYPES(result_dtype, "mm", [&] {
         const scalar_t* A_data = A.data_ptr<scalar_t>();
         const scalar_t* B_data = B.data_ptr<scalar_t>();
@@ -1399,9 +1418,59 @@ inline SVDResult svd(const Tensor& self, bool full_matrices = true) {
     Tensor Vh = V.t().narrow(0, 0, k).contiguous(); // [k, n]
 
     if (full_matrices) {
-        // Extend U to [m, m] and Vh to [n, n] (fill with orthogonal complement)
-        // For simplicity, return the thin SVD for full_matrices=false
-        // and the thin factors for full_matrices=true (common practical usage)
+        // Extend U [m,k] -> [m,m] and Vh [k,n] -> [n,n] via Gram-Schmidt on
+        // standard basis vectors, orthogonalizing against existing columns/rows.
+        PT_DISPATCH_FLOATING_TYPES(self.dtype(), "svd_full", [&] {
+            auto extend_columns = [](Tensor& Q, int64_t rows, int64_t cur_cols, int64_t target_cols) {
+                if (cur_cols >= target_cols) return;
+                Tensor Q_full = empty({rows, target_cols},
+                                      TensorOptions().dtype(Q.dtype()).device(Q.device()));
+                scalar_t* qf = Q_full.mutable_data_ptr<scalar_t>();
+                const scalar_t* q = Q.data_ptr<scalar_t>();
+                // Copy existing columns.
+                for (int64_t i = 0; i < rows; ++i)
+                    for (int64_t j = 0; j < cur_cols; ++j)
+                        qf[i * target_cols + j] = q[i * cur_cols + j];
+                // Fill additional columns via Gram-Schmidt on successive e_basis vectors.
+                int64_t basis_idx = 0;
+                for (int64_t new_col = cur_cols; new_col < target_cols; ++new_col) {
+                    bool placed = false;
+                    while (!placed && basis_idx < rows) {
+                        // v = e_{basis_idx}
+                        std::vector<scalar_t> v(rows, scalar_t(0));
+                        v[basis_idx] = scalar_t(1);
+                        // Orthogonalize against all previous columns.
+                        for (int64_t c = 0; c < new_col; ++c) {
+                            scalar_t dot = scalar_t(0);
+                            for (int64_t i = 0; i < rows; ++i)
+                                dot += qf[i * target_cols + c] * v[i];
+                            for (int64_t i = 0; i < rows; ++i)
+                                v[i] -= dot * qf[i * target_cols + c];
+                        }
+                        // Norm check.
+                        scalar_t norm2 = scalar_t(0);
+                        for (int64_t i = 0; i < rows; ++i) norm2 += v[i] * v[i];
+                        basis_idx++;
+                        if (norm2 > scalar_t(1e-20)) {
+                            scalar_t inv = scalar_t(1) / std::sqrt(norm2);
+                            for (int64_t i = 0; i < rows; ++i)
+                                qf[i * target_cols + new_col] = v[i] * inv;
+                            placed = true;
+                        }
+                    }
+                    PT_CHECK_MSG(placed, "svd: failed to extend to full_matrices (degenerate)");
+                }
+                Q = Q_full;
+            };
+            // U: extend from [m,k] to [m,m]
+            extend_columns(U, m, k, m);
+            // Vh rows correspond to rows of V^T. V is [n,n] thin -> Vh [k,n]. Extend to [n,n].
+            // Work on V^T shape: treat Vh as [target_rows=n, cols=n] by transposing logic.
+            // Easier: extend V (currently [n,k]) to [n,n], then Vh_full = V_full^T.
+            Tensor V_full = V.narrow(1, 0, k).contiguous();
+            extend_columns(V_full, n, k, n);
+            Vh = V_full.t().contiguous();
+        });
     }
 
     return {U, S, Vh};

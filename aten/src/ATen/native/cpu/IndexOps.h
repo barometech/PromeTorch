@@ -161,55 +161,59 @@ inline Tensor index_select(const Tensor& self, int64_t dim, const Tensor& index)
     PT_CHECK_MSG(index.dtype() == c10::ScalarType::Long,
         "index_select: index must be LongTensor");
 
+    // Force contiguous input — the general stride walk below is already a full
+    // multi-dim index composition, so making self contiguous costs one copy but
+    // guarantees correctness for any stride pattern (views, transposes, slices).
+    const Tensor self_c = self.is_contiguous() ? self : self.contiguous();
+
     int64_t num_indices = index.size(0);
 
     // Result shape: same as self but with dim size replaced by num_indices
-    std::vector<int64_t> result_shape(self.sizes().begin(), self.sizes().end());
+    std::vector<int64_t> result_shape(self_c.sizes().begin(), self_c.sizes().end());
     result_shape[dim] = num_indices;
 
-    Tensor result = empty(result_shape, TensorOptions().dtype(self.dtype()).device(self.device()));
+    Tensor result = empty(result_shape, TensorOptions().dtype(self_c.dtype()).device(self_c.device()));
 
     const int64_t* idx_data = index.data_ptr<int64_t>();
 
-    PT_DISPATCH_ALL_TYPES(self.dtype(), "index_select", [&] {
-        const scalar_t* src = self.data_ptr<scalar_t>();
+    PT_DISPATCH_ALL_TYPES(self_c.dtype(), "index_select", [&] {
+        const scalar_t* src = self_c.data_ptr<scalar_t>();
         scalar_t* dst = result.mutable_data_ptr<scalar_t>();
 
-        // Compute sizes for iteration
         int64_t outer_size = 1;
-        for (int64_t i = 0; i < dim; ++i) {
-            outer_size *= self.size(i);
-        }
-
+        for (int64_t i = 0; i < dim; ++i) outer_size *= self_c.size(i);
         int64_t inner_size = 1;
-        for (int64_t i = dim + 1; i < ndim; ++i) {
-            inner_size *= self.size(i);
-        }
+        for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= self_c.size(i);
 
-        int64_t src_dim_stride = self.stride(dim);
-        int64_t dst_dim_stride = result.stride(dim);
+        const int64_t src_dim_stride = self_c.stride(dim);
+        const int64_t dst_dim_stride = result.stride(dim);
 
         for (int64_t outer = 0; outer < outer_size; ++outer) {
+            // Decompose outer linear index into per-dim offsets honoring strides.
+            int64_t src_outer_off = 0, dst_outer_off = 0;
+            {
+                int64_t t = outer;
+                for (int64_t d = dim - 1; d >= 0; --d) {
+                    src_outer_off += (t % self_c.size(d)) * self_c.stride(d);
+                    dst_outer_off += (t % result.size(d)) * result.stride(d);
+                    t /= self_c.size(d);
+                }
+            }
             for (int64_t idx = 0; idx < num_indices; ++idx) {
                 int64_t src_idx = idx_data[idx];
-                PT_CHECK_MSG(src_idx >= 0 && src_idx < self.size(dim),
+                PT_CHECK_MSG(src_idx >= 0 && src_idx < self_c.size(dim),
                     "index_select: index out of bounds");
-
-                // FIX 1.3: convert linear outer index to multi-dim offset (was wrong for dim>1)
-                int64_t src_outer_off = 0, dst_outer_off = 0;
-                {
-                    int64_t t = outer;
-                    for (int64_t d = dim - 1; d >= 0; --d) {
-                        src_outer_off += (t % self.size(d)) * self.stride(d);
-                        dst_outer_off += (t % result.size(d)) * result.stride(d);
-                        t /= self.size(d);
-                    }
-                }
+                // Inner dims: walk inner linear index → proper stride offset.
                 for (int64_t inner = 0; inner < inner_size; ++inner) {
-                    int64_t src_offset = src_outer_off + src_idx * src_dim_stride + inner;
-                    int64_t dst_offset = dst_outer_off + idx * dst_dim_stride + inner;
-
-                    // Simplified - assumes contiguous in inner dimensions
+                    int64_t src_inner_off = 0, dst_inner_off = 0;
+                    int64_t t = inner;
+                    for (int64_t d = ndim - 1; d > dim; --d) {
+                        src_inner_off += (t % self_c.size(d)) * self_c.stride(d);
+                        dst_inner_off += (t % result.size(d)) * result.stride(d);
+                        t /= self_c.size(d);
+                    }
+                    int64_t src_offset = src_outer_off + src_idx * src_dim_stride + src_inner_off;
+                    int64_t dst_offset = dst_outer_off + idx * dst_dim_stride + dst_inner_off;
                     dst[dst_offset] = src[src_offset];
                 }
             }
@@ -327,18 +331,21 @@ inline Tensor where(const Tensor& condition, const Tensor& self, const Tensor& o
 
         int64_t n = result.numel();
 
-        // Simple case: all same shape
-        if (condition.sizes() == self.sizes() && self.sizes() == other.sizes()) {
+        // Fast path: all three inputs same shape AND all contiguous → linear indexing.
+        // The previous check only compared shapes and silently miscomputed when any input
+        // was a non-contig view (transpose / slice).
+        const bool same_shape = (condition.sizes() == self.sizes() && self.sizes() == other.sizes());
+        const bool all_contig = condition.is_contiguous() && self.is_contiguous() && other.is_contiguous();
+        if (same_shape && all_contig) {
             for (int64_t i = 0; i < n; ++i) {
                 out[i] = cond_data[i] ? self_data[i] : other_data[i];
             }
         } else {
-            // Broadcasting case
+            // Broadcasting / non-contiguous case: resolve each element via stride walk.
             for (int64_t i = 0; i < n; ++i) {
                 int64_t cond_idx = detail::broadcast_index(i, result.sizes(), condition.sizes(), condition.strides());
                 int64_t self_idx = detail::broadcast_index(i, result.sizes(), self.sizes(), self.strides());
                 int64_t other_idx = detail::broadcast_index(i, result.sizes(), other.sizes(), other.strides());
-
                 out[i] = cond_data[cond_idx] ? self_data[self_idx] : other_data[other_idx];
             }
         }

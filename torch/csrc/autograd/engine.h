@@ -264,10 +264,14 @@ inline void Engine::execute_node(
 ) {
     auto& fn = node_task.fn;
 
-    // Execute the node under NoGradGuard so that Tensor ops called inside
-    // backward (e.g. mul, add) do not create spurious autograd nodes.
+    // create_graph=true: leave autograd enabled inside apply() so that gradient
+    // tensors produced by backward also carry grad_fn and can be differentiated
+    // again (double backward).  create_graph=false (default): run under
+    // NoGradGuard so interior ops (mul, add) don't spawn spurious autograd nodes.
     variable_list grads;
-    {
+    if (task.create_graph) {
+        grads = fn->apply(variable_list(node_task.inputs));
+    } else {
         NoGradGuard no_grad;
         grads = fn->apply(variable_list(node_task.inputs));
     }

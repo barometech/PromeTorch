@@ -960,10 +960,15 @@ class TextDataset {
     size_t data_size_ = 0;
     int64_t block_size_;
     std::mt19937 rng_;
+    bool is_tokens_ = false;   // true: file is uint32 BPE tokens; false: raw bytes
 
 public:
     TextDataset(const std::string& path, int64_t block_size, int seed = 42)
         : block_size_(block_size), rng_(seed) {
+        // Auto-detect: .tokens or .bin → uint32 BPE; otherwise byte chars
+        if (path.size() >= 7 && path.compare(path.size() - 7, 7, ".tokens") == 0) {
+            is_tokens_ = true;
+        }
 #ifdef __linux__
         // Use mmap — no memory copy, pages loaded on demand from any NUMA node
         int fd = open(path.c_str(), O_RDONLY);
@@ -983,7 +988,8 @@ public:
         }
         data_ptr_ = mmap_ptr_;
         data_size_ = mmap_size_;
-        std::cout << "mmap'd " << data_size_ << " bytes from " << path << std::endl;
+        std::cout << "mmap'd " << data_size_ << " bytes from " << path
+                  << (is_tokens_ ? " [uint32 BPE tokens]" : " [byte chars]") << std::endl;
 #else
         std::ifstream file(path, std::ios::binary);
         if (!file) {
@@ -1008,6 +1014,7 @@ public:
 
     bool empty() const { return data_size_ == 0; }
     size_t size() const { return data_size_; }
+    bool is_tokens() const { return is_tokens_; }
 
     std::pair<Tensor, Tensor> get_batch(int64_t batch_size) {
         int64_t T = block_size_;
@@ -1016,7 +1023,9 @@ public:
         float* inp = input.mutable_data_ptr<float>();
         float* tgt = target.mutable_data_ptr<float>();
 
-        int64_t max_start = static_cast<int64_t>(data_size_) - T - 1;
+        // For uint32 token files: total tokens = data_size / 4
+        int64_t n_units = is_tokens_ ? (int64_t)(data_size_ / 4) : (int64_t)data_size_;
+        int64_t max_start = n_units - T - 1;
         if (max_start <= 0) {
             std::cerr << "Data too short for block_size=" << T << std::endl;
             return {input, target};
@@ -1029,14 +1038,28 @@ public:
             starts[b] = dist(rng_);
         }
 
-        #ifdef _OPENMP
-        #pragma omp parallel for schedule(static)
-        #endif
-        for (int64_t b = 0; b < batch_size; b++) {
-            int64_t start = starts[b];
-            for (int64_t t = 0; t < T; t++) {
-                inp[b * T + t] = static_cast<float>(data_ptr_[start + t]);
-                tgt[b * T + t] = static_cast<float>(data_ptr_[start + t + 1]);
+        if (is_tokens_) {
+            const uint32_t* tokens = reinterpret_cast<const uint32_t*>(data_ptr_);
+            #ifdef _OPENMP
+            #pragma omp parallel for schedule(static)
+            #endif
+            for (int64_t b = 0; b < batch_size; b++) {
+                int64_t start = starts[b];
+                for (int64_t t = 0; t < T; t++) {
+                    inp[b * T + t] = static_cast<float>(tokens[start + t]);
+                    tgt[b * T + t] = static_cast<float>(tokens[start + t + 1]);
+                }
+            }
+        } else {
+            #ifdef _OPENMP
+            #pragma omp parallel for schedule(static)
+            #endif
+            for (int64_t b = 0; b < batch_size; b++) {
+                int64_t start = starts[b];
+                for (int64_t t = 0; t < T; t++) {
+                    inp[b * T + t] = static_cast<float>(data_ptr_[start + t]);
+                    tgt[b * T + t] = static_cast<float>(data_ptr_[start + t + 1]);
+                }
             }
         }
 
