@@ -170,9 +170,8 @@ Tensor cross_entropy_loss_with_grad(const Tensor& logits, const Tensor& targets,
 
     loss_data[0] = total_loss / static_cast<float>(total_tokens);
 
-    // Store gradient in autograd meta (simplified)
-    auto* meta = autograd::get_or_create_autograd_meta(const_cast<Tensor&>(logits));
-    meta->grad_ = std::make_shared<Tensor>(std::move(grad));
+    // Store gradient on the tensor via the public setter.
+    const_cast<Tensor&>(logits).set_grad(grad);
 
     return loss_tensor;
 }

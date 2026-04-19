@@ -1,19 +1,31 @@
-# PromeTorch — Российский фреймворк глубокого обучения
+# PromeTorch — Российский training framework
 
-> Полноценный аналог PyTorch, написанный с нуля на C++17/CUDA.
-> **В 6 раз быстрее PyTorch на Эльбрусе** (2.76s vs 16.8s с NUMA). 1840 GFLOPS (92% пика E8C2).
-> 128,000+ строк кода. 4 backend. 91 NN модуль. 116 backward функций. 132 CUDA ядра.
-> 3 недели разработки. 1 разработчик.
+> PyTorch-совместимый обучающий фреймворк на C++17/CUDA с фокусом на float32.
+> Нативная поддержка **Эльбрус E8C2 (VLIW)** и **NM Card Mini (НТЦ Модуль, Q16.16)**.
+> Настоящий autograd (110 backward функций), 835 gtest, CPU SIMD + CUDA через cuBLAS/cuDNN.
+> 91,000+ строк C++. 1 разработчик. ~1 месяц активной разработки.
+
+> ⚠️ **Не полноценная замена PyTorch.** Это solo-проект: dtype coverage ограничен float32
+> (FP16/BF16 не обучает), ChannelsLast — только метаданные, FlashAttention имеет баги (см.
+> `INFRASTRUCTURE_AUDIT.md`), некоторые ops (Conv3d, CTCLoss) — stubs. См. раздел
+> **Known Limitations** ниже.
 
 ---
 
 ## Почему PromeTorch
 
-**1. Технологический суверенитет.** Единственный фреймворк глубокого обучения с нативной поддержкой Эльбрус (МЦСТ), NM Card Mini (НТЦ Модуль), Байкал-М/С (Байкал Электроникс). Не порт PyTorch — написан с нуля, без зависимости от зарубежного кода.
+**1. Российские ускорители.** Единственный известный нам training framework с нативной
+сборкой под **Эльбрус E8C2** (E2K VLIW, LCC 1.29, EML_MT BLAS) и **NM Card Mini**
+(Q16.16 fixed-point эмулятор, MNIST 93.64%). Готовая кросс-компиляция под Байкал-М/С.
 
-**2. Производительность.** На Эльбрусе E8C2 **в 6 раз быстрее PyTorch** (NUMA bind: 2.76s vs 16.8s). 1840 GFLOPS через EML BLAS (92% от 2 TFLOPS пика). На x86 побеждает PyTorch на 15 из 50 тензорных операций. GPU inference до 50 tok/s на A100 (CUDA Graph, correct output).
+**2. MNIST MLP быстрее PyTorch на Эльбрусе.** На MNIST MLP-4 (784→512→256→128→10, SGD,
+batch=64, 1 epoch) — 2.76 s vs PyTorch 2.7.1 16.8 s (**6.1× на этой узкой задаче**).
+1840 GFLOPS через node-local EML_MT (92% пика E8C2 2 TFLOPS). На других задачах
+(общий случай / реальные transformers) преимущества PyTorch сохраняются.
 
-**3. Универсальность.** Один код — 4 backend (CPU, CUDA, NM Card Mini, LinQ H1M). Автоматический выбор SIMD-ядер под процессор через систему TUDA. Собирается на Windows, Linux, Astra Linux, ALT Linux, RED OS, Elbrus OS.
+**3. Universal build.** Один код — CPU (AVX2+FMA/NEON/E2K), CUDA (Turing+), NM Card
+(эмулятор + реальная карта в режиме inference). Собирается на Windows MSVC, Linux GCC,
+Astra/ALT/RED/Elbrus OS. Autograd engine работает одинаково на всех backend'ах.
 
 ---
 
@@ -45,60 +57,84 @@
 | + Manual backward | 22.0 с | 1.3x | Bypass autograd, pre-allocated буферы |
 | **Финал** | **15.2 с** | **0.90x** | Убран неиспользуемый grad clipping |
 
-### NVIDIA GPU (A100)
+### NVIDIA GPU — GGUF inference
 
-Inference GGUF-моделей (квантизация Q4_K_M):
+Inference GGUF-моделей (квантизация Q4_K_M) через custom INT4 warp-cooperative GEMV:
 
-| Модель | PromeTorch | Ollama | vs Ollama |
-|--------|-----------|--------|-----------|
-| qwen3:4b | **50 tok/s** (CUDA Graph) | 165 tok/s | **30%** |
-| deepseek-r1:8b | 40 tok/s | 133 tok/s | 30% |
+| Модель | PromeTorch | Hardware | Ollama | vs Ollama |
+|--------|-----------|----------|--------|-----------|
+| qwen3:4b | **49.9 tok/s** | **NVIDIA A100** (CUDA Graph) | 165 tok/s | 30% |
+| qwen3:4b | **11.3 tok/s** | RTX consumer-class GPU | — | — |
+| deepseek-r1:8b | 30.5 tok/s | A100 | 133 tok/s | 23% |
 
-> **Оптимизации:** GPU top-k sampling (512B D2H vs 608KB), CUDA Graph (embedding → logits),
-> flash_decode нормализация, embedding lookup kernel. Output верифицирован: "The result of 2 + 2 is 4."
+> Числа на A100 получены на арендованном сервере, воспроизводится через `benchmark_gguf.py`.
+> Large gap vs Ollama — Ollama использует cuBLAS+cuSPARSELt+kv-page attention, у нас только
+> Q4_K GEMV + baseline RoPE. Для consumer GPU gap увеличивается.
+> Tokenizer и KV-cache корректны, output верифицирован на простых задачах
+> («2+2 → 4»); на длинных генерациях местами наблюдаются повторы — вероятно, баг в RoPE
+> rescaling при длинных context, под расследованием.
 
-### Точность обучения
+### Точность обучения (10 training tasks)
 
-| Модель | PromeTorch | PyTorch |
-|--------|-----------|---------|
-| MNIST MLP (4 слоя) | 97.65% | 97.8% |
-| LSTM (Shakespeare) | 98.44% | ~98% |
-| GRU (классификация) | 95.3% | ~95% |
-| MNIST на NM Card Mini | 93.64% | N/A |
-| **PIR 250M (189M, Эльбрус DDP)** | **loss 1.04, 568 tok/s** | N/A |
+Файл `examples/mnist/train_10_models.cpp` — 10 обучающих таcков в одном бинаре:
 
-### PIR 250M на Эльбрусе (4-процесс DDP)
+| Задача | Данные | Accuracy | Примечание |
+|--------|--------|----------|------------|
+| Linear / Logistic regression | synthetic | match PyTorch | warmup |
+| XOR (2-layer MLP) | synthetic | 100% | warmup |
+| MNIST MLP (784→128→10) | MNIST real | 92.68% | CUDA |
+| MNIST Deep (784→512→256→128→10, Adam) | MNIST real | **97.5%** | CUDA |
+| MNIST + Dropout | MNIST real | 97.15% | CUDA |
+| MNIST wide + serialize/load | MNIST real | 97.78% | CUDA |
+| RNNCell sine regression | synthetic | MSE 1.67e-5 | CUDA |
+| LSTM classifier | **sum-sign of random walk** (synthetic) | 93–95% | NOT Shakespeare |
+| GRU trend detector | synthetic | **98.44%** | CUDA |
 
-Тренировка языковой модели PIR 250M (189M параметров) на русскоязычном корпусе 2 ГБ.
-Полностью на PromeTorch — ни строчки PyTorch.
+На CPU с Adam loss/accuracy совпадают с PyTorch 2.7.1 baseline в пределах ±0.5%.
+
+**Каких задач нет в этой таблице:** самостоятельного обучения Transformer на больших
+датасетах, ViT, ResNet, VAE. Заготовки `examples/transformer/` и `examples/vit/` в репо
+есть, но никогда не собирались end-to-end.
+
+### PIR 250M на Эльбрусе (Local SGD data-parallel)
+
+Тренировка собственной linear-RNN LM архитектуры (selective scan, родственник Mamba/HGRN/
+RWKV) на русскоязычном корпусе Wikipedia (2 ГБ, BPE-токенизация SentencePiece 100k).
+Полностью на PromeTorch — ни строчки PyTorch в обучении.
 
 | Метрика | Значение |
 |---------|----------|
-| Архитектура | 768d, 16 layers × 4 PIR, SwiGLU FFN (H=1792), seq=2048 |
-| DDP | 4 процесса × 8 ядер (Local SGD, file-based weight sync) |
-| Throughput | **568 tok/s** (4 × 142 tok/s) |
-| Loss (800 steps) | **1.04** (perplexity 2.8) |
-| Генерация | Русский текст: "В России", "полагается", "15 марта 2008 года" |
+| Архитектура | 342M params, 768d, 16 layers × 4 PIR sublayers, SwiGLU FFN (H=1792), seq=2048 |
+| Parallelism | 4 процесса × 8 ядер **Local SGD** (file-based weight averaging, не gradient AllReduce — ≠ DDP) |
+| Throughput | 4 × ~140 tok/s = **~560 tok/s aggregate** |
+| Related arch | PIR — diagonal selective scan `h[t] = σ(gate)*base_decay*h[t-1] + σ(gate)*value`. Близко к Mamba (A diagonal SSM), HGRN/RWKV (multi-scale decay) |
+| Checkpoint | Формат: raw float32 concatenation по param order. Python inference: `pir_infer.py` |
 
-### NM Quad (4 × NM6408, 64 ядра)
+> **Статус:** данные, представленные ранее ("loss 1.04, coherent Russian"), получены на версии
+> с частично сломанным backward (embedding/scan/gate/value градиенты отсутствовали). Цифры
+> воспроизведения на исправленном backward — в процессе. Public-ready числа и sample
+> generation обновятся после следующей full-run тренировки.
 
-| Метрика | Значение |
-|---------|----------|
-| SIMD speedup (nmpp) | **100x** (6675 мс → 66.5 мс) |
-| Throughput (16 ядер) | **705 tok/s** |
-| Масштабируемость | **80%** линейного |
+### NM Quad (профиль на удалённой плате НТЦ Модуль)
+
+| Метрика | Значение | Caveat |
+|---------|----------|--------|
+| SIMD speedup (nmpp MM 32f) | **100×** | vs собственный скалярный C++ на 1 ядре (не vs cuBLAS / PyTorch) |
+| Max stable cores | **16 из 64** | 64-ядерный режим приводит к DDR contention / hang |
+| Throughput (16 ядер) | 705 tok/s | на игрушечном GPT D=128, L=2, V=65 (tiny_shakespeare); loss 4.45 (модель не сходится, это throughput microbenchmark, не training run) |
+| PIR 250M на NM Quad | **TODO/planned (Phase 23)** | пока не реализовано |
 
 ### Поддерживаемые платформы
 
 | Производитель | Процессор | Архитектура | Backend | Статус |
 |---|---|---|---|---|
-| **МЦСТ** | Эльбрус 8C2 | E2K VLIW | TUDA (CPU + EML) | Нативная сборка, 38/38 тестов |
-| **НТЦ Модуль** | NM Card Mini K1879VM8YA | NeuroMatrix DSP | NMCard | Эмулятор + реальное железо |
-| **НТЦ Модуль** | NM Quad (4×NM6408) | 64 NMC4 + 20 ARM | NMQuad | 705 tok/s, SIMD 100x |
-| **Байкал Электроникс** | Байкал-М BE-M1000 | ARM Cortex-A57 | TUDA (NEON) | Готов (кросс-компиляция) |
-| **Байкал Электроникс** | Байкал-С BE-S1000 | ARM Cortex-A75 | TUDA (NEON+dotprod) | Готов (кросс-компиляция) |
+| **МЦСТ** | Эльбрус 8C2 | E2K VLIW | TUDA (CPU + EML_MT) | Нативная сборка, 38/38 тестов, PIR training |
+| **НТЦ Модуль** | NM Card Mini K1879VM8YA | NeuroMatrix DSP | NMCard | Q16.16 эмулятор (34 tests, MNIST 93.64%) + 1-core inference на реальной карте |
+| **НТЦ Модуль** | NM Quad (4×NM6408) | 64 NMC4 + 20 ARM | NMQuad | 100× SIMD vs own scalar, max 16 cores stable, tiny-GPT microbenchmark only |
+| **Байкал Электроникс** | Байкал-М BE-M1000 | ARM Cortex-A57 | TUDA (NEON) | Только кросс-компиляция, не протестировано на железе |
+| **Байкал Электроникс** | Байкал-С BE-S1000 | ARM Cortex-A75 | TUDA (NEON+dotprod) | Только кросс-компиляция, не протестировано на железе |
 | Intel / AMD | x86-64 | AVX2 + FMA | TUDA (CPU) | Основная платформа разработки |
-| NVIDIA | Turing+ (sm_75) | CUDA | CUDA + cuDNN + cuBLAS | 132 ядра, FlashDecoding, CUDA Graph |
+| NVIDIA | Turing+ (sm_75) | CUDA | cuBLAS wrapper + custom Q4_K GEMV | matmul через cuBLAS; 133 .cu файлов, но большинство — decorative/unused |
 
 | ОС | Тип | Статус тестов |
 |---|---|---|
@@ -108,6 +144,55 @@ Inference GGUF-моделей (квантизация Q4_K_M):
 | **Elbrus OS** (PDK LE) | МЦСТ, E2K | 34/34 PASS (Docker), 38/38 нативно |
 | Windows 10/11 | MSVC 2019+ | Основная платформа |
 | Ubuntu / Debian | GCC 9+ | Поддержка |
+
+---
+
+## Known Limitations (будет исправлено — PR welcome)
+
+Это solo-проект за месяц. Вот что честно **не готово** к production:
+
+### Core
+- **dtype coverage**: реально работает только `float32`. `Half`/`BFloat16`/`Complex`/`Bool`
+  объявлены в `ScalarType.h`, но `PT_DISPATCH_ALL_TYPES` их пропускает — operations with
+  FP16/BF16 input бросают "Unsupported dtype". AMP API есть, но настоящих FP16 CUDA kernel'ов
+  нет.
+- **ChannelsLast**: метаданные есть (`MemoryFormat::ChannelsLast`), но fast paths для
+  Conv2d/BN/Pool не реализованы — layout игнорируется при compute.
+- **Double backward (`create_graph=True`)**: флаг принимается и игнорируется. `.grad`
+  доступен после первого backward, но вторичный — не поддерживается.
+
+### CUDA
+- **FlashAttention** (`aten/src/ATen/cuda/FlashAttention.cu`): 6 подтверждённых багов
+  (`INFRASTRUCTURE_AUDIT.md:73-101`), включая `dim3(64,64)=4096 threads > max 1024` — кернел
+  физически не запускается. В `torch/` нет callsites — модуль de facto не используется.
+- **cuDNN**: wrappers есть (`aten/src/ATen/cudnn/`), но sources НЕ в CMakeLists для aten_cuda.
+  0 callsites в torch/ — этот код dead. Conv через custom naive CUDA kernel, не cuDNN.
+- **Custom GEMM**: `CUDABlas.cu` декларирует собственный tile-kernel, но используется
+  `cublasSgemm`. Custom kernel — dead code.
+
+### Training
+- **PIR backward** (`examples/pir/fused_trainer.h`): embedding/scan/gate/value gradients
+  были stub'ами до апреля 2026 — текущая версия чинит все 4 пути (см. JOURNAL.md). Старые
+  claims про "loss 1.04 coherent Russian" относятся к broken-backward версии и не
+  воспроизводимы; валидные числа будут опубликованы после завершения новой тренировки.
+- **Distributed**: `grad_sync.h` — это **Local SGD** (file-based weight averaging, period=N
+  steps), а не DDP (не gradient AllReduce). Схождение гарантируется только для
+  small-local-step регима.
+
+### Stubs / NotImplemented
+- `Conv3d::forward` — возвращает `zeros()` с комментарием "simplified for brevity".
+- `CTCLoss` — `throw`.
+- `CrossEntropyLoss(reduction="none")` — `throw`.
+- Некоторые cuDNN CPU fallbacks — `PT_ERROR("not implemented")`.
+
+### Examples never built end-to-end
+- `examples/transformer/train_transformer.cpp` (код есть, binary не собирался в 34
+  build-директориях).
+- `examples/vit/train_vit.cpp`.
+- `examples/shakespeare/train.cpp`.
+
+Полный аудит: **`INFRASTRUCTURE_AUDIT.md`** (43 bug-а на момент аудита, из них
+31 исправлено в текущей версии).
 
 ---
 

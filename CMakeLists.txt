@@ -530,8 +530,11 @@ set(AUTOGRAD_HEADERS
 )
 
 # Autograd library (grad_mode.cpp provides DLL-safe singleton for GradMode)
+# Also hosts torch::distributed (TCP-socket DDP) — header-only on Windows,
+# real POSIX implementation on Elbrus/Linux.
 add_library(torch_autograd STATIC
     torch/csrc/autograd/grad_mode.cpp
+    torch/distributed/ddp.cpp
 )
 
 target_include_directories(torch_autograd PUBLIC
@@ -540,6 +543,12 @@ target_include_directories(torch_autograd PUBLIC
 )
 
 target_link_libraries(torch_autograd PUBLIC aten)
+
+# DDP needs sockets. On Windows we link Ws2_32 via #pragma comment; on POSIX
+# nothing extra is required (libc provides socket(), close()).
+if(NOT WIN32)
+    target_link_libraries(torch_autograd PUBLIC pthread)
+endif()
 
 # ============================================================================
 # Torch NN Library (Neural Network Modules)
@@ -560,6 +569,8 @@ set(NN_HEADERS
     torch/nn/modules/dropout.h
     torch/nn/modules/sparse.h
     torch/nn/modules/loss.h
+    torch/nn/parallel/tensor_parallel.h
+    torch/nn/parallel/pipeline.h
 )
 
 # NN is header-only for now, create interface library
@@ -580,9 +591,21 @@ set(OPTIM_HEADERS
     torch/optim/optimizer.h
     torch/optim/sgd.h
     torch/optim/adam.h
+    torch/optim/adamw.h
     torch/optim/rmsprop.h
     torch/optim/lr_scheduler.h
     torch/optim/optim.h
+    # New optimizers added 2026-04-19
+    torch/optim/lion.h
+    torch/optim/sophia.h
+    torch/optim/lamb.h
+    torch/optim/adafactor.h
+    torch/optim/nadam.h
+    torch/optim/radam.h
+    torch/optim/adagrad.h
+    torch/optim/adamax.h
+    torch/optim/asgd.h
+    torch/optim/lbfgs.h
 )
 
 # Optim is header-only for now, create interface library
@@ -604,6 +627,7 @@ set(DATA_HEADERS
     torch/data/sampler.h
     torch/data/dataloader.h
     torch/data/data.h
+    torch/data/distributed_sampler.h
 )
 
 # Data is header-only for now, create interface library
@@ -615,6 +639,51 @@ target_include_directories(torch_data INTERFACE
 )
 
 target_link_libraries(torch_data INTERFACE torch_optim)
+
+# ============================================================================
+# Torch Extras — header-only modules added 2026-04-19.
+# ONNX, JIT, Mobile, MLIR, Vision, Trainer, NN-parallel, Quantization, Distributed,
+# Forward-AD, vmap. Each is an INTERFACE library so IDEs see the headers and
+# install targets export them.
+# ============================================================================
+
+set(TORCH_EXTRAS_HEADERS
+    # ONNX export
+    torch/onnx/export.h
+    # JIT compile prototype
+    torch/jit/compile.h
+    # Mobile serialization (ExecuTorch-like)
+    torch/mobile/executor.h
+    # MLIR text export
+    torch/mlir/export.h
+    # Vision (torchvision-compatible)
+    torch/vision/vision.h
+    torch/vision/transforms.h
+    torch/vision/models.h
+    # Lightning-style trainer
+    torch/trainer/trainer.h
+    # Quantization (INT8 QAT)
+    torch/quantization/qat.h
+    torch/quantization/observer.h
+    torch/quantization/quantization.h
+    torch/quantization/quantize.h
+    # Distributed (TCP DDP, FSDP, cluster launcher)
+    torch/distributed/ddp.h
+    torch/distributed/fsdp.h
+    torch/distributed/launcher.h
+    # Forward-mode AD, vmap
+    torch/autograd/forward_ad.h
+    torch/autograd/vmap.h
+)
+
+add_library(torch_extras INTERFACE)
+
+target_include_directories(torch_extras INTERFACE
+    $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}>
+    $<INSTALL_INTERFACE:include>
+)
+
+target_link_libraries(torch_extras INTERFACE torch_data)
 
 # ============================================================================
 # Tests
@@ -819,6 +888,24 @@ if(PT_BUILD_TESTS)
 
     gtest_discover_tests(edge_case_tests)
 
+    # DDP (TCP-socket distributed) self-test — fork-based, POSIX only.
+    add_executable(ddp_tests
+        test/cpp/test_ddp.cpp
+    )
+    target_link_libraries(ddp_tests PRIVATE torch_autograd)
+    if(NOT WIN32)
+        add_test(NAME ddp_tests COMMAND ddp_tests)
+    endif()
+
+    # FSDP / ZeRO self-test — fork-based, POSIX only.
+    add_executable(fsdp_tests
+        test/cpp/test_fsdp.cpp
+    )
+    target_link_libraries(fsdp_tests PRIVATE torch_autograd)
+    if(NOT WIN32)
+        add_test(NAME fsdp_tests COMMAND fsdp_tests)
+    endif()
+
     # NM Card Mini Emulator Test (only when NMCard is enabled)
     if(PT_USE_NMCARD)
         add_executable(nmcard_tests
@@ -917,11 +1004,18 @@ endif()
 # ============================================================================
 
 add_subdirectory(examples/mnist)
+add_subdirectory(examples/mobile)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/examples/mlir/CMakeLists.txt")
+    add_subdirectory(examples/mlir)
+endif()
 add_subdirectory(examples/rnn)
 add_subdirectory(examples/transformer)
 add_subdirectory(examples/vit)
 add_subdirectory(examples/pir)
 add_subdirectory(examples/gguf)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/examples/shakespeare/CMakeLists.txt")
+    add_subdirectory(examples/shakespeare)
+endif()
 if(PT_USE_NMCARD)
     add_subdirectory(examples/nmcard)
 endif()
@@ -936,7 +1030,7 @@ endif()
 # Installation
 # ============================================================================
 
-set(INSTALL_TARGETS c10 aten_cpu aten torch_autograd torch_nn torch_optim torch_data)
+set(INSTALL_TARGETS c10 aten_cpu aten torch_autograd torch_nn torch_optim torch_data torch_extras)
 if(PT_USE_CUDA)
     list(APPEND INSTALL_TARGETS aten_cuda)
 endif()
