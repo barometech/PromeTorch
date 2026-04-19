@@ -584,11 +584,31 @@ curl -s http://localhost:11434/api/chat \
 - `POST /api/generate` — генерация текста (streaming NDJSON)
 - `POST /api/chat` — чат (streaming NDJSON)
 - `GET /api/tags` — список доступных моделей
-- `POST /api/show` — информация о модели
+- `POST /api/show` — информация о модели (JSON modelfile)
 - `GET /api/version` — версия сервера
+- `OPTIONS /api/generate` — CORS preflight (204 + разрешённые методы)
+- `GET`/`POST /api/embeddings` — 501 Not Implemented (заглушка под будущий embedding API)
+
+**Production guardrails (добавлены 2026-04-19):**
+- Thread pool с ограниченной очередью (`--workers N`, `--queue-depth N`,
+  default 128). Переполнение → `503 Service Unavailable` + `Retry-After: 1`.
+- Per-request таймаут (`--timeout-ms`, default 60000). При срабатывании в
+  streaming сессию пишется `{"error":"timeout","done":true}` и соединение
+  корректно закрывается.
+- CORS методы: `POST, GET, OPTIONS`.
+- Debug stderr (`[ModelManager]`, per-token `[decode]`) gated за
+  `#ifdef PT_DEBUG_HTTP` — дефолт тихий, логи не забивают stdout.
+- Пофикшен silent header-parse bug: `Content-Length` терялся из-за
+  `>=` вместо `>` на границе header/body — каждый POST получал body_size=0
+  и отдавал «model name required». Теперь `/api/show`, `/api/generate`,
+  `/api/chat` принимают тело корректно.
 
 **Поддерживаемые архитектуры:** Qwen3, Gemma3, DeepSeek-R1, Llama, Mistral.
 **Квантизация:** Q4_K_M, Q5_K_M, Q6_K, Q8_0, F16, F32.
+
+**Сейчас на A100:** ~48 tok/s на qwen3:4b через HTTP. Плановый разгон до
+≥130 tok/s — one-shot Q4_K → FP16 dequant при загрузке + cublasHgemv; см.
+[TEST_PLAN.md §4](TEST_PLAN.md).
 
 ---
 
