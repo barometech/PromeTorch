@@ -37,7 +37,7 @@
 | Sparse tensors | COO/CSR/BSR | нет | 0% |
 | torch.distributions | 50+ | нет | 0% |
 | FX graph mode | full | нет | 0% |
-| Unit tests | 100K+ | ~850 gtest + ~30 agent self-tests + auto-generated suite | ~1% |
+| Unit tests | 100K+ | 720+ gtest + agent self-tests + auto-generated suite | ~1% |
 
 **Обобщённая оценка: ~35-45% user-surface PyTorch** — достаточно для training/deploy
 transformers/CNN/RNN/LLM на CPU + CUDA + Эльбрус + NM Card. Gap в **tuned kernels** /
@@ -405,7 +405,7 @@ CPU-portable, compile на Elbrus LCC. Плюс EMA + clip_grad_norm_ (`torch/op
 - **Vulkan compute / TPU XLA backends**.
 - **functorch полный** (grad-of-vmap, hessian, jacrev/jacfwd, composable transforms) —
   у нас базовый vmap + forward-mode AD.
-- **100K+ unit tests** — у нас ~850 gtest + ~30 agent self-tests + auto-generated
+- **100K+ unit tests** — у нас 720+ gtest + agent self-tests + auto-generated
   test_ops_generated суит (количество не протестировано).
 
 ### Что можно закрыть за 1-2 дня полной работы
@@ -849,7 +849,7 @@ ctest --output-on-failure
 | NMCard Backend | 33 | PASS |
 | LinQ H1M Backend | 34 | PASS |
 | Edge Cases | 20+ | PASS |
-| **Итого** | **434+** | **PASS** |
+| **Итого** | **720+** | **PASS** |
 
 **Верификация на российских ОС:**
 - Docker Astra Linux: 34/34 PASS
@@ -927,7 +927,7 @@ torch/                        Фреймворк
 promeserve/                   Ollama-совместимый LLM-сервер
 python/                       pybind11 bindings
 examples/                     MNIST, RNN, Transformer, ViT, GGUF, NMCard, CIFAR, GAN, VAE
-test/cpp/                     434+ тестов (Google Test)
+test/cpp/ + tests/            720+ тестов (Google Test + self-tests)
 docker/                       Dockerfiles: Astra, Elbrus, RED OS
 cmake/toolchains/             CMake toolchains для российских процессоров
 scripts/                      Build-скрипты для российских ОС
@@ -964,7 +964,7 @@ scripts/                      Build-скрипты для российских �
 | Оптимизаторов | 16 |
 | LR Schedulers | 16 |
 | Backend-ов | 4 (CPU, CUDA, NMCard, LinQ) |
-| Тестов | 434+ |
+| Тестов | 720+ (gtest `TEST()` / `TEST_F()` / `TEST_P()` across `test/cpp/` + `tests/`) |
 | Примеров | 12 |
 
 ---
