@@ -265,6 +265,8 @@ public:
         return "dim=" + std::to_string(dim_);
     }
 
+    int64_t dim() const { return dim_; }
+
 private:
     int64_t dim_;
 };
