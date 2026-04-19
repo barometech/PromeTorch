@@ -3,7 +3,85 @@
 Полная история разработки проекта. Актуальные инструкции — в `CLAUDE.md`.
 Полный аудит инфраструктуры — в `INFRASTRUCTURE_AUDIT.md`.
 
-## 2026-04-19: Большой sprint закрытия гэпов vs PyTorch + лицензия
+## 2026-04-19 (PM): Structural API gap sprint + critical Linear CUDA fix
+
+### Критический CUDA баг — fused_linear_autograd
+`Linear::forward` в 2D fast path вызывал `fused_linear_autograd` → `at::empty({M,N})`
+(без device = CPU) и `at::native::hot::sgemm_nt` на raw float* поинтерах. Когда
+input / weight живут на CUDA, pointer всё ещё валидный, но указывает в device memory
+— sgemm_nt читает → crash. Это блокировало КАЖДУЮ Linear-on-CUDA модель (input.dim()==2,
+FP32). VAE / ViT / DCGAN агенты все наткнулись.
+
+**Fix (`151e463`):** добавил `input.is_cpu() && W.is_cpu()` к gate обоих fast paths
+(no-grad inference + autograd training). CUDA падает в общий `mm_autograd` путь
+который дисpatches CUDA matmul kernel правильно. CPU behavior не изменён.
+
+### 4 структурных гэпа закрыты (+ foundation для 5-го)
+1. **`ParamGroup` per-group hyperparameters** (`d3951bb` + `d519a0f`) — lr, momentum,
+   betas, eps, amsgrad (tri-state int8), weight_decay с NaN-sentinel inheritance.
+   `scheduler.step_group(idx)` для per-group advance. Backwards-compat: единичный
+   (params, lr) ctor по-прежнему работает. Discriminative LR для fine-tuning теперь
+   возможны.
+2. **DDP `no_sync()` context manager** (`ab71ddf` + `ea07f99`) — RAII guard + Python
+   wrapper. Skip AllReduce across gradient accumulation micro-batches (1 sync за N
+   шагов вместо N). Работает на обоих DDP (POSIX-TCP Elbrus + ProcessGroup-abstracted).
+   Single-process test с `CountingPG` mock verifies 1 вместо 4 AllReduce для N=4.
+3. **Python `no_grad` / `enable_grad` → C++ GradMode** (`763ebb1`). BUG-C9 закрыт —
+   Python inference loops больше не строят autograd graph. `_GradModeContextDecorator`
+   база (stack-safe, nest-safe, decorator-compat). Thread-local correctness
+   задокументирован.
+4. **DLL exports `.def`** (`a5a8cbf`) — nvcc silently drops `__declspec(dllexport)`
+   на host-side functions в .cu файлах. Ship `aten/src/ATen/cuda/aten_cuda_exports.def`
+   с ~150 `launch_*` symbols. CMake conditional на MSVC + shared build. Unblock'ает
+   train_resnet / train_gan / test_gguf_inference на Windows.
+5. **`to_autograd` + `ToBackward`** (`8f87e57`) — foundation для autocast. Dtype cast
+   с корректным backward (grad casts back to source dtype). Guarded для integer
+   dtypes. Autocast wiring (Linear/Conv/MHA forwards + FP16 mm dispatch + A100
+   verify) — отдельная задача.
+
+### Supporting fixes
+- **cuDNN compile fix** (`a5a8cbf`): `data_ptr<void>()` → `data_ptr()` в
+  CuDNNActivation/BatchNorm/Convolution/Pooling. Добавил `mutable_data_ptr()` void*
+  overload в `Tensor.h`. Unblock'ает PT_USE_CUDNN build.
+- **loss.h CTCLoss lambda capture**: `[]` → `[NEG_INF]` (MSVC strict, C3493).
+- **`.reshape()` / `.select()` обрывали autograd** (`df3f804` + `0f205af`): все
+  training examples переведены на `reshape_autograd` / `select_autograd`. Это была
+  силient причина "loss падает но медленно" в Shakespeare / ViT.
+- **ViT CLS-token broadcast**: был N-copy cat (aliased-tensor hazard в backward), стал
+  `zeros({B,1,E}).add(cls)` + mean-pool по sequence (MultiheadAttention bypass'ит
+  autograd в custom batched matmul — отдельный gap §5.10).
+- **examples/cifar + gan/**: narrow includes (avoid torch/nn/nn.h → CuDNNRNN.h →
+  cuDNN 9 legacy API compile errors).
+
+### Pre-existing баги, зафиксированные агентами но не починенные
+- **MultiheadAttention bypass autograd** в custom batched matmul
+  (`torch/nn/modules/attention.h`) — grad не идёт поперёк positions через attention.
+  Workaround в ViT: mean-pool. Filed как §5 TEST_PLAN.
+- **`cuda_fp16.h` missing `nv/target` header** в anaconda CUDA 12.9. Workaround: switch
+  to `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4`.
+- **TransformerEncoderLayer CUDA forward crash** — CPU работает (85.8% val acc
+  verified), CUDA падает (suspected LayerNorm CUDA kernel gap).
+- **Python `_C.pyd` op bindings** (e.g. `t1 + t2`) calls raw aten, bypass `*_autograd`
+  wrappers — `requires_grad` не пропагируется на Python boundary.
+
+### Документация / план
+- **`TEST_PLAN.md`** — comprehensive verification plan: §1 7 CUDA-built binaries с
+  target metrics, §2 5 need-rebuild binaries, §3 inference speed targets, §4
+  PromeServe 150 tok/s roadmap (Option B: one-shot Q4_K → FP16 unpack + cublasHgemv),
+  §5 12 structural gaps со статусами, §7 ordered sprint queue, §8 commit map.
+- **`EXAMPLES_VERIFIED.md`** — A100 matrix: 10-models 9/9 PASS, qwen3:4b 47.6 tok/s
+  coherent, PIR CUDA 0.54M params loss 3.87→2.74, mem-leak test PASS.
+- **`README.md`** — новая секция "2026-04-19 structural sprint" с полным списком
+  закрытых гэпов. Known Limitations refresh.
+- **memory `project_license_intent.md`** — заякорено: permissive + attribution +
+  no-resale. "модельки и форки свободно, сам фреймворк продавать нельзя".
+
+### Коммиты (итого 28+ в этот день)
+От `9b19480` (5 missing backward) до `bdbbf95` (README update).
+
+---
+
+## 2026-04-19 (AM): Большой sprint закрытия гэпов vs PyTorch + лицензия
 
 ### Лицензия
 **PromeTorch License** переписана для максимальной открытости:
