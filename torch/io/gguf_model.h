@@ -13,6 +13,7 @@
 #include "aten/src/ATen/native/cpu/hot_loops.h"
 #ifdef PT_USE_CUDA
 #include "aten/src/ATen/cuda/CUDADispatch.h"
+#include "aten/src/ATen/cuda/CuBLASHandle.h"
 #endif
 
 #include <string>
@@ -252,7 +253,10 @@ struct KVCache {
         // Allocate FP16 KV cache for CUDA decode (halves attention bandwidth)
 #ifdef PT_USE_CUDA
         if (use_cuda) {
-            use_fp16_kv = false;  // Disabled: FP16 KV cache has baked offset bug in graph + reduce norm bug
+            // FP16 KV cache allocation (attention memory bandwidth reduction).
+            // Decode path uses graph-compatible FP32 flash_decode (reads d_past_len from device) —
+            // FP16 flag gates the fp16-reading kernel which is currently used for prefill only.
+            use_fp16_kv = true;
             key_cache_fp16.resize(num_layers, nullptr);
             value_cache_fp16.resize(num_layers, nullptr);
             for (int64_t i = 0; i < num_layers; ++i) {
@@ -1320,13 +1324,21 @@ public:
         cudaMemcpyAsync(d_past_len_, h_past_len_pinned_, sizeof(int64_t), cudaMemcpyHostToDevice, s);
         cudaMemcpyAsync(d_token_id_, h_token_id_pinned_, sizeof(int), cudaMemcpyHostToDevice, s);
 
-        // Graph capture DISABLED — cuBLAS inside graph needs special handling
-        capturing = false; // (d_past_len_ && !graph_captured_ && graph_token_id_ > 0);
+        // Graph capture: reads device pointers (d_past_len_, d_token_id_) — cuBLAS
+        // HGEMV path sets its own stream per call (see launch_cublas_hgemv), which is
+        // capture-friendly on CUDA 11.1+. Disable for first token (warmup) so scratch
+        // buffers are stable; capture on 2nd token, then replay for the rest.
+        capturing = (d_past_len_ && !graph_captured_ && graph_token_id_ > 0);
         if (capturing) {
+            // Ensure cuBLAS handle is bound to our capture stream before any cuBLAS call
+            // inside the captured region (redundant with per-call SetStream, but safe).
+#ifdef PT_USE_CUDA
+            cublasHandle_t cublas_h = at::cuda::CuBLASHandle::get();
+            cublasSetStream(cublas_h, s);
+#endif
             cudaError_t cap_err = cudaStreamBeginCapture(s, cudaStreamCaptureModeGlobal);
             if (cap_err != cudaSuccess) {
-                std::cerr << "[PromeGraph] BeginCapture FAILED: "
-                          << cudaGetErrorString(cap_err) << std::endl;
+                // Silent fall back per user spec
                 cudaGetLastError();
                 capturing = false;
             }
@@ -2712,9 +2724,13 @@ public:
 
             generated.push_back(next_token);
 
-            // Print token as it's generated
+            // Print token as it's generated (no per-token flush on hot path — flush below at end)
             std::string token_str = tokenizer.decode_token(next_token);
+#ifdef PT_DEBUG_DECODE
             std::cout << token_str << std::flush;
+#else
+            std::cout << token_str;
+#endif
 
             // Forward with single token (using KV cache)
 #ifdef PT_USE_CUDA

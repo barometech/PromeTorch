@@ -333,10 +333,17 @@ inline std::string duration_ns_str(double seconds) {
 
 class ApiHandlers {
 public:
-    ApiHandlers(ModelManager& models) : models_(models) {}
+    ApiHandlers(ModelManager& models) : models_(models), server_timeout_ms_(60000) {}
+
+    // Set per-request generation timeout (milliseconds). 0 = no timeout.
+    void set_timeout_ms(int ms) { server_timeout_ms_ = ms; }
+    int timeout_ms() const { return server_timeout_ms_; }
 
     // Register all routes on the given server
     void register_routes(HttpServer& server) {
+        // Pick up timeout from server config so the CLI only needs to set it once.
+        server_timeout_ms_ = server.server_timeout_ms();
+
         // Health check
         server.route("GET", "/", [this](const HttpRequest& req) -> HttpResponse {
             return handle_health(req);
@@ -368,6 +375,14 @@ public:
             [this](const HttpRequest& req, StreamWriter& writer) -> HttpResponse {
                 return handle_chat(req, writer);
             });
+
+        // Embeddings stub — 501 Not Implemented (better than 404)
+        server.route("POST", "/api/embeddings", [this](const HttpRequest& req) -> HttpResponse {
+            return handle_embeddings(req);
+        });
+        server.route("GET", "/api/embeddings", [this](const HttpRequest& req) -> HttpResponse {
+            return handle_embeddings(req);
+        });
     }
 
 private:
@@ -482,18 +497,32 @@ private:
     }
 
     // ========================================================================
+    // POST /api/embeddings — not implemented (stub returns 501)
+    // ========================================================================
+    HttpResponse handle_embeddings(const HttpRequest&) {
+        HttpResponse resp;
+        resp.status = 501;
+        resp.set_json("{\"error\":\"embeddings not implemented\"}");
+        return resp;
+    }
+
+    // ========================================================================
     // POST /api/generate — text generation (streaming NDJSON)
     // ========================================================================
     HttpResponse handle_generate(const HttpRequest& req, StreamWriter& writer) {
+#ifdef PT_DEBUG_HTTP
         std::cerr << "[Generate] Request body (" << req.body.size() << " bytes): "
                   << req.body.substr(0, 200) << std::endl;
+#endif
         auto body = json::parse(req.body);
         std::string model_name = body["model"].as_string();
         std::string prompt = body["prompt"].as_string();
         bool stream = body.has("stream") ? body["stream"].as_bool(true) : true;
+#ifdef PT_DEBUG_HTTP
         std::cerr << "[Generate] Parsed: model=\"" << model_name
                   << "\" prompt=\"" << prompt.substr(0, 80)
                   << "\" stream=" << stream << std::endl;
+#endif
 
         // Generation parameters (Ollama-compatible)
         int max_tokens = 128;
@@ -518,7 +547,6 @@ private:
         resp.set_ndjson_streaming();
 
         if (model_name.empty()) {
-            std::cerr << "[Generate] ERROR: model name is empty" << std::endl;
             writer.write("{\"error\":\"model name required\",\"done\":true}\n");
             writer.finish();
             return resp;
@@ -545,9 +573,11 @@ private:
             return resp;
         }
 
+#ifdef PT_DEBUG_HTTP
         std::cerr << "[Generate] Model ready: " << model_name
                   << " use_cuda=" << model->use_cuda_
                   << " prompt=\"" << prompt.substr(0, 100) << "\"" << std::endl;
+#endif
 
         // Auto-apply chat template if prompt doesn't already have one
         bool needs_template = (prompt.find("<|im_start|>") == std::string::npos &&
@@ -559,20 +589,19 @@ private:
                               max_tokens, temperature, top_k, top_p, repeat_penalty,
                               stream, writer, t_total_start);
         } catch (const std::exception& e) {
-            std::cerr << "[Generate] UNCAUGHT exception in generate_streaming: " << e.what() << std::endl;
+            std::cerr << "[Generate] ERROR: " << e.what() << std::endl;
             if (!writer.is_closed()) {
                 writer.write("{\"error\":\"internal error: " + json_escape(e.what()) + "\",\"done\":true}\n");
                 writer.finish();
             }
         } catch (...) {
-            std::cerr << "[Generate] UNCAUGHT unknown exception in generate_streaming" << std::endl;
+            std::cerr << "[Generate] ERROR: unknown exception" << std::endl;
             if (!writer.is_closed()) {
                 writer.write("{\"error\":\"internal error: unknown exception\",\"done\":true}\n");
                 writer.finish();
             }
         }
 
-        std::cerr << "[Generate] Handler complete" << std::endl;
         return resp;
     }
 
@@ -580,13 +609,17 @@ private:
     // POST /api/chat — chat completion (streaming NDJSON)
     // ========================================================================
     HttpResponse handle_chat(const HttpRequest& req, StreamWriter& writer) {
+#ifdef PT_DEBUG_HTTP
         std::cerr << "[Chat] Request body (" << req.body.size() << " bytes): "
                   << req.body.substr(0, 200) << std::endl;
+#endif
         auto body = json::parse(req.body);
         std::string model_name = body["model"].as_string();
         bool stream = body.has("stream") ? body["stream"].as_bool(true) : true;
+#ifdef PT_DEBUG_HTTP
         std::cerr << "[Chat] Parsed: model=\"" << model_name
                   << "\" stream=" << stream << std::endl;
+#endif
 
         // Parse messages array
         std::string formatted_prompt;
@@ -615,14 +648,12 @@ private:
         resp.set_ndjson_streaming();
 
         if (model_name.empty()) {
-            std::cerr << "[Chat] ERROR: model name is empty" << std::endl;
             writer.write("{\"error\":\"model name required\",\"done\":true}\n");
             writer.finish();
             return resp;
         }
 
         if (formatted_prompt.empty()) {
-            std::cerr << "[Chat] ERROR: messages array is empty" << std::endl;
             writer.write("{\"error\":\"messages array required\",\"done\":true}\n");
             writer.finish();
             return resp;
@@ -647,9 +678,11 @@ private:
             return resp;
         }
 
+#ifdef PT_DEBUG_HTTP
         std::cerr << "[Chat] Model ready: " << model_name
                   << " use_cuda=" << model->use_cuda_
                   << " prompt_len=" << formatted_prompt.size() << std::endl;
+#endif
 
         // For chat, the prompt is already formatted with chat template
         try {
@@ -657,20 +690,19 @@ private:
                                    max_tokens, temperature, top_k, top_p, repeat_penalty,
                                    stream, writer, t_total_start);
         } catch (const std::exception& e) {
-            std::cerr << "[Chat] UNCAUGHT exception in generate_streaming_chat: " << e.what() << std::endl;
+            std::cerr << "[Chat] ERROR: " << e.what() << std::endl;
             if (!writer.is_closed()) {
                 writer.write("{\"error\":\"internal error: " + json_escape(e.what()) + "\",\"done\":true}\n");
                 writer.finish();
             }
         } catch (...) {
-            std::cerr << "[Chat] UNCAUGHT unknown exception in generate_streaming_chat" << std::endl;
+            std::cerr << "[Chat] ERROR: unknown exception" << std::endl;
             if (!writer.is_closed()) {
                 writer.write("{\"error\":\"internal error: unknown exception\",\"done\":true}\n");
                 writer.finish();
             }
         }
 
-        std::cerr << "[Chat] Handler complete" << std::endl;
         return resp;
     }
 
@@ -687,12 +719,14 @@ private:
 
         std::string created_at = iso8601_now();
 
+#ifdef PT_DEBUG_HTTP
         std::cerr << "[Generate] START model=" << model_name
                   << " use_cuda=" << model->use_cuda_
                   << " prompt_len=" << prompt.size()
                   << " max_tokens=" << max_tokens
                   << " temp=" << temperature
                   << " stream=" << stream << std::endl;
+#endif
 
         // Reset KV cache
         model->kv_cache.reset();
@@ -702,19 +736,12 @@ private:
         if (max_total_seq > model->config.context_length)
             max_total_seq = model->config.context_length;
 
-        std::cerr << "[Generate] KV cache: kv_dim=" << kv_dim
-                  << " max_total_seq=" << max_total_seq
-                  << " allocated=" << model->kv_cache.allocated
-                  << " use_cuda=" << model->use_cuda_ << std::endl;
-
         if (!model->kv_cache.allocated || model->kv_cache.max_seq < max_total_seq) {
             // Invalidate CUDA Graph — KV cache pointers will change
             model->invalidate_graph();
             try {
                 model->kv_cache.allocate(model->config.num_layers, max_total_seq, kv_dim,
                                          model->use_cuda_);
-                std::cerr << "[Generate] KV cache allocated OK: layers=" << model->config.num_layers
-                          << " max_seq=" << max_total_seq << " kv_dim=" << kv_dim << std::endl;
             } catch (const std::exception& e) {
                 std::cerr << "[Generate] ERROR: KV cache allocation failed: " << e.what() << std::endl;
                 std::string err = "{\"model\":\"" + json_escape(model_name) + "\""
@@ -729,13 +756,10 @@ private:
 
         // Encode prompt
         std::string actual_prompt = apply_template ? model->apply_chat_template(prompt) : prompt;
-        std::cerr << "[Generate] Tokenizing prompt (" << actual_prompt.size() << " chars)..." << std::endl;
         auto input_tokens = model->tokenizer.encode(actual_prompt, true);
         int prompt_tokens = static_cast<int>(input_tokens.size());
-        std::cerr << "[Generate] Tokenized: " << prompt_tokens << " tokens" << std::endl;
 
         if (input_tokens.empty()) {
-            std::cerr << "[Generate] ERROR: tokenizer returned empty token list" << std::endl;
             std::string err = "{\"model\":\"" + json_escape(model_name) + "\""
                 + ",\"created_at\":\"" + created_at + "\""
                 + ",\"response\":\"\",\"done\":true"
@@ -748,13 +772,9 @@ private:
         // Prefill
         at::Tensor logits;
         auto t_prompt_start = std::chrono::high_resolution_clock::now();
-        std::cerr << "[Generate] Starting prefill forward()..." << std::endl;
         try {
             std::vector<int64_t> tokens_i64(input_tokens.begin(), input_tokens.end());
             logits = model->forward(tokens_i64, true);
-            std::cerr << "[Generate] Prefill forward() returned logits: ["
-                      << logits.size(0) << ", " << logits.size(1) << "]"
-                      << " is_cpu=" << logits.is_cpu() << std::endl;
         } catch (const std::exception& e) {
             std::cerr << "[Generate] ERROR in prefill forward(): " << e.what() << std::endl;
             std::string err = "{\"model\":\"" + json_escape(model_name) + "\""
@@ -768,16 +788,26 @@ private:
         auto t_prompt_end = std::chrono::high_resolution_clock::now();
 
         double prompt_eval_ms = std::chrono::duration<double, std::milli>(t_prompt_end - t_prompt_start).count();
-        std::cerr << "[Generate] Prefill done: " << prompt_tokens << " tokens in "
-                  << (prompt_eval_ms / 1000.0) << "s ("
-                  << (prompt_tokens / (prompt_eval_ms / 1000.0)) << " tok/s)" << std::endl;
 
         // Decode tokens one by one
         auto t_eval_start = std::chrono::high_resolution_clock::now();
         std::vector<int32_t> generated;
         std::string full_response;
 
+        const int timeout_ms_local = server_timeout_ms_;
+        bool timed_out = false;
         for (int step = 0; step < max_tokens; ++step) {
+            // Request timeout check — cheap, once per decode step
+            if (timeout_ms_local > 0) {
+                auto now = std::chrono::high_resolution_clock::now();
+                double elapsed_ms = std::chrono::duration<double, std::milli>(now - t_total_start).count();
+                if (elapsed_ms > timeout_ms_local) {
+                    writer.write("{\"error\":\"timeout\",\"done\":true}\n");
+                    timed_out = true;
+                    break;
+                }
+            }
+
             try {
                 int64_t last_pos = logits.size(0) - 1;
                 at::Tensor last_logits = model->get_row(logits, last_pos);
@@ -795,27 +825,14 @@ private:
 
                 int32_t next_token = model->sample_token(last_logits, temperature, top_k, top_p);
 
-                if (step == 0) {
-                    std::cerr << "[Generate] First sampled token: " << next_token
-                              << " (eos_id=" << model->tokenizer.eos_id
-                              << ", is_stop=" << model->is_stop_token(next_token) << ")" << std::endl;
-                }
-
                 // Check stop conditions
                 if (next_token == model->tokenizer.eos_id || model->is_stop_token(next_token)) {
-                    std::cerr << "[Generate] Stop token at step " << step
-                              << ": token=" << next_token << std::endl;
                     break;
                 }
 
                 generated.push_back(next_token);
                 std::string token_str = model->tokenizer.decode_token(next_token);
                 full_response += token_str;
-
-                if (step < 3 || step % 50 == 0) {
-                    std::cerr << "[Generate] Step " << step << ": token=" << next_token
-                              << " \"" << token_str << "\"" << std::endl;
-                }
 
                 // Stream this token
                 if (stream) {
@@ -825,7 +842,6 @@ private:
                           << ",\"response\":\"" << json_escape(token_str) << "\""
                           << ",\"done\":false}\n";
                     if (!writer.write(chunk.str())) {
-                        std::cerr << "[Generate] Client disconnected at step " << step << std::endl;
                         return;  // Client gone, stop generating
                     }
                 }
@@ -843,7 +859,6 @@ private:
                     std::vector<int64_t> next_input = {static_cast<int64_t>(next_token)};
                     logits = model->forward(next_input, true);
                 }
-                std::cerr << " done" << std::endl;
             } catch (const std::exception& e) {
                 std::cerr << "[Generate] ERROR at decode step " << step << ": " << e.what() << std::endl;
                 // Send error in stream and break
@@ -856,6 +871,10 @@ private:
                 writer.finish();
                 return;
             }
+        }
+        if (timed_out) {
+            writer.finish();
+            return;
         }
 
         auto t_eval_end = std::chrono::high_resolution_clock::now();
@@ -884,13 +903,10 @@ private:
                     << ",\"eval_count\":" << eval_count
                     << ",\"eval_duration\":" << duration_ns_str(eval_ms / 1000.0)
                     << "}\n";
-        std::cerr << "[Generate] Sending final chunk: eval_count=" << eval_count << std::endl;
         writer.write(final_chunk.str());
         writer.finish();
 
         double tok_per_sec = (eval_ms > 0) ? (eval_count / (eval_ms / 1000.0)) : 0;
-        std::cerr << "[Generate] DONE: " << eval_count << " tokens, "
-                  << tok_per_sec << " tok/s, total " << (total_ms / 1000.0) << "s" << std::endl;
         std::cout << "[Generate] " << eval_count << " tokens, "
                   << tok_per_sec << " tok/s" << std::endl;
     }
@@ -908,12 +924,14 @@ private:
 
         std::string created_at = iso8601_now();
 
+#ifdef PT_DEBUG_HTTP
         std::cerr << "[Chat] START model=" << model_name
                   << " use_cuda=" << model->use_cuda_
                   << " prompt_len=" << formatted_prompt.size()
                   << " max_tokens=" << max_tokens
                   << " temp=" << temperature
                   << " stream=" << stream << std::endl;
+#endif
 
         // Reset KV cache
         model->kv_cache.reset();
@@ -923,17 +941,11 @@ private:
         if (max_total_seq > model->config.context_length)
             max_total_seq = model->config.context_length;
 
-        std::cerr << "[Chat] KV cache: kv_dim=" << kv_dim
-                  << " max_total_seq=" << max_total_seq
-                  << " allocated=" << model->kv_cache.allocated
-                  << " use_cuda=" << model->use_cuda_ << std::endl;
-
         if (!model->kv_cache.allocated || model->kv_cache.max_seq < max_total_seq) {
             model->invalidate_graph();
             try {
                 model->kv_cache.allocate(model->config.num_layers, max_total_seq, kv_dim,
                                          model->use_cuda_);
-                std::cerr << "[Chat] KV cache allocated OK" << std::endl;
             } catch (const std::exception& e) {
                 std::cerr << "[Chat] ERROR: KV cache allocation failed: " << e.what() << std::endl;
                 std::string err = "{\"model\":\"" + json_escape(model_name) + "\""
@@ -947,13 +959,10 @@ private:
         }
 
         // Encode (already formatted)
-        std::cerr << "[Chat] Tokenizing prompt (" << formatted_prompt.size() << " chars)..." << std::endl;
         auto input_tokens = model->tokenizer.encode(formatted_prompt, true);
         int prompt_tokens = static_cast<int>(input_tokens.size());
-        std::cerr << "[Chat] Tokenized: " << prompt_tokens << " tokens" << std::endl;
 
         if (input_tokens.empty()) {
-            std::cerr << "[Chat] ERROR: tokenizer returned empty token list" << std::endl;
             std::string err = "{\"model\":\"" + json_escape(model_name) + "\""
                 + ",\"created_at\":\"" + created_at + "\""
                 + ",\"message\":{\"role\":\"assistant\",\"content\":\"\"}"
@@ -966,13 +975,9 @@ private:
         // Prefill
         at::Tensor logits;
         auto t_prompt_start = std::chrono::high_resolution_clock::now();
-        std::cerr << "[Chat] Starting prefill forward()..." << std::endl;
         try {
             std::vector<int64_t> tokens_i64(input_tokens.begin(), input_tokens.end());
             logits = model->forward(tokens_i64, true);
-            std::cerr << "[Chat] Prefill forward() returned logits: ["
-                      << logits.size(0) << ", " << logits.size(1) << "]"
-                      << " is_cpu=" << logits.is_cpu() << std::endl;
         } catch (const std::exception& e) {
             std::cerr << "[Chat] ERROR in prefill forward(): " << e.what() << std::endl;
             std::string err = "{\"model\":\"" + json_escape(model_name) + "\""
@@ -986,16 +991,26 @@ private:
         }
         auto t_prompt_end = std::chrono::high_resolution_clock::now();
         double prompt_eval_ms = std::chrono::duration<double, std::milli>(t_prompt_end - t_prompt_start).count();
-        std::cerr << "[Chat] Prefill done: " << prompt_tokens << " tokens in "
-                  << (prompt_eval_ms / 1000.0) << "s ("
-                  << (prompt_tokens / (prompt_eval_ms / 1000.0)) << " tok/s)" << std::endl;
 
         // Decode
         auto t_eval_start = std::chrono::high_resolution_clock::now();
         std::vector<int32_t> generated;
         std::string full_response;
 
+        const int timeout_ms_local = server_timeout_ms_;
+        bool timed_out = false;
         for (int step = 0; step < max_tokens; ++step) {
+            // Request timeout check
+            if (timeout_ms_local > 0) {
+                auto now = std::chrono::high_resolution_clock::now();
+                double elapsed_ms = std::chrono::duration<double, std::milli>(now - t_total_start).count();
+                if (elapsed_ms > timeout_ms_local) {
+                    writer.write("{\"error\":\"timeout\",\"done\":true}\n");
+                    timed_out = true;
+                    break;
+                }
+            }
+
             try {
                 int64_t last_pos = logits.size(0) - 1;
                 at::Tensor last_logits = model->get_row(logits, last_pos);
@@ -1012,26 +1027,13 @@ private:
 
                 int32_t next_token = model->sample_token(last_logits, temperature, top_k, top_p);
 
-                if (step == 0) {
-                    std::cerr << "[Chat] First sampled token: " << next_token
-                              << " (eos_id=" << model->tokenizer.eos_id
-                              << ", is_stop=" << model->is_stop_token(next_token) << ")" << std::endl;
-                }
-
                 if (next_token == model->tokenizer.eos_id || model->is_stop_token(next_token)) {
-                    std::cerr << "[Chat] Stop token at step " << step
-                              << ": token=" << next_token << std::endl;
                     break;
                 }
 
                 generated.push_back(next_token);
                 std::string token_str = model->tokenizer.decode_token(next_token);
                 full_response += token_str;
-
-                if (step < 3 || step % 50 == 0) {
-                    std::cerr << "[Chat] Step " << step << ": token=" << next_token
-                              << " \"" << token_str << "\"" << std::endl;
-                }
 
                 // Chat streaming format: {"message":{"role":"assistant","content":"token"}}
                 if (stream) {
@@ -1041,7 +1043,6 @@ private:
                           << ",\"message\":{\"role\":\"assistant\",\"content\":\"" << json_escape(token_str) << "\"}"
                           << ",\"done\":false}\n";
                     if (!writer.write(chunk.str())) {
-                        std::cerr << "[Chat] Client disconnected at step " << step << std::endl;
                         return;
                     }
                 }
@@ -1057,7 +1058,6 @@ private:
                     std::vector<int64_t> next_input = {static_cast<int64_t>(next_token)};
                     logits = model->forward(next_input, true);
                 }
-                std::cerr << " done" << std::endl;
             } catch (const std::exception& e) {
                 std::cerr << "[Chat] ERROR at decode step " << step << ": " << e.what() << std::endl;
                 std::string err_chunk = "{\"model\":\"" + json_escape(model_name) + "\""
@@ -1069,6 +1069,10 @@ private:
                 writer.finish();
                 return;
             }
+        }
+        if (timed_out) {
+            writer.finish();
+            return;
         }
 
         auto t_eval_end = std::chrono::high_resolution_clock::now();
@@ -1097,13 +1101,10 @@ private:
                     << ",\"eval_count\":" << eval_count
                     << ",\"eval_duration\":" << duration_ns_str(eval_ms / 1000.0)
                     << "}\n";
-        std::cerr << "[Chat] Sending final chunk: eval_count=" << eval_count << std::endl;
         writer.write(final_chunk.str());
         writer.finish();
 
         double tok_per_sec = (eval_ms > 0) ? (eval_count / (eval_ms / 1000.0)) : 0;
-        std::cerr << "[Chat] DONE: " << eval_count << " tokens, "
-                  << tok_per_sec << " tok/s, total " << (total_ms / 1000.0) << "s" << std::endl;
         std::cout << "[Chat] " << eval_count << " tokens, "
                   << tok_per_sec << " tok/s" << std::endl;
     }
@@ -1185,6 +1186,7 @@ private:
 
     ModelManager& models_;
     std::mutex generate_mutex_;  // Serialize generation (one at a time)
+    int server_timeout_ms_;      // Per-request generation timeout (ms); 0 = none
 };
 
 }  // namespace promeserve

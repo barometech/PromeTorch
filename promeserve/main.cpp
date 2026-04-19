@@ -43,10 +43,13 @@ void print_usage(const char* argv0) {
     std::cout << "Usage: " << argv0 << " [options]" << std::endl;
     std::cout << std::endl;
     std::cout << "Options:" << std::endl;
-    std::cout << "  --port PORT      Listen port (default: 11434)" << std::endl;
-    std::cout << "  --device DEVICE  Device: cuda, cpu (default: cuda)" << std::endl;
-    std::cout << "  --model MODEL    Pre-load model at startup (e.g., qwen3:4b)" << std::endl;
-    std::cout << "  --help           Show this help" << std::endl;
+    std::cout << "  --port PORT         Listen port (default: 11434)" << std::endl;
+    std::cout << "  --device DEVICE     Device: cuda, cpu (default: cuda)" << std::endl;
+    std::cout << "  --model MODEL       Pre-load model at startup (e.g., qwen3:4b)" << std::endl;
+    std::cout << "  --workers N         Worker thread pool size (default: hardware_concurrency)" << std::endl;
+    std::cout << "  --queue-depth N     Max queued requests (default: 128; excess returns 503)" << std::endl;
+    std::cout << "  --timeout-ms MS     Per-request generation timeout (default: 60000)" << std::endl;
+    std::cout << "  --help              Show this help" << std::endl;
     std::cout << std::endl;
     std::cout << "API endpoints (Ollama-compatible):" << std::endl;
     std::cout << "  POST /api/generate  — text completion" << std::endl;
@@ -66,6 +69,7 @@ int main(int argc, char* argv[]) {
     int port = 11434;
     std::string device = "cuda";
     std::string model;
+    promeserve::ServerConfig cfg;  // defaults: 0 workers (use hw_concurrency), 128 queue, 60000ms timeout
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -78,6 +82,12 @@ int main(int argc, char* argv[]) {
             device = argv[++i];
         } else if (arg == "--model" && i + 1 < argc) {
             model = argv[++i];
+        } else if (arg == "--workers" && i + 1 < argc) {
+            cfg.worker_threads = static_cast<size_t>(std::atoi(argv[++i]));
+        } else if (arg == "--queue-depth" && i + 1 < argc) {
+            cfg.max_queue_depth = static_cast<size_t>(std::atoi(argv[++i]));
+        } else if (arg == "--timeout-ms" && i + 1 < argc) {
+            cfg.server_timeout_ms = std::atoi(argv[++i]);
         } else if (arg == "--cpu") {
             device = "cpu";
         } else if (arg == "--cuda" || arg == "--gpu") {
@@ -94,6 +104,7 @@ int main(int argc, char* argv[]) {
     std::signal(SIGTERM, signal_handler);
 
     promeserve::PromeServe server;
+    server.set_config(cfg);
     g_server = &server;
 
     server.start(port, device, model);
