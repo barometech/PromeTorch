@@ -46,6 +46,9 @@
 #include "aten/src/ATen/cudnn/CuDNNPooling.h"
 #include "aten/src/ATen/cudnn/CuDNNBatchNorm.h"
 #include "aten/src/ATen/cudnn/CuDNNActivation.h"
+#ifdef PT_USE_CUDNN
+#include "aten/src/ATen/cudnn/CuDNNRNN.h"
+#endif
 
 namespace at {
 namespace cudnn {
