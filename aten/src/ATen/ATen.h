@@ -1999,4 +1999,11 @@ using at::native::lerp;
 using at::native::hypot;
 using at::native::atan2;
 
+// New ops (2026-04-18)
+using at::native::logsumexp;
+using at::native::one_hot;
+using at::native::allclose;
+using at::native::equal;
+using at::native::floor_divide;
+
 } // namespace torch
