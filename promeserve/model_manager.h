@@ -128,7 +128,20 @@ public:
             }
         }
 
-        std::cout << "[ModelManager] Found " << models_.size() << " model entries" << std::endl;
+        std::cout << "[ModelManager] Found " << list_models_locked().size() << " models" << std::endl;
+    }
+
+    // Internal: list with lock already held by caller.
+    std::vector<ModelInfo> list_models_locked() const {
+        std::vector<ModelInfo> result;
+        std::map<std::string, bool> seen;
+        for (auto& kv : models_) {
+            if (kv.second.gguf_path.empty()) continue;
+            if (seen.count(kv.second.gguf_path)) continue;
+            seen[kv.second.gguf_path] = true;
+            result.push_back(kv.second);
+        }
+        return result;
     }
 
     // ========================================================================
@@ -216,8 +229,11 @@ public:
 
         try {
             auto model = std::make_unique<torch::io::GGUFModel>();
+#ifdef PT_DEBUG_HTTP
             std::cerr << "[ModelManager] Loading GGUF: " << gguf_path << std::endl;
+#endif
             model->load(gguf_path);
+#ifdef PT_DEBUG_HTTP
             std::cerr << "[ModelManager] GGUF loaded. use_cuda_=" << use_cuda_
                       << " model->use_cuda_=" << model->use_cuda_
                       << " model->use_quant_gemv_=" << model->use_quant_gemv_
@@ -225,18 +241,14 @@ public:
                       << " layers=" << model->config.num_layers
                       << " hidden=" << model->config.hidden_size
                       << " vocab=" << model->config.vocab_size << std::endl;
+#endif
 
 #ifdef PT_USE_CUDA
             if (use_cuda_) {
                 model->to_cuda();
                 model->load_quantized_to_cuda();
                 std::cout << "[ModelManager] Quantized weights loaded to GPU" << std::endl;
-            } else {
-                std::cerr << "[ModelManager] CPU mode: model->use_cuda_ stays "
-                          << model->use_cuda_ << std::endl;
             }
-#else
-            std::cerr << "[ModelManager] Built without PT_USE_CUDA, CPU-only mode" << std::endl;
 #endif
 
             loaded_model_name_ = name;

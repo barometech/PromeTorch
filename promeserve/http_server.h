@@ -24,6 +24,8 @@
 #include <functional>
 #include <thread>
 #include <mutex>
+#include <condition_variable>
+#include <queue>
 #include <atomic>
 #include <iostream>
 #include <sstream>
@@ -117,6 +119,8 @@ struct HttpResponse {
             case 404: return "Not Found";
             case 405: return "Method Not Allowed";
             case 500: return "Internal Server Error";
+            case 501: return "Not Implemented";
+            case 503: return "Service Unavailable";
             default:  return "Unknown";
         }
     }
@@ -172,6 +176,7 @@ private:
         while (remaining > 0) {
             int sent = ::send(sock_, ptr, remaining, 0);
             if (sent <= 0) {
+#ifdef PT_DEBUG_HTTP
 #ifdef _WIN32
                 int err = WSAGetLastError();
                 std::cerr << "[StreamWriter] send failed: WSA error " << err
@@ -179,6 +184,7 @@ private:
 #else
                 std::cerr << "[StreamWriter] send failed: errno=" << errno
                           << " (remaining=" << remaining << ")" << std::endl;
+#endif
 #endif
                 closed_ = true;
                 return false;
@@ -213,16 +219,35 @@ struct Route {
 };
 
 // ============================================================================
+// Server Configuration
+// ============================================================================
+
+struct ServerConfig {
+    // Thread pool size. 0 = use hardware_concurrency().
+    size_t worker_threads = 0;
+    // Maximum queued requests beyond worker_threads. Excess returns 503.
+    size_t max_queue_depth = 128;
+    // Per-request generation timeout in milliseconds.
+    int server_timeout_ms = 60000;
+};
+
+// ============================================================================
 // HTTP Server
 // ============================================================================
 
 class HttpServer {
 public:
-    HttpServer() : listen_sock_(INVALID_SOCK), running_(false), port_(0) {}
+    HttpServer() : listen_sock_(INVALID_SOCK), running_(false), port_(0),
+                   pool_stop_(false), queued_(0) {}
 
     ~HttpServer() {
         stop();
     }
+
+    // Configure thread pool and per-request settings. Must be called before start().
+    void set_config(const ServerConfig& cfg) { config_ = cfg; }
+    const ServerConfig& config() const { return config_; }
+    int server_timeout_ms() const { return config_.server_timeout_ms; }
 
     // Register a standard (non-streaming) route
     void route(const std::string& method, const std::string& path, Handler handler) {
@@ -296,7 +321,24 @@ public:
         }
 
         running_ = true;
-        std::cout << "[PromeServe] Listening on http://0.0.0.0:" << port << std::endl;
+
+        // Start the worker pool
+        size_t n_workers = config_.worker_threads;
+        if (n_workers == 0) {
+            n_workers = std::thread::hardware_concurrency();
+            if (n_workers == 0) n_workers = 4;
+        }
+        pool_stop_ = false;
+        queued_ = 0;
+        workers_.reserve(n_workers);
+        for (size_t i = 0; i < n_workers; ++i) {
+            workers_.emplace_back([this]() { worker_loop(); });
+        }
+
+        std::cout << "[PromeServe] Listening on http://0.0.0.0:" << port
+                  << " (workers=" << n_workers
+                  << " queue=" << config_.max_queue_depth
+                  << " timeout=" << config_.server_timeout_ms << "ms)" << std::endl;
 
         accept_loop();
     }
@@ -308,14 +350,16 @@ public:
             listen_sock_ = INVALID_SOCK;
         }
 
-        // Wait for worker threads to finish
-        std::lock_guard<std::mutex> lock(threads_mutex_);
-        for (auto& t : threads_) {
-            if (t.joinable()) {
-                t.detach();  // Don't block on long-running connections
-            }
+        // Stop worker pool: drain the queue and join threads.
+        {
+            std::lock_guard<std::mutex> lock(queue_mutex_);
+            pool_stop_ = true;
         }
-        threads_.clear();
+        queue_cv_.notify_all();
+        for (auto& t : workers_) {
+            if (t.joinable()) t.join();
+        }
+        workers_.clear();
 
 #ifdef _WIN32
         WSACleanup();
@@ -345,13 +389,59 @@ private:
                 break;  // Server shutting down
             }
 
-            // Spawn a thread for this connection
-            std::lock_guard<std::mutex> lock(threads_mutex_);
-            threads_.emplace_back([this, client]() {
-                handle_connection(client);
-            });
-            threads_.back().detach();
+            // Enqueue for worker pool. On queue-full, return 503.
+            bool accepted = false;
+            {
+                std::lock_guard<std::mutex> lock(queue_mutex_);
+                if (queue_.size() < config_.max_queue_depth) {
+                    queue_.push(client);
+                    ++queued_;
+                    accepted = true;
+                }
+            }
+            if (accepted) {
+                queue_cv_.notify_one();
+            } else {
+                send_busy_response(client);
+                CLOSE_SOCKET(client);
+            }
         }
+    }
+
+    void worker_loop() {
+        while (true) {
+            socket_t client = INVALID_SOCK;
+            {
+                std::unique_lock<std::mutex> lock(queue_mutex_);
+                queue_cv_.wait(lock, [this]() {
+                    return pool_stop_ || !queue_.empty();
+                });
+                if (pool_stop_ && queue_.empty()) return;
+                client = queue_.front();
+                queue_.pop();
+            }
+            if (client != INVALID_SOCK) {
+                handle_connection(client);
+                --queued_;
+            }
+        }
+    }
+
+    // Fast 503 response for when the queue is full.
+    void send_busy_response(socket_t client) {
+        const char* body =
+            "{\"error\":\"server busy, retry later\"}";
+        std::ostringstream oss;
+        oss << "HTTP/1.1 503 Service Unavailable\r\n"
+            << "Content-Type: application/json\r\n"
+            << "Content-Length: " << std::strlen(body) << "\r\n"
+            << "Retry-After: 1\r\n"
+            << "Access-Control-Allow-Origin: *\r\n"
+            << "Connection: close\r\n"
+            << "\r\n"
+            << body;
+        std::string raw = oss.str();
+        ::send(client, raw.c_str(), static_cast<int>(raw.size()), 0);
     }
 
     void handle_connection(socket_t client) {
@@ -418,8 +508,10 @@ private:
             // 2. Send headers on the socket
             // 3. THEN let the handler write chunked data via StreamWriter
 
+#ifdef PT_DEBUG_HTTP
             std::cerr << "[HTTP] Streaming request: " << request.method << " " << request.path
                       << " body_size=" << request.body.size() << std::endl;
+#endif
 
             // Pre-build a streaming response with correct headers
             HttpResponse resp;
@@ -429,13 +521,17 @@ private:
 
             // Send HTTP headers first (before any chunk data)
             std::string header_raw = resp.serialize();
-            int header_sent = ::send(client, header_raw.c_str(), static_cast<int>(header_raw.size()), 0);
-            std::cerr << "[HTTP] Sent streaming headers: " << header_sent << " bytes" << std::endl;
+            ::send(client, header_raw.c_str(), static_cast<int>(header_raw.size()), 0);
+#ifdef PT_DEBUG_HTTP
+            std::cerr << "[HTTP] Sent streaming headers" << std::endl;
+#endif
 
             // Now create the writer and let the handler stream chunks
             StreamWriter writer(client);
             HttpResponse handler_resp = matched->stream_handler(request, writer);
+#ifdef PT_DEBUG_HTTP
             std::cerr << "[HTTP] Handler returned, writer.closed=" << writer.is_closed() << std::endl;
+#endif
 
             // If handler returned a non-streaming error response, send it as a chunk
             if (!handler_resp.streaming && handler_resp.status >= 400 && !handler_resp.body.empty()) {
@@ -444,7 +540,6 @@ private:
 
             // If handler didn't finish the stream, do it now
             if (!writer.is_closed()) {
-                std::cerr << "[HTTP] Handler didn't finish stream, closing now" << std::endl;
                 writer.finish();
             }
         } else {
@@ -522,11 +617,13 @@ private:
             req.path = full_path;
         }
 
-        // Parse headers
+        // Parse headers. `header_end` points to the CRLF that PRECEDES the blank
+        // line separating headers from body, so the last header's terminating
+        // CRLF starts exactly at header_end. We must accept line_end == header_end.
         size_t pos = first_line_end + 2;
         while (pos < header_end) {
             size_t line_end = buffer.find("\r\n", pos);
-            if (line_end == std::string::npos || line_end >= header_end) break;
+            if (line_end == std::string::npos || line_end > header_end) break;
             std::string line = buffer.substr(pos, line_end - pos);
             size_t colon = line.find(':');
             if (colon != std::string::npos) {
@@ -567,7 +664,7 @@ private:
 
     void add_cors_headers(HttpResponse& resp) {
         resp.headers["Access-Control-Allow-Origin"] = "*";
-        resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS, DELETE";
+        resp.headers["Access-Control-Allow-Methods"] = "POST, GET, OPTIONS";
         resp.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization";
         resp.headers["Access-Control-Max-Age"] = "86400";
     }
@@ -576,9 +673,16 @@ private:
     socket_t listen_sock_;
     std::atomic<bool> running_;
     int port_;
+    ServerConfig config_;
     std::vector<Route> routes_;
-    std::vector<std::thread> threads_;
-    std::mutex threads_mutex_;
+
+    // Worker pool + bounded request queue.
+    std::vector<std::thread> workers_;
+    std::queue<socket_t> queue_;
+    std::mutex queue_mutex_;
+    std::condition_variable queue_cv_;
+    bool pool_stop_;
+    std::atomic<size_t> queued_;
 };
 
 }  // namespace promeserve

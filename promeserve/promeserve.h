@@ -24,6 +24,10 @@ class PromeServe {
 public:
     PromeServe() : handlers_(models_) {}
 
+    // Configure thread pool, queue depth, request timeout.
+    void set_config(const ServerConfig& cfg) { config_ = cfg; }
+    const ServerConfig& config() const { return config_; }
+
     // ========================================================================
     // Start the server
     // ========================================================================
@@ -65,7 +69,10 @@ public:
             }
         }
 
-        // Register API routes
+        // Apply server config (thread pool, queue, timeout)
+        server_.set_config(config_);
+
+        // Register API routes (handlers pick up timeout from server)
         handlers_.register_routes(server_);
 
         // Start listening (blocking)
@@ -83,6 +90,7 @@ private:
     HttpServer server_;
     ModelManager models_;
     ApiHandlers handlers_;
+    ServerConfig config_;
 };
 
 }  // namespace promeserve
