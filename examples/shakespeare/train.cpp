@@ -251,11 +251,14 @@ int main(int argc, char* argv[]) {
             Tensor logits = model->forward(input);
 
             // Reshape for CrossEntropyLoss: [N, V] and [N]
+            // CRITICAL: use reshape_autograd on logits so gradient flows back.
+            // Tensor::reshape() calls native::reshape() directly, bypassing autograd.
             int64_t S = logits.size(0);
             int64_t B = logits.size(1);
             int64_t V = logits.size(2);
-            Tensor logits_flat  = logits.reshape({S * B, V});
-            Tensor target_flat  = target.reshape({S * B});
+            Tensor logits_flat = torch::autograd::reshape_autograd(logits, {S * B, V});
+            // Targets don't need autograd — they're leaves with no grad.
+            Tensor target_flat = target.reshape({S * B});
 
             Tensor loss = criterion.forward(logits_flat, target_flat);
 

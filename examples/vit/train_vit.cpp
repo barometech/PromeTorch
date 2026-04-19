@@ -159,9 +159,12 @@ public:
         Tensor patches = perm.reshape({B, num_patches_, patch_dim_});
 
         // Project patches through Linear. Linear handles 3D via internal reshape.
+        // patches has no grad_fn (native reshape/permute) — OK, the Linear forward
+        // wires grad_fn to the learnable W. AFTER Linear we need reshape_autograd
+        // to keep the autograd chain alive back to proj.weight.
         Tensor flat = patches.reshape({B * num_patches_, patch_dim_});
         Tensor embedded = proj->forward(flat);
-        embedded = embedded.reshape({B, num_patches_, embed_dim_});
+        embedded = torch::autograd::reshape_autograd(embedded, {B, num_patches_, embed_dim_});
 
         LOG_TENSOR("output", embedded);
         return embedded;
@@ -273,8 +276,9 @@ public:
         }
         LOG_TENSOR("encoder_out", h);
 
-        // Extract CLS token output: h[:, 0, :]
-        Tensor cls_out = h.select(1, 0);  // [B, embed_dim]
+        // Extract CLS token output: h[:, 0, :]. Use select_autograd so gradient
+        // from the classification head flows back through the encoder stack.
+        Tensor cls_out = torch::autograd::select_autograd(h, 1, 0);  // [B, embed_dim]
         LOG_TENSOR("cls_out", cls_out);
 
         // Layer norm + classification head

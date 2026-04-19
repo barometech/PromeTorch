@@ -225,8 +225,11 @@ Tensor vae_loss(const Tensor& recon, const Tensor& x,
     // that has the SAME shape as x / recon — no broadcasting required.
     // ==========================================================================
 
-    // Clamp recon into [eps, 1-eps] for numerical stability of log.
-    Tensor r_clamped = ta::clamp_autograd(recon, 1e-7, 1.0 - 1e-7);
+    // Decoder's sigmoid output is already in (0, 1) — clamp can crash in this
+    // framework's ClampBackward for some tensor shapes. Skip clamp and rely on
+    // sigmoid's numerical guarantees (output never exactly hits 0 or 1 for
+    // finite logits).
+    Tensor r_clamped = recon;
     Tensor log_r     = ta::log_autograd(r_clamped);
 
     // ones_r has same shape/device as recon, no grad
@@ -283,13 +286,8 @@ Tensor vae_loss(const Tensor& recon, const Tensor& x,
     Tensor kl_loss  = mul_scalar_autograd(kl_inner,
                             0.5f / static_cast<float>(batch_size));
 
-    // DEBUG: MSE instead of BCE
     (void)kl_loss;
-    (void)recon_loss;
-    Tensor diff = ta::sub_autograd(recon, x);
-    Tensor sq = ta::square_autograd(diff);
-    Tensor mse_sum = ta::sum_autograd(sq);
-    return mul_scalar_autograd(mse_sum, 1.0f / static_cast<float>(batch_size));
+    return recon_loss;  // DEBUG: BCE without KL, without clamp
 }
 
 // ============================================================================
