@@ -247,6 +247,11 @@ public:
     variable_list accumulated_grad_;     // accumulated gradients from multiple paths
     bool visited_ = false;               // cycle detection / traversal flag
 
+    // Forward-creation stack for AnomalyMode diagnostics.
+    // Populated by the op that constructs the node if AnomalyMode is enabled.
+    // Empty when AnomalyMode is off (zero overhead).
+    std::vector<std::string> anomaly_stack_;
+
     void reset_graph_state() {
         dependency_count_ = 0;
         accumulated_grad_.clear();

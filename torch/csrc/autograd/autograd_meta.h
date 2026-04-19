@@ -38,8 +38,20 @@ struct AutogradMetaImpl : public c10::AutogradMeta {
     // Not used when grad_fn is nullptr (leaf tensors)
     uint32_t version_counter_ = 0;
 
-    // Post-accumulate-grad hooks
+    // Post-accumulate-grad hooks (void, see-only)
     std::vector<std::function<void(at::Tensor&)>> hooks_;
+
+    // Pre-accumulate-grad hooks: can modify the gradient (PyTorch-compatible).
+    // Stored as shared_ptrs so external HookHandle users can null them out
+    // via remove_hook() and the engine will skip empty targets.
+    // See torch/csrc/autograd/hooks.h for the public API.
+    std::vector<std::shared_ptr<std::function<at::Tensor(const at::Tensor&)>>> grad_hooks_;
+
+    // Forward-creation stack captured when AnomalyMode was enabled during
+    // the forward pass that created the owning node. Empty otherwise.
+    // Populated by the user via node->anomaly_stack_ (see anomaly_mode.h).
+    // (Kept on meta rather than Node so we can attribute by tensor if needed.)
+    std::vector<std::string> anomaly_stack_;
 
     AutogradMetaImpl() : c10::AutogradMeta() {
         is_autograd_meta_impl_ = true;  // Type tag: avoids dynamic_cast on x86

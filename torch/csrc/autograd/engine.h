@@ -3,6 +3,7 @@
 #include "torch/csrc/autograd/node.h"
 #include "torch/csrc/autograd/edge.h"
 #include "torch/csrc/autograd/autograd_meta.h"
+#include "torch/csrc/autograd/anomaly_mode.h"
 #include "aten/src/ATen/core/Tensor.h"
 #include "aten/src/ATen/core/TensorFactory.h"
 #include "aten/src/ATen/native/cpu/hot_loops.h"
@@ -264,6 +265,15 @@ inline void Engine::execute_node(
 ) {
     auto& fn = node_task.fn;
 
+    // AnomalyMode: validate input gradients before apply(). We cannot mutate
+    // the NodeTask (it is const-ref from the priority queue), so we validate
+    // node_task.inputs directly. Throws std::runtime_error on NaN/Inf.
+    const bool anomaly_on = AnomalyMode::is_enabled();
+    if (anomaly_on) {
+        validate_no_nan_or_inf(node_task.inputs, fn->name(),
+                               fn->anomaly_stack_, "input");
+    }
+
     // create_graph=true: leave autograd enabled inside apply() so that gradient
     // tensors produced by backward also carry grad_fn and can be differentiated
     // again (double backward).  create_graph=false (default): run under
@@ -274,6 +284,11 @@ inline void Engine::execute_node(
     } else {
         NoGradGuard no_grad;
         grads = fn->apply(variable_list(node_task.inputs));
+    }
+
+    // AnomalyMode: validate output gradients produced by this node.
+    if (anomaly_on) {
+        validate_no_nan_or_inf(grads, fn->name(), fn->anomaly_stack_, "output");
     }
 
     // Gradient tensors produced by backward are float32 contiguous CPU — mark trusted
