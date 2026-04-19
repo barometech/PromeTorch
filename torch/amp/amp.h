@@ -72,6 +72,7 @@
 
 #include "torch/amp/grad_scaler.h"
 #include "torch/amp/autocast.h"
+#include "torch/amp/autocast_policy.h"
 
 namespace torch {
 namespace amp {
