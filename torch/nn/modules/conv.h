@@ -772,7 +772,12 @@ public:
     }
 
     Tensor forward(const Tensor& input) override {
-        // Transposed convolution (deconvolution)
+        // Transposed convolution (deconvolution).
+        // NOTE: Compute is CPU-only — if the input lives on CUDA we bounce through
+        // host memory. That's fine for small models (DCGAN / debugging); a native
+        // cuDNN path can be wired in later.
+        const bool input_on_cuda = input.is_cuda();
+
         int64_t batch_size = input.size(0);
         int64_t in_channels = input.size(1);
         int64_t in_height = input.size(2);
@@ -786,13 +791,23 @@ public:
 
         auto* weight_param = get_parameter("weight");
         PT_CHECK_MSG(weight_param && weight_param->defined(), "ConvTranspose2d: weight not initialized");
+#ifdef PT_USE_CUDA
+        Tensor weight = weight_param->data().is_cuda()
+            ? at::to_cpu(weight_param->data()).contiguous()
+            : weight_param->data().contiguous();
+#else
         Tensor weight = weight_param->data().contiguous();
+#endif
 
         int64_t out_channels_per_group = out_channels_ / groups_;
         int64_t in_channels_per_group = in_channels_ / groups_;
 
         Tensor output = at::zeros({batch_size, out_channels_, out_height, out_width});
+#ifdef PT_USE_CUDA
+        Tensor inp = input_on_cuda ? at::to_cpu(input).contiguous() : input.contiguous();
+#else
         Tensor inp = input.contiguous();
+#endif
 
         const float* in_data = inp.data_ptr<float>();
         const float* w_data = weight.data_ptr<float>();
@@ -844,6 +859,36 @@ public:
                 }
             }
         }
+
+        // Wire autograd backward — saved tensors are always on CPU (compute path).
+        // ConvTranspose2dBackward will produce CPU grads which the engine then
+        // forwards to the upstream grad sinks (parameter.grad_). For CUDA params,
+        // the caller is responsible for ensuring grads end up on the correct device;
+        // in practice our optimizers handle CPU grads for CPU params and this
+        // bounce matches the CPU-bounce of the forward.
+        const bool needs_grad = autograd::GradMode::is_enabled() &&
+            (input.requires_grad() || weight_param->data().requires_grad());
+        if (needs_grad) {
+            auto grad_fn = std::make_shared<autograd::ConvTranspose2dBackward>(
+                inp, weight, has_bias_,
+                in_channels_, out_channels_, groups_,
+                kernel_size_, stride_, padding_, dilation_,
+                out_height, out_width
+            );
+            grad_fn->add_input_metadata(input);
+            grad_fn->add_input_metadata(weight_param->data());
+            if (has_bias_) {
+                grad_fn->add_input_metadata(get_parameter("bias")->data());
+            }
+            autograd::set_grad_fn(output, grad_fn);
+            output.set_requires_grad(true);
+        }
+
+#ifdef PT_USE_CUDA
+        if (input_on_cuda) {
+            output = at::to_cuda(output);
+        }
+#endif
 
         return output;
     }
