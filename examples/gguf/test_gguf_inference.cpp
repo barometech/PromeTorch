@@ -34,6 +34,7 @@ void print_usage(const char* argv0) {
     std::cout << "  --chat           Apply chat template (recommended for questions)" << std::endl;
     std::cout << "  --raw            No chat template (default, good for completions)" << std::endl;
     std::cout << "  --profile        Enable GPU profiling (timing breakdown)" << std::endl;
+    std::cout << "  --fp16-weights   Dequant Q4_K -> FP16 at load; cuBLAS HGEMV decode (CUDA only)" << std::endl;
 }
 
 int main(int argc, char* argv[]) {
@@ -49,6 +50,7 @@ int main(int argc, char* argv[]) {
     bool use_cuda = false;
     bool use_chat = false;
     bool use_profile = false;
+    bool use_fp16_weights = false;
     int max_tokens = 128;
     float temperature = 0.7f;
     int top_k = 40;
@@ -74,9 +76,11 @@ int main(int argc, char* argv[]) {
             use_chat = false;
         } else if (arg == "--profile") {
             use_profile = true;
-        } else if (arg == "--max-tokens" && i + 1 < argc) {
+        } else if (arg == "--fp16-weights" || arg == "--fp16_weights") {
+            use_fp16_weights = true;
+        } else if ((arg == "--max-tokens" || arg == "--max_tokens") && i + 1 < argc) {
             max_tokens = std::atoi(argv[++i]);
-        } else if (arg == "--temp" && i + 1 < argc) {
+        } else if ((arg == "--temp" || arg == "--temperature") && i + 1 < argc) {
             temperature = std::atof(argv[++i]);
         } else if (arg == "--top-k" && i + 1 < argc) {
             top_k = std::atoi(argv[++i]);
@@ -160,6 +164,13 @@ int main(int argc, char* argv[]) {
             model.to_cuda();
             // Load quantized weights for fast decode GEMV
             model.load_quantized_to_cuda();
+
+            // Optional: dequant Q4_K -> FP16 for cuBLAS HGEMV decode
+            if (use_fp16_weights) {
+                bool ok = model.dequant_all_to_fp16();
+                std::cout << "[Model] FP16 weights path: "
+                          << (ok ? "ENABLED" : "FAILED / using quant fallback") << std::endl;
+            }
         }
 
         // Enable profiling if requested

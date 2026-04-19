@@ -47,11 +47,14 @@ struct ModelInfo {
 
 class ModelManager {
 public:
-    ModelManager() : use_cuda_(false) {}
+    ModelManager() : use_cuda_(false), use_fp16_weights_(false) {}
 
     void set_device(const std::string& device) {
         use_cuda_ = (device == "cuda" || device == "gpu");
     }
+
+    void set_use_fp16_weights(bool v) { use_fp16_weights_ = v; }
+    bool use_fp16_weights() const { return use_fp16_weights_; }
 
     // ========================================================================
     // Scan Ollama model directory for available models
@@ -248,6 +251,11 @@ public:
                 model->to_cuda();
                 model->load_quantized_to_cuda();
                 std::cout << "[ModelManager] Quantized weights loaded to GPU" << std::endl;
+                if (use_fp16_weights_) {
+                    bool ok = model->dequant_all_to_fp16();
+                    std::cout << "[ModelManager] FP16 weights path: "
+                              << (ok ? "ENABLED" : "FAILED / using quant fallback") << std::endl;
+                }
             }
 #endif
 
@@ -275,6 +283,7 @@ private:
     std::unique_ptr<torch::io::GGUFModel> loaded_model_;
     std::string loaded_model_name_;
     bool use_cuda_;
+    bool use_fp16_weights_;
     mutable std::mutex mutex_;
 };
 

@@ -33,7 +33,8 @@ public:
     // ========================================================================
 
     void start(int port = 11434, const std::string& device = "cuda",
-               const std::string& preload_model = "") {
+               const std::string& preload_model = "",
+               bool fp16_weights = false) {
 
         std::cout << "==========================================" << std::endl;
         std::cout << "  PromeServe v0.1.0" << std::endl;
@@ -43,9 +44,11 @@ public:
         std::cout << std::endl;
         std::cout << "  Device:  " << device << std::endl;
         std::cout << "  Port:    " << port << std::endl;
+        if (fp16_weights) std::cout << "  FP16:    dequant-at-load (cuBLAS HGEMV decode)" << std::endl;
 
         // Configure device
         models_.set_device(device);
+        models_.set_use_fp16_weights(fp16_weights);
 
         // Scan for available models
         std::cout << std::endl;
