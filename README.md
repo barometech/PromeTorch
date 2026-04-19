@@ -137,14 +137,28 @@ some topic drift. That's model-quality territory, not runtime.
 saturates A100 HBM2e better than ours + paged attention. We use custom
 Q4_K fused kernels + flash_decode + CUDA Graph.
 
-**Tested 2026-04-20: Q4_K → FP16 dequant + cublasHgemv does NOT speed up
-decode.** Shipped as `--fp16-weights` opt-in (commit `6623fe3`), but
-empirically runs ~6% slower than the existing Q4_K fused path on A100
-(44 vs 47 tok/s). Single-token decode is bandwidth-bound: FP16 reads
-2.36× more memory per forward pass (5.9 GB vs 2.5 GB Q4_K), and Tensor
-Cores don't help N=1 GEMV shapes. See [TEST_PLAN.md §4.3-4.4](TEST_PLAN.md)
-for the post-mortem + proposed paths (port llama.cpp kernels ~30-50%,
-continuous batching, INT4 throughout).
+**Tested 2026-04-20 — two speedup paths empirically tried, both revealed
+that our v1 persistent Q4_K kernel is already HBM-saturation-optimal on
+A100 for N=1 single-token decode:**
+- `--fp16-weights` (dequant Q4_K → FP16 + cublasHgemv): **44 tok/s** (~6%
+  slower). FP16 reads 2.36× more memory per forward, Tensor Cores don't
+  help N=1 GEMV. Commit `6623fe3`.
+- `--llama-gemv` (llama.cpp-style bulk load + NROWS=2): **47.05 tok/s**
+  vs v1 46.8 = **+0.5% (noise)**. Byte-identical output at T=0. Commit
+  `a3d2796`.
+
+**Single-request throughput is bandwidth-capped.** Real speedups come
+from:
+1. **Continuous batching** — N>1 turns each matmul into GEMM; Tensor
+   Cores pay off. Estimated 3-5× aggregate throughput for multi-request
+   workloads.
+2. **Lower-precision weights** — INT3 / INT2 / sparse Q4_K. Direct
+   reduction in HBM traffic.
+3. **Speculative decode** — draft model predicts multiple tokens per
+   forward pass.
+
+See [TEST_PLAN.md §4.3-4.5](TEST_PLAN.md) for the full post-mortem with
+measurements.
 
 ### Точность обучения (10 training tasks)
 
