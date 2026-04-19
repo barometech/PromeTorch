@@ -593,6 +593,10 @@ inline EinsumParsed parse_einsum(const std::string& equation) {
 
 } // namespace einsum_detail
 
+// Forward declaration of the full-featured einsum implementation
+// (defined in Einsum.h, which must be included after LinearAlgebra.h).
+inline Tensor einsum_impl(const std::string& equation, const std::vector<Tensor>& operands);
+
 inline Tensor einsum(const std::string& equation, const std::vector<Tensor>& tensors) {
     auto parsed = einsum_detail::parse_einsum(equation);
     PT_CHECK_MSG(parsed.input_subscripts.size() == tensors.size(),
@@ -774,8 +778,9 @@ inline Tensor einsum(const std::string& equation, const std::vector<Tensor>& ten
         return result;
     }
 
-    PT_CHECK_MSG(false, "einsum: general case with ", tensors.size(), " operands not yet supported (use 1 or 2 operands)");
-    return Tensor();
+    // General fallback: dispatch to the full einsum implementation
+    // (handles 3+ operands, ellipsis, repeated labels, etc.).
+    return einsum_impl(equation, tensors);
 }
 
 // ============================================================================
@@ -2042,3 +2047,9 @@ inline CompressedWeight compress_weight(const Tensor& W, int64_t rank) {
 
 } // namespace native
 } // namespace at
+
+// Pull in the full einsum implementation AFTER LinearAlgebra.h defines bmm /
+// permute etc. Forward-declared `einsum_impl` above resolves to this inline
+// definition. Included here (not at the top) to avoid a circular dependency:
+// Einsum.h itself needs bmm/mm/permute from this file.
+#include "aten/src/ATen/native/cpu/Einsum.h"
