@@ -411,3 +411,83 @@ TEST(IntegrationTest, TrainingLoopSimulation) {
         EXPECT_EQ(batch_idx, 4);  // 64 / 16 = 4 batches
     }
 }
+
+// ============================================================================
+// Multi-worker Prefetch Tests (num_workers > 0)
+// ============================================================================
+// Compare a synchronous DataLoader against a 4-worker prefetching DataLoader
+// over the same synthetic dataset. Both must yield the same total number of
+// batches and the same total number of items, regardless of arrival order.
+
+TEST(DataLoaderMultiWorker, SameTotalsAsSingleThreaded) {
+    const int64_t N = 256;
+    at::Tensor X = at::arange(0, N).view({N, 1});  // each sample is its own index
+    TensorDataset dataset(X);
+
+    // Synchronous reference run.
+    auto loader_sync = make_data_loader(
+        dataset,
+        DataLoaderOptions().batch_size_(8).shuffle_(false).drop_last_(false)
+    );
+
+    size_t batches_sync = 0;
+    size_t items_sync = 0;
+    std::set<int64_t> seen_sync;
+    for (auto& batch : loader_sync) {
+        ++batches_sync;
+        items_sync += batch.size;
+        float* p = batch.data.mutable_data_ptr<float>();
+        for (size_t i = 0; i < batch.size; ++i) {
+            seen_sync.insert(static_cast<int64_t>(p[i]));
+        }
+    }
+
+    // Multi-worker run with the same dataset/options + workers.
+    auto loader_mt = make_data_loader(
+        dataset,
+        DataLoaderOptions().batch_size_(8).shuffle_(false).drop_last_(false)
+            .num_workers_(4).prefetch_factor_(2)
+    );
+
+    size_t batches_mt = 0;
+    size_t items_mt = 0;
+    std::set<int64_t> seen_mt;
+    for (auto& batch : loader_mt) {
+        ++batches_mt;
+        items_mt += batch.size;
+        float* p = batch.data.mutable_data_ptr<float>();
+        for (size_t i = 0; i < batch.size; ++i) {
+            seen_mt.insert(static_cast<int64_t>(p[i]));
+        }
+    }
+
+    EXPECT_EQ(batches_mt, batches_sync);
+    EXPECT_EQ(items_mt, items_sync);
+    EXPECT_EQ(items_mt, static_cast<size_t>(N));
+    EXPECT_EQ(seen_mt, seen_sync);  // every index covered exactly once
+}
+
+TEST(DataLoaderMultiWorker, MultiEpochAndDropLast) {
+    const int64_t N = 100;
+    at::Tensor X = at::arange(0, N).view({N, 1});
+    TensorDataset dataset(X);
+
+    auto loader = make_data_loader(
+        dataset,
+        DataLoaderOptions().batch_size_(16).shuffle_(true).drop_last_(true)
+            .num_workers_(2).prefetch_factor_(3).seed_(42)
+    );
+
+    // drop_last=true => 100/16 = 6 full batches.
+    for (int epoch = 0; epoch < 3; ++epoch) {
+        size_t batches = 0;
+        size_t items = 0;
+        for (auto& batch : loader) {
+            ++batches;
+            items += batch.size;
+            EXPECT_EQ(batch.size, 16u);
+        }
+        EXPECT_EQ(batches, 6u);
+        EXPECT_EQ(items, 96u);
+    }
+}
