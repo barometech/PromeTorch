@@ -13,6 +13,7 @@
 #include "c10/cuda/CUDAAllocator.h"
 #include "aten/src/ATen/cuda/CUDAOps.h"
 #include <cuda_runtime.h>
+#include <cuda_fp16.h>
 #endif
 
 namespace at {
@@ -252,31 +253,66 @@ inline Tensor log(const Tensor& input) {
 
 inline Tensor tanh(const Tensor& input) {
     auto output = empty_cuda(input.sizes().vec(), input.dtype(), input.device().index());
-    at::cuda::launch_tanh(input.data_ptr<float>(), output.mutable_data_ptr<float>(), input.numel(), nullptr);
+    if (input.dtype() == c10::ScalarType::Half) {
+        at::cuda::launch_tanh_fp16(
+            reinterpret_cast<const __half*>(input.data_ptr()),
+            reinterpret_cast<__half*>(output.mutable_data_ptr()),
+            input.numel(), nullptr);
+    } else {
+        at::cuda::launch_tanh(input.data_ptr<float>(), output.mutable_data_ptr<float>(), input.numel(), nullptr);
+    }
     return output;
 }
 
 inline Tensor sigmoid(const Tensor& input) {
     auto output = empty_cuda(input.sizes().vec(), input.dtype(), input.device().index());
-    at::cuda::launch_sigmoid(input.data_ptr<float>(), output.mutable_data_ptr<float>(), input.numel(), nullptr);
+    if (input.dtype() == c10::ScalarType::Half) {
+        at::cuda::launch_sigmoid_fp16(
+            reinterpret_cast<const __half*>(input.data_ptr()),
+            reinterpret_cast<__half*>(output.mutable_data_ptr()),
+            input.numel(), nullptr);
+    } else {
+        at::cuda::launch_sigmoid(input.data_ptr<float>(), output.mutable_data_ptr<float>(), input.numel(), nullptr);
+    }
     return output;
 }
 
 inline Tensor relu(const Tensor& input) {
     auto output = empty_cuda(input.sizes().vec(), input.dtype(), input.device().index());
-    at::cuda::launch_relu(input.data_ptr<float>(), output.mutable_data_ptr<float>(), input.numel(), nullptr);
+    if (input.dtype() == c10::ScalarType::Half) {
+        at::cuda::launch_relu_fp16(
+            reinterpret_cast<const __half*>(input.data_ptr()),
+            reinterpret_cast<__half*>(output.mutable_data_ptr()),
+            input.numel(), nullptr);
+    } else {
+        at::cuda::launch_relu(input.data_ptr<float>(), output.mutable_data_ptr<float>(), input.numel(), nullptr);
+    }
     return output;
 }
 
 inline Tensor silu(const Tensor& input) {
     auto output = empty_cuda(input.sizes().vec(), input.dtype(), input.device().index());
-    at::cuda::launch_silu(input.data_ptr<float>(), output.mutable_data_ptr<float>(), input.numel(), nullptr);
+    if (input.dtype() == c10::ScalarType::Half) {
+        at::cuda::launch_silu_fp16(
+            reinterpret_cast<const __half*>(input.data_ptr()),
+            reinterpret_cast<__half*>(output.mutable_data_ptr()),
+            input.numel(), nullptr);
+    } else {
+        at::cuda::launch_silu(input.data_ptr<float>(), output.mutable_data_ptr<float>(), input.numel(), nullptr);
+    }
     return output;
 }
 
 inline Tensor gelu(const Tensor& input) {
     auto output = empty_cuda(input.sizes().vec(), input.dtype(), input.device().index());
-    at::cuda::launch_gelu(input.data_ptr<float>(), output.mutable_data_ptr<float>(), input.numel(), nullptr);
+    if (input.dtype() == c10::ScalarType::Half) {
+        at::cuda::launch_gelu_fp16(
+            reinterpret_cast<const __half*>(input.data_ptr()),
+            reinterpret_cast<__half*>(output.mutable_data_ptr()),
+            input.numel(), nullptr);
+    } else {
+        at::cuda::launch_gelu(input.data_ptr<float>(), output.mutable_data_ptr<float>(), input.numel(), nullptr);
+    }
     return output;
 }
 
@@ -343,37 +379,73 @@ inline Tensor reciprocal(const Tensor& input) {
 // have different physical vs logical layout and would produce wrong results.
 inline Tensor add(const Tensor& a, const Tensor& b) {
     PT_CHECK_MSG(a.numel() == b.numel(), "Tensors must have same number of elements");
+    PT_CHECK_MSG(a.dtype() == b.dtype(), "add: dtype mismatch");
     Tensor ac = a.is_contiguous() ? a : a.contiguous();
     Tensor bc = b.is_contiguous() ? b : b.contiguous();
     auto output = empty_cuda(ac.sizes().vec(), ac.dtype(), ac.device().index());
-    at::cuda::launch_add(ac.data_ptr<float>(), bc.data_ptr<float>(), output.mutable_data_ptr<float>(), ac.numel(), nullptr);
+    if (ac.dtype() == c10::ScalarType::Half) {
+        at::cuda::launch_add_fp16(
+            reinterpret_cast<const __half*>(ac.data_ptr()),
+            reinterpret_cast<const __half*>(bc.data_ptr()),
+            reinterpret_cast<__half*>(output.mutable_data_ptr()),
+            ac.numel(), nullptr);
+    } else {
+        at::cuda::launch_add(ac.data_ptr<float>(), bc.data_ptr<float>(), output.mutable_data_ptr<float>(), ac.numel(), nullptr);
+    }
     return output;
 }
 
 inline Tensor sub(const Tensor& a, const Tensor& b) {
     PT_CHECK_MSG(a.numel() == b.numel(), "Tensors must have same number of elements");
+    PT_CHECK_MSG(a.dtype() == b.dtype(), "sub: dtype mismatch");
     Tensor ac = a.is_contiguous() ? a : a.contiguous();
     Tensor bc = b.is_contiguous() ? b : b.contiguous();
     auto output = empty_cuda(ac.sizes().vec(), ac.dtype(), ac.device().index());
-    at::cuda::launch_sub(ac.data_ptr<float>(), bc.data_ptr<float>(), output.mutable_data_ptr<float>(), ac.numel(), nullptr);
+    if (ac.dtype() == c10::ScalarType::Half) {
+        at::cuda::launch_sub_fp16(
+            reinterpret_cast<const __half*>(ac.data_ptr()),
+            reinterpret_cast<const __half*>(bc.data_ptr()),
+            reinterpret_cast<__half*>(output.mutable_data_ptr()),
+            ac.numel(), nullptr);
+    } else {
+        at::cuda::launch_sub(ac.data_ptr<float>(), bc.data_ptr<float>(), output.mutable_data_ptr<float>(), ac.numel(), nullptr);
+    }
     return output;
 }
 
 inline Tensor mul(const Tensor& a, const Tensor& b) {
     PT_CHECK_MSG(a.numel() == b.numel(), "Tensors must have same number of elements");
+    PT_CHECK_MSG(a.dtype() == b.dtype(), "mul: dtype mismatch");
     Tensor ac = a.is_contiguous() ? a : a.contiguous();
     Tensor bc = b.is_contiguous() ? b : b.contiguous();
     auto output = empty_cuda(ac.sizes().vec(), ac.dtype(), ac.device().index());
-    at::cuda::launch_mul(ac.data_ptr<float>(), bc.data_ptr<float>(), output.mutable_data_ptr<float>(), ac.numel(), nullptr);
+    if (ac.dtype() == c10::ScalarType::Half) {
+        at::cuda::launch_mul_fp16(
+            reinterpret_cast<const __half*>(ac.data_ptr()),
+            reinterpret_cast<const __half*>(bc.data_ptr()),
+            reinterpret_cast<__half*>(output.mutable_data_ptr()),
+            ac.numel(), nullptr);
+    } else {
+        at::cuda::launch_mul(ac.data_ptr<float>(), bc.data_ptr<float>(), output.mutable_data_ptr<float>(), ac.numel(), nullptr);
+    }
     return output;
 }
 
 inline Tensor div(const Tensor& a, const Tensor& b) {
     PT_CHECK_MSG(a.numel() == b.numel(), "Tensors must have same number of elements");
+    PT_CHECK_MSG(a.dtype() == b.dtype(), "div: dtype mismatch");
     Tensor ac = a.is_contiguous() ? a : a.contiguous();
     Tensor bc = b.is_contiguous() ? b : b.contiguous();
     auto output = empty_cuda(ac.sizes().vec(), ac.dtype(), ac.device().index());
-    at::cuda::launch_div(ac.data_ptr<float>(), bc.data_ptr<float>(), output.mutable_data_ptr<float>(), ac.numel(), nullptr);
+    if (ac.dtype() == c10::ScalarType::Half) {
+        at::cuda::launch_div_fp16(
+            reinterpret_cast<const __half*>(ac.data_ptr()),
+            reinterpret_cast<const __half*>(bc.data_ptr()),
+            reinterpret_cast<__half*>(output.mutable_data_ptr()),
+            ac.numel(), nullptr);
+    } else {
+        at::cuda::launch_div(ac.data_ptr<float>(), bc.data_ptr<float>(), output.mutable_data_ptr<float>(), ac.numel(), nullptr);
+    }
     return output;
 }
 
@@ -428,9 +500,17 @@ inline Tensor add_broadcast(const Tensor& a, const Tensor& b) {
     int64_t inner = a.size(1);
 
     auto output = empty_cuda(a.sizes().vec(), a.dtype(), a.device().index());
-    at::cuda::launch_add_broadcast_col(
-        a.data_ptr<float>(), b.data_ptr<float>(), output.mutable_data_ptr<float>(),
-        outer, inner, nullptr);
+    if (a.dtype() == c10::ScalarType::Half) {
+        at::cuda::launch_add_broadcast_fp16(
+            reinterpret_cast<const __half*>(a.data_ptr()),
+            reinterpret_cast<const __half*>(b.data_ptr()),
+            reinterpret_cast<__half*>(output.mutable_data_ptr()),
+            outer, inner, nullptr);
+    } else {
+        at::cuda::launch_add_broadcast_col(
+            a.data_ptr<float>(), b.data_ptr<float>(), output.mutable_data_ptr<float>(),
+            outer, inner, nullptr);
+    }
 
     return output;
 }
@@ -591,8 +671,15 @@ inline Tensor softmax(const Tensor& input, int dim) {
     for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= sizes[i];
 
     auto output = empty_cuda(sizes, input.dtype(), input.device().index());
-    at::cuda::launch_softmax(input.data_ptr<float>(), output.mutable_data_ptr<float>(),
-                             outer_size, dim_size, inner_size, nullptr);
+    if (input.dtype() == c10::ScalarType::Half) {
+        at::cuda::launch_softmax_fp16(
+            reinterpret_cast<const __half*>(input.data_ptr()),
+            reinterpret_cast<__half*>(output.mutable_data_ptr()),
+            outer_size, dim_size, inner_size, nullptr);
+    } else {
+        at::cuda::launch_softmax(input.data_ptr<float>(), output.mutable_data_ptr<float>(),
+                                 outer_size, dim_size, inner_size, nullptr);
+    }
     return output;
 }
 
