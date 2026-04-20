@@ -1,8 +1,9 @@
 # PromeTorch — Российский training framework
 
+[![Release](https://img.shields.io/github/v/release/barometech/PromeTorch?color=blue&label=release)](https://github.com/barometech/PromeTorch/releases)
 [![License](https://img.shields.io/badge/license-PromeTorch%20%28BSD--3%20%2B%20attribution%20%2B%20no--resale%29-blue.svg)](LICENSE)
 [![C++](https://img.shields.io/badge/C%2B%2B-17-00599C.svg?logo=c%2B%2B)](CMakeLists.txt)
-[![CUDA](https://img.shields.io/badge/CUDA-12.4%2F12.8-76B900.svg?logo=nvidia)](scripts/build-cuda-windows.bat)
+[![CUDA](https://img.shields.io/badge/CUDA-12.4%2F12.8-76B900.svg?logo=nvidia)](docs/BUILD_WINDOWS.md)
 [![Эльбрус](https://img.shields.io/badge/Эльбрус-E8C2%20VLIW-red.svg)](docs/elbrus/)
 [![NM Card](https://img.shields.io/badge/НТЦ%20Модуль-NM%20Card%20Mini-blueviolet.svg)](BENCH_NMCARD.md)
 [![Tests](https://img.shields.io/badge/tests-720%2B-green.svg)](tests/)
