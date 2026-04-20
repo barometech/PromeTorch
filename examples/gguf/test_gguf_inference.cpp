@@ -10,6 +10,7 @@
 // ============================================================================
 
 #include "torch/io/gguf_model.h"
+#include "torch/distributed/ddp.h"
 #include <iostream>
 #include <string>
 #include <cstring>
@@ -36,6 +37,12 @@ void print_usage(const char* argv0) {
     std::cout << "  --profile        Enable GPU profiling (timing breakdown)" << std::endl;
     std::cout << "  --fp16-weights   Dequant Q4_K -> FP16 at load; cuBLAS HGEMV decode (CUDA only)" << std::endl;
     std::cout << "  --llama-gemv     Use llama.cpp-style Q4_K GEMV v2 kernel (CUDA only)" << std::endl;
+    std::cout << std::endl;
+    std::cout << "Multi-process tensor-parallel (CPU, Elbrus NUMA):" << std::endl;
+    std::cout << "  --nprocs N       Number of tensor-parallel processes (default 1)" << std::endl;
+    std::cout << "  --rank R         This process's rank in [0, N) (default 0)" << std::endl;
+    std::cout << "  --master-addr A  Master address for rank-0 hub (default 127.0.0.1)" << std::endl;
+    std::cout << "  --master-port P  Master port (default 29500)" << std::endl;
 }
 
 int main(int argc, char* argv[]) {
@@ -57,6 +64,12 @@ int main(int argc, char* argv[]) {
     float temperature = 0.7f;
     int top_k = 40;
     float top_p = 0.9f;
+
+    // Tensor-parallel / multi-process config
+    int tp_nprocs = 1;
+    int tp_rank = 0;
+    std::string tp_master_addr = "127.0.0.1";
+    int tp_master_port = 29500;
 
     // Parse arguments
     for (int i = 2; i < argc; ++i) {
@@ -90,6 +103,14 @@ int main(int argc, char* argv[]) {
             top_k = std::atoi(argv[++i]);
         } else if (arg == "--top-p" && i + 1 < argc) {
             top_p = static_cast<float>(std::atof(argv[++i]));
+        } else if (arg == "--nprocs" && i + 1 < argc) {
+            tp_nprocs = std::atoi(argv[++i]);
+        } else if (arg == "--rank" && i + 1 < argc) {
+            tp_rank = std::atoi(argv[++i]);
+        } else if ((arg == "--master-addr" || arg == "--master_addr") && i + 1 < argc) {
+            tp_master_addr = argv[++i];
+        } else if ((arg == "--master-port" || arg == "--master_port") && i + 1 < argc) {
+            tp_master_port = std::atoi(argv[++i]);
         } else if (arg[0] != '-') {
             prompt = arg;
         }
@@ -152,6 +173,29 @@ int main(int argc, char* argv[]) {
         std::cout << "Mode: " << (use_chat ? "Chat" : "Completion") << std::endl;
         std::cout << "============================================" << std::endl;
 
+        // --- Multi-process tensor-parallel init (CPU-only) ---
+        bool tp_mode = (tp_nprocs > 1);
+        if (tp_mode) {
+            if (use_cuda) {
+                std::cerr << "Error: --nprocs > 1 is CPU-only (no CUDA multi-process yet)"
+                          << std::endl;
+                return 1;
+            }
+            if (tp_rank < 0 || tp_rank >= tp_nprocs) {
+                std::cerr << "Error: --rank must be in [0, " << tp_nprocs << ")" << std::endl;
+                return 1;
+            }
+            torch::distributed::DDPConfig cfg;
+            cfg.rank        = tp_rank;
+            cfg.world_size  = tp_nprocs;
+            cfg.master_addr = tp_master_addr;
+            cfg.master_port = tp_master_port;
+            cfg.timeout_sec = 300;
+            std::cout << "[TP] rank " << tp_rank << "/" << tp_nprocs
+                      << " connecting to " << tp_master_addr << ":" << tp_master_port << std::endl;
+            torch::distributed::init_process_group(cfg);
+        }
+
         // Load model
         torch::io::GGUFModel model;
 
@@ -161,6 +205,14 @@ int main(int argc, char* argv[]) {
             model.load(model_path);
         } else {
             model.load_ollama(model_path);
+        }
+
+        if (tp_mode) {
+            if (!model.init_tensor_parallel(tp_rank, tp_nprocs)) {
+                std::cerr << "Error: init_tensor_parallel failed for rank " << tp_rank << std::endl;
+                torch::distributed::destroy_process_group();
+                return 1;
+            }
         }
 
         // Move to CUDA if requested
@@ -190,19 +242,35 @@ int main(int argc, char* argv[]) {
         }
 
         // Generate
-        std::cout << "\n--- Generation ---" << std::endl;
-        std::string response;
-        if (use_chat) {
-            response = model.chat(prompt, max_tokens, temperature, top_k, top_p);
+        if (tp_mode) {
+            if (tp_rank == 0) {
+                std::cout << "\n--- Generation (tensor-parallel, nprocs=" << tp_nprocs
+                          << ") ---" << std::endl;
+            }
+            std::string response = model.generate_tp(prompt, max_tokens, temperature);
+            if (tp_rank == 0) {
+                std::cout << "\n--- Full Response ---" << std::endl;
+                std::cout << response << std::endl;
+            }
+            torch::distributed::destroy_process_group();
         } else {
-            response = model.generate(prompt, max_tokens, temperature, top_k, top_p);
-        }
+            std::cout << "\n--- Generation ---" << std::endl;
+            std::string response;
+            if (use_chat) {
+                response = model.chat(prompt, max_tokens, temperature, top_k, top_p);
+            } else {
+                response = model.generate(prompt, max_tokens, temperature, top_k, top_p);
+            }
 
-        std::cout << "\n--- Full Response ---" << std::endl;
-        std::cout << response << std::endl;
+            std::cout << "\n--- Full Response ---" << std::endl;
+            std::cout << response << std::endl;
+        }
 
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;
+        if (torch::distributed::is_initialized()) {
+            torch::distributed::destroy_process_group();
+        }
         return 1;
     }
 

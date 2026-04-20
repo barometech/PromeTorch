@@ -9,6 +9,7 @@
 #include "torch/io/ollama.h"
 #include "torch/io/tokenizer.h"
 #include "torch/io/inference_profiler.h"
+#include "torch/distributed/ddp.h"
 #include "aten/src/ATen/ATen.h"
 #include "aten/src/ATen/native/cpu/hot_loops.h"
 #ifdef PT_USE_CUDA
@@ -480,6 +481,112 @@ struct CPUScratchPool {
 };
 
 // ============================================================================
+// Tensor-Parallel (DDP) configuration for multi-process CPU inference
+// ============================================================================
+// Splits transformer compute across N processes for throughput on ONE request:
+//   - attn_q / attn_k / attn_v / ffn_gate / ffn_up: ROW-SPLIT (output dim)
+//       rank r owns rows [r*rows/N, (r+1)*rows/N) — contiguous byte-slice of Q_K
+//   - attn_output / ffn_down / output_weight: REPLICATED (full weight on every rank)
+//       rank r fills its local column-slice of the input buffer, zeros elsewhere,
+//       runs the full GEMV locally, then AllReduce-SUM across ranks.
+//   - norms, biases, token_embedding: REPLICATED.
+//
+// Collective points (per layer):
+//   1. After attention output proj: AllReduce(h_buf, SUM) across ranks.
+//   2. After FFN down proj:         AllReduce(h_buf, SUM) across ranks.
+// Logits are fully-replicated since final hidden state is fully-replicated.
+//
+// Constraints: num_heads % nprocs == 0 AND num_kv_heads % nprocs == 0.
+// ============================================================================
+
+struct TPSlicedWeight {
+    // Row-sliced copy of a QuantizedWeight. Points into an owned malloc'd buffer
+    // (never mmap). rows = local_rows, cols = full cols, stride = full row stride.
+    void* cpu_data = nullptr;
+    int64_t rows = 0;            // local rows (N / nprocs)
+    int64_t cols = 0;            // same as full cols (K)
+    int64_t row_stride_bytes = 0;
+    int64_t total_bytes = 0;
+    uint32_t quant_type = 0;
+    bool valid = false;
+
+    ~TPSlicedWeight() {
+        if (cpu_data) std::free(cpu_data);
+    }
+    TPSlicedWeight() = default;
+    TPSlicedWeight(const TPSlicedWeight&) = delete;
+    TPSlicedWeight& operator=(const TPSlicedWeight&) = delete;
+    TPSlicedWeight(TPSlicedWeight&& o) noexcept { swap_from(o); }
+    TPSlicedWeight& operator=(TPSlicedWeight&& o) noexcept {
+        if (this != &o) {
+            if (cpu_data) std::free(cpu_data);
+            cpu_data = nullptr;
+            swap_from(o);
+        }
+        return *this;
+    }
+private:
+    void swap_from(TPSlicedWeight& o) {
+        cpu_data = o.cpu_data; o.cpu_data = nullptr;
+        rows = o.rows; cols = o.cols;
+        row_stride_bytes = o.row_stride_bytes;
+        total_bytes = o.total_bytes;
+        quant_type = o.quant_type;
+        valid = o.valid;
+    }
+};
+
+struct TPLayer {
+    // Row-sliced Q/K/V/gate/up. output+down stay as-is on each rank (replicated).
+    TPSlicedWeight q_attn_q;   // rows = n_heads_local * head_dim
+    TPSlicedWeight q_attn_k;   // rows = n_kv_heads_local * head_dim
+    TPSlicedWeight q_attn_v;   // rows = n_kv_heads_local * head_dim
+    TPSlicedWeight q_ffn_gate; // rows = inter_local
+    TPSlicedWeight q_ffn_up;   // rows = inter_local
+};
+
+struct GGUFTPConfig {
+    bool enabled = false;
+    int rank = 0;
+    int nprocs = 1;
+
+    // Local head partitioning
+    int64_t n_heads_local = 0;     // num_heads / nprocs
+    int64_t n_kv_heads_local = 0;  // num_kv_heads / nprocs
+    int64_t head_start = 0;        // rank * n_heads_local
+    int64_t head_end = 0;          // head_start + n_heads_local
+    int64_t kv_head_start = 0;
+    int64_t kv_head_end = 0;
+
+    // Local dim slices
+    int64_t q_dim_local = 0;       // n_heads_local * head_dim
+    int64_t kv_dim_local = 0;      // n_kv_heads_local * head_dim
+    int64_t inter_local = 0;       // intermediate / nprocs
+
+    // Per-rank KV cache (local KV dim)
+    std::vector<at::Tensor> k_cache_local;  // per layer: [max_seq, kv_dim_local]
+    std::vector<at::Tensor> v_cache_local;  // per layer: [max_seq, kv_dim_local]
+    int64_t kv_seq_len = 0;
+    int64_t kv_max_seq = 0;
+
+    // Per-layer row-sliced quantized weights
+    std::vector<TPLayer> layers;
+
+    // Scratch buffers sized to local dims
+    std::vector<float> x_buf[2];       // [H] (hidden state, replicated)
+    std::vector<float> q_local_buf;    // [q_dim_local]
+    std::vector<float> k_local_buf;    // [kv_dim_local]
+    std::vector<float> v_local_buf;    // [kv_dim_local]
+    std::vector<float> attn_full_buf;  // [q_dim]  (zero-padded; local heads filled)
+    std::vector<float> h_buf;          // [H]
+    std::vector<float> gate_local_buf; // [inter_local]
+    std::vector<float> up_local_buf;   // [inter_local]
+    std::vector<float> silu_full_buf;  // [inter] (zero-padded; local slice filled)
+    std::vector<float> logits_buf;     // [vocab]
+    bool scratch_ready = false;
+};
+
+// ============================================================================
 // GGUFModel — Load and run inference with GGUF transformer models
 // ============================================================================
 
@@ -555,6 +662,11 @@ public:
 
     // CPU scratch pool for zero-allocation CPU decode
     CPUScratchPool cpu_scratch_;
+
+    // Tensor-parallel (multi-process DDP) state for CPU inference.
+    // When enabled, forward_decode_cpu_tp() is used instead of forward_decode_cpu().
+    GGUFTPConfig tp_;
+    bool tp_enabled() const { return tp_.enabled; }
 
     // === Algorithmic acceleration ===
     LowRankOutputProj low_rank_output_;      // Speculative decode via low-rank output proj
@@ -3046,6 +3158,519 @@ public:
             return true;
         }
         return false;
+    }
+
+    // ========================================================================
+    // Tensor-Parallel initialization (multi-process DDP CPU inference).
+    //
+    // Must be called AFTER load() (full weights present as QuantizedWeight on
+    // each rank) AND AFTER torch::distributed::init_process_group(cfg).
+    //
+    // Effect: row-slices the Q/K/V and FFN gate/up quantized weights by output
+    // rows so rank r only keeps its local slice. attn_output / ffn_down /
+    // output_weight stay replicated — each rank keeps the full weight pointer.
+    //
+    // Returns true on success, false if constraints are violated (in which
+    // case tp_ stays disabled and the caller should fall back to single
+    // process decode).
+    // ========================================================================
+    bool init_tensor_parallel(int rank, int nprocs) {
+        if (nprocs <= 1) {
+            tp_.enabled = false;
+            return false;
+        }
+        if (!use_quant_gemv_) {
+            std::cerr << "[TP] init_tensor_parallel requires quantized weights "
+                         "loaded (call load() first). Skipping." << std::endl;
+            return false;
+        }
+        int64_t n_heads    = config.num_heads;
+        int64_t n_kv_heads = config.num_kv_heads;
+        int64_t head_dim   = config.head_dim;
+        int64_t inter      = config.intermediate_size;
+
+        if (n_heads % nprocs != 0) {
+            std::cerr << "[TP] num_heads (" << n_heads << ") must be divisible "
+                         "by nprocs (" << nprocs << ")." << std::endl;
+            return false;
+        }
+        if (n_kv_heads % nprocs != 0) {
+            std::cerr << "[TP] num_kv_heads (" << n_kv_heads << ") must be "
+                         "divisible by nprocs (" << nprocs << ")." << std::endl;
+            return false;
+        }
+        if (inter % nprocs != 0) {
+            std::cerr << "[TP] intermediate_size (" << inter << ") must be "
+                         "divisible by nprocs (" << nprocs << ")." << std::endl;
+            return false;
+        }
+
+        tp_.enabled          = true;
+        tp_.rank             = rank;
+        tp_.nprocs           = nprocs;
+        tp_.n_heads_local    = n_heads / nprocs;
+        tp_.n_kv_heads_local = n_kv_heads / nprocs;
+        tp_.head_start       = rank * tp_.n_heads_local;
+        tp_.head_end         = tp_.head_start + tp_.n_heads_local;
+        tp_.kv_head_start    = rank * tp_.n_kv_heads_local;
+        tp_.kv_head_end      = tp_.kv_head_start + tp_.n_kv_heads_local;
+        tp_.q_dim_local      = tp_.n_heads_local * head_dim;
+        tp_.kv_dim_local     = tp_.n_kv_heads_local * head_dim;
+        tp_.inter_local      = inter / nprocs;
+
+        // Row-slice Q/K/V/gate/up from the already-loaded full quantized weights
+        tp_.layers.resize(config.num_layers);
+        auto slice_rows = [&](const QuantizedWeight& full, TPSlicedWeight& out,
+                              int64_t row_start_elems, int64_t row_count_elems) -> bool {
+            if (!full.valid || !full.cpu_data) return false;
+            if (row_start_elems + row_count_elems > full.rows) return false;
+            // Each output "row" in quantized form is full.row_stride_bytes bytes.
+            int64_t stride = full.row_stride_bytes;
+            int64_t local_bytes = row_count_elems * stride;
+            out.cpu_data = std::malloc(local_bytes);
+            if (!out.cpu_data) return false;
+            std::memcpy(out.cpu_data,
+                        static_cast<const char*>(full.cpu_data) + row_start_elems * stride,
+                        local_bytes);
+            out.rows = row_count_elems;
+            out.cols = full.cols;
+            out.row_stride_bytes = stride;
+            out.total_bytes = local_bytes;
+            out.quant_type = full.quant_type;
+            out.valid = true;
+            return true;
+        };
+
+        int64_t q_row_start    = rank * tp_.q_dim_local;
+        int64_t kv_row_start   = rank * tp_.kv_dim_local;
+        int64_t inter_row_start = rank * tp_.inter_local;
+
+        for (int64_t i = 0; i < config.num_layers; ++i) {
+            const auto& layer = layers[i];
+            auto& tl = tp_.layers[i];
+            // Attention projections: output rows correspond to head lanes.
+            // attn_q has rows = n_heads * head_dim, so slicing rows
+            // [rank * q_dim_local, (rank+1) * q_dim_local) picks rank's heads.
+            if (!slice_rows(layer.q_attn_q, tl.q_attn_q, q_row_start, tp_.q_dim_local)) {
+                std::cerr << "[TP] failed to row-slice layer " << i << " attn_q" << std::endl;
+                tp_.enabled = false;
+                return false;
+            }
+            if (!slice_rows(layer.q_attn_k, tl.q_attn_k, kv_row_start, tp_.kv_dim_local)) {
+                std::cerr << "[TP] failed to row-slice layer " << i << " attn_k" << std::endl;
+                tp_.enabled = false;
+                return false;
+            }
+            if (!slice_rows(layer.q_attn_v, tl.q_attn_v, kv_row_start, tp_.kv_dim_local)) {
+                std::cerr << "[TP] failed to row-slice layer " << i << " attn_v" << std::endl;
+                tp_.enabled = false;
+                return false;
+            }
+            if (!slice_rows(layer.q_ffn_gate, tl.q_ffn_gate, inter_row_start, tp_.inter_local)) {
+                std::cerr << "[TP] failed to row-slice layer " << i << " ffn_gate" << std::endl;
+                tp_.enabled = false;
+                return false;
+            }
+            if (!slice_rows(layer.q_ffn_up, tl.q_ffn_up, inter_row_start, tp_.inter_local)) {
+                std::cerr << "[TP] failed to row-slice layer " << i << " ffn_up" << std::endl;
+                tp_.enabled = false;
+                return false;
+            }
+        }
+
+        // Allocate scratch buffers (local dims for Q/K/V/gate/up,
+        // full dims for attn (zero-padded) and silu (zero-padded)).
+        int64_t H     = config.hidden_size;
+        int64_t q_dim = n_heads * head_dim;
+        tp_.x_buf[0].assign(H, 0.0f);
+        tp_.x_buf[1].assign(H, 0.0f);
+        tp_.q_local_buf.assign(tp_.q_dim_local, 0.0f);
+        tp_.k_local_buf.assign(tp_.kv_dim_local, 0.0f);
+        tp_.v_local_buf.assign(tp_.kv_dim_local, 0.0f);
+        tp_.attn_full_buf.assign(q_dim, 0.0f);
+        tp_.h_buf.assign(H, 0.0f);
+        tp_.gate_local_buf.assign(tp_.inter_local, 0.0f);
+        tp_.up_local_buf.assign(tp_.inter_local, 0.0f);
+        tp_.silu_full_buf.assign(inter, 0.0f);
+        tp_.logits_buf.assign(config.vocab_size, 0.0f);
+        tp_.scratch_ready = true;
+
+        std::cout << "[TP] Tensor-parallel enabled: rank " << rank << "/" << nprocs
+                  << " heads[" << tp_.head_start << ".." << tp_.head_end << ") "
+                  << "kv_heads[" << tp_.kv_head_start << ".." << tp_.kv_head_end << ") "
+                  << "inter[" << inter_row_start << ".." << (inter_row_start + tp_.inter_local) << ")"
+                  << std::endl;
+
+        // Free the full-size row-split weights (q_attn_q/k/v, ffn_gate/up) to save RAM.
+        // attn_output, ffn_down, output_weight stay as full QuantizedWeight per rank.
+        // Do this only if the full weights are NOT mmap'd (we cannot free mmap pointers).
+        for (int64_t i = 0; i < config.num_layers; ++i) {
+            auto& full = layers[i];
+            auto free_if_owned = [](QuantizedWeight& qw) {
+                if (qw.valid && qw.cpu_data && !qw.mmap_owned) {
+                    std::free(qw.cpu_data);
+                    qw.cpu_data = nullptr;
+                    qw.valid = false;
+                }
+            };
+            free_if_owned(full.q_attn_q);
+            free_if_owned(full.q_attn_k);
+            free_if_owned(full.q_attn_v);
+            free_if_owned(full.q_ffn_gate);
+            free_if_owned(full.q_ffn_up);
+        }
+
+        return true;
+    }
+
+    // Allocate local KV cache (per-rank, kv_dim_local columns)
+    void tp_allocate_kv_cache(int64_t max_seq_len) {
+        tp_.k_cache_local.resize(config.num_layers);
+        tp_.v_cache_local.resize(config.num_layers);
+        for (int64_t i = 0; i < config.num_layers; ++i) {
+            tp_.k_cache_local[i] = at::empty({max_seq_len, tp_.kv_dim_local});
+            tp_.v_cache_local[i] = at::empty({max_seq_len, tp_.kv_dim_local});
+        }
+        tp_.kv_max_seq = max_seq_len;
+        tp_.kv_seq_len = 0;
+    }
+
+    // ========================================================================
+    // Tensor-parallel CPU decode (1 token).
+    // Mirrors forward_decode_cpu() but:
+    //   - Q/K/V use row-sliced local weights (local_q_dim, local_kv_dim).
+    //   - Attention runs on local heads only (uses local KV cache).
+    //   - Output proj runs on FULL replicated weight with zero-padded input
+    //     (only rank's heads filled in attn_full_buf) → AllReduce SUM.
+    //   - FFN gate/up use row-sliced local weights.
+    //   - FFN down runs on FULL replicated weight with zero-padded silu_full_buf
+    //     → AllReduce SUM.
+    //   - Final RMSNorm + output projection: replicated (no AllReduce).
+    // Returns logits [1, vocab_size] (identical on all ranks).
+    // ========================================================================
+    Tensor forward_decode_cpu_tp(int64_t token_id) {
+        if (!tp_.enabled) {
+            throw std::runtime_error("forward_decode_cpu_tp: tp_ not initialized");
+        }
+        const int64_t H          = config.hidden_size;
+        const int64_t head_dim   = config.head_dim;
+        const int64_t inter      = config.intermediate_size;
+        const int64_t q_dim      = config.num_heads * config.head_dim;
+        const int64_t kv_dim     = config.num_kv_heads * config.head_dim;
+        const int64_t past_len   = tp_.kv_seq_len;
+        const float eps          = config.rms_norm_eps;
+        const bool add_one       = config.gemma_norm_add_one;
+        const int64_t n_heads_l  = tp_.n_heads_local;
+        const int64_t n_kv_l     = tp_.n_kv_heads_local;
+        const int64_t heads_per_group = config.num_heads / config.num_kv_heads;
+        // Within-rank group offset mapping (local Q head -> local KV head):
+        // Global Q head h → global KV head h/heads_per_group. Since Q and KV
+        // heads are sliced in aligned chunks (rank gets contiguous head range
+        // of both), local_kv_h = local_q_h / heads_per_group.
+
+        // Ensure KV cache is allocated
+        if (tp_.kv_max_seq == 0) {
+            tp_allocate_kv_cache(config.context_length > 0 ? config.context_length : 4096);
+        }
+
+        int cur = 0;
+        // 1. Embedding lookup (replicated on every rank)
+        const float* emb_table = token_embedding.data_ptr<float>();
+        std::memcpy(tp_.x_buf[cur].data(), emb_table + token_id * H, H * sizeof(float));
+        if (config.scale_embeddings) {
+            float scale = std::sqrt(static_cast<float>(H));
+            for (int64_t j = 0; j < H; ++j) tp_.x_buf[cur][j] *= scale;
+        }
+
+        // 2. Transformer layers
+        for (int64_t i = 0; i < config.num_layers; ++i) {
+            const auto& layer   = layers[i];
+            const auto& tl      = tp_.layers[i];
+            float* x_ptr = tp_.x_buf[cur].data();
+
+            // --- RMSNorm(x) --- (use cpu_rmsnorm_inplace on a copy for AVX2-compatible math)
+            std::vector<float> x_normed(H);
+            std::memcpy(x_normed.data(), x_ptr, H * sizeof(float));
+            cpu_quant::cpu_rmsnorm_inplace(x_normed.data(),
+                layer.attn_norm.data_ptr<float>(), eps, add_one, H);
+
+            // --- Q/K/V local projections (row-sliced weights) ---
+            float* q_l = tp_.q_local_buf.data();
+            float* k_l = tp_.k_local_buf.data();
+            float* v_l = tp_.v_local_buf.data();
+            if (tl.q_attn_q.valid)
+                cpu_quant::cpu_quant_gemv(tl.q_attn_q.quant_type, tl.q_attn_q.cpu_data,
+                    x_normed.data(), q_l, H, tl.q_attn_q.rows, tl.q_attn_q.row_stride_bytes);
+            if (tl.q_attn_k.valid)
+                cpu_quant::cpu_quant_gemv(tl.q_attn_k.quant_type, tl.q_attn_k.cpu_data,
+                    x_normed.data(), k_l, H, tl.q_attn_k.rows, tl.q_attn_k.row_stride_bytes);
+            if (tl.q_attn_v.valid)
+                cpu_quant::cpu_quant_gemv(tl.q_attn_v.quant_type, tl.q_attn_v.cpu_data,
+                    x_normed.data(), v_l, H, tl.q_attn_v.rows, tl.q_attn_v.row_stride_bytes);
+
+            // --- Biases (Qwen3) on rank-local slice ---
+            if (layer.attn_q_bias.defined()) {
+                const float* bq = layer.attn_q_bias.data_ptr<float>();
+                const float* bk = layer.attn_k_bias.data_ptr<float>();
+                const float* bv = layer.attn_v_bias.data_ptr<float>();
+                // bq is sized [q_dim]; rank gets slice [q_dim_local_start, ...)
+                int64_t q_off = tp_.rank * tp_.q_dim_local;
+                int64_t kv_off = tp_.rank * tp_.kv_dim_local;
+                for (int64_t j = 0; j < tp_.q_dim_local; ++j)  q_l[j] += bq[q_off + j];
+                for (int64_t j = 0; j < tp_.kv_dim_local; ++j) k_l[j] += bk[kv_off + j];
+                for (int64_t j = 0; j < tp_.kv_dim_local; ++j) v_l[j] += bv[kv_off + j];
+            }
+
+            // --- QK-norm (per-head) ---
+            if (layer.attn_q_norm.defined()) {
+                const float* qn_w = layer.attn_q_norm.data_ptr<float>();
+                const float* kn_w = layer.attn_k_norm.data_ptr<float>();
+                for (int64_t h = 0; h < n_heads_l; ++h)
+                    cpu_quant::cpu_rmsnorm_inplace(q_l + h * head_dim, qn_w, eps, add_one, head_dim);
+                for (int64_t h = 0; h < n_kv_l; ++h)
+                    cpu_quant::cpu_rmsnorm_inplace(k_l + h * head_dim, kn_w, eps, add_one, head_dim);
+            }
+
+            // --- RoPE (uses current past_len position) ---
+            {
+                float rope_cos[256], rope_sin[256];
+                at::native::hot::rope_precompute(rope_cos, rope_sin,
+                    past_len, head_dim, config.rope_freq_base);
+                at::native::hot::rope_apply_fused(q_l, k_l, rope_cos, rope_sin,
+                    n_heads_l, n_kv_l, head_dim);
+            }
+
+            // --- KV cache append (local) ---
+            float* k_cache = tp_.k_cache_local[i].mutable_data_ptr<float>();
+            float* v_cache = tp_.v_cache_local[i].mutable_data_ptr<float>();
+            std::memcpy(k_cache + past_len * tp_.kv_dim_local, k_l, tp_.kv_dim_local * sizeof(float));
+            std::memcpy(v_cache + past_len * tp_.kv_dim_local, v_l, tp_.kv_dim_local * sizeof(float));
+
+            // --- Attention over local heads (fill rank's slice of attn_full_buf, zero rest) ---
+            // Zero full buffer first so other ranks' slices stay 0 (for the
+            // replicated output-proj GEMV + AllReduce-sum trick).
+            std::fill(tp_.attn_full_buf.begin(), tp_.attn_full_buf.end(), 0.0f);
+            {
+                int64_t total_seq = past_len + 1;
+                float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+                // Where rank's heads land in the full q_dim buffer
+                int64_t q_off = tp_.rank * tp_.q_dim_local;
+                for (int64_t hl = 0; hl < n_heads_l; ++hl) {
+                    int64_t global_h = tp_.head_start + hl;
+                    int64_t kv_hl    = hl / heads_per_group;  // within rank
+                    (void)global_h;
+                    const float* q_head = q_l + hl * head_dim;
+                    float* out_head = tp_.attn_full_buf.data() + q_off + hl * head_dim;
+                    std::vector<float> scores(total_seq);
+                    for (int64_t t = 0; t < total_seq; ++t) {
+                        const float* k_head = k_cache + t * tp_.kv_dim_local + kv_hl * head_dim;
+                        float dot = 0.0f;
+                        for (int64_t d = 0; d < head_dim; ++d) dot += q_head[d] * k_head[d];
+                        scores[t] = dot * scale;
+                    }
+                    // softmax
+                    float mx = scores[0];
+                    for (int64_t t = 1; t < total_seq; ++t) if (scores[t] > mx) mx = scores[t];
+                    float se = 0.0f;
+                    for (int64_t t = 0; t < total_seq; ++t) {
+                        scores[t] = std::exp(scores[t] - mx);
+                        se += scores[t];
+                    }
+                    float inv = 1.0f / (se + 1e-10f);
+                    for (int64_t t = 0; t < total_seq; ++t) scores[t] *= inv;
+                    // weighted sum
+                    std::fill(out_head, out_head + head_dim, 0.0f);
+                    for (int64_t t = 0; t < total_seq; ++t) {
+                        const float* v_head = v_cache + t * tp_.kv_dim_local + kv_hl * head_dim;
+                        float w = scores[t];
+                        for (int64_t d = 0; d < head_dim; ++d) out_head[d] += w * v_head[d];
+                    }
+                }
+            }
+
+            // --- Post-attention norm (Gemma3): in-place on full buf (norm is elementwise / scale) ---
+            // Note: RMSNorm of zero-padded vector ≠ per-slice RMSNorm. Since this
+            // path is Gemma3-specific and we target qwen3, we don't support
+            // post_attention_norm in TP mode; guard and throw for clarity.
+            if (layer.post_attention_norm.defined()) {
+                throw std::runtime_error("TP: post_attention_norm unsupported (Gemma3 not yet wired)");
+            }
+
+            // --- Output projection (REPLICATED weight, partial input) → h_buf ---
+            // Each rank's attn_full_buf has its head-slice filled, others zero.
+            // Full GEMV per rank → AllReduce-sum across ranks recovers W_o @ attn_full.
+            float* h_buf = tp_.h_buf.data();
+            if (use_quant_gemv_ && layer.q_attn_output.valid && layer.q_attn_output.cpu_data) {
+                cpu_quant::cpu_quant_gemv(
+                    layer.q_attn_output.quant_type, layer.q_attn_output.cpu_data,
+                    tp_.attn_full_buf.data(), h_buf, q_dim,
+                    layer.q_attn_output.rows, layer.q_attn_output.row_stride_bytes);
+            } else if (layer.attn_output.defined()) {
+                const float* w = layer.attn_output.data_ptr<float>();
+                int64_t N_out = layer.attn_output.size(0);
+                for (int64_t n = 0; n < N_out; ++n) {
+                    float dot = 0.0f;
+                    for (int64_t k = 0; k < q_dim; ++k) dot += tp_.attn_full_buf[k] * w[n * q_dim + k];
+                    h_buf[n] = dot;
+                }
+            }
+
+            // --- AllReduce-sum h_buf across ranks ---
+            {
+                at::Tensor h_tensor = at::empty({H});
+                std::memcpy(h_tensor.mutable_data_ptr<float>(), h_buf, H * sizeof(float));
+                torch::distributed::all_reduce(h_tensor);
+                std::memcpy(h_buf, h_tensor.data_ptr<float>(), H * sizeof(float));
+            }
+
+            // --- Residual add: x_next = x + h ---
+            int next = 1 - cur;
+            for (int64_t j = 0; j < H; ++j) tp_.x_buf[next][j] = tp_.x_buf[cur][j] + h_buf[j];
+            cur = next;
+
+            // --- FFN RMSNorm(x) ---
+            float* x_cur = tp_.x_buf[cur].data();
+            std::memcpy(x_normed.data(), x_cur, H * sizeof(float));
+            cpu_quant::cpu_rmsnorm_inplace(x_normed.data(),
+                layer.ffn_norm.data_ptr<float>(), eps, add_one, H);
+
+            // --- FFN gate/up local (row-sliced) ---
+            float* gate_l = tp_.gate_local_buf.data();
+            float* up_l   = tp_.up_local_buf.data();
+            if (tl.q_ffn_gate.valid)
+                cpu_quant::cpu_quant_gemv(tl.q_ffn_gate.quant_type, tl.q_ffn_gate.cpu_data,
+                    x_normed.data(), gate_l, H, tl.q_ffn_gate.rows, tl.q_ffn_gate.row_stride_bytes);
+            if (tl.q_ffn_up.valid)
+                cpu_quant::cpu_quant_gemv(tl.q_ffn_up.quant_type, tl.q_ffn_up.cpu_data,
+                    x_normed.data(), up_l, H, tl.q_ffn_up.rows, tl.q_ffn_up.row_stride_bytes);
+
+            // --- SiLU(gate) * up, local; write into full zero-padded buffer slice ---
+            std::fill(tp_.silu_full_buf.begin(), tp_.silu_full_buf.end(), 0.0f);
+            int64_t inter_off = tp_.rank * tp_.inter_local;
+            for (int64_t j = 0; j < tp_.inter_local; ++j) {
+                float g = gate_l[j];
+                tp_.silu_full_buf[inter_off + j] = (g / (1.0f + std::exp(-g))) * up_l[j];
+            }
+
+            // --- FFN down (REPLICATED weight, partial input) → h_buf ---
+            if (use_quant_gemv_ && layer.q_ffn_down.valid && layer.q_ffn_down.cpu_data) {
+                cpu_quant::cpu_quant_gemv(
+                    layer.q_ffn_down.quant_type, layer.q_ffn_down.cpu_data,
+                    tp_.silu_full_buf.data(), h_buf, inter,
+                    layer.q_ffn_down.rows, layer.q_ffn_down.row_stride_bytes);
+            }
+
+            if (layer.post_ffw_norm.defined()) {
+                throw std::runtime_error("TP: post_ffw_norm unsupported (Gemma3 not yet wired)");
+            }
+
+            // --- AllReduce-sum h_buf across ranks ---
+            {
+                at::Tensor h_tensor = at::empty({H});
+                std::memcpy(h_tensor.mutable_data_ptr<float>(), h_buf, H * sizeof(float));
+                torch::distributed::all_reduce(h_tensor);
+                std::memcpy(h_buf, h_tensor.data_ptr<float>(), H * sizeof(float));
+            }
+
+            // --- Residual add ---
+            next = 1 - cur;
+            for (int64_t j = 0; j < H; ++j) tp_.x_buf[next][j] = tp_.x_buf[cur][j] + h_buf[j];
+            cur = next;
+        }  // end layer loop
+
+        // 3. Final RMSNorm (in-place, replicated)
+        cpu_quant::cpu_rmsnorm_inplace(tp_.x_buf[cur].data(),
+            output_norm.data_ptr<float>(), eps, add_one, H);
+
+        // 4. Output projection (replicated, full logits; no AllReduce needed)
+        if (use_quant_gemv_ && q_output_weight.valid && q_output_weight.cpu_data) {
+            cpu_quant::cpu_quant_gemv(
+                q_output_weight.quant_type, q_output_weight.cpu_data,
+                tp_.x_buf[cur].data(), tp_.logits_buf.data(),
+                H, q_output_weight.rows, q_output_weight.row_stride_bytes);
+        } else if (output_weight.defined()) {
+            const float* w = output_weight.data_ptr<float>();
+            int64_t V = config.vocab_size;
+            for (int64_t n = 0; n < V; ++n) {
+                float dot = 0.0f;
+                for (int64_t k = 0; k < H; ++k) dot += tp_.x_buf[cur][k] * w[n * H + k];
+                tp_.logits_buf[n] = dot;
+            }
+        }
+
+        // Wrap into tensor (copy out)
+        Tensor logits = at::empty({1, config.vocab_size});
+        std::memcpy(logits.mutable_data_ptr<float>(), tp_.logits_buf.data(),
+                    config.vocab_size * sizeof(float));
+
+        tp_.kv_seq_len += 1;
+        return logits;
+    }
+
+    // ========================================================================
+    // Tensor-parallel generate: drives prefill + decode via forward_decode_cpu_tp.
+    // Only rank 0 prints tokens. Returns the decoded string on rank 0; other
+    // ranks return "" after finishing the same number of forward passes
+    // (to keep collectives in lockstep).
+    // ========================================================================
+    std::string generate_tp(const std::string& prompt, int max_tokens = 128,
+                            float temperature = 0.0f) {
+        if (!tp_.enabled) {
+            throw std::runtime_error("generate_tp: call init_tensor_parallel() first");
+        }
+        // Reset KV cache
+        int64_t max_total_seq = static_cast<int64_t>(max_tokens) + 2048;
+        if (max_total_seq > config.context_length) max_total_seq = config.context_length;
+        if (tp_.kv_max_seq < max_total_seq) {
+            tp_allocate_kv_cache(max_total_seq);
+        } else {
+            tp_.kv_seq_len = 0;
+        }
+
+        // Tokenize prompt
+        auto input_tokens = tokenizer.encode(prompt, true);
+        if (tp_.rank == 0) {
+            std::cout << "[Generate-TP] Prompt tokens: " << input_tokens.size() << std::endl;
+        }
+
+        // Prefill: run every prompt token through forward_decode_cpu_tp one at a time
+        Tensor logits;
+        for (int64_t t : input_tokens) {
+            logits = forward_decode_cpu_tp(t);
+        }
+
+        // Generation loop
+        std::vector<int32_t> generated;
+        auto t_start = std::chrono::high_resolution_clock::now();
+        for (int step = 0; step < max_tokens; ++step) {
+            // Greedy argmax on identical replicated logits (all ranks agree)
+            int32_t best = 0;
+            const float* lbuf = logits.data_ptr<float>();
+            float best_val = lbuf[0];
+            for (int64_t j = 1; j < config.vocab_size; ++j) {
+                if (lbuf[j] > best_val) { best_val = lbuf[j]; best = static_cast<int32_t>(j); }
+            }
+            (void)temperature;  // only greedy supported in TP mode
+
+            if (best == tokenizer.eos_id) break;
+            if (is_stop_token(best)) break;
+
+            generated.push_back(best);
+            if (tp_.rank == 0) {
+                std::cout << tokenizer.decode_token(best);
+            }
+            logits = forward_decode_cpu_tp(static_cast<int64_t>(best));
+        }
+        auto t_end = std::chrono::high_resolution_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
+        double tok_per_s = generated.size() / (ms / 1000.0);
+
+        if (tp_.rank == 0) {
+            std::cout << "\n\n[Generate-TP] " << generated.size() << " tokens in "
+                      << (ms / 1000.0) << "s (" << tok_per_s << " tok/s)" << std::endl;
+            return tokenizer.decode(generated, true);
+        }
+        return "";
     }
 
     // ========================================================================
