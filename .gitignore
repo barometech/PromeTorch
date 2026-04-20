@@ -80,3 +80,5 @@ vae_samples.ppm
 *.ppm
 run_logs/
 *.log
+model*.pt
+*.pth
