@@ -46,6 +46,7 @@ data/cifar-100-*/
 
 # Output files
 *.png
+!docs/screenshots/*.png
 output.txt
 
 # Unused directories
