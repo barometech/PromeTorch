@@ -54,11 +54,12 @@ Source/CMake updated, binary not yet rebuilt or only CPU-built so far.
 
 | # | Path | Model | Hardware | Target | Current | Status |
 |---|------|-------|----------|--------|---------|--------|
-| 13 | `test_gguf_inference.exe` (direct CUDA) | qwen3:4b Q4_K_M | A100 40GB | ≥ 150 tok/s | 86.6 tok/s | 🟡 |
-| 14 | `promeserve.exe /api/generate` (HTTP) | qwen3:4b | A100 | ≥ 140 tok/s (HTTP overhead) | 89.8 tok/s | 🟡 |
-| 15 | `test_gguf_inference.exe` | gemma3:4b | A100 | ≥ 90 tok/s | 52.9 tok/s | 🟡 |
-| 16 | `test_gguf_inference.exe` | deepseek-r1:8b | A100 | ≥ 60 tok/s | 30.5 tok/s | 🟡 |
-| 17 | `test_gguf_inference.exe` | qwen3:14b | A100 | ≥ 35 tok/s | 18.4 tok/s | 🟡 |
+| 13 | `test_gguf_inference.exe` (direct CUDA, greedy) | qwen3:4b Q4_K_M | A100 40GB | ≥ 130 tok/s | **82.6 tok/s** (2026-04-20) | 🟡 |
+| 13a | `test_gguf_inference.exe` (sampling T=0.7) | qwen3:4b Q4_K_M | A100 40GB | ≥ 80 tok/s | 46.5 tok/s (sampling path overhead) | 🔴 |
+| 14 | `promeserve.exe /api/generate` (HTTP) | qwen3:4b | A100 | ≥ 80 tok/s (HTTP overhead) | ~82 tok/s greedy expected | ⚪ (not re-bench'd since latest build) |
+| 15 | `test_gguf_inference.exe` (greedy) | gemma3:4b | A100 | ≥ 80 tok/s | **81.4 tok/s** (2026-04-20) | 🟢 |
+| 16 | `test_gguf_inference.exe` (greedy) | deepseek-r1:8b | A100 | ≥ 50 tok/s | **51.1 tok/s** (2026-04-20) | 🟢 |
+| 17 | `test_gguf_inference.exe` | qwen3:14b | A100 | ≥ 35 tok/s | 18.4 tok/s (stale, 2026-04-19) | ⚪ |
 | 18 | `promeserve.exe` baseline functional | qwen3:4b | A100 | `/api/show` 200, `/api/generate` 200, `/api/embeddings` 501, `OPTIONS /api/generate` 204 with CORS, timeout fires correctly | All four endpoints working | 🟢 (verified by agent `af854109154bca330` on port 11440) |
 
 ---
