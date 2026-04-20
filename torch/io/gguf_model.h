@@ -537,12 +537,31 @@ private:
 };
 
 struct TPLayer {
-    // Row-sliced Q/K/V/gate/up. output+down stay as-is on each rank (replicated).
+    // N-dim row-sliced Q/K/V/gate/up (ColumnParallel-style: each rank gets its
+    // output-dim slice; input is replicated; output is its own slice).
     TPSlicedWeight q_attn_q;   // rows = n_heads_local * head_dim
     TPSlicedWeight q_attn_k;   // rows = n_kv_heads_local * head_dim
     TPSlicedWeight q_attn_v;   // rows = n_kv_heads_local * head_dim
     TPSlicedWeight q_ffn_gate; // rows = inter_local
     TPSlicedWeight q_ffn_up;   // rows = inter_local
+
+    // K-dim sliced attn_output and ffn_down (RowParallel-style: each rank gets
+    // its input-dim K-slice of a full-N weight; input is its own slice; output
+    // is a partial N-vector that must be AllReduce-sum'd across ranks).
+    // Reuses TPSlicedWeight: cpu_data = malloc'd buffer for N×(local_blocks*144)
+    // row_stride_bytes = local_blocks * 144 (local, not global)
+    // rows = full N (4096 for attn_output; H=2560 for ffn_down)
+    // cols = local K = local_blocks * 256
+    TPSlicedWeight q_attn_output;  // K-slice of attn_output (K=q_dim=4096)
+    TPSlicedWeight q_ffn_down;     // K-slice of ffn_down (K=inter=9728)
+
+    // K-slice metadata (in super-block units = 256 elements each)
+    int64_t attn_output_k_start = 0;  // in super-blocks
+    int64_t attn_output_k_end = 0;
+    int64_t attn_output_k_local = 0;  // = (k_end - k_start) * 256
+    int64_t ffn_down_k_start = 0;
+    int64_t ffn_down_k_end = 0;
+    int64_t ffn_down_k_local = 0;
 };
 
 struct GGUFTPConfig {
@@ -561,7 +580,9 @@ struct GGUFTPConfig {
     // Local dim slices
     int64_t q_dim_local = 0;       // n_heads_local * head_dim
     int64_t kv_dim_local = 0;      // n_kv_heads_local * head_dim
-    int64_t inter_local = 0;       // intermediate / nprocs
+    int64_t inter_local = 0;       // this rank's slice of intermediate (= local_blocks * 256,
+                                   // may differ across ranks if inter/256 not divisible by nprocs)
+    int64_t inter_offset = 0;      // this rank's start offset into full inter (= k_start * 256)
 
     // Per-rank KV cache (local KV dim)
     std::vector<at::Tensor> k_cache_local;  // per layer: [max_seq, kv_dim_local]
@@ -3199,9 +3220,12 @@ public:
                          "divisible by nprocs (" << nprocs << ")." << std::endl;
             return false;
         }
-        if (inter % nprocs != 0) {
+        // inter_local is non-uniform: rank gets super-block count =
+        //   per_rank_blocks + (rank < rem ? 1 : 0), each 256 elements.
+        // This must match the K-slicing of ffn_down for correctness.
+        if (inter % 256 != 0) {
             std::cerr << "[TP] intermediate_size (" << inter << ") must be "
-                         "divisible by nprocs (" << nprocs << ")." << std::endl;
+                         "multiple of 256 (Q4_K super-block granularity)." << std::endl;
             return false;
         }
 
@@ -3216,7 +3240,15 @@ public:
         tp_.kv_head_end      = tp_.kv_head_start + tp_.n_kv_heads_local;
         tp_.q_dim_local      = tp_.n_heads_local * head_dim;
         tp_.kv_dim_local     = tp_.n_kv_heads_local * head_dim;
-        tp_.inter_local      = inter / nprocs;
+
+        // Non-uniform super-block partition of inter dim.
+        int64_t inter_total_blocks = inter / 256;
+        int64_t per_rank_blocks = inter_total_blocks / nprocs;
+        int64_t rem_blocks = inter_total_blocks % nprocs;
+        int64_t my_blocks = per_rank_blocks + (rank < rem_blocks ? 1 : 0);
+        int64_t my_block_start = rank * per_rank_blocks + std::min<int64_t>(rank, rem_blocks);
+        tp_.inter_local  = my_blocks * 256;
+        tp_.inter_offset = my_block_start * 256;
 
         // Row-slice Q/K/V/gate/up from the already-loaded full quantized weights
         tp_.layers.resize(config.num_layers);
@@ -3243,7 +3275,7 @@ public:
 
         int64_t q_row_start    = rank * tp_.q_dim_local;
         int64_t kv_row_start   = rank * tp_.kv_dim_local;
-        int64_t inter_row_start = rank * tp_.inter_local;
+        int64_t inter_row_start = tp_.inter_offset;  // non-uniform offset
 
         for (int64_t i = 0; i < config.num_layers; ++i) {
             const auto& layer = layers[i];
@@ -3273,6 +3305,75 @@ public:
             }
             if (!slice_rows(layer.q_ffn_up, tl.q_ffn_up, inter_row_start, tp_.inter_local)) {
                 std::cerr << "[TP] failed to row-slice layer " << i << " ffn_up" << std::endl;
+                tp_.enabled = false;
+                return false;
+            }
+
+            // ============================================================
+            // K-DIM SLICING for attn_output and ffn_down (RowParallel).
+            // Each rank keeps a local copy of the full N rows, but only of
+            // its own K-super-block range. Partial sum output → AllReduce.
+            //
+            // Non-uniform split handles non-divisible super-block counts:
+            // rank r gets k_blocks = (K_full/256)/nprocs + (r < rem ? 1 : 0)
+            // where rem = (K_full/256) % nprocs.
+            // ============================================================
+            auto slice_k_blocks = [&](const QuantizedWeight& full, TPSlicedWeight& out,
+                                       int64_t& k_start_out, int64_t& k_end_out,
+                                       int64_t& k_local_out) -> bool {
+                if (!full.valid || !full.cpu_data || full.quant_type != 12 /* Q4_K */) {
+                    return false;
+                }
+                int64_t K_full = full.cols;
+                if (K_full % 256 != 0) return false;
+                int64_t total_blocks = K_full / 256;
+                int64_t per_rank = total_blocks / nprocs;
+                int64_t rem = total_blocks % nprocs;
+                int64_t k_start = rank * per_rank + std::min((int64_t)rank, rem);
+                int64_t local_blocks = per_rank + (rank < rem ? 1 : 0);
+                int64_t k_end = k_start + local_blocks;
+
+                constexpr int64_t bytes_per_block = 144;  // Q4_K super-block
+                int64_t local_row_stride = local_blocks * bytes_per_block;
+                int64_t full_row_stride = full.row_stride_bytes;
+                int64_t total_local_bytes = full.rows * local_row_stride;
+
+                out.cpu_data = std::malloc(total_local_bytes);
+                if (!out.cpu_data) return false;
+
+                // Copy each row's K-slice into contiguous local buffer.
+                // This malloc goes to caller's NUMA-local DDR under membind.
+                char* dst = static_cast<char*>(out.cpu_data);
+                const char* src = static_cast<const char*>(full.cpu_data);
+                int64_t offset_bytes = k_start * bytes_per_block;
+                for (int64_t n = 0; n < full.rows; ++n) {
+                    std::memcpy(dst + n * local_row_stride,
+                                src + n * full_row_stride + offset_bytes,
+                                local_row_stride);
+                }
+                out.rows = full.rows;
+                out.cols = local_blocks * 256;
+                out.row_stride_bytes = local_row_stride;
+                out.total_bytes = total_local_bytes;
+                out.quant_type = full.quant_type;
+                out.valid = true;
+                k_start_out = k_start;
+                k_end_out = k_end;
+                k_local_out = local_blocks * 256;
+                return true;
+            };
+
+            if (!slice_k_blocks(layer.q_attn_output, tl.q_attn_output,
+                                tl.attn_output_k_start, tl.attn_output_k_end,
+                                tl.attn_output_k_local)) {
+                std::cerr << "[TP] failed to K-slice layer " << i << " attn_output" << std::endl;
+                tp_.enabled = false;
+                return false;
+            }
+            if (!slice_k_blocks(layer.q_ffn_down, tl.q_ffn_down,
+                                tl.ffn_down_k_start, tl.ffn_down_k_end,
+                                tl.ffn_down_k_local)) {
+                std::cerr << "[TP] failed to K-slice layer " << i << " ffn_down" << std::endl;
                 tp_.enabled = false;
                 return false;
             }
@@ -3496,16 +3597,29 @@ public:
                 throw std::runtime_error("TP: post_attention_norm unsupported (Gemma3 not yet wired)");
             }
 
-            // --- Output projection (REPLICATED weight, partial input) → h_buf ---
-            // Each rank's attn_full_buf has its head-slice filled, others zero.
-            // Full GEMV per rank → AllReduce-sum across ranks recovers W_o @ attn_full.
+            // --- Output projection (K-sliced, RowParallel) → h_buf ---
+            // Each rank has K-slice of W_o and its head-slice of attention output.
+            // K-ranges of attn_output weight and attention heads are co-aligned
+            // (rank r's heads map to super-blocks [r*k_blocks .. (r+1)*k_blocks)).
+            // Rank r computes: h_partial = W_o[:, k_start:k_end] @ attn_local_slice
+            // Then AllReduce-sum across ranks.
             float* h_buf = tp_.h_buf.data();
-            if (use_quant_gemv_ && layer.q_attn_output.valid && layer.q_attn_output.cpu_data) {
-                cpu_quant::cpu_quant_gemv(
-                    layer.q_attn_output.quant_type, layer.q_attn_output.cpu_data,
-                    tp_.attn_full_buf.data(), h_buf, q_dim,
-                    layer.q_attn_output.rows, layer.q_attn_output.row_stride_bytes);
+            if (tl.q_attn_output.valid && tl.q_attn_output.cpu_data) {
+                // Local K-slice input: rank's heads are laid in attn_full_buf at
+                // offset rank*q_dim_local of length q_dim_local.
+                // K-split of W_o matches because q_dim_local is aligned to 256.
+                const float* input_slice = tp_.attn_full_buf.data() + (tp_.rank * tp_.q_dim_local);
+                int64_t local_blocks = tl.attn_output_k_end - tl.attn_output_k_start;
+                cpu_quant::cpu_quant_gemv_k_slice(
+                    tl.q_attn_output.quant_type,
+                    tl.q_attn_output.cpu_data,
+                    input_slice,
+                    h_buf,
+                    local_blocks,
+                    tl.q_attn_output.rows,             // full H
+                    tl.q_attn_output.row_stride_bytes);
             } else if (layer.attn_output.defined()) {
+                // Fallback (non-Q4_K or CPU float): replicated full GEMV + AllReduce.
                 const float* w = layer.attn_output.data_ptr<float>();
                 int64_t N_out = layer.attn_output.size(0);
                 for (int64_t n = 0; n < N_out; ++n) {
@@ -3544,20 +3658,25 @@ public:
                 cpu_quant::cpu_quant_gemv(tl.q_ffn_up.quant_type, tl.q_ffn_up.cpu_data,
                     x_normed.data(), up_l, H, tl.q_ffn_up.rows, tl.q_ffn_up.row_stride_bytes);
 
-            // --- SiLU(gate) * up, local; write into full zero-padded buffer slice ---
-            std::fill(tp_.silu_full_buf.begin(), tp_.silu_full_buf.end(), 0.0f);
-            int64_t inter_off = tp_.rank * tp_.inter_local;
+            // --- SiLU(gate) * up, local; keep in local buffer (no zero-pad).
+            // silu_local_buf length = tp_.inter_local (= rank's K-slice of inter).
+            std::vector<float> silu_local(tp_.inter_local);
             for (int64_t j = 0; j < tp_.inter_local; ++j) {
                 float g = gate_l[j];
-                tp_.silu_full_buf[inter_off + j] = (g / (1.0f + std::exp(-g))) * up_l[j];
+                silu_local[j] = (g / (1.0f + std::exp(-g))) * up_l[j];
             }
 
-            // --- FFN down (REPLICATED weight, partial input) → h_buf ---
-            if (use_quant_gemv_ && layer.q_ffn_down.valid && layer.q_ffn_down.cpu_data) {
-                cpu_quant::cpu_quant_gemv(
-                    layer.q_ffn_down.quant_type, layer.q_ffn_down.cpu_data,
-                    tp_.silu_full_buf.data(), h_buf, inter,
-                    layer.q_ffn_down.rows, layer.q_ffn_down.row_stride_bytes);
+            // --- FFN down (K-sliced, RowParallel) → h_buf partial ---
+            if (tl.q_ffn_down.valid && tl.q_ffn_down.cpu_data) {
+                int64_t local_blocks = tl.ffn_down_k_end - tl.ffn_down_k_start;
+                cpu_quant::cpu_quant_gemv_k_slice(
+                    tl.q_ffn_down.quant_type,
+                    tl.q_ffn_down.cpu_data,
+                    silu_local.data(),
+                    h_buf,
+                    local_blocks,
+                    tl.q_ffn_down.rows,                   // full H
+                    tl.q_ffn_down.row_stride_bytes);
             }
 
             if (layer.post_ffw_norm.defined()) {
