@@ -11,6 +11,12 @@
 > **Single-dev PyTorch rewrite.** Native Эльбрус E8C2 VLIW + NM Card Mini +
 > NVIDIA A100. Real autograd (119 backward ops), 16 optimizers, ONNX export,
 > PyTorch-compatible `.pt` I/O. ~35-45 % PyTorch practical surface. 137K строк.
+>
+> 📊 **[RESULTS.md](RESULTS.md) — single-page canonical benchmarks.**
+> On A100: qwen3:4b @ **82 tok/s** greedy inference (50 % Ollama).
+> On CPU: MNIST match PyTorch ±0.5 pp, VAE **0.35 nats tighter**.
+> On Эльбрус 8C2: **6.1× быстрее** PyTorch 2.7.1 на MNIST MLP.
+> On NM Card Mini emulator: MNIST 88.94 %.
 
 > PyTorch-совместимый обучающий фреймворк на C++17/CUDA с широкой dtype-поддержкой.
 > Real autograd (119 backward ops + gradient hooks + anomaly mode + create_graph
