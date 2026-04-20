@@ -1,6 +1,14 @@
 # Examples Verification Report — 2026-04-19 / 20
 
-Environment: Windows 10, A100-SXM4-40GB (TCC, driver 572.61, CUDA 12.8 runtime), CUDA 12.4 build-time (system NVIDIA Toolkit at `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4`), cuDNN 9 via Anaconda.
+> **Note:** This file records the actual host that ran the benchmarks — a
+> Windows 10 dev machine with an A100-SXM4-40GB. The `/c/...` paths below
+> are Git Bash reproducers from that specific host. Cross-platform build
+> instructions live in [README.md](README.md) and
+> [docs/BUILD_WINDOWS.md](docs/BUILD_WINDOWS.md). On Linux you'd just
+> `./build/examples/gguf/test_gguf_inference qwen3:4b --device cuda ...`
+> with `LD_LIBRARY_PATH` set to your CUDA install.
+
+Environment: Windows 10, A100-SXM4-40GB (TCC, driver 572.61, CUDA 12.8 runtime), CUDA 12.4 build-time (NVIDIA standalone), cuDNN 9.
 
 Logs: `run_logs/` at repo root.
 
