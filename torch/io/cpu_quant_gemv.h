@@ -18,6 +18,7 @@
 #include <cmath>
 #include <memory>
 #include "torch/io/gguf_dequant.h"
+#include "torch/io/numa_weight_replica.h"
 #include "c10/util/ThreadPool.h"
 
 #ifdef __AVX2__
@@ -53,11 +54,16 @@ inline float hsum_avx(__m256 v) {
 #ifdef __AVX2__
 inline void q4k_gemv_avx2_float(const void* weight_data, const float* x,
                                  float* y, int64_t K, int64_t N,
-                                 int64_t row_stride_bytes) {
-    const uint8_t* raw = static_cast<const uint8_t*>(weight_data);
+                                 int64_t row_stride_bytes,
+                                 const torch::io::ReplicatedWeight* numa = nullptr) {
     const int64_t blocks_per_row = K / 256;
 
     c10::get_thread_pool().parallel_for(0, N, [&](int64_t start, int64_t end) {
+    // NUMA: each parallel_for chunk runs on ONE worker thread, so select
+    // that thread's node-local weight replica once per chunk.
+    const uint8_t* raw = (numa && numa->num_replicas > 1)
+        ? static_cast<const uint8_t*>(numa->get(c10::current_numa_node()))
+        : static_cast<const uint8_t*>(weight_data);
     for (int64_t n = start; n < end; ++n) {
         const __m256i mask_lo = _mm256_set1_epi32(0xF);
         const uint8_t* row_data = raw + n * row_stride_bytes;
@@ -298,8 +304,8 @@ inline float q4k_q8_dot_avx2(const uint8_t* block, const Q8Block* x_q8) {
 
 inline void q4k_gemv_avx2(const void* weight_data, const float* x,
                            float* y, int64_t K, int64_t N,
-                           int64_t row_stride_bytes) {
-    const uint8_t* raw = static_cast<const uint8_t*>(weight_data);
+                           int64_t row_stride_bytes,
+                           const torch::io::ReplicatedWeight* numa = nullptr) {
     const int64_t blocks_per_row = K / 256;
     const int64_t nb_q8 = K / 32;  // number of Q8 blocks
 
@@ -323,6 +329,10 @@ inline void q4k_gemv_avx2(const void* weight_data, const float* x,
     const __m256i ones_16 = _mm256_set1_epi16(1);
 
     c10::get_thread_pool().parallel_for(0, N, [&](int64_t start, int64_t end) {
+        // NUMA: pick this chunk's node-local replica once.
+        const uint8_t* raw = (numa && numa->num_replicas > 1)
+            ? static_cast<const uint8_t*>(numa->get(c10::current_numa_node()))
+            : static_cast<const uint8_t*>(weight_data);
         int64_t n = start;
 
         // Process 2 rows at a time — share x_q8 loads
@@ -447,7 +457,9 @@ inline void q4k_gemv_avx2(const void* weight_data, const float* x,
 // Scalar fallback for Q4_K
 inline void q4k_gemv_scalar(const void* weight_data, const float* x,
                              float* y, int64_t K, int64_t N,
-                             int64_t row_stride_bytes) {
+                             int64_t row_stride_bytes,
+                             const torch::io::ReplicatedWeight* numa = nullptr) {
+    (void)numa;  // scalar path: replica unused, parallelism from thread pool only
     const uint8_t* raw = static_cast<const uint8_t*>(weight_data);
     const int64_t blocks_per_row = K / 256;
 
@@ -592,11 +604,14 @@ inline void q8_0_gemv_scalar(const void* weight_data, const float* x,
 #ifdef __AVX2__
 inline void q6k_gemv_avx2(const void* weight_data, const float* x,
                            float* y, int64_t K, int64_t N,
-                           int64_t row_stride_bytes) {
-    const uint8_t* raw = static_cast<const uint8_t*>(weight_data);
+                           int64_t row_stride_bytes,
+                           const torch::io::ReplicatedWeight* numa = nullptr) {
     const int64_t blocks_per_row = K / 256;
 
     c10::get_thread_pool().parallel_for(0, N, [&](int64_t start, int64_t end) {
+    const uint8_t* raw = (numa && numa->num_replicas > 1)
+        ? static_cast<const uint8_t*>(numa->get(c10::current_numa_node()))
+        : static_cast<const uint8_t*>(weight_data);
     for (int64_t n = start; n < end; ++n) {
         const uint8_t* row_data = raw + n * row_stride_bytes;
         __m256 acc = _mm256_setzero_ps();
@@ -721,7 +736,9 @@ inline void q6k_gemv_avx2(const void* weight_data, const float* x,
 // Scalar fallback for Q6_K
 inline void q6k_gemv_scalar(const void* weight_data, const float* x,
                              float* y, int64_t K, int64_t N,
-                             int64_t row_stride_bytes) {
+                             int64_t row_stride_bytes,
+                             const torch::io::ReplicatedWeight* numa = nullptr) {
+    (void)numa;
     const uint8_t* raw = static_cast<const uint8_t*>(weight_data);
     const int64_t blocks_per_row = K / 256;
 
@@ -1217,13 +1234,14 @@ inline bool cpu_quant_gemv_k_slice_supported(uint32_t quant_type) {
 inline void cpu_quant_gemv(uint32_t quant_type,
                            const void* weight_data, const float* x,
                            float* y, int64_t K, int64_t N,
-                           int64_t row_stride_bytes) {
+                           int64_t row_stride_bytes,
+                           const torch::io::ReplicatedWeight* numa = nullptr) {
     switch (quant_type) {
         case 12: // GGML_TYPE_Q4_K
 #ifdef __AVX2__
-            q4k_gemv_avx2(weight_data, x, y, K, N, row_stride_bytes);
+            q4k_gemv_avx2(weight_data, x, y, K, N, row_stride_bytes, numa);
 #else
-            q4k_gemv_scalar(weight_data, x, y, K, N, row_stride_bytes);
+            q4k_gemv_scalar(weight_data, x, y, K, N, row_stride_bytes, numa);
 #endif
             break;
         case 8: // GGML_TYPE_Q8_0
@@ -1235,9 +1253,9 @@ inline void cpu_quant_gemv(uint32_t quant_type,
             break;
         case 14: // GGML_TYPE_Q6_K
 #ifdef __AVX2__
-            q6k_gemv_avx2(weight_data, x, y, K, N, row_stride_bytes);
+            q6k_gemv_avx2(weight_data, x, y, K, N, row_stride_bytes, numa);
 #else
-            q6k_gemv_scalar(weight_data, x, y, K, N, row_stride_bytes);
+            q6k_gemv_scalar(weight_data, x, y, K, N, row_stride_bytes, numa);
 #endif
             break;
         case 13: // GGML_TYPE_Q5_K
@@ -1582,7 +1600,9 @@ inline void cpu_fused_rmsnorm_gate_up_gemv(
     uint32_t quant_type_up, const void* w_up,
     float* y_gate, float* y_up,
     int64_t hidden, int64_t N_gate, int64_t N_up,
-    int64_t row_stride_gate, int64_t row_stride_up) {
+    int64_t row_stride_gate, int64_t row_stride_up,
+    const torch::io::ReplicatedWeight* numa_gate = nullptr,
+    const torch::io::ReplicatedWeight* numa_up = nullptr) {
 
     constexpr int64_t MAX_STACK_HIDDEN = 8192;
     float stack_buf[MAX_STACK_HIDDEN];
@@ -1631,8 +1651,8 @@ inline void cpu_fused_rmsnorm_gate_up_gemv(
     }
 #endif
 
-    cpu_quant_gemv(quant_type_gate, w_gate, x_norm, y_gate, hidden, N_gate, row_stride_gate);
-    cpu_quant_gemv(quant_type_up, w_up, x_norm, y_up, hidden, N_up, row_stride_up);
+    cpu_quant_gemv(quant_type_gate, w_gate, x_norm, y_gate, hidden, N_gate, row_stride_gate, numa_gate);
+    cpu_quant_gemv(quant_type_up, w_up, x_norm, y_up, hidden, N_up, row_stride_up, numa_up);
 
     if (hidden > MAX_STACK_HIDDEN) std::free(x_norm);
 }

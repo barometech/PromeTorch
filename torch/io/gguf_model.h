@@ -3,6 +3,7 @@
 #include "torch/io/gguf_loader.h"
 #include "torch/io/gguf_dequant.h"
 #include "torch/io/cpu_quant_gemv.h"
+#include "torch/io/numa_weight_replica.h"
 #include "torch/io/speculative_decode.h"
 #include "torch/io/sliding_window_attn.h"
 #include "torch/io/sparse_gemv.h"
@@ -151,6 +152,11 @@ struct QuantizedWeight {
     bool is_q8_0() const { return quant_type == 8; }  // GGML_TYPE_Q8_0
 
     bool mmap_owned = false;  // true if cpu_data points into mmap region (don't free!)
+
+    // Optional: per-NUMA-node local copies of cpu_data, built lazily when
+    // PT_NUMA_REPLICATE=1. When populated, GEMV can pick `replica.get(node)`
+    // instead of `cpu_data` to read weights from thread's local DDR.
+    torch::io::ReplicatedWeight numa_replica;
 
     void free_gpu() {
         gpu_data = nullptr;
@@ -1429,9 +1435,43 @@ public:
         // fallback: malloc + memcpy (~9s for 2.5GB)
         load_quantized_mmap(reader);
 
+        // Optional: replicate hot weights across NUMA nodes (PT_NUMA_REPLICATE=1).
+        // Each worker thread then reads from its local DDR controller at full
+        // per-channel bandwidth instead of contending through a single node's
+        // DDR via the inter-chip interconnect.
+        replicate_weights_for_numa();
+
         auto t_end = std::chrono::high_resolution_clock::now();
         double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
         std::cout << "\n[Model] Loaded in " << (ms / 1000.0) << " seconds" << std::endl;
+    }
+
+    // Replicate the hot CPU weights (ffn_gate/up/down, attn_output) across NUMA
+    // nodes. Safe no-op when PT_NUMA_REPLICATE is not set or libnuma missing.
+    // Only replicates weights whose cpu_data is non-null (CPU-loaded models).
+    void replicate_weights_for_numa() {
+        int n = torch::io::numa_replicate_count();
+        if (n <= 1) return;
+
+        auto rep = [&](QuantizedWeight& qw) {
+            if (!qw.valid || !qw.cpu_data || qw.total_bytes == 0) return;
+            qw.numa_replica.replicate(qw.cpu_data, qw.total_bytes);
+        };
+
+        size_t total_bytes = 0;
+        for (auto& layer : layers) {
+            rep(layer.q_ffn_gate);
+            rep(layer.q_ffn_up);
+            rep(layer.q_ffn_down);
+            rep(layer.q_attn_output);
+            total_bytes += layer.q_ffn_gate.total_bytes +
+                           layer.q_ffn_up.total_bytes +
+                           layer.q_ffn_down.total_bytes +
+                           layer.q_attn_output.total_bytes;
+        }
+        std::cout << "[NUMA] Replicated hot weights across " << n << " nodes ("
+                  << (total_bytes * n / (1024.0 * 1024.0)) << " MB total allocated)"
+                  << std::endl;
     }
 
     // ========================================================================
@@ -2432,7 +2472,8 @@ public:
 
             if (use_quant_gemv_ && layer.q_attn_output.valid && layer.q_attn_output.cpu_data) {
                 cpu_quant::cpu_quant_gemv(layer.q_attn_output.quant_type, layer.q_attn_output.cpu_data,
-                    sp.attn_buf, sp.h_buf, q_dim, layer.q_attn_output.rows, layer.q_attn_output.row_stride_bytes);
+                    sp.attn_buf, sp.h_buf, q_dim, layer.q_attn_output.rows, layer.q_attn_output.row_stride_bytes,
+                    &layer.q_attn_output.numa_replica);
             } else if (layer.attn_output.defined()) {
                 // Float32 fallback
                 const float* w = layer.attn_output.data_ptr<float>();
@@ -2475,7 +2516,8 @@ public:
                     layer.q_ffn_up.quant_type, layer.q_ffn_up.cpu_data,
                     sp.gate_buf, sp.up_buf,
                     H, layer.q_ffn_gate.rows, layer.q_ffn_up.rows,
-                    layer.q_ffn_gate.row_stride_bytes, layer.q_ffn_up.row_stride_bytes);
+                    layer.q_ffn_gate.row_stride_bytes, layer.q_ffn_up.row_stride_bytes,
+                    &layer.q_ffn_gate.numa_replica, &layer.q_ffn_up.numa_replica);
             } else {
                 // Fallback: separate RMSNorm + GEMVs
                 float norm2_buf[8192];
@@ -2499,18 +2541,20 @@ public:
             }
 
             // -- SiLU(gate) * up: in-place into gate_buf --
+            // Parallelized: std::exp on E2K libm is scalar software, ~200ns/call.
+            // Per layer inter=9728 × 8 exps per AVX2 iter (prev scalar fallback)
+            // = ~10K exps/layer × 36 = 350K/token = ~70 ms serial. Fan-out across
+            // 24 threads cuts this to single-digit ms.
+            c10::get_thread_pool().parallel_for(0, inter, [&](int64_t s, int64_t e) {
+                int64_t j = s;
 #ifdef __AVX2__
-            {
-                int64_t j = 0;
                 __m256 one = _mm256_set1_ps(1.0f);
-                __m256 neg_one = _mm256_set1_ps(-1.0f);
-                for (; j + 7 < inter; j += 8) {
+                for (; j + 7 < e; j += 8) {
                     __m256 g = _mm256_loadu_ps(sp.gate_buf + j);
                     __m256 u = _mm256_loadu_ps(sp.up_buf + j);
-                    __m256 neg_g = _mm256_mul_ps(g, neg_one);
+                    __m256 neg_g = _mm256_sub_ps(_mm256_setzero_ps(), g);
                     neg_g = _mm256_max_ps(neg_g, _mm256_set1_ps(-88.0f));
                     neg_g = _mm256_min_ps(neg_g, _mm256_set1_ps(88.0f));
-                    // Scalar exp fallback (same as existing code)
                     float tmp[8];
                     _mm256_storeu_ps(tmp, neg_g);
                     __m256 exp_neg_g = _mm256_set_ps(
@@ -2520,17 +2564,12 @@ public:
                     __m256 silu = _mm256_mul_ps(g, sigmoid);
                     _mm256_storeu_ps(sp.gate_buf + j, _mm256_mul_ps(silu, u));
                 }
-                for (; j < inter; ++j) {
+#endif
+                for (; j < e; ++j) {
                     float g = sp.gate_buf[j];
                     sp.gate_buf[j] = (g / (1.0f + std::exp(-g))) * sp.up_buf[j];
                 }
-            }
-#else
-            for (int64_t j = 0; j < inter; ++j) {
-                float g = sp.gate_buf[j];
-                sp.gate_buf[j] = (g / (1.0f + std::exp(-g))) * sp.up_buf[j];
-            }
-#endif
+            }, /*min_grain=*/256);
 
             // -- Post-FFN norm (Gemma3) --
             // Applied to gate_buf before down projection
@@ -2548,7 +2587,8 @@ public:
                                     sparse_ffn_[i * 3 + 2]);
                 } else {
                     cpu_quant::cpu_quant_gemv(layer.q_ffn_down.quant_type, layer.q_ffn_down.cpu_data,
-                        sp.gate_buf, sp.h_buf, inter, layer.q_ffn_down.rows, layer.q_ffn_down.row_stride_bytes);
+                        sp.gate_buf, sp.h_buf, inter, layer.q_ffn_down.rows, layer.q_ffn_down.row_stride_bytes,
+                        &layer.q_ffn_down.numa_replica);
                 }
             }
 
@@ -2839,7 +2879,8 @@ public:
                     layer.q_ffn_up.quant_type, layer.q_ffn_up.cpu_data,
                     sp.gate_buf, sp.up_buf,
                     H, layer.q_ffn_gate.rows, layer.q_ffn_up.rows,
-                    layer.q_ffn_gate.row_stride_bytes, layer.q_ffn_up.row_stride_bytes);
+                    layer.q_ffn_gate.row_stride_bytes, layer.q_ffn_up.row_stride_bytes,
+                    &layer.q_ffn_gate.numa_replica, &layer.q_ffn_up.numa_replica);
             } else {
                 float nb[8192];
                 float* xn = (H <= 8192) ? nb : static_cast<float*>(std::malloc(H * sizeof(float)));
@@ -2875,7 +2916,8 @@ public:
                                     sparse_ffn_[i * 3 + 2]);
                 } else {
                     cpu_quant::cpu_quant_gemv(layer.q_ffn_down.quant_type, layer.q_ffn_down.cpu_data,
-                        sp.gate_buf, sp.h_buf, inter, layer.q_ffn_down.rows, layer.q_ffn_down.row_stride_bytes);
+                        sp.gate_buf, sp.h_buf, inter, layer.q_ffn_down.rows, layer.q_ffn_down.row_stride_bytes,
+                        &layer.q_ffn_down.numa_replica);
                 }
             }
 

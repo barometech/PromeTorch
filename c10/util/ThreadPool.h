@@ -33,7 +33,54 @@
 #include <cstdint>
 #include <cstdlib>
 
+#if defined(__linux__) && !defined(_WIN32)
+#  define _GNU_SOURCE
+#  include <sched.h>
+#  include <pthread.h>
+#  if __has_include(<numa.h>)
+#    include <numa.h>
+#    define C10_HAS_LIBNUMA 1
+#  else
+#    define C10_HAS_LIBNUMA 0
+#  endif
+#else
+#  define C10_HAS_LIBNUMA 0
+#endif
+
 namespace c10 {
+
+// Per-thread NUMA node id. Written once on worker start (or on demand for
+// the main thread). Read by NUMA-aware code paths (e.g. quant GEMV with
+// per-node weight replicas) to pick the correct local copy.
+inline thread_local int t_numa_node = -1;
+
+// Query or lazily-initialize current thread's NUMA node. Returns 0 if the
+// system has no NUMA API. Safe to call from any thread, any time.
+inline int current_numa_node() {
+    if (t_numa_node >= 0) return t_numa_node;
+#if defined(__linux__) && !defined(_WIN32)
+    int cpu = sched_getcpu();
+    if (cpu < 0) { t_numa_node = 0; return 0; }
+#  if C10_HAS_LIBNUMA
+    if (numa_available() >= 0) {
+        int n = numa_node_of_cpu(cpu);
+        t_numa_node = (n < 0) ? 0 : n;
+        return t_numa_node;
+    }
+#  endif
+    // Fallback without libnuma: assume homogeneous layout where cores are
+    // packed per node. Env PT_CORES_PER_NODE overrides default 8 (Elbrus
+    // E8C2). Good-enough heuristic for single-socket NUMA boxes.
+    int cores_per = 8;
+    const char* env = std::getenv("PT_CORES_PER_NODE");
+    if (env && env[0]) { int v = std::atoi(env); if (v > 0) cores_per = v; }
+    t_numa_node = cpu / cores_per;
+    return t_numa_node;
+#else
+    t_numa_node = 0;
+    return 0;
+#endif
+}
 
 class ThreadPool {
 public:
@@ -54,8 +101,16 @@ public:
             if (num_threads <= 0) num_threads = 4;
         }
         num_threads_ = num_threads;
+        // If PT_PIN_THREADS=1 we spread worker i across cores round-robin,
+        // one core per worker. This is what OMP_PLACES=cores OMP_PROC_BIND=close
+        // does for OpenMP pools, but our std::thread pool doesn't inherit that.
+        pin_enabled_ = false;
+        {
+            const char* env = std::getenv("PT_PIN_THREADS");
+            if (env && env[0] == '1') pin_enabled_ = true;
+        }
         for (int i = 0; i < num_threads; i++) {
-            workers_.emplace_back(&ThreadPool::worker_loop, this);
+            workers_.emplace_back(&ThreadPool::worker_loop, this, i);
         }
     }
 
@@ -141,7 +196,27 @@ public:
     int num_threads() const { return num_threads_; }
 
 private:
-    void worker_loop() {
+    void worker_loop(int worker_id) {
+#if defined(__linux__) && !defined(_WIN32)
+        // Optional affinity pin: worker i → core i (round-robin over available).
+        // With NUMA-aware pinning, workers pin to specific NUMA nodes so the
+        // per-thread t_numa_node cache stays stable, and the NUMA replica
+        // fetch in GEMV returns the same local pointer every iteration.
+        if (pin_enabled_) {
+            int ncpu = static_cast<int>(std::thread::hardware_concurrency());
+            if (ncpu <= 0) ncpu = 1;
+            int cpu = worker_id % ncpu;
+            cpu_set_t cs;
+            CPU_ZERO(&cs);
+            CPU_SET(cpu, &cs);
+            pthread_setaffinity_np(pthread_self(), sizeof(cs), &cs);
+        }
+#endif
+        // Prime thread-local NUMA node cache so first parallel_for doesn't
+        // pay sched_getcpu+numa_node_of_cpu latency on the critical path.
+        (void)current_numa_node();
+        (void)worker_id;
+
         while (true) {
             std::function<void()> task;
             {
@@ -163,6 +238,7 @@ private:
     std::condition_variable done_cv_;    // FIX 3.3: wake main thread
     bool stop_ = false;
     int num_threads_;
+    bool pin_enabled_ = false;  // PT_PIN_THREADS=1 → 1 worker per core
 };
 
 // Global thread pool singleton — created once, lives forever
