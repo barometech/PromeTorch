@@ -3320,12 +3320,30 @@ public:
             // ============================================================
             auto slice_k_blocks = [&](const QuantizedWeight& full, TPSlicedWeight& out,
                                        int64_t& k_start_out, int64_t& k_end_out,
-                                       int64_t& k_local_out) -> bool {
-                if (!full.valid || !full.cpu_data || full.quant_type != 12 /* Q4_K */) {
+                                       int64_t& k_local_out, const char* dbg_name) -> bool {
+                // Q4_K (qtype=12) + Q6_K (qtype=14) supported. Both use 256-element
+                // super-blocks; byte sizes differ (144 vs 210).
+                if (!full.valid || !full.cpu_data) {
+                    std::cerr << "[TP slice_k] " << dbg_name
+                              << " fail: valid=" << full.valid
+                              << " cpu=" << (full.cpu_data != nullptr) << std::endl;
+                    return false;
+                }
+                int64_t bytes_per_block;
+                if (full.quant_type == 12) bytes_per_block = 144;       // Q4_K
+                else if (full.quant_type == 14) bytes_per_block = 210;  // Q6_K
+                else {
+                    std::cerr << "[TP slice_k] " << dbg_name
+                              << " unsupported qtype=" << full.quant_type
+                              << " (will use replicated fallback)" << std::endl;
                     return false;
                 }
                 int64_t K_full = full.cols;
-                if (K_full % 256 != 0) return false;
+                if (K_full % 256 != 0) {
+                    std::cerr << "[TP slice_k] " << dbg_name << " K_full=" << K_full
+                              << " not multiple of 256" << std::endl;
+                    return false;
+                }
                 int64_t total_blocks = K_full / 256;
                 int64_t per_rank = total_blocks / nprocs;
                 int64_t rem = total_blocks % nprocs;
@@ -3333,7 +3351,6 @@ public:
                 int64_t local_blocks = per_rank + (rank < rem ? 1 : 0);
                 int64_t k_end = k_start + local_blocks;
 
-                constexpr int64_t bytes_per_block = 144;  // Q4_K super-block
                 int64_t local_row_stride = local_blocks * bytes_per_block;
                 int64_t full_row_stride = full.row_stride_bytes;
                 int64_t total_local_bytes = full.rows * local_row_stride;
@@ -3363,20 +3380,15 @@ public:
                 return true;
             };
 
-            if (!slice_k_blocks(layer.q_attn_output, tl.q_attn_output,
-                                tl.attn_output_k_start, tl.attn_output_k_end,
-                                tl.attn_output_k_local)) {
-                std::cerr << "[TP] failed to K-slice layer " << i << " attn_output" << std::endl;
-                tp_.enabled = false;
-                return false;
-            }
-            if (!slice_k_blocks(layer.q_ffn_down, tl.q_ffn_down,
-                                tl.ffn_down_k_start, tl.ffn_down_k_end,
-                                tl.ffn_down_k_local)) {
-                std::cerr << "[TP] failed to K-slice layer " << i << " ffn_down" << std::endl;
-                tp_.enabled = false;
-                return false;
-            }
+            // K-slicing for Q4_K only. Q5_K/Q6_K fall back to replicated path
+            // (marked via tl.q_attn_output.valid=false; forward will see valid=0
+            // and use the full-weight zero-padded path).
+            slice_k_blocks(layer.q_attn_output, tl.q_attn_output,
+                           tl.attn_output_k_start, tl.attn_output_k_end,
+                           tl.attn_output_k_local, "attn_output");
+            slice_k_blocks(layer.q_ffn_down, tl.q_ffn_down,
+                           tl.ffn_down_k_start, tl.ffn_down_k_end,
+                           tl.ffn_down_k_local, "ffn_down");
         }
 
         // Allocate scratch buffers (local dims for Q/K/V/gate/up,
@@ -3597,17 +3609,13 @@ public:
                 throw std::runtime_error("TP: post_attention_norm unsupported (Gemma3 not yet wired)");
             }
 
-            // --- Output projection (K-sliced, RowParallel) → h_buf ---
-            // Each rank has K-slice of W_o and its head-slice of attention output.
-            // K-ranges of attn_output weight and attention heads are co-aligned
-            // (rank r's heads map to super-blocks [r*k_blocks .. (r+1)*k_blocks)).
-            // Rank r computes: h_partial = W_o[:, k_start:k_end] @ attn_local_slice
-            // Then AllReduce-sum across ranks.
+            // --- Output projection ---
+            // Fast path: K-sliced RowParallel (only Q4_K weights). Each rank
+            // computes h_partial = W_o[:, k_start:k_end] @ attn_local_slice
+            // then AllReduce-sum. Fallback: replicated full GEMV on zero-
+            // padded attn_full_buf + AllReduce-sum (Q5_K/Q6_K/F16).
             float* h_buf = tp_.h_buf.data();
             if (tl.q_attn_output.valid && tl.q_attn_output.cpu_data) {
-                // Local K-slice input: rank's heads are laid in attn_full_buf at
-                // offset rank*q_dim_local of length q_dim_local.
-                // K-split of W_o matches because q_dim_local is aligned to 256.
                 const float* input_slice = tp_.attn_full_buf.data() + (tp_.rank * tp_.q_dim_local);
                 int64_t local_blocks = tl.attn_output_k_end - tl.attn_output_k_start;
                 cpu_quant::cpu_quant_gemv_k_slice(
@@ -3618,6 +3626,12 @@ public:
                     local_blocks,
                     tl.q_attn_output.rows,             // full H
                     tl.q_attn_output.row_stride_bytes);
+            } else if (use_quant_gemv_ && layer.q_attn_output.valid && layer.q_attn_output.cpu_data) {
+                // Fallback: replicated GEMV (original path, Q5_K/Q6_K compatible)
+                cpu_quant::cpu_quant_gemv(
+                    layer.q_attn_output.quant_type, layer.q_attn_output.cpu_data,
+                    tp_.attn_full_buf.data(), h_buf, q_dim,
+                    layer.q_attn_output.rows, layer.q_attn_output.row_stride_bytes);
             } else if (layer.attn_output.defined()) {
                 // Fallback (non-Q4_K or CPU float): replicated full GEMV + AllReduce.
                 const float* w = layer.attn_output.data_ptr<float>();
@@ -3658,16 +3672,19 @@ public:
                 cpu_quant::cpu_quant_gemv(tl.q_ffn_up.quant_type, tl.q_ffn_up.cpu_data,
                     x_normed.data(), up_l, H, tl.q_ffn_up.rows, tl.q_ffn_up.row_stride_bytes);
 
-            // --- SiLU(gate) * up, local; keep in local buffer (no zero-pad).
-            // silu_local_buf length = tp_.inter_local (= rank's K-slice of inter).
-            std::vector<float> silu_local(tp_.inter_local);
-            for (int64_t j = 0; j < tp_.inter_local; ++j) {
-                float g = gate_l[j];
-                silu_local[j] = (g / (1.0f + std::exp(-g))) * up_l[j];
-            }
-
-            // --- FFN down (K-sliced, RowParallel) → h_buf partial ---
+            // --- SiLU(gate) * up ---
+            // Two paths:
+            //   A) Fast (Q4_K ffn_down): local compact buffer [inter_local],
+            //      passed to k_slice gemv.
+            //   B) Fallback (Q5_K/Q6_K): zero-padded silu_full_buf, replicated
+            //      full gemv + AllReduce-sum.
             if (tl.q_ffn_down.valid && tl.q_ffn_down.cpu_data) {
+                // Fast: compact silu_local.
+                std::vector<float> silu_local(tp_.inter_local);
+                for (int64_t j = 0; j < tp_.inter_local; ++j) {
+                    float g = gate_l[j];
+                    silu_local[j] = (g / (1.0f + std::exp(-g))) * up_l[j];
+                }
                 int64_t local_blocks = tl.ffn_down_k_end - tl.ffn_down_k_start;
                 cpu_quant::cpu_quant_gemv_k_slice(
                     tl.q_ffn_down.quant_type,
@@ -3677,6 +3694,17 @@ public:
                     local_blocks,
                     tl.q_ffn_down.rows,                   // full H
                     tl.q_ffn_down.row_stride_bytes);
+            } else if (use_quant_gemv_ && layer.q_ffn_down.valid && layer.q_ffn_down.cpu_data) {
+                // Fallback: zero-padded silu_full_buf + replicated full gemv.
+                std::fill(tp_.silu_full_buf.begin(), tp_.silu_full_buf.end(), 0.0f);
+                for (int64_t j = 0; j < tp_.inter_local; ++j) {
+                    float g = gate_l[j];
+                    tp_.silu_full_buf[tp_.inter_offset + j] = (g / (1.0f + std::exp(-g))) * up_l[j];
+                }
+                cpu_quant::cpu_quant_gemv(
+                    layer.q_ffn_down.quant_type, layer.q_ffn_down.cpu_data,
+                    tp_.silu_full_buf.data(), h_buf, inter,
+                    layer.q_ffn_down.rows, layer.q_ffn_down.row_stride_bytes);
             }
 
             if (layer.post_ffw_norm.defined()) {

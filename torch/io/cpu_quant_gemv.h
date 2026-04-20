@@ -925,6 +925,292 @@ inline void q5k_gemv_scalar(const void* weight_data, const float* x,
 }
 
 // ============================================================================
+// K-sliced GEMV (for row-parallel / K-dim Tensor Parallel)
+//
+// Operates on a **compacted** weight buffer: the caller copies only a K-range
+// [k_start_block..k_end_block) of super-blocks from each row into a rank-local
+// buffer whose row_stride_bytes = local_blocks * bytes_per_block.
+//
+// The input x is the **local slice** of length k_local = (k_end-k_start)*256
+// (already trimmed by caller; matches this rank's k-range globally).
+//
+// Output y has length N (full N rows — each rank produces full N). The result
+// is a **partial sum** across K: y_partial = W[n, k_start*256:k_end*256] @ x
+// All ranks must then AllReduce-sum their y to recover the full N-vector.
+//
+// NOTE: the caller is responsible for the NUMA-local copy of the sliced weight;
+// we just read from the provided buffer assuming [N, k_local_blocks*bytes] layout.
+// ============================================================================
+
+#ifdef __AVX2__
+// Q4_K K-slice — same code path as q4k_gemv_avx2 but with local_blocks
+// super-blocks per row (no outer K, only blocks [0..local_blocks) read).
+inline void q4k_gemv_k_slice_avx2(const void* sliced_weight, const float* x_local,
+                                   float* y, int64_t local_blocks, int64_t N,
+                                   int64_t local_row_stride_bytes) {
+    const uint8_t* raw = static_cast<const uint8_t*>(sliced_weight);
+    const int64_t K_local = local_blocks * 256;
+    const int64_t nb_q8 = K_local / 32;
+
+    Q8Block* x_q8;
+    Q8Block x_q8_stack[512];  // covers K_local up to 16384
+    std::unique_ptr<Q8Block[]> x_q8_heap;
+    if (nb_q8 <= 512) {
+        x_q8 = x_q8_stack;
+    } else {
+        x_q8_heap.reset(new Q8Block[nb_q8]);
+        x_q8 = x_q8_heap.get();
+    }
+    quantize_x_q8(x_local, x_q8, K_local);
+
+    const __m256i mask_lo4 = _mm256_set1_epi8(0x0F);
+    const __m256i ones_16 = _mm256_set1_epi16(1);
+
+    c10::get_thread_pool().parallel_for(0, N, [&](int64_t start, int64_t end) {
+        int64_t n = start;
+        for (; n + 1 < end; n += 2) {
+            const uint8_t* row0 = raw + n * local_row_stride_bytes;
+            const uint8_t* row1 = raw + (n + 1) * local_row_stride_bytes;
+            float sum0 = 0.0f, sum1 = 0.0f;
+
+            for (int64_t bi = 0; bi < local_blocks; ++bi) {
+                const uint8_t* blk0 = row0 + bi * 144;
+                const uint8_t* blk1 = row1 + bi * 144;
+                const Q8Block* xq = x_q8 + bi * 8;
+
+                uint16_t d0_bits, dmin0_bits, d1_bits, dmin1_bits;
+                std::memcpy(&d0_bits, blk0, 2);
+                std::memcpy(&dmin0_bits, blk0 + 2, 2);
+                std::memcpy(&d1_bits, blk1, 2);
+                std::memcpy(&dmin1_bits, blk1 + 2, 2);
+                const float d_r0 = gguf::fp16_to_fp32(d0_bits);
+                const float dmin_r0 = gguf::fp16_to_fp32(dmin0_bits);
+                const float d_r1 = gguf::fp16_to_fp32(d1_bits);
+                const float dmin_r1 = gguf::fp16_to_fp32(dmin1_bits);
+                const uint8_t* sc0 = blk0 + 4;
+                const uint8_t* sc1 = blk1 + 4;
+                const uint8_t* qs0 = blk0 + 16;
+                const uint8_t* qs1 = blk1 + 16;
+
+                int q8_idx = 0;
+                for (int j = 0; j < 256; j += 64) {
+                    int is = j / 32;
+                    uint8_t sc_a0, m_a0, sc_b0, m_b0;
+                    uint8_t sc_a1, m_a1, sc_b1, m_b1;
+                    gguf::get_scale_min_k4(is, sc0, &sc_a0, &m_a0);
+                    gguf::get_scale_min_k4(is + 1, sc0, &sc_b0, &m_b0);
+                    gguf::get_scale_min_k4(is, sc1, &sc_a1, &m_a1);
+                    gguf::get_scale_min_k4(is + 1, sc1, &sc_b1, &m_b1);
+
+                    __m256i q8_lo = _mm256_loadu_si256(
+                        reinterpret_cast<const __m256i*>(xq[q8_idx].qs));
+                    __m256i q8_hi = _mm256_loadu_si256(
+                        reinterpret_cast<const __m256i*>(xq[q8_idx + 1].qs));
+                    float dx_lo = xq[q8_idx].d;
+                    float dx_hi = xq[q8_idx + 1].d;
+                    float sx_lo = xq[q8_idx].sum;
+                    float sx_hi = xq[q8_idx + 1].sum;
+
+                    // Row 0
+                    __m256i raw0 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(qs0));
+                    __m256i q4_lo0 = _mm256_and_si256(raw0, mask_lo4);
+                    __m256i q4_hi0 = _mm256_and_si256(_mm256_srli_epi16(raw0, 4), mask_lo4);
+                    __m256i p0_lo16 = _mm256_maddubs_epi16(q4_lo0, q8_lo);
+                    __m256i p0_lo32 = _mm256_madd_epi16(p0_lo16, ones_16);
+                    __m256i p0_hi16 = _mm256_maddubs_epi16(q4_hi0, q8_hi);
+                    __m256i p0_hi32 = _mm256_madd_epi16(p0_hi16, ones_16);
+                    __m128i t0 = _mm_add_epi32(_mm256_castsi256_si128(p0_lo32),
+                                                _mm256_extracti128_si256(p0_lo32, 1));
+                    t0 = _mm_add_epi32(t0, _mm_shuffle_epi32(t0, _MM_SHUFFLE(1,0,3,2)));
+                    t0 = _mm_add_epi32(t0, _mm_shuffle_epi32(t0, _MM_SHUFFLE(2,3,0,1)));
+                    int32_t is0_lo = _mm_cvtsi128_si32(t0);
+                    __m128i t1 = _mm_add_epi32(_mm256_castsi256_si128(p0_hi32),
+                                                _mm256_extracti128_si256(p0_hi32, 1));
+                    t1 = _mm_add_epi32(t1, _mm_shuffle_epi32(t1, _MM_SHUFFLE(1,0,3,2)));
+                    t1 = _mm_add_epi32(t1, _mm_shuffle_epi32(t1, _MM_SHUFFLE(2,3,0,1)));
+                    int32_t is0_hi = _mm_cvtsi128_si32(t1);
+                    sum0 += d_r0 * sc_a0 * dx_lo * (float)is0_lo - dmin_r0 * m_a0 * sx_lo;
+                    sum0 += d_r0 * sc_b0 * dx_hi * (float)is0_hi - dmin_r0 * m_b0 * sx_hi;
+
+                    // Row 1
+                    __m256i raw1 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(qs1));
+                    __m256i q4_lo1 = _mm256_and_si256(raw1, mask_lo4);
+                    __m256i q4_hi1 = _mm256_and_si256(_mm256_srli_epi16(raw1, 4), mask_lo4);
+                    __m256i p1_lo16 = _mm256_maddubs_epi16(q4_lo1, q8_lo);
+                    __m256i p1_lo32 = _mm256_madd_epi16(p1_lo16, ones_16);
+                    __m256i p1_hi16 = _mm256_maddubs_epi16(q4_hi1, q8_hi);
+                    __m256i p1_hi32 = _mm256_madd_epi16(p1_hi16, ones_16);
+                    __m128i t2 = _mm_add_epi32(_mm256_castsi256_si128(p1_lo32),
+                                                _mm256_extracti128_si256(p1_lo32, 1));
+                    t2 = _mm_add_epi32(t2, _mm_shuffle_epi32(t2, _MM_SHUFFLE(1,0,3,2)));
+                    t2 = _mm_add_epi32(t2, _mm_shuffle_epi32(t2, _MM_SHUFFLE(2,3,0,1)));
+                    int32_t is1_lo = _mm_cvtsi128_si32(t2);
+                    __m128i t3 = _mm_add_epi32(_mm256_castsi256_si128(p1_hi32),
+                                                _mm256_extracti128_si256(p1_hi32, 1));
+                    t3 = _mm_add_epi32(t3, _mm_shuffle_epi32(t3, _MM_SHUFFLE(1,0,3,2)));
+                    t3 = _mm_add_epi32(t3, _mm_shuffle_epi32(t3, _MM_SHUFFLE(2,3,0,1)));
+                    int32_t is1_hi = _mm_cvtsi128_si32(t3);
+                    sum1 += d_r1 * sc_a1 * dx_lo * (float)is1_lo - dmin_r1 * m_a1 * sx_lo;
+                    sum1 += d_r1 * sc_b1 * dx_hi * (float)is1_hi - dmin_r1 * m_b1 * sx_hi;
+
+                    qs0 += 32;
+                    qs1 += 32;
+                    q8_idx += 2;
+                }
+            }
+            y[n] = sum0;
+            y[n + 1] = sum1;
+        }
+        if (n < end) {
+            const uint8_t* row_data = raw + n * local_row_stride_bytes;
+            float sum = 0.0f;
+            for (int64_t bi = 0; bi < local_blocks; ++bi) {
+                sum += q4k_q8_dot_avx2(row_data + bi * 144, x_q8 + bi * 8);
+            }
+            y[n] = sum;
+        }
+    }, 1);
+}
+#endif
+
+// Scalar fallback for Q4_K K-slice
+inline void q4k_gemv_k_slice_scalar(const void* sliced_weight, const float* x_local,
+                                      float* y, int64_t local_blocks, int64_t N,
+                                      int64_t local_row_stride_bytes) {
+    const uint8_t* raw = static_cast<const uint8_t*>(sliced_weight);
+
+    c10::get_thread_pool().parallel_for(0, N, [&](int64_t start, int64_t end) {
+    for (int64_t n = start; n < end; ++n) {
+        const uint8_t* row_data = raw + n * local_row_stride_bytes;
+        float dot = 0.0f;
+
+        for (int64_t bi = 0; bi < local_blocks; ++bi) {
+            const uint8_t* block = row_data + bi * 144;
+            const int64_t base_k = bi * 256;  // index into x_local
+
+            uint16_t d_bits, dmin_bits;
+            std::memcpy(&d_bits, block, 2);
+            std::memcpy(&dmin_bits, block + 2, 2);
+            const float d = gguf::fp16_to_fp32(d_bits);
+            const float dmin = gguf::fp16_to_fp32(dmin_bits);
+            const uint8_t* scales = block + 4;
+            const uint8_t* qs = block + 16;
+
+            int is = 0;
+            for (int j = 0; j < 256; j += 64) {
+                uint8_t sc, m_val;
+                gguf::get_scale_min_k4(is, scales, &sc, &m_val);
+                float d1 = d * sc;
+                float m1 = dmin * m_val;
+                gguf::get_scale_min_k4(is + 1, scales, &sc, &m_val);
+                float d2 = d * sc;
+                float m2 = dmin * m_val;
+                for (int l = 0; l < 32; ++l) {
+                    dot += (d1 * (qs[l] & 0xF) - m1) * x_local[base_k + j + l];
+                    dot += (d2 * (qs[l] >> 4) - m2) * x_local[base_k + j + 32 + l];
+                }
+                qs += 32;
+                is += 2;
+            }
+        }
+        y[n] = dot;
+    }
+    }, 1);
+}
+
+// Q6_K K-slice scalar — ffn_down in qwen3:4b / gemma3:4b uses Q6_K for
+// higher precision on the down-projection. Super-block layout same 256
+// elements, stride 210 bytes.
+inline void q6k_gemv_k_slice_scalar(const void* sliced_weight, const float* x_local,
+                                      float* y, int64_t local_blocks, int64_t N,
+                                      int64_t local_row_stride_bytes) {
+    const uint8_t* raw = static_cast<const uint8_t*>(sliced_weight);
+
+    c10::get_thread_pool().parallel_for(0, N, [&](int64_t start, int64_t end) {
+    for (int64_t n = start; n < end; ++n) {
+        const uint8_t* row_data = raw + n * local_row_stride_bytes;
+        float dot = 0.0f;
+
+        for (int64_t bi = 0; bi < local_blocks; ++bi) {
+            const uint8_t* block = row_data + bi * 210;
+            const int64_t base_k = bi * 256;  // index into x_local
+
+            const uint8_t* ql = block;
+            const uint8_t* qh = block + 128;
+            const int8_t* scales = reinterpret_cast<const int8_t*>(block + 192);
+
+            uint16_t d_bits;
+            std::memcpy(&d_bits, block + 208, 2);
+            const float d = gguf::fp16_to_fp32(d_bits);
+
+            for (int n_half = 0; n_half < 256; n_half += 128) {
+                for (int l = 0; l < 32; ++l) {
+                    int is = n_half / 16 + l / 16;
+                    int8_t q1 = static_cast<int8_t>(((ql[l] & 0xF) | (((qh[l] >> 0) & 3) << 4))) - 32;
+                    int8_t q2 = static_cast<int8_t>(((ql[l+32] & 0xF) | (((qh[l] >> 2) & 3) << 4))) - 32;
+                    int8_t q3 = static_cast<int8_t>(((ql[l] >> 4) | (((qh[l] >> 4) & 3) << 4))) - 32;
+                    int8_t q4 = static_cast<int8_t>(((ql[l+32] >> 4) | (((qh[l] >> 6) & 3) << 4))) - 32;
+
+                    dot += d * scales[is+0] * q1 * x_local[base_k + n_half + l];
+                    dot += d * scales[is+2] * q2 * x_local[base_k + n_half + l + 32];
+                    dot += d * scales[is+4] * q3 * x_local[base_k + n_half + l + 64];
+                    dot += d * scales[is+6] * q4 * x_local[base_k + n_half + l + 96];
+                }
+                ql += 64;
+                qh += 32;
+            }
+        }
+        y[n] = dot;
+    }
+    }, 1);
+}
+
+// Dispatch: K-sliced GEMV. Supports Q4_K and Q6_K. Caller must prepare
+// compacted rank-local buffer [N, local_blocks * bytes_per_block] — Q4_K
+// uses 144 bytes/block, Q6_K uses 210. Partial output → AllReduce-sum.
+inline void cpu_quant_gemv_k_slice(
+    uint32_t quant_type,
+    const void* sliced_weight,  // compacted rank-local buffer [N, local_blocks*144]
+    const float* x_local,        // length = local_blocks * 256
+    float* y,                    // length = N (partial, needs AllReduce after)
+    int64_t local_blocks,
+    int64_t N,
+    int64_t local_row_stride_bytes) {
+    switch (quant_type) {
+        case 12: // Q4_K
+#ifdef __AVX2__
+            q4k_gemv_k_slice_avx2(sliced_weight, x_local, y,
+                local_blocks, N, local_row_stride_bytes);
+#else
+            q4k_gemv_k_slice_scalar(sliced_weight, x_local, y,
+                local_blocks, N, local_row_stride_bytes);
+#endif
+            break;
+        case 14: // Q6_K
+            // Existing q6k_gemv_avx2 works on any (data, K, N, row_stride)
+            // tuple. With sliced_weight compacted and row_stride = local_blocks*210
+            // bytes, blocks_per_row = K/256 = local_blocks — identical layout.
+#ifdef __AVX2__
+            q6k_gemv_avx2(sliced_weight, x_local, y,
+                local_blocks * 256, N, local_row_stride_bytes);
+#else
+            q6k_gemv_scalar(sliced_weight, x_local, y,
+                local_blocks * 256, N, local_row_stride_bytes);
+#endif
+            break;
+        default:
+            // Q5_K / Q8_0 — unsupported k-slice fast path. Caller detects
+            // valid=false and falls back to replicated GEMV + AllReduce.
+            for (int64_t i = 0; i < N; ++i) y[i] = 0.0f / 0.0f;
+            break;
+    }
+}
+
+inline bool cpu_quant_gemv_k_slice_supported(uint32_t quant_type) {
+    return quant_type == 12;  // Q4_K only for now
+}
+
+// ============================================================================
 // Dispatch function: auto-selects AVX2 or scalar based on quant type
 // ============================================================================
 
