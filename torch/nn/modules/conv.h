@@ -18,6 +18,7 @@
 #endif
 #endif
 #include <array>
+#include <iostream>
 #include <cmath>
 #include <tuple>
 #include <vector>

@@ -456,8 +456,16 @@ public:
         int64_t in_height = input.size(2);
         int64_t in_width = input.size(3);
 
+#ifdef PT_USE_CUDA
+        // CPU-fallback bounce: loop uses raw host pointers.
+        const bool on_cuda = input.is_cuda();
+        Tensor input_eff = on_cuda ? at::to_cpu(input) : input;
+#else
+        const Tensor& input_eff = input;
+#endif
+
         Tensor output = at::zeros({batch_size, channels, output_size_[0], output_size_[1]});
-        const float* in_data = input.data_ptr<float>();
+        const float* in_data = input_eff.data_ptr<float>();
         float* out_data = output.mutable_data_ptr<float>();
 
         for (int64_t n = 0; n < batch_size; ++n) {
@@ -489,6 +497,11 @@ public:
             }
         }
 
+#ifdef PT_USE_CUDA
+        if (on_cuda) {
+            output = at::to_cuda(output);
+        }
+#endif
         return output;
     }
 

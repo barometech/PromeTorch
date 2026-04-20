@@ -86,8 +86,7 @@ struct CifarDataset {
 };
 
 // Read one .bin file (10000 records of 3073 bytes) and append to ds.
-// Returns true on success. We reserve up-front so the 154 MB train buffer
-// is allocated once instead of being grown record-by-record.
+// Bulk read entire file in one go, then split into labels + images.
 static bool append_cifar_bin(const std::string& path, CifarDataset& ds) {
     std::ifstream f(path, std::ios::binary);
     if (!f) {
@@ -96,19 +95,28 @@ static bool append_cifar_bin(const std::string& path, CifarDataset& ds) {
     }
     constexpr int64_t kPerRecord = 1 + CifarDataset::CHW;   // 3073
     constexpr int64_t kRecords = 10000;
+    constexpr int64_t kFileBytes = kRecords * kPerRecord;   // 30_730_000
 
-    ds.labels.reserve(ds.labels.size() + kRecords);
-    ds.images.reserve(ds.images.size() + kRecords * CifarDataset::CHW);
+    // Bulk read the whole file
+    std::vector<uint8_t> raw(kFileBytes);
+    f.read(reinterpret_cast<char*>(raw.data()), kFileBytes);
+    if (f.gcount() != kFileBytes) {
+        std::cerr << "  [cifar] short read in " << path
+                  << " (got " << f.gcount() << " / " << kFileBytes << ")\n";
+        return false;
+    }
 
-    std::vector<uint8_t> buf(kPerRecord);
+    const size_t old_img_size = ds.images.size();
+    ds.labels.resize(ds.labels.size() + kRecords);
+    ds.images.resize(old_img_size + kRecords * CifarDataset::CHW);
+
+    uint8_t* img_out = ds.images.data() + old_img_size;
+    uint8_t* lbl_out = ds.labels.data() + ds.labels.size() - kRecords;
+
     for (int64_t i = 0; i < kRecords; ++i) {
-        f.read(reinterpret_cast<char*>(buf.data()), kPerRecord);
-        if (f.gcount() != kPerRecord) {
-            std::cerr << "  [cifar] short read in " << path << " at record " << i << "\n";
-            return false;
-        }
-        ds.labels.push_back(buf[0]);
-        ds.images.insert(ds.images.end(), buf.begin() + 1, buf.end());
+        const uint8_t* rec = raw.data() + i * kPerRecord;
+        lbl_out[i] = rec[0];
+        std::memcpy(img_out + i * CifarDataset::CHW, rec + 1, CifarDataset::CHW);
     }
     ds.n += kRecords;
     return true;
@@ -335,17 +343,20 @@ int main(int argc, char* argv[]) {
         return 0;   // clean exit, no error
     }
     std::cout << "  train: " << train.n << " images, test: " << test.n << " images\n";
+    std::cout.flush();
 
     // --- Build model ------------------------------------------------------
     auto model = torch::vision::models::resnet20(/*num_classes=*/10);
     int64_t n_params = 0;
     for (auto* p : model->parameters()) n_params += p->data().numel();
     std::cout << "Model: ResNet-20  (" << n_params << " params)\n";
+    std::cout.flush();
 
 #ifdef PT_USE_CUDA
     if (g_device.is_cuda()) {
+        std::cout << "Moving model to CUDA...\n"; std::cout.flush();
         model->to(g_device);
-        std::cout << "Model moved to CUDA\n";
+        std::cout << "Model moved to CUDA\n"; std::cout.flush();
     }
 #endif
 
@@ -368,6 +379,7 @@ int main(int argc, char* argv[]) {
     std::cout << "\n=== Training (" << total_epochs << " epochs, bs=" << batch_size
               << ", lr=" << lr << ", momentum=" << momentum
               << ", wd=" << weight_decay << ") ===\n";
+    std::cout.flush();
 
     float best_test_acc = 0.0f;
     auto train_start = std::chrono::steady_clock::now();
@@ -396,12 +408,17 @@ int main(int argc, char* argv[]) {
             inputs = to_device(inputs);
             targets = to_device(targets);
 
+            if (step < 5 && epoch == 1) { std::cout << "  [trn] step " << step << " start\n"; std::cout.flush(); }
             optimizer.zero_grad();
+            if (step < 5 && epoch == 1) { std::cout << "  [trn] step " << step << " zg\n"; std::cout.flush(); }
             Tensor logits = model->forward(inputs);
+            if (step < 5 && epoch == 1) { std::cout << "  [trn] step " << step << " fwd\n"; std::cout.flush(); }
             Tensor loss = criterion.forward(logits, targets);
-
+            if (step < 5 && epoch == 1) { std::cout << "  [trn] step " << step << " loss\n"; std::cout.flush(); }
             torch::autograd::backward({loss});
+            if (step < 5 && epoch == 1) { std::cout << "  [trn] step " << step << " bwd\n"; std::cout.flush(); }
             optimizer.step();
+            if (step < 5 && epoch == 1) { std::cout << "  [trn] step " << step << " opt\n"; std::cout.flush(); }
 
             // -------- running stats (cheap: argmax on device, copy once) ----
             Tensor loss_cpu = move_to_cpu(loss);

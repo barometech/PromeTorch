@@ -510,6 +510,17 @@ struct BatchNorm2dBackward : public Node {
         Tensor go = grad_output.is_contiguous() ? grad_output : grad_output.contiguous();
         Tensor input = saved_input_.is_contiguous() ? saved_input_ : saved_input_.contiguous();
 
+#ifdef PT_USE_CUDA
+        // Bounce to CPU for the reference implementation below.
+        const bool was_cuda = go.is_cuda() || input.is_cuda();
+        if (go.is_cuda())    go    = at::to_cpu(go);
+        if (input.is_cuda()) input = at::to_cpu(input);
+        Tensor weight_cpu;
+        if (affine_ && saved_weight_.defined()) {
+            weight_cpu = saved_weight_.is_cuda() ? at::to_cpu(saved_weight_) : saved_weight_;
+        }
+#endif
+
         int64_t N = input.size(0);
         int64_t C = input.size(1);
         int64_t H = input.size(2);
@@ -522,7 +533,11 @@ struct BatchNorm2dBackward : public Node {
 
         const float* gamma = nullptr;
         if (affine_ && saved_weight_.defined()) {
+#ifdef PT_USE_CUDA
+            gamma = weight_cpu.data_ptr<float>();
+#else
             gamma = saved_weight_.data_ptr<float>();
+#endif
         }
 
         // --- grad_input ---
@@ -585,6 +600,13 @@ struct BatchNorm2dBackward : public Node {
         saved_mean_.clear();
         saved_var_.clear();
 
+#ifdef PT_USE_CUDA
+        if (was_cuda) {
+            grad_input = at::to_cuda(grad_input);
+            if (grad_weight.defined()) grad_weight = at::to_cuda(grad_weight);
+            if (grad_bias.defined())   grad_bias   = at::to_cuda(grad_bias);
+        }
+#endif
         return {grad_input, grad_weight, grad_bias};
     }
 
