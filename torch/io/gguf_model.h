@@ -2161,7 +2161,40 @@ public:
     // Expected speedup: ~1.5-2x over generic forward() on CPU
     // ========================================================================
 
+    // Per-section cumulative timers, summed across layers+tokens, dumped on
+    // reset. Toggle via env PT_PROFILE_LAYER=1. Near-zero overhead when off.
+    mutable struct SectionTimers {
+        bool on = false;
+        bool inited = false;
+        double qkv_ms = 0, attn_ms = 0, ao_ms = 0, gateup_ms = 0, silu_ms = 0, fdown_ms = 0;
+        int64_t tokens = 0;
+        void init() {
+            if (inited) return;
+            const char* env = std::getenv("PT_PROFILE_LAYER");
+            on = (env && env[0] == '1');
+            inited = true;
+        }
+        void dump() const {
+            if (!on || tokens == 0) return;
+            double total = qkv_ms + attn_ms + ao_ms + gateup_ms + silu_ms + fdown_ms;
+            std::fprintf(stderr,
+                "[prof] %ld tokens, avg ms/token:\n"
+                "  qkv_fused:     %6.2f\n"
+                "  attention:     %6.2f\n"
+                "  attn_output:   %6.2f\n"
+                "  gate_up_fused: %6.2f\n"
+                "  silu:          %6.2f\n"
+                "  ffn_down:      %6.2f\n"
+                "  sum:           %6.2f\n",
+                (long)tokens,
+                qkv_ms/tokens, attn_ms/tokens, ao_ms/tokens,
+                gateup_ms/tokens, silu_ms/tokens, fdown_ms/tokens,
+                total/tokens);
+        }
+    } sec_timers_;
+
     Tensor forward_decode_cpu(int64_t token_id) {
+        sec_timers_.init();
         int64_t H = config.hidden_size;
         int64_t q_dim = config.num_heads * config.head_dim;
         int64_t kv_dim = config.num_kv_heads * config.head_dim;
@@ -2263,6 +2296,14 @@ public:
                 layer.q_attn_q.cols == layer.q_attn_k.cols &&
                 layer.q_attn_q.cols == layer.q_attn_v.cols &&
                 layer.q_attn_q.row_stride_bytes == layer.q_attn_k.row_stride_bytes;
+
+            auto _t_section = std::chrono::high_resolution_clock::now();
+            auto _elapsed_ms = [&_t_section]() {
+                auto t1 = std::chrono::high_resolution_clock::now();
+                double ms = std::chrono::duration<double, std::milli>(t1 - _t_section).count();
+                _t_section = t1;
+                return ms;
+            };
 
             if (can_fuse) {
                 // FUSED: RMSNorm + QKV projection (1 RMSNorm, shared x across 3 GEMVs)
@@ -2382,6 +2423,7 @@ public:
                         k_cache, v_cache, n_kv_heads, head_dim);
                 }
 
+                if (sec_timers_.on) sec_timers_.qkv_ms += _elapsed_ms();
                 // Parallel over heads
                 c10::get_thread_pool().parallel_for(0, n_heads, [&](int64_t h_start, int64_t h_end) {
                 for (int64_t h = h_start; h < h_end; ++h) {
@@ -2462,6 +2504,7 @@ public:
                 }
                 }, 1);  // min_grain=1: parallelize across heads
             }
+            if (sec_timers_.on) sec_timers_.attn_ms += _elapsed_ms();
 
             // -- Output projection: attn_buf @ W_o -> h_buf --
             // Post-attention norm (Gemma3): in-place on attn_buf
@@ -2501,6 +2544,7 @@ public:
             for (int64_t j = 0; j < H; ++j) sp.x_buf[next][j] = sp.x_buf[cur][j] + sp.h_buf[j];
 #endif
             cur = next;
+            if (sec_timers_.on) sec_timers_.ao_ms += _elapsed_ms();
 
             // -- FFN: fused RMSNorm + gate+up GEMV --
             bool can_fuse_ffn = use_quant_gemv_ &&
@@ -2540,6 +2584,8 @@ public:
                 if (H > 8192) std::free(x_normed2);
             }
 
+            if (sec_timers_.on) sec_timers_.gateup_ms += _elapsed_ms();
+
             // -- SiLU(gate) * up: in-place into gate_buf --
             // Parallelized: std::exp on E2K libm is scalar software, ~200ns/call.
             // Per layer inter=9728 × 8 exps per AVX2 iter (prev scalar fallback)
@@ -2570,6 +2616,7 @@ public:
                     sp.gate_buf[j] = (g / (1.0f + std::exp(-g))) * sp.up_buf[j];
                 }
             }, /*min_grain=*/256);
+            if (sec_timers_.on) sec_timers_.silu_ms += _elapsed_ms();
 
             // -- Post-FFN norm (Gemma3) --
             // Applied to gate_buf before down projection
@@ -2614,7 +2661,9 @@ public:
             for (int64_t j = 0; j < H; ++j) sp.x_buf[next][j] = sp.x_buf[cur][j] + sp.h_buf[j];
 #endif
             cur = next;
+            if (sec_timers_.on) sec_timers_.fdown_ms += _elapsed_ms();
         }  // end layer loop
+        if (sec_timers_.on) sec_timers_.tokens++;
 
         // 3. Final RMS norm (in-place)
         cpu_quant::cpu_rmsnorm_inplace(sp.x_buf[cur], output_norm.data_ptr<float>(), eps, add_one, H);
@@ -3170,6 +3219,8 @@ public:
 
         std::cout << "\n\n[Generate] " << generated.size() << " tokens in "
                   << (ms / 1000.0) << "s (" << tokens_per_sec << " tok/s)" << std::endl;
+
+        sec_timers_.dump();
 
         // Print profiler report if enabled
         if (profiler.enabled()) {
