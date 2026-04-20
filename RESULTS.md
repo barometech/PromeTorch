@@ -83,6 +83,32 @@ wide Linear is PromeBLAS's hot path; MKL wins small-matmul shape class).
 
 ---
 
+## Training on CPU — DCGAN MNIST
+
+30 epochs, CPU, 5 089 s total (~170 s/epoch). Canonical DCGAN hyperparams
+(lr 2e-4, β1 0.5, latent 100). Results from [BENCH_DCGAN.md](BENCH_DCGAN.md).
+
+| Epoch | D-loss | G-loss | Visual |
+|------:|-------:|-------:|--------|
+|  1 | 0.334 | 2.44 | warm start |
+|  5 | 0.069 | 4.2  | D winning, noise era |
+| 10 | 0.315 | 3.21 | G catches up, adversarial phase begins |
+| 15 | 0.45  | 1.95 | **stable equilibrium** — emerging strokes |
+| 20 | 0.52  | 1.96 | digit topology, half readable |
+| 25 | 0.41  | 2.12 | clearer digits |
+| 30 | 0.264 | 2.47 | **0, 2, 3, 7, 8, 9 readable**, no mode collapse |
+
+Stable training end-to-end through PromeTorch autograd + BatchNorm2d +
+ConvTranspose2d + Adam. Full sample gallery:
+
+| ep 5 | ep 10 | ep 15 |
+|:---:|:---:|:---:|
+| ![](docs/screenshots/gan_samples/epoch_05.png) | ![](docs/screenshots/gan_samples/epoch_10.png) | ![](docs/screenshots/gan_samples/epoch_15.png) |
+| ep 20 | ep 25 | ep 30 |
+| ![](docs/screenshots/gan_samples/epoch_20.png) | ![](docs/screenshots/gan_samples/epoch_25.png) | ![](docs/screenshots/gan_samples/epoch_30.png) |
+
+---
+
 ## Training on CPU — VAE MNIST vs PyTorch
 
 50 epochs, identical arch (784→400→20 enc + 20→400→784 dec), Adam 1e-3.
