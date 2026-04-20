@@ -334,7 +334,7 @@ static inline void macro_kernel(
 // sgemm: C = alpha * A @ B + beta * C
 // ============================================================================
 
-static void sgemm(
+__attribute__((unused)) static void sgemm(
     int64_t M, int64_t K, int64_t N,
     float alpha,
     const float* __restrict A, int64_t lda,
@@ -412,7 +412,7 @@ static void sgemm(
 // sgemm_nt: C = alpha * A @ B^T + beta * C  (B stored as [N,K])
 // ============================================================================
 
-static void sgemm_nt(
+__attribute__((unused)) static void sgemm_nt(
     int64_t M, int64_t K, int64_t N,
     float alpha,
     const float* __restrict A, int64_t lda,
@@ -472,7 +472,7 @@ static void sgemm_nt(
 // sgemv: y = alpha * A @ x + beta * y
 // ============================================================================
 
-static void sgemv(
+__attribute__((unused)) static void sgemv(
     int64_t M, int64_t N,
     float alpha,
     const float* __restrict A, int64_t lda,
@@ -529,7 +529,7 @@ static void sgemv(
 // sdot: dot product
 // ============================================================================
 
-static float sdot(int64_t N, const float* __restrict x, const float* __restrict y) {
+__attribute__((unused)) static float sdot(int64_t N, const float* __restrict x, const float* __restrict y) {
     return vec_dot(N, x, y);
 }
 
@@ -537,7 +537,7 @@ static float sdot(int64_t N, const float* __restrict x, const float* __restrict 
 // saxpy: y = alpha * x + y
 // ============================================================================
 
-static void saxpy(int64_t N, float alpha, const float* __restrict x, float* __restrict y) {
+__attribute__((unused)) static void saxpy(int64_t N, float alpha, const float* __restrict x, float* __restrict y) {
     constexpr int W = VecF::width;
     VecF va = VecF::broadcast(alpha);
     int64_t i = 0;
