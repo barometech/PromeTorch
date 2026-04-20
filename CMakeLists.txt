@@ -1190,6 +1190,26 @@ if(PT_BUILD_TESTS)
         add_test(NAME fsdp_tests COMMAND fsdp_tests)
     endif()
 
+    # Tensor-parallel GGUF inference self-test — fork-based, POSIX only.
+    # Loads a GGUF model (path passed as CLI arg or GGUF_DDP_MODEL env var),
+    # runs single-process reference decode + world_size-process TP decode,
+    # verifies logits cos-sim >= 0.999 and argmax match.
+    add_executable(gguf_ddp_tests
+        test/cpp/test_gguf_ddp.cpp
+    )
+    target_include_directories(gguf_ddp_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}
+        ${PROJECT_SOURCE_DIR}/aten/src
+    )
+    target_link_libraries(gguf_ddp_tests PRIVATE c10 aten torch_autograd)
+    if(MSVC)
+        target_link_options(gguf_ddp_tests PRIVATE /STACK:67108864)
+    endif()
+    if(OpenMP_CXX_FOUND)
+        target_link_libraries(gguf_ddp_tests PRIVATE OpenMP::OpenMP_CXX)
+    endif()
+    # Not registered via add_test — requires a GGUF model path supplied at run-time.
+
     # DeepSpeed-style wrappers (CPU offload, 1F1B pipeline, ZeRO-3).
     # Gated behind PT_BUILD_DEEPSPEED_TESTS (default OFF) — partial from killed
     # agent burst, not fully verified. Enable after integration review.
