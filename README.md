@@ -498,42 +498,31 @@ CPU-portable, compile на Elbrus LCC. Плюс EMA + clip_grad_norm_ (`torch/op
 
 ## Быстрый старт
 
-### Сборка на x86 (Linux)
+### Сборка (Linux / macOS / WSL)
+
+Основная платформа. `g++ 9+` / `clang 10+` + CMake 3.15+ + Ninja (optional).
 
 ```bash
 git clone https://github.com/barometech/PromeTorch.git
 cd promethorch
-mkdir build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release -DPT_USE_TUDA=ON
-cmake --build . -j$(nproc)
-```
-
-### Сборка на x86 (Windows)
-
-> **ВАЖНО:** Сборка на Windows работает ТОЛЬКО из Developer Command Prompt (не из Git Bash, PowerShell или WSL). `rc.exe` не найдётся без `vcvarsall.bat`.
-
-```batch
-REM Открыть Developer Command Prompt for VS 2019 (или запустить вручную):
-call "C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64
-cd /d C:\path\to\promethorch
-mkdir build && cd build
-cmake .. -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release
-nmake
+cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DPT_USE_TUDA=ON
+cmake --build build -j$(nproc)
+ctest --test-dir build --output-on-failure  # 720+ tests
 ```
 
 ### Сборка с CUDA
 
 ```bash
-cmake .. -DCMAKE_BUILD_TYPE=Release -DPT_USE_CUDA=ON -DPT_USE_CUDNN=ON
-cmake --build . -j$(nproc)
+cmake -S . -B build -GNinja \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DPT_USE_CUDA=ON -DPT_USE_CUDNN=ON
+cmake --build build -j$(nproc)
 ```
 
-> **NVIDIA CUDA Toolkit 12.4+ required.** cuDNN 9 is supported (legacy RNN
-> API is guarded — if you need cuDNN-accelerated LSTM/GRU specifically, use
-> cuDNN 8). The anaconda-packaged CUDA 12.9 is currently missing the
-> `nv/target` header required by `cuda_fp16.h`; point `CUDA_PATH` at the
-> standalone NVIDIA installer instead. A reference batch script
-> (`build_10m_cuda124.bat`) at the repo root does this on Windows.
+Требуется NVIDIA CUDA Toolkit 12.4+. cuDNN 9 поддерживается (legacy RNN
+API guarded). На Windows есть [отдельный гайд сборки](docs/BUILD_WINDOWS.md)
+с MSVC + NVIDIA Toolkit 12.4 workaround (anaconda CUDA 12.9 missing
+`nv/target`).
 
 ### Сборка на Эльбрусе (нативно)
 
