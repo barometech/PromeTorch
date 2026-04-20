@@ -3,6 +3,60 @@
 Полная история разработки проекта. Актуальные инструкции — в `CLAUDE.md`.
 Полный аудит инфраструктуры — в `INFRASTRUCTURE_AUDIT.md`.
 
+## 2026-04-20 (PM): TP inference — SHM reduce bug + Q6_K k-slice AVX2 + ThreadPool fix (commit `6db8988`)
+
+**Контекст:** партнёр МЦСТ запросил реальные цифры Эльбрус vs A100 на qwen3:4b Q4_K_M,
+в том числе 4-процесс TP DDP. Предыдущие коммиты (`73c0b17`, `ade43cd`) завернули
+SHM AllReduce + K-sliced row-parallel ffn_down/attn_output. Но output был
+мусорный ("the neg in thes" в 2-proc), а 4-proc hang'ился на 25 минут.
+
+### Root cause 1: SHM AllReduce rank-0 reduce missing write-back
+
+Layout: `sum_slot == rank_slot(0)` by design (экономит на memcpy между ними).
+Rank 0 депонирует свой payload → sum_slot, ждёт всех, суммирует в sum_slot.
+Workers делают `memcpy(data, sum, nbytes)` и получают корректный результат.
+Rank 0 — **никогда** не копировал `sum` обратно в caller's `data`. Его output
+оставался как pre-reduce partial. 72 AllReduce/token — NaN propagation → мусор,
+в 4-proc deadlock при argmax'е по NaN-логитам.
+
+**Fix:** `memcpy(data, sum, nbytes)` в rank-0 branch после редукции.
+
+### Root cause 2: numactl `--membind` + `--preferred` конфликт
+
+`scripts/run_tp_elbrus.sh` имел все три флага — numactl на Эльбрусе выдаёт
+"Conflicting policies" и не запускает процесс. В случайных ран'ах половина
+rank'ов падала тихо. Удалил `--preferred` из всех runner'ов.
+
+### Root cause 3: ThreadPool oversubscription
+
+`c10::ThreadPool` default = `hardware_concurrency()` = 32. В 4-proc это 128
+worker threads на 32 ядрах. Добавил env override `PT_NUM_THREADS` /
+`OMP_NUM_THREADS`, чтобы каждый rank имел 8 threads (= NUMA-node size).
+
+### Root cause 4: Q6_K k-slice был скалярный
+
+Для qwen3:4b `ffn_down` — Q6_K. Скалярный `q6k_gemv_k_slice_scalar` был медленный.
+Оказалось, существующий `q6k_gemv_avx2` спокойно работает на sliced буфер —
+достаточно передать `K=local_blocks*256`, `row_stride=local_blocks*210`.
+
+### Результаты
+
+| Config | tok/s | Output |
+|--------|------:|--------|
+| 1-proc 32t | 2.8 | "the user is asking for help with a problem..." ✓ |
+| 1-proc 8t | 1.8 | same prefix ✓ |
+| 4-proc TP + SHM + k-slice (fixed) | **1.3** | "I'm a new user. I'm interested in learning..." ✓ |
+| 4-proc TP + SHM (broken, before) | hang/NaN | "the neg in thes" garbage |
+
+**TP correct, но всё ещё хуже 1-proc.** 72 AllReduce/token × NUMA cache-coherence
+overhead > compute gain. Для single-box 4-NUMA TP даёт только memory scalability
+(4× модели влезает в агрегатный DDR), не throughput. Honest next step — MT-GEMV
+within single proc (task #44), не cross-proc TP.
+
+Full bench: `BENCH_ELBRUS.md`.
+
+---
+
 ## 2026-04-19 (PM): Structural API gap sprint + critical Linear CUDA fix
 
 ### Критический CUDA баг — fused_linear_autograd
