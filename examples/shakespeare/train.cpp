@@ -297,6 +297,33 @@ int main(int argc, char* argv[]) {
         double avg = epoch_loss_count > 0 ? epoch_loss_sum / epoch_loss_count : 0.0;
         std::cout << ">>> Epoch " << (epoch + 1) << " avg loss: "
                   << std::fixed << std::setprecision(4) << avg << std::endl;
+
+        // Checkpoint generation at epochs {1, 3, 5, 10, 15}
+        int64_t e1 = epoch + 1;
+        bool is_ckpt = (e1 == 1 || e1 == 3 || e1 == 5 || e1 == 10 || e1 == 15
+                        || e1 == args.epochs);
+        if (is_ckpt) {
+            std::cout << "\n--- CHECKPOINT GEN @ epoch " << e1 << " ---" << std::endl;
+#ifdef PT_USE_CUDA
+            if (use_cuda) {
+                model->to(c10::Device(c10::DeviceType::CPU, 0));
+            }
+#endif
+            model->eval();
+            std::string prompt_ckpt = "HAMLET:";
+            std::vector<int64_t> pt_ckpt = tokenizer.encode(prompt_ckpt);
+            std::vector<int64_t> gen_ckpt = model->generate(
+                pt_ckpt, 200, 0.8, true);
+            std::string gen_text = tokenizer.decode(gen_ckpt);
+            std::cout << "GEN[epoch " << e1 << "]:\n" << gen_text
+                      << "\n--- END GEN ---\n" << std::endl;
+#ifdef PT_USE_CUDA
+            if (use_cuda) {
+                model->to(c10::Device(c10::DeviceType::CUDA, 0));
+            }
+#endif
+            model->train();
+        }
     }
 
     auto end_time = std::chrono::high_resolution_clock::now();

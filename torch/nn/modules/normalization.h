@@ -227,9 +227,20 @@ public:
         int64_t width = input.size(3);
         int64_t spatial = height * width;
 
+#ifdef PT_USE_CUDA
+        // CPU-fallback bounce: the loop body below uses raw host pointers.
+        // For CUDA tensors, copy to CPU, compute, then copy back + re-wire
+        // running_mean / running_var (which may also live on CUDA).
+        const bool on_cuda = input.is_cuda();
+        Tensor input_eff = on_cuda ? at::to_cpu(input) : input;
+        Tensor output = input_eff.clone();
+        float* out_data = output.mutable_data_ptr<float>();
+        const float* in_data = input_eff.data_ptr<float>();
+#else
         Tensor output = input.clone();
         float* out_data = output.mutable_data_ptr<float>();
         const float* in_data = input.data_ptr<float>();
+#endif
 
         std::vector<float> mean(channels, 0.0f);
         std::vector<float> var(channels, 0.0f);
@@ -270,8 +281,16 @@ public:
             if (track_running_stats_ && is_training()) {
                 Buffer* rm_buf = get_buffer("running_mean");
                 Buffer* rv_buf = get_buffer("running_var");
+#ifdef PT_USE_CUDA
+                // If running stats live on CUDA, bounce: read to CPU, update, write back.
+                Tensor rm_cpu = rm_buf->data().is_cuda() ? at::to_cpu(rm_buf->data()) : rm_buf->data();
+                Tensor rv_cpu = rv_buf->data().is_cuda() ? at::to_cpu(rv_buf->data()) : rv_buf->data();
+                float* rm = rm_cpu.mutable_data_ptr<float>();
+                float* rv = rv_cpu.mutable_data_ptr<float>();
+#else
                 float* rm = rm_buf->data().mutable_data_ptr<float>();
                 float* rv = rv_buf->data().mutable_data_ptr<float>();
+#endif
                 float mom = static_cast<float>(momentum_);
 
                 for (int64_t c = 0; c < channels; ++c) {
@@ -280,12 +299,35 @@ public:
                     float var_unbiased = (count > 1) ? var[c] * static_cast<float>(count) / static_cast<float>(count - 1) : var[c];
                     rv[c] = (1.0f - mom) * rv[c] + mom * var_unbiased;
                 }
+#ifdef PT_USE_CUDA
+                // Write running stats back to CUDA if they live there.
+                // Use raw cudaMemcpy to avoid Tensor::copy_() (which has CUDA issues).
+                if (rm_buf->data().is_cuda()) {
+                    c10::cuda::cuda_memcpy_h2d(
+                        rm_buf->data().mutable_data_ptr(),
+                        rm_cpu.data_ptr(),
+                        rm_cpu.nbytes(), nullptr);
+                }
+                if (rv_buf->data().is_cuda()) {
+                    c10::cuda::cuda_memcpy_h2d(
+                        rv_buf->data().mutable_data_ptr(),
+                        rv_cpu.data_ptr(),
+                        rv_cpu.nbytes(), nullptr);
+                }
+#endif
             }
         } else {
             Buffer* rm_buf = get_buffer("running_mean");
             Buffer* rv_buf = get_buffer("running_var");
+#ifdef PT_USE_CUDA
+            Tensor rm_cpu = rm_buf->data().is_cuda() ? at::to_cpu(rm_buf->data()) : rm_buf->data();
+            Tensor rv_cpu = rv_buf->data().is_cuda() ? at::to_cpu(rv_buf->data()) : rv_buf->data();
+            const float* rm = rm_cpu.data_ptr<float>();
+            const float* rv = rv_cpu.data_ptr<float>();
+#else
             const float* rm = rm_buf->data().data_ptr<float>();
             const float* rv = rv_buf->data().data_ptr<float>();
+#endif
             for (int64_t c = 0; c < channels; ++c) {
                 mean[c] = rm[c];
                 var[c] = rv[c];
@@ -293,8 +335,22 @@ public:
         }
 
         // Normalize
+#ifdef PT_USE_CUDA
+        Tensor w_cpu, b_cpu;
+        const float* gamma = nullptr;
+        const float* beta = nullptr;
+        if (affine_) {
+            Tensor w = get_parameter("weight")->data();
+            Tensor b = get_parameter("bias")->data();
+            w_cpu = w.is_cuda() ? at::to_cpu(w) : w;
+            b_cpu = b.is_cuda() ? at::to_cpu(b) : b;
+            gamma = w_cpu.data_ptr<float>();
+            beta  = b_cpu.data_ptr<float>();
+        }
+#else
         const float* gamma = affine_ ? get_parameter("weight")->data().data_ptr<float>() : nullptr;
         const float* beta = affine_ ? get_parameter("bias")->data().data_ptr<float>() : nullptr;
+#endif
 
         // omp removed for LCC
         for (int64_t n = 0; n < batch_size; ++n) {
@@ -311,6 +367,14 @@ public:
                 }
             }
         }
+
+#ifdef PT_USE_CUDA
+        // Move output back to CUDA if the user handed us a CUDA tensor.
+        // Do this BEFORE wiring autograd so grad_fn attaches to the returned tensor.
+        if (on_cuda) {
+            output = at::to_cuda(output);
+        }
+#endif
 
         // Wire autograd backward
         if (autograd::GradMode::is_enabled() && is_training()) {

@@ -2,6 +2,10 @@
 
 #include "aten/src/ATen/ATen.h"
 #include "torch/csrc/autograd/autograd.h"
+#ifdef PT_USE_CUDA
+#include <cuda_runtime.h>
+#include "c10/cuda/CUDAAllocator.h"  // for CUDA_CHECK macro
+#endif
 #include <memory>
 #include <string>
 #include <cstring>  // memset for fast zero_grad
@@ -108,11 +112,19 @@ public:
         // Access grad_ from base c10::AutogradMeta (no need for AutogradMetaImpl)
         auto* raw_meta = tensor_.autograd_meta();
         if (raw_meta && raw_meta->grad_) {
-            // Fast path: memset directly without constructing a Tensor wrapper.
             // Gradient tensors from backward pass are always contiguous float32.
             auto* impl = raw_meta->grad_.get();
             if (impl && impl->is_contiguous()) {
+#ifdef PT_USE_CUDA
+                if (impl->is_cuda()) {
+                    // Zero via cudaMemset; bare memset would dereference GPU ptr on host.
+                    CUDA_CHECK(cudaMemset(impl->data(), 0, impl->nbytes()));
+                } else {
+                    std::memset(impl->data(), 0, impl->nbytes());
+                }
+#else
                 std::memset(impl->data(), 0, impl->nbytes());
+#endif
             } else if (impl) {
                 Tensor g(raw_meta->grad_);
                 g.zero_();

@@ -35,6 +35,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <fstream>
 #include <iostream>
 #include <numeric>
@@ -443,7 +444,9 @@ int main(int argc, char* argv[]) {
             Tensor z_dev = to_device(fixed_z_cpu);
             Tensor samples = G->forward(z_dev);
             Tensor samples_cpu = move_to_cpu(samples);
-            std::string p = out_dir + "/gan_samples_epoch_" + std::to_string(epoch) + ".ppm";
+            char ebuf[16];
+            std::snprintf(ebuf, sizeof(ebuf), "%02d", static_cast<int>(epoch));
+            std::string p = out_dir + "/epoch_" + ebuf + ".ppm";
             save_grid_ppm(samples_cpu, p);
         }
     }
