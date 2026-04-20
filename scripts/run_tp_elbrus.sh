@@ -37,11 +37,13 @@ for rank in 0 1 2 3; do
     # buffers, SHM sum slot) to the local NUMA node's DDR. Combined with
     # --cpunodebind this gives per-rank local HBM bandwidth = 4× aggregate
     # vs 1 NUMA bottleneck.
+    # NOTE: --membind and --preferred conflict on Elbrus numactl ("Conflicting
+    # policies"). Use --membind alone for strict local allocation.
     PT_NO_NUMA_POOL=1 \
     OMP_NUM_THREADS=8 \
     OMP_PLACES=cores OMP_PROC_BIND=close \
     PT_DDP_SHM=1 \
-    numactl --cpunodebind=$rank --membind=$rank --preferred=$rank \
+    numactl --cpunodebind=$rank --membind=$rank \
         "$BIN" "$MODEL" \
         --nprocs 4 --rank $rank \
         --master-addr 127.0.0.1 --master-port 29500 \
