@@ -420,6 +420,7 @@ void init_process_group(const DDPConfig& cfg) {
             s.shm_size = total;
             s.shm_path = path;
             s.shm_enabled = true;
+            std::cout << "[DDP] SHM AllReduce enabled (" << path << ")" << std::endl;
         } else {
             // Workers: open + mmap. Retry for up to timeout_sec.
             auto deadline = std::chrono::steady_clock::now() +
