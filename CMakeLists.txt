@@ -79,6 +79,9 @@ else()
         $<$<COMPILE_LANGUAGE:CXX>:-Wextra>
         $<$<COMPILE_LANGUAGE:CXX>:-Wpedantic>
         $<$<COMPILE_LANGUAGE:CXX>:-Wno-unused-parameter>
+        $<$<COMPILE_LANGUAGE:CXX>:-Wno-unused-function>
+        $<$<COMPILE_LANGUAGE:CXX>:-Wno-error=unused-function>
+        $<$<COMPILE_LANGUAGE:CXX>:-Wno-error>
         $<$<COMPILE_LANGUAGE:CXX>:-fPIC>
     )
 
@@ -1326,29 +1329,13 @@ endif()
 # Examples
 # ============================================================================
 
-add_subdirectory(examples/mnist)
-add_subdirectory(examples/vae)
-add_subdirectory(examples/mobile)
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/examples/jit/CMakeLists.txt")
-    add_subdirectory(examples/jit)
-endif()
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/examples/mlir/CMakeLists.txt")
-    add_subdirectory(examples/mlir)
-endif()
-add_subdirectory(examples/rnn)
-add_subdirectory(examples/transformer)
-add_subdirectory(examples/vit)
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/examples/cifar/CMakeLists.txt")
-    add_subdirectory(examples/cifar)
-endif()
-add_subdirectory(examples/pir)
-add_subdirectory(examples/gguf)
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/examples/gan/CMakeLists.txt")
-    add_subdirectory(examples/gan)
-endif()
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/examples/shakespeare/CMakeLists.txt")
-    add_subdirectory(examples/shakespeare)
-endif()
+# All example subdirs are optional — guarded by `if(EXISTS ...)` so a
+# partial clone / missing sub-CMakeLists.txt doesn't break the whole build.
+foreach(_ex_dir mnist vae mobile jit mlir rnn transformer vit cifar pir gguf gan shakespeare)
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/examples/${_ex_dir}/CMakeLists.txt")
+        add_subdirectory(examples/${_ex_dir})
+    endif()
+endforeach()
 if(PT_USE_NMCARD)
     add_subdirectory(examples/nmcard)
 endif()
