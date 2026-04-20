@@ -496,6 +496,14 @@ int main(int argc, char* argv[]) {
                   << "  test_loss="  << test_avg
                   << "  (" << std::setprecision(1) << sec << " s)"
                   << std::endl;
+
+        // Intermediate sample grid snapshots at milestone epochs.
+        if (epoch == 10 || epoch == 25 || epoch == 50) {
+            Tensor snap = generate_samples(*model, 16);
+            std::string path = "run_logs/vae_samples/vae_samples_ep"
+                               + std::to_string(epoch) + ".ppm";
+            save_ppm_grid(snap, path);
+        }
     }
 
     // --- Sample quality check ---
