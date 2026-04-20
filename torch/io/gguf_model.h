@@ -1161,6 +1161,8 @@ public:
 
         if (reader.has_tensor("output.weight")) {
             upload_quant_cpu("output.weight", q_output_weight);
+        } else if (config.tie_word_embeddings && reader.has_tensor("token_embd.weight")) {
+            upload_quant_cpu("token_embd.weight", q_output_weight);
         }
 
         use_quant_gemv_ = true;
@@ -1330,6 +1332,13 @@ public:
 
         if (reader.has_tensor("output.weight")) {
             map_quant_mmap("output.weight", q_output_weight);
+            if (q_output_weight.valid) total_bytes_mapped += q_output_weight.total_bytes;
+        } else if (config.tie_word_embeddings && reader.has_tensor("token_embd.weight")) {
+            // Tied output weights: use quantized token embedding as output projection.
+            // Without this, the TP forward falls back to a scalar main-thread FP32
+            // GEMV for vocab=152k — 500+ ms/token on Elbrus, the single biggest
+            // cost of TP decode. Fixing the tie saves 50%+ of tok time.
+            map_quant_mmap("token_embd.weight", q_output_weight);
             if (q_output_weight.valid) total_bytes_mapped += q_output_weight.total_bytes;
         }
 
@@ -3554,10 +3563,48 @@ public:
     //   - Final RMSNorm + output projection: replicated (no AllReduce).
     // Returns logits [1, vocab_size] (identical on all ranks).
     // ========================================================================
+    // Per-section TP timers. Same shape as sec_timers_ but with an extra
+    // `allreduce_ms` bucket — this is the TP-unique cost we want to isolate.
+    mutable struct TPSectionTimers {
+        bool on = false;
+        bool inited = false;
+        double qkv_ms = 0, attn_ms = 0, ao_ms = 0, allreduce_ao_ms = 0;
+        double gateup_ms = 0, silu_ms = 0, fdown_ms = 0, allreduce_fdown_ms = 0;
+        double output_proj_ms = 0, tail_ms = 0;
+        int64_t tokens = 0;
+        void init() {
+            if (inited) return;
+            const char* env = std::getenv("PT_PROFILE_LAYER");
+            on = (env && env[0] == '1');
+            inited = true;
+        }
+        void dump(int rank) const {
+            if (!on || tokens == 0 || rank != 0) return;
+            double total = qkv_ms+attn_ms+ao_ms+allreduce_ao_ms+gateup_ms+silu_ms+fdown_ms
+                          +allreduce_fdown_ms+output_proj_ms+tail_ms;
+            std::fprintf(stderr,
+                "[prof-TP rank0] %ld tokens, avg ms/token:\n"
+                "  attn_phase:        %6.2f  (RMSNorm+QKV+bias+QKnorm+RoPE+KVcache+attn math)\n"
+                "  attn_output:       %6.2f\n"
+                "  allreduce(ao):     %6.2f\n"
+                "  gate_up:           %6.2f  (RMSNorm+gate+up GEMVs)\n"
+                "  ffn_down:          %6.2f  (incl. SiLU*up)\n"
+                "  allreduce(fdown):  %6.2f\n"
+                "  output_proj:       %6.2f  (final RMSNorm + full vocab GEMV)\n"
+                "  tail:              %6.2f  (embedding lookup + tensor wrap)\n"
+                "  sum:               %6.2f\n",
+                (long)tokens, attn_ms/tokens, ao_ms/tokens,
+                allreduce_ao_ms/tokens, gateup_ms/tokens,
+                fdown_ms/tokens, allreduce_fdown_ms/tokens,
+                output_proj_ms/tokens, tail_ms/tokens, total/tokens);
+        }
+    } tp_sec_timers_;
+
     Tensor forward_decode_cpu_tp(int64_t token_id) {
         if (!tp_.enabled) {
             throw std::runtime_error("forward_decode_cpu_tp: tp_ not initialized");
         }
+        tp_sec_timers_.init();
         const int64_t H          = config.hidden_size;
         const int64_t head_dim   = config.head_dim;
         const int64_t inter      = config.intermediate_size;
@@ -3589,10 +3636,20 @@ public:
         }
 
         // 2. Transformer layers
+        auto _tp_t = std::chrono::high_resolution_clock::now();
+        auto _tp_elapsed = [&_tp_t]() {
+            auto t1 = std::chrono::high_resolution_clock::now();
+            double ms = std::chrono::duration<double, std::milli>(t1 - _tp_t).count();
+            _tp_t = t1;
+            return ms;
+        };
+
         for (int64_t i = 0; i < config.num_layers; ++i) {
             const auto& layer   = layers[i];
             const auto& tl      = tp_.layers[i];
             float* x_ptr = tp_.x_buf[cur].data();
+
+            if (tp_sec_timers_.on) _tp_elapsed();  // reset baseline for this layer
 
             // --- RMSNorm(x) --- (use cpu_rmsnorm_inplace on a copy for AVX2-compatible math)
             std::vector<float> x_normed(H);
@@ -3702,6 +3759,11 @@ public:
                 throw std::runtime_error("TP: post_attention_norm unsupported (Gemma3 not yet wired)");
             }
 
+            if (tp_sec_timers_.on) tp_sec_timers_.attn_ms += _tp_elapsed();
+            // qkv+attention combined into attn_ms for now; we split by also
+            // tracking QKV upstream — done below after the simple integration
+            // proves the data. (qkv_ms initially 0, attn_ms holds combined time.)
+
             // --- Output projection ---
             // Fast path: K-sliced RowParallel (only Q4_K weights). Each rank
             // computes h_partial = W_o[:, k_start:k_end] @ attn_local_slice
@@ -3736,6 +3798,8 @@ public:
                 }
             }
 
+            if (tp_sec_timers_.on) tp_sec_timers_.ao_ms += _tp_elapsed();
+
             // --- AllReduce-sum h_buf across ranks ---
             {
                 at::Tensor h_tensor = at::empty({H});
@@ -3743,6 +3807,7 @@ public:
                 torch::distributed::all_reduce(h_tensor);
                 std::memcpy(h_buf, h_tensor.data_ptr<float>(), H * sizeof(float));
             }
+            if (tp_sec_timers_.on) tp_sec_timers_.allreduce_ao_ms += _tp_elapsed();
 
             // --- Residual add: x_next = x + h ---
             int next = 1 - cur;
@@ -3764,6 +3829,7 @@ public:
             if (tl.q_ffn_up.valid)
                 cpu_quant::cpu_quant_gemv(tl.q_ffn_up.quant_type, tl.q_ffn_up.cpu_data,
                     x_normed.data(), up_l, H, tl.q_ffn_up.rows, tl.q_ffn_up.row_stride_bytes);
+            if (tp_sec_timers_.on) tp_sec_timers_.gateup_ms += _tp_elapsed();
 
             // --- SiLU(gate) * up ---
             // Two paths:
@@ -3803,6 +3869,7 @@ public:
             if (layer.post_ffw_norm.defined()) {
                 throw std::runtime_error("TP: post_ffw_norm unsupported (Gemma3 not yet wired)");
             }
+            if (tp_sec_timers_.on) tp_sec_timers_.fdown_ms += _tp_elapsed();
 
             // --- AllReduce-sum h_buf across ranks ---
             {
@@ -3811,12 +3878,14 @@ public:
                 torch::distributed::all_reduce(h_tensor);
                 std::memcpy(h_buf, h_tensor.data_ptr<float>(), H * sizeof(float));
             }
+            if (tp_sec_timers_.on) tp_sec_timers_.allreduce_fdown_ms += _tp_elapsed();
 
             // --- Residual add ---
             next = 1 - cur;
             for (int64_t j = 0; j < H; ++j) tp_.x_buf[next][j] = tp_.x_buf[cur][j] + h_buf[j];
             cur = next;
         }  // end layer loop
+        if (tp_sec_timers_.on) _tp_elapsed();  // reset — tail measured below
 
         // 3. Final RMSNorm (in-place, replicated)
         cpu_quant::cpu_rmsnorm_inplace(tp_.x_buf[cur].data(),
@@ -3837,6 +3906,7 @@ public:
                 tp_.logits_buf[n] = dot;
             }
         }
+        if (tp_sec_timers_.on) tp_sec_timers_.output_proj_ms += _tp_elapsed();
 
         // Wrap into tensor (copy out)
         Tensor logits = at::empty({1, config.vocab_size});
@@ -3844,6 +3914,10 @@ public:
                     config.vocab_size * sizeof(float));
 
         tp_.kv_seq_len += 1;
+        if (tp_sec_timers_.on) {
+            tp_sec_timers_.tail_ms += _tp_elapsed();
+            tp_sec_timers_.tokens++;
+        }
         return logits;
     }
 
@@ -3908,6 +3982,7 @@ public:
         if (tp_.rank == 0) {
             std::cout << "\n\n[Generate-TP] " << generated.size() << " tokens in "
                       << (ms / 1000.0) << "s (" << tok_per_s << " tok/s)" << std::endl;
+            tp_sec_timers_.dump(tp_.rank);
             return tokenizer.decode(generated, true);
         }
         return "";

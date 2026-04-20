@@ -39,8 +39,11 @@ for rank in 0 1 2 3; do
     # vs 1 NUMA bottleneck.
     # NOTE: --membind and --preferred conflict on Elbrus numactl ("Conflicting
     # policies"). Use --membind alone for strict local allocation.
+    # OMP_NUM_THREADS=7 (not 8): same sweet-spot reason as 1-proc 24-vs-32 —
+    # leave 1 core per NUMA node free for OS daemons / IRQ handlers. Sweep:
+    # 4t=2.1, 6t=3.0, 7t=3.4, 8t=2.9.
     PT_NO_NUMA_POOL=1 \
-    OMP_NUM_THREADS=8 \
+    OMP_NUM_THREADS=7 \
     OMP_PLACES=cores OMP_PROC_BIND=close \
     PT_DDP_SHM=1 \
     numactl --cpunodebind=$rank --membind=$rank \
