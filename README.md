@@ -1,14 +1,30 @@
 # PromeTorch — Российский training framework
 
+[![License](https://img.shields.io/badge/license-PromeTorch%20%28BSD--3%20%2B%20attribution%20%2B%20no--resale%29-blue.svg)](LICENSE)
+[![C++](https://img.shields.io/badge/C%2B%2B-17-00599C.svg?logo=c%2B%2B)](CMakeLists.txt)
+[![CUDA](https://img.shields.io/badge/CUDA-12.4%2F12.8-76B900.svg?logo=nvidia)](scripts/build-cuda-windows.bat)
+[![Эльбрус](https://img.shields.io/badge/Эльбрус-E8C2%20VLIW-red.svg)](docs/elbrus/)
+[![NM Card](https://img.shields.io/badge/НТЦ%20Модуль-NM%20Card%20Mini-blueviolet.svg)](BENCH_NMCARD.md)
+[![Tests](https://img.shields.io/badge/tests-720%2B-green.svg)](tests/)
+[![Docker](https://img.shields.io/badge/Docker-Astra%20%7C%20ALT%20%7C%20RED%20%7C%20Elbrus-informational.svg)](docker/)
+
+> **Single-dev PyTorch rewrite.** Native Эльбрус E8C2 VLIW + NM Card Mini +
+> NVIDIA A100. Real autograd (119 backward ops), 16 optimizers, ONNX export,
+> PyTorch-compatible `.pt` I/O. ~35-45 % PyTorch practical surface. 137K строк.
+
 > PyTorch-совместимый обучающий фреймворк на C++17/CUDA с широкой dtype-поддержкой.
-> Нативная сборка на **Эльбрус E8C2 (VLIW)** и **NM Card Mini (НТЦ Модуль, Q16.16)**.
-> Real autograd (110 backward ops + gradient hooks + anomaly mode + create_graph double-bwd),
-> 16 optimizers, CPU SIMD + CUDA (cuBLAS/cuDNN/FP16 kernels), distributed training
-> (TCP DDP/FSDP/TP/Pipeline), export (ONNX/MLIR/Mobile/JIT), ecosystem shims
-> (HuggingFace/torchvision/torchaudio/torchtext/Lightning Trainer), **PyTorch-compatible
-> save/load (.pt ↔ torch.load/save)**.
+> Real autograd (119 backward ops + gradient hooks + anomaly mode + create_graph
+> double-bwd), **16 optimizers** (SGD/Adam/AdamW/RMSprop + Lion/Sophia/LAMB/
+> Adafactor/NAdam/RAdam/Adagrad/Adadelta/Adamax/AdamKiller/ASGD/LBFGS),
+> **16 LR schedulers**, CPU SIMD + CUDA (cuBLAS/cuDNN 8/FP16 kernels),
+> distributed training (TCP DDP/FSDP/TP/Pipeline + `no_sync()`),
+> export (ONNX/MLIR/Mobile/JIT), ecosystem shims (HuggingFace/torchvision/
+> torchaudio/torchtext/Lightning Trainer), **PyTorch-compatible save/load
+> (`.pt` ↔ `torch.load`/`torch.save`)**.
 >
-> ~128,000 строк C++/CUDA + ~4,500 Python. 1 разработчик. ~5 недель активной разработки + agent bursts (35 + 15).
+> **~132,000 строк C++/CUDA** (114K ядро framework + 17.8K examples) +
+> **~4,700 Python** = ~137K LOC. 1 разработчик. ~5 недель активной
+> разработки + два agent-burst'а (35 + 15). 720+ тестов.
 
 > ⚠️ **Coverage ~35-45% практической площади PyTorch.** Это solo-проект: ряд путей
 > runtime-verified на своём железе (CPU x86 / Эльбрус / A100 GGUF inference),
@@ -19,12 +35,19 @@
 
 ---
 
+![PromeServe UI — Ollama-compatible LLM server](docs/screenshots/promeserve_ui_main.png)
+
+*PromeServe — встроенный Ollama-совместимый LLM inference сервер. ~48 tok/s на
+qwen3:4b Q4_K_M на A100 (см. [BENCH_OLLAMA.md](BENCH_OLLAMA.md)).*
+
+---
+
 ## Coverage vs PyTorch
 
 | Категория | PyTorch | PromeTorch | % |
 |---|---|---|---|
 | Tensor ops | ~2000 | ~150 (90 базовых + 50+ в OpsExpansion) | ~7% |
-| Backward functions | ~1500 | 110 + hooks + anomaly | ~7% |
+| Backward functions | ~1500 | 119 + hooks + anomaly | ~8% |
 | Optimizers | 15+ | **16** (SGD, Adam, AdamW, RMSprop, Adagrad, Adadelta, Adamax, AdamKiller, ASGD, Lion, Sophia(G), LAMB, Adafactor, NAdam, RAdam, LBFGS) | ~100% |
 | LR schedulers | 15+ | 16 (Step/MultiStep/Exp/CosineAnnealing/Linear/Const/ReduceLROnPlateau/WarmupCosine/OneCycle/CosineAnnealingWarmRestarts/Cyclic/Polynomial/Lambda/Multiplicative/Sequential/Chained) | ~100% |
 | dtypes | 20+ | 10 (Float32/64, Half, BFloat16, **Float8 e4m3fn/e5m2**, Complex64/128, Bool, int8-64) | ~50% |
@@ -384,7 +407,7 @@ CPU-portable, compile на Elbrus LCC. Плюс EMA + clip_grad_norm_ (`torch/op
 ## Known Limitations — честный gap от PyTorch
 
 ### Работает + протестировано на всех поддерживаемых backend'ах
-- Core autograd (110 backward + hooks + anomaly + create_graph)
+- Core autograd (119 backward + hooks + anomaly + create_graph)
 - 20 optimizers
 - CPU SIMD (AVX2/NEON/E2K)
 - Эльбрус VLIW + NM Card Mini emulator (Q16.16)
@@ -664,7 +687,7 @@ PromeTorch предоставляет API, максимально приближ
 * **Gradient computation:** `torch::autograd::backward()`, `NoGradGuard`, `EnableGradGuard`.
 * **Custom Functions:** `torch::autograd::Function<Derived>` + `FunctionCtx` + `save_for_backward()`.
 * **Gradient Checkpointing:** `torch::utils::checkpoint(fn, inputs)`.
-* **116 backward functions** для всех операций.
+* **119 backward functions** для всех операций.
 
 ### 5. Загрузка данных (`torch::data`)
 * **Датасеты:** `Dataset`, `TensorDataset`, `MapDataset`, `ConcatDataset`, `SubsetDataset`, `random_split`.
@@ -701,7 +724,7 @@ Web UI с streaming chat, markdown rendering, syntax highlighting.
 │  97 модулей   10 opt    DataLoader  GradScaler  PTOR   │
 ├─────────────────────────────────────────────────────────┤
 │                  torch/csrc/autograd/                   │
-│  Engine   Node   Edge   116 backward функций           │
+│  Engine   Node   Edge   119 backward функций           │
 ├─────────────────────────────────────────────────────────┤
 │                aten/src/ATen/ (операции)                │
 │  MathOps  ReduceOps  LinearAlgebra  ShapeOps  IndexOps │
@@ -749,7 +772,7 @@ Web UI с streaming chat, markdown rendering, syntax highlighting.
 
 Reverse-mode автоматическое дифференцирование:
 - **Engine** — топологическая сортировка, cached GraphTask (reuse между backward)
-- **116 backward-функций** — Math(46) + LinAlg(13) + Shape(21) + Reduce(16) + Index(2) + Fused(4) + Conv(4) + AccumulateGrad
+- **119 backward-функций** — Math(46) + LinAlg(13) + Shape(21) + Reduce(16) + Index(2) + Fused(4) + Conv(4) + AccumulateGrad
 - **Fused backward** — FusedLinearRelu (4 nodes → 1), FusedMLP (12 nodes → 1), PrecomputedGrad (zero-compute backward)
 - **NodePool** — thread-local object pool для backward nodes (zero malloc в hot path)
 - **SmallEdgeList<4>** — inline edges без heap allocation (99% ops)
@@ -960,7 +983,7 @@ aten/src/ATen/                Операции (120+ CPU, 132 CUDA ядра)
   nmcard/                     NMCardEmulator, NMCardOps, NMCardHardware
 
 torch/                        Фреймворк
-  csrc/autograd/              Engine, Node, Edge, 116 backward функций
+  csrc/autograd/              Engine, Node, Edge, 119 backward функций
   nn/modules/                 64+ NN модулей (16 файлов)
   optim/                      16 оптимизаторов + 16 LR schedulers + EMA + clip_grad
   data/                       Dataset, DataLoader, Samplers, Transforms
@@ -1003,17 +1026,18 @@ scripts/                      Build-скрипты для российских �
 
 | Метрика | Значение |
 |---------|----------|
-| Строк C++/CUDA | ~127,700 (`torch/`, `aten/`, `c10/`, `examples/`) |
-| Строк Python | ~4,500 (`python/`) |
-| **Всего строк** | **~132,000** |
-| Backward функций | 110+ |
+| Строк C++/CUDA (core framework) | 114,253 (`torch/`, `aten/`, `c10/`, `python/csrc/`) |
+| Строк C++/CUDA (examples) | 17,819 (`examples/`) |
+| Строк Python | 4,756 (`python/`) |
+| **Всего строк** | **~137,000** |
+| Backward функций | 119 (grep `struct.*Backward : public Node`) |
 | NN модулей | 64+ |
 | CUDA ядер | ~150 `launch_*` (см. `aten/src/ATen/cuda/aten_cuda_exports.def`) |
 | Оптимизаторов | 16 |
 | LR Schedulers | 16 |
 | Backend-ов | 4 (CPU, CUDA, NMCard, LinQ) |
 | Тестов | 720+ (gtest `TEST()` / `TEST_F()` / `TEST_P()` across `test/cpp/` + `tests/`) |
-| Примеров | 12 |
+| Примеров | 12 (MNIST MLP/CNN, RNN, Transformer, ViT, GGUF, NMCard, CIFAR ResNet, GAN, VAE, Shakespeare, PIR) |
 
 ---
 
@@ -1066,6 +1090,7 @@ scripts/                      Build-скрипты для российских �
 
 ## Авторы
 
-Разработано в России. 3 недели, 1 разработчик, 93,000 строк кода.
+Разработано в России. ~5 недель активной разработки, 1 разработчик,
+~137,000 строк кода (132K C++/CUDA + 4.7K Python).
 
 Подробная документация: [PROMEPEDIA.md](PROMEPEDIA.md) | Журнал разработки: [JOURNAL.md](JOURNAL.md) | Аудит: [INFRASTRUCTURE_AUDIT.md](INFRASTRUCTURE_AUDIT.md)
