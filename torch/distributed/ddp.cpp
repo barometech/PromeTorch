@@ -34,6 +34,8 @@
   #include <sys/socket.h>
   #include <sys/time.h>
   #include <sys/types.h>
+  #include <sys/mman.h>
+  #include <fcntl.h>
   #include <unistd.h>
   static int close_sock(int fd) { return ::close(fd); }
   static int set_reuseaddr(int fd) {
@@ -84,8 +86,6 @@ namespace {
 // ----------------------------------------------------------------------------
 
 #if !defined(_WIN32)
-#include <sys/mman.h>
-#include <fcntl.h>
 static constexpr size_t kShmHeaderSize = 4096;
 static constexpr size_t kShmSlotSize   = 256 * 1024;  // 256 KB per slot
 static constexpr uint32_t kShmMagic    = 0x53445450u; // "PTDS"
