@@ -31,6 +31,7 @@
 #include <atomic>
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 
 namespace c10 {
 
@@ -38,7 +39,18 @@ class ThreadPool {
 public:
     explicit ThreadPool(int num_threads = 0) {
         if (num_threads <= 0) {
-            num_threads = static_cast<int>(std::thread::hardware_concurrency());
+            // Allow env overrides for multi-process TP on NUMA systems.
+            // PT_NUM_THREADS is ours; fall back to OMP_NUM_THREADS for
+            // consistency with the rest of the stack, then hardware_concurrency.
+            const char* env = std::getenv("PT_NUM_THREADS");
+            if (!env || !env[0]) env = std::getenv("OMP_NUM_THREADS");
+            if (env && env[0]) {
+                int n = std::atoi(env);
+                if (n > 0) num_threads = n;
+            }
+            if (num_threads <= 0) {
+                num_threads = static_cast<int>(std::thread::hardware_concurrency());
+            }
             if (num_threads <= 0) num_threads = 4;
         }
         num_threads_ = num_threads;

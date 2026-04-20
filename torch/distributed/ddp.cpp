@@ -534,13 +534,16 @@ static void all_reduce_shm(PGState& s, float* data, int64_t numel) {
             __sync_synchronize();
         }
         // Reduce (sum) all rank slots -> sum slot.
+        // NOTE: sum_slot == rank_slot(0) by design, so rank 0's deposit is
+        // already at sum. Accumulate workers 1..ws-1 into it.
         float* sum = reinterpret_cast<float*>(shm_sum_slot(base));
-        // Start from rank 0's own deposit.
-        std::memcpy(sum, shm_rank_slot(base, 0), nbytes);
         for (int r = 1; r < s.world_size; ++r) {
             const float* src = reinterpret_cast<const float*>(shm_rank_slot(base, r));
             for (int64_t i = 0; i < numel; ++i) sum[i] += src[i];
         }
+        // Copy reduced sum back into caller's tensor (workers do this via
+        // the post-generation memcpy, rank 0 must do it explicitly).
+        std::memcpy(data, sum, nbytes);
         __sync_synchronize();
         // 4. Publish new generation so workers see result is ready.
         hdr->generation = gen + 1;
