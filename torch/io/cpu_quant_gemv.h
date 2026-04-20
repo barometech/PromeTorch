@@ -468,17 +468,7 @@ inline void q4k_gemv_scalar(const void* weight_data, const float* x,
             const uint8_t* scales = block + 4;
             const uint8_t* qs = block + 16;
 
-            // UNROLL-8 inner loop: per партнёр МЦСТ (МЦСТ) — E2K VLIW has
-            // 6 compute channels, full FMA throughput needs ≥6 independent
-            // in-flight FMAs to hide the 8-cycle latency. Unroll-8 gives the
-            // compiler enough independent ops to schedule one FMA per cycle
-            // across 6 channels. Compiler auto-unroll was factor-4.
-            //
-            // 8 parallel accumulators (acc0..acc7) break the single-dot
-            // dependency chain and let VLIW dispatch saturate.
             int is = 0;
-            float acc0 = 0, acc1 = 0, acc2 = 0, acc3 = 0;
-            float acc4 = 0, acc5 = 0, acc6 = 0, acc7 = 0;
             for (int j = 0; j < 256; j += 64) {
                 uint8_t sc, m_val;
                 gguf::get_scale_min_k4(is, scales, &sc, &m_val);
@@ -487,39 +477,13 @@ inline void q4k_gemv_scalar(const void* weight_data, const float* x,
                 gguf::get_scale_min_k4(is + 1, scales, &sc, &m_val);
                 float d2 = d * sc;
                 float m2 = dmin * m_val;
-
-                const float* xj0 = x + base_k + j;
-                const float* xj1 = xj0 + 32;
-
-                // Two passes: low nibble (l=0..31) against xj0,
-                // high nibble against xj1. Unroll-8 each pass — split the
-                // 32-element inner into 4 groups of 8, each group uses 8
-                // independent FMA accumulators.
-                for (int l = 0; l < 32; l += 8) {
-                    // Low nibble lane
-                    acc0 += (d1 * (qs[l+0] & 0xF) - m1) * xj0[l+0];
-                    acc1 += (d1 * (qs[l+1] & 0xF) - m1) * xj0[l+1];
-                    acc2 += (d1 * (qs[l+2] & 0xF) - m1) * xj0[l+2];
-                    acc3 += (d1 * (qs[l+3] & 0xF) - m1) * xj0[l+3];
-                    acc4 += (d1 * (qs[l+4] & 0xF) - m1) * xj0[l+4];
-                    acc5 += (d1 * (qs[l+5] & 0xF) - m1) * xj0[l+5];
-                    acc6 += (d1 * (qs[l+6] & 0xF) - m1) * xj0[l+6];
-                    acc7 += (d1 * (qs[l+7] & 0xF) - m1) * xj0[l+7];
-
-                    // High nibble lane
-                    acc0 += (d2 * (qs[l+0] >> 4) - m2) * xj1[l+0];
-                    acc1 += (d2 * (qs[l+1] >> 4) - m2) * xj1[l+1];
-                    acc2 += (d2 * (qs[l+2] >> 4) - m2) * xj1[l+2];
-                    acc3 += (d2 * (qs[l+3] >> 4) - m2) * xj1[l+3];
-                    acc4 += (d2 * (qs[l+4] >> 4) - m2) * xj1[l+4];
-                    acc5 += (d2 * (qs[l+5] >> 4) - m2) * xj1[l+5];
-                    acc6 += (d2 * (qs[l+6] >> 4) - m2) * xj1[l+6];
-                    acc7 += (d2 * (qs[l+7] >> 4) - m2) * xj1[l+7];
+                for (int l = 0; l < 32; ++l) {
+                    dot += (d1 * (qs[l] & 0xF) - m1) * x[base_k + j + l];
+                    dot += (d2 * (qs[l] >> 4) - m2) * x[base_k + j + 32 + l];
                 }
                 qs += 32;
                 is += 2;
             }
-            dot += (acc0 + acc1) + (acc2 + acc3) + (acc4 + acc5) + (acc6 + acc7);
         }
         y[n] = dot;
     }
