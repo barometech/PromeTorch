@@ -575,17 +575,16 @@ static void all_reduce_shm(PGState& s, float* data, int64_t numel) {
 }
 #endif  // !_WIN32
 
-void all_reduce(at::Tensor& tensor) {
+// Shared implementation — takes raw data+numel, dispatches to SHM or TCP.
+static void all_reduce_impl(float* data, int64_t numel) {
     auto& s = pg();
     if (!s.initialized) {
         throw std::runtime_error("all_reduce: process group not initialized");
     }
     if (s.world_size == 1) return;
-    if (!tensor.defined() || tensor.numel() == 0) return;
+    if (numel == 0) return;
 
-    int64_t numel = tensor.numel();
-    size_t  nbytes = (size_t)numel * sizeof(float);
-    float*  data   = tensor.mutable_data_ptr<float>();
+    size_t nbytes = (size_t)numel * sizeof(float);
 
 #if !defined(_WIN32)
     if (s.shm_enabled && nbytes <= kShmSlotSize) {
@@ -620,6 +619,18 @@ void all_reduce(at::Tensor& tensor) {
             throw std::runtime_error("all_reduce: recv from rank 0 failed");
         }
     }
+}
+
+// Tensor overload: delegates to the raw-pointer implementation.
+void all_reduce(at::Tensor& tensor) {
+    if (!tensor.defined() || tensor.numel() == 0) return;
+    all_reduce_impl(tensor.mutable_data_ptr<float>(), tensor.numel());
+}
+
+// Raw-pointer overload — hot path for TP forward (per-layer collectives).
+// Avoids the at::empty + 2 memcpys around each call.
+void all_reduce_inplace(float* data, int64_t numel) {
+    all_reduce_impl(data, numel);
 }
 
 void broadcast(at::Tensor& tensor, int src_rank) {

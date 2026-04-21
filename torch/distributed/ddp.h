@@ -65,6 +65,10 @@ int  get_world_size();
 // element-wise sum across all ranks. Caller divides by world_size for AVG.
 void all_reduce(at::Tensor& tensor);
 
+// Raw-pointer overload: skips at::empty + memcpy overhead for hot-path TP
+// collectives. Data is modified in place. Numel must be FP32 element count.
+void all_reduce_inplace(float* data, int64_t numel);
+
 // broadcast: src_rank sends tensor data to every other rank in-place.
 void broadcast(at::Tensor& tensor, int src_rank = 0);
 
