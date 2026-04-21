@@ -3891,15 +3891,45 @@ public:
         cpu_quant::cpu_rmsnorm_inplace(tp_.x_buf[cur].data(),
             output_norm.data_ptr<float>(), eps, add_one, H);
 
-        // 4. Output projection (replicated, full logits; no AllReduce needed)
+        // 4. Output projection — split across ranks and AllReduce.
+        // Each rank computes a disjoint row-range of the vocab; zero-pads the
+        // rest; AllReduce-SUM concatenates into full logits_buf on all ranks.
+        // Per-rank work: 1/nprocs of vocab rows → ~4× speedup on output_proj.
+        // Needs kShmSlotSize >= V*4 bytes — raised to 1 MB to fit vocab=152k.
+        int64_t V = config.vocab_size;
         if (use_quant_gemv_ && q_output_weight.valid && q_output_weight.cpu_data) {
+            int64_t rank_rows = V / tp_.nprocs;
+            int64_t row_start = tp_.rank * rank_rows;
+            int64_t row_end   = (tp_.rank == tp_.nprocs - 1) ? V : row_start + rank_rows;
+            int64_t local_rows = row_end - row_start;
+
+            // Zero the logits buffer first — other ranks' slices must read 0.
+            std::memset(tp_.logits_buf.data(), 0, V * sizeof(float));
+
+            // Compute just our row-slice, writing directly into the output
+            // region. cpu_quant_gemv with N=local_rows + weight pointer offset
+            // by row_start * row_stride_bytes.
+            const uint8_t* w_slice = static_cast<const uint8_t*>(q_output_weight.cpu_data)
+                                   + row_start * q_output_weight.row_stride_bytes;
             cpu_quant::cpu_quant_gemv(
-                q_output_weight.quant_type, q_output_weight.cpu_data,
-                tp_.x_buf[cur].data(), tp_.logits_buf.data(),
-                H, q_output_weight.rows, q_output_weight.row_stride_bytes);
+                q_output_weight.quant_type, w_slice,
+                tp_.x_buf[cur].data(), tp_.logits_buf.data() + row_start,
+                H, local_rows, q_output_weight.row_stride_bytes);
+
+            // AllReduce-sum: each rank's buffer has its slice non-zero, rest
+            // zero; sum yields the full concatenated logits on all ranks.
+            {
+                at::Tensor lt = at::empty({V});
+                std::memcpy(lt.mutable_data_ptr<float>(), tp_.logits_buf.data(),
+                            V * sizeof(float));
+                torch::distributed::all_reduce(lt);
+                std::memcpy(tp_.logits_buf.data(), lt.data_ptr<float>(),
+                            V * sizeof(float));
+            }
         } else if (output_weight.defined()) {
+            // FP32 fallback — no split, scalar main-thread path (slow but rare
+            // since tied q_output_weight is the common case for qwen3:4b etc.).
             const float* w = output_weight.data_ptr<float>();
-            int64_t V = config.vocab_size;
             for (int64_t n = 0; n < V; ++n) {
                 float dot = 0.0f;
                 for (int64_t k = 0; k < H; ++k) dot += tp_.x_buf[cur][k] * w[n * H + k];
