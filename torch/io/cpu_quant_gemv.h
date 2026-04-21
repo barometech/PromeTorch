@@ -1381,6 +1381,16 @@ inline void cpu_quant_gemv_batched_qkv(
                     const uint8_t* blk1 = row1 + bi * 144;
                     const Q8Block* xq = x_q8 + bi * 8;
 
+                    // Prefetch next Q4_K block for both rows (3 cache lines each).
+                    if (bi + 1 < blocks_per_row) {
+                        __builtin_prefetch(row0 + (bi + 1) * 144,       0, 3);
+                        __builtin_prefetch(row0 + (bi + 1) * 144 + 64,  0, 3);
+                        __builtin_prefetch(row0 + (bi + 1) * 144 + 128, 0, 3);
+                        __builtin_prefetch(row1 + (bi + 1) * 144,       0, 3);
+                        __builtin_prefetch(row1 + (bi + 1) * 144 + 64,  0, 3);
+                        __builtin_prefetch(row1 + (bi + 1) * 144 + 128, 0, 3);
+                    }
+
                     uint16_t d0_bits, dmin0_bits, d1_bits, dmin1_bits;
                     std::memcpy(&d0_bits, blk0, 2);
                     std::memcpy(&dmin0_bits, blk0 + 2, 2);
