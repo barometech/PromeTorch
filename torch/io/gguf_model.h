@@ -3800,13 +3800,8 @@ public:
 
             if (tp_sec_timers_.on) tp_sec_timers_.ao_ms += _tp_elapsed();
 
-            // --- AllReduce-sum h_buf across ranks ---
-            {
-                at::Tensor h_tensor = at::empty({H});
-                std::memcpy(h_tensor.mutable_data_ptr<float>(), h_buf, H * sizeof(float));
-                torch::distributed::all_reduce(h_tensor);
-                std::memcpy(h_buf, h_tensor.data_ptr<float>(), H * sizeof(float));
-            }
+            // --- AllReduce-sum h_buf across ranks (zero-alloc fast path) ---
+            torch::distributed::all_reduce_inplace(h_buf, H);
             if (tp_sec_timers_.on) tp_sec_timers_.allreduce_ao_ms += _tp_elapsed();
 
             // --- Residual add: x_next = x + h ---
@@ -3871,13 +3866,8 @@ public:
             }
             if (tp_sec_timers_.on) tp_sec_timers_.fdown_ms += _tp_elapsed();
 
-            // --- AllReduce-sum h_buf across ranks ---
-            {
-                at::Tensor h_tensor = at::empty({H});
-                std::memcpy(h_tensor.mutable_data_ptr<float>(), h_buf, H * sizeof(float));
-                torch::distributed::all_reduce(h_tensor);
-                std::memcpy(h_buf, h_tensor.data_ptr<float>(), H * sizeof(float));
-            }
+            // --- AllReduce-sum h_buf across ranks (zero-alloc fast path) ---
+            torch::distributed::all_reduce_inplace(h_buf, H);
             if (tp_sec_timers_.on) tp_sec_timers_.allreduce_fdown_ms += _tp_elapsed();
 
             // --- Residual add ---
@@ -3918,14 +3908,7 @@ public:
 
             // AllReduce-sum: each rank's buffer has its slice non-zero, rest
             // zero; sum yields the full concatenated logits on all ranks.
-            {
-                at::Tensor lt = at::empty({V});
-                std::memcpy(lt.mutable_data_ptr<float>(), tp_.logits_buf.data(),
-                            V * sizeof(float));
-                torch::distributed::all_reduce(lt);
-                std::memcpy(tp_.logits_buf.data(), lt.data_ptr<float>(),
-                            V * sizeof(float));
-            }
+            torch::distributed::all_reduce_inplace(tp_.logits_buf.data(), V);
         } else if (output_weight.defined()) {
             // FP32 fallback — no split, scalar main-thread path (slow but rare
             // since tied q_output_weight is the common case for qwen3:4b etc.).
