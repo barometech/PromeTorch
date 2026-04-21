@@ -87,7 +87,10 @@ namespace {
 
 #if !defined(_WIN32)
 static constexpr size_t kShmHeaderSize = 4096;
-static constexpr size_t kShmSlotSize   = 256 * 1024;  // 256 KB per slot
+// 1 MB per slot — covers a full vocab=152k FP32 logits block (608 KB) needed
+// for split+AllReduce output projection in TP mode. Previously 256 KB.
+// Cost: 1 MB × world_size = ~5 MB of /dev/shm mmap per TP session.
+static constexpr size_t kShmSlotSize   = 1024 * 1024;
 static constexpr uint32_t kShmMagic    = 0x53445450u; // "PTDS"
 
 struct ShmHeader {
