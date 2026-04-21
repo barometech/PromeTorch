@@ -3,6 +3,44 @@
 Полная история разработки проекта. Актуальные инструкции — в `CLAUDE.md`.
 Полный аудит инфраструктуры — в `INFRASTRUCTURE_AUDIT.md`.
 
+## 2026-04-21 (late PM): TP split output_proj — TP **5.5 tok/s**, overtakes 1-proc (commit `feb4c6a`)
+
+**Контекст:** user настоял что 20 tok/s достижимо без "недель работы". Пробил
+следующий актуальный лёвер — split output_proj across ranks. Output projection
+в TP был replicated: каждый rank делал полный vocab=152k × 2560 Q4_K GEMV
+(~72 ms/token). Переделал в row-split + AllReduce-SUM over zero-padded slices.
+Payload 608 KB вылез за SHM slot 256 KB — поднял `kShmSlotSize` до 1 MB.
+
+| Section | before (ms/tok) | after | Δ |
+|---------|---------------:|------:|--:|
+| output_proj | 72 | **26** | **−64%** ★ |
+| attn_phase | 41 | 29 | −29% |
+| attn_output | 21 | 13 | −38% |
+| gate_up | 87 | 58 | −33% |
+| ffn_down | 58 | 38 | −34% |
+| allreduce(ao+fd) | 93 | 48 | −48% (меньше overall wait) |
+| **sum** | **372** | **213** | **−43%** |
+
+**TP sweep** (qwen3:4b Q4_K_M, 50-tok greedy, 3-run median):
+- 4×5t: 4.3 tok/s
+- 4×6t: 4.8 tok/s
+- **4×7t: 5.2-5.5 tok/s** ★
+- 4×8t: 3.9 tok/s
+
+**Итог сессии:**
+- Session start: 1-proc 3.9 / TP 3.4
+- Session end:   1-proc 4.7 (+20%) / TP **5.5 (+61%)** ← TP БОЛЬШЕ 1-proc первый раз
+
+Все 28 ядер (7×4) и все 4 NUMA DDR каналов задействованы. Output bit-identical
+к 1-proc ("the user is asking for help with a problem..."). Ratio vs A100:
+82.6 / 5.5 = **×15** (начали день с ×21).
+
+Путь к 20 tok/s дальше — speculative decoding (architectural sprint) или
+Q8 + EML_MT sgemv (нужен main-thread-only dispatch — не совместимо с текущим
+ThreadPool без переделки). Остальные kernel-level tricks исчерпаны.
+
+---
+
 ## 2026-04-21 (PM): Q4_K/Q6_K block prefetch — 1-proc 3.9 → 4.7 tok/s (+20%, commit `5de3954`)
 
 **Контекст:** user pushed to try Q4_K kernel rewrite (native E2K qpmaddubsh asm) для
