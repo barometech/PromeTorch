@@ -106,8 +106,10 @@ Astra/ALT/RED/Elbrus OS. Autograd engine работает одинаково н�
 | Config | Cores | tok/s | vs A100 PromeTorch (82.6) |
 |--------|------:|------:|--------------------------:|
 | llama.cpp pure-C 32t (no SIMD, no EML) | 32/32 | 3.3 | ×25 |
-| **PromeTorch 1-proc, 24t + numactl --interleave=all** | **24/32** | **3.9** ★ | ×21 |
-| **PromeTorch 4-proc TP SHM, 7t/rank** | **28/32** | **3.4** | ×24 |
+| **PromeTorch 1-proc, 24t + interleave + Q4_K/Q6_K block prefetch** | **24/32** | **4.7** ★ | **×17.6** |
+| **PromeTorch 4-proc TP SHM, 7t/rank + prefetch** | **28/32** | **4.1** | ×20 |
+| PromeTorch 1-proc, 24t (prefetch, pre-session) | 24/32 | 3.9 | ×21 |
+| PromeTorch 4-proc TP 7t/rank (pre-prefetch, post tied-fix) | 28/32 | 3.4 | ×24 |
 | PromeTorch 4-proc TP (before tied-output fix) | 32/32 | 1.3 | broken baseline |
 
 1-proc остаётся чуть быстрее TP (13% gap) из-за 93 ms/token AllReduce на 4-NUMA. TP
