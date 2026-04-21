@@ -1692,8 +1692,21 @@ inline void cpu_fused_rmsnorm_gate_up_gemv(
     }
 #endif
 
-    cpu_quant_gemv(quant_type_gate, w_gate, x_norm, y_gate, hidden, N_gate, row_stride_gate, numa_gate);
-    cpu_quant_gemv(quant_type_up, w_up, x_norm, y_up, hidden, N_up, row_stride_up, numa_up);
+    // Fuse gate and up into ONE parallel_for via batched_qkv (with N_v=0).
+    // Saves 1 parallel_for sync (~120 us) per layer × 36 layers = ~4 ms/token.
+    // Conditions: same quant_type + same row_stride + no per-weight NUMA replica
+    // (batched_qkv doesn't yet thread numa through — falls back to 2-call path).
+    if (quant_type_gate == quant_type_up &&
+        row_stride_gate == row_stride_up &&
+        numa_gate == nullptr && numa_up == nullptr) {
+        cpu_quant_gemv_batched_qkv(
+            quant_type_gate, w_gate, w_up, nullptr,
+            x_norm, y_gate, y_up, nullptr,
+            hidden, N_gate, N_up, 0, row_stride_gate);
+    } else {
+        cpu_quant_gemv(quant_type_gate, w_gate, x_norm, y_gate, hidden, N_gate, row_stride_gate, numa_gate);
+        cpu_quant_gemv(quant_type_up, w_up, x_norm, y_up, hidden, N_up, row_stride_up, numa_up);
+    }
 
     if (hidden > MAX_STACK_HIDDEN) std::free(x_norm);
 }
