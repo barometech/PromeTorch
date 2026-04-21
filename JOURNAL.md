@@ -3,6 +3,89 @@
 Полная история разработки проекта. Актуальные инструкции — в `CLAUDE.md`.
 Полный аудит инфраструктуры — в `INFRASTRUCTURE_AUDIT.md`.
 
+## 2026-04-21: TP output_weight tied fix — 4-proc TP 1.3 → 3.4 tok/s (+160%, commit `5ba5c03`)
+
+**Контекст:** продолжение работы над Эльбрус inference. 1-proc достиг 3.9 tok/s (24t +
+interleave). 4-proc TP отставал на 1.3 tok/s — хуже single-proc в 3×. Задача — добиться
+чтобы TP с 32 ядрами превосходил 1-proc.
+
+### Root cause — tied output weight на CPU
+
+qwen3:4b имеет `output: tied to token_embd` (GGUF метаданные показывают это при загрузке).
+GPU-путь обрабатывал tied случай через fallback на `token_embd.weight`:
+
+```cpp
+if (reader.has_tensor("output.weight")) {
+    upload_quant("output.weight", q_output_weight);
+} else if (config.tie_word_embeddings && reader.has_tensor("token_embd.weight")) {
+    upload_quant("token_embd.weight", q_output_weight);
+}
+```
+
+CPU-путь (`upload_quant_cpu` + `map_quant_mmap`) имел ТОЛЬКО первый if, без tied fallback.
+Итог: `q_output_weight.valid = false` в TP → каждый forward падал в scalar FP32 nested loop:
+
+```cpp
+} else if (output_weight.defined()) {
+    const float* w = output_weight.data_ptr<float>();
+    int64_t V = config.vocab_size;
+    for (int64_t n = 0; n < V; ++n) {
+        float dot = 0.0f;
+        for (int64_t k = 0; k < H; ++k) dot += x[k] * w[n * H + k];
+        logits_buf[n] = dot;
+    }
+}
+```
+
+Это — main-thread SEQUENTIAL FP32 GEMV. **vocab=151936 × H=2560 = 389 MFLOPs/token** на main
+thread ≈ **543 ms/token = 67% от всего времени** при 1.3 tok/s. Per-section profiler
+(`PT_PROFILE_LAYER=1` добавлен в `forward_decode_cpu_tp`) это сразу показал.
+
+**Fix:** mirror GPU tied fallback в CPU load путях (`gguf_model.h:1162-1166` + `1331-1340`).
+
+### Результаты
+
+Перед фиксом — 4-proc × 8 threads = 32/32 cores:
+```
+output_proj: 543 ms (scalar FP32 main)   ← bottleneck
+sum:         808 ms/token
+→ 1.3 tok/s
+```
+
+После фикса (Q4_K GEMV через thread-pool) — 4-proc × 8 threads = 32/32:
+```
+output_proj:  72 ms (Q4_K parallel GEMV)  ← −471 ms
+sum:         372 ms/token
+→ 2.9 tok/s
+```
+
+После sweep threads/rank (аналогично 1-proc 24 vs 32 — оставить 1 core per node OS'у):
+
+| threads/rank | cores | tok/s |
+|-------------:|------:|------:|
+| 4 | 16/32 | 2.1 |
+| 6 | 24/32 | 3.0 |
+| **7** | **28/32** | **3.4** ★ |
+| 8 | 32/32 | 2.9 |
+
+**Итог: TP 4×7t = 3.4 tok/s**, в 13% от 1-proc 24t (3.9 tok/s). Все 32 ядра задействованы
+(28 compute + 4 OS headroom), **output bit-identical** к 1-proc, AllReduce работает
+корректно (SHM `/dev/shm/prometorch_ddp_*`).
+
+**Per-section @ 4×8t** (для наглядности до thread-tuning):
+- attn_phase: 41 ms / attn_output: 20 / allreduce(ao): 77
+- gate_up: 87 / ffn_down: 58 / allreduce(fd): 16
+- output_proj: 72 (было 543) / sum: 372 ms/token
+
+**Где ещё 85 ms/token** от 1-proc (3.9) до TP (3.4)? AllReduce(ao+fd) = **93 ms/token** —
+cache coherence traffic на 4-NUMA через SHM. Sequentially: 36 layers × 2 AllReduces ×
+~1.3 ms each. Next-step атаки — объединить 2 allreduces в один или заменить на
+reduce-scatter+all-gather.
+
+Also updated: `scripts/run_tp_elbrus.sh` → `OMP_NUM_THREADS=7`.
+
+---
+
 ## 2026-04-20 (PM): TP inference — SHM reduce bug + Q6_K k-slice AVX2 + ThreadPool fix (commit `6db8988`)
 
 **Контекст:** партнёр МЦСТ запросил реальные цифры Эльбрус vs A100 на qwen3:4b Q4_K_M,
