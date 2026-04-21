@@ -3,6 +3,58 @@
 Полная история разработки проекта. Актуальные инструкции — в `CLAUDE.md`.
 Полный аудит инфраструктуры — в `INFRASTRUCTURE_AUDIT.md`.
 
+## 2026-04-21 (PM): Q4_K/Q6_K block prefetch — 1-proc 3.9 → 4.7 tok/s (+20%, commit `5de3954`)
+
+**Контекст:** user pushed to try Q4_K kernel rewrite (native E2K qpmaddubsh asm) для
+пробить ceiling. Сначала probe-микробенч для сравнения LCC AVX2 vs ручной E2K.
+
+### Главный честный вывод: LCC AVX2 → VLIW translation optimal
+
+Написал standalone probe `examples/benchmarks/q4k_e2k_kernel_probe.cpp`, сравнил
+одинаковую kernel логику через два пути:
+
+| Kernel | ns/row (K=2560, N=9728, single-thread) |
+|--------|---------------------------------------:|
+| AVX2 intrinsics → LCC translation   | 3199 |
+| Native E2K `__builtin_e2k_qpmaddubsh` | 3944 (**-23% slower**) |
+
+Correctness bit-identical (diff=0). Значит LCC переводит AVX2 intrinsics лучше чем
+можно написать вручную через native qp* builtins — packing в VLIW слоты и
+register scheduling у компилятора уже near-optimal. Писать E2K asm напрямую
+не даст прироста.
+
+### Реальный win — explicit block prefetch
+
+`__builtin_prefetch(row + (bi+1)*144, 0, 3)` в начале каждой итерации inner
+block loop:
+
+| Kernel | ns/row |
+|--------|-------:|
+| AVX2 baseline | 3199 |
+| + 3-line prefetch next block | 2832 (**-12%**) |
+
+HW prefetcher на Эльбрусе, видимо, пропускает non-power-of-2 stride (144B для
+Q4_K, 210B для Q6_K). Explicit prefetch warmingает L1 к моменту advance.
+
+Применил в production kernels `q4k_gemv_avx2` + `q6k_gemv_avx2`:
+
+| Config | Before | After | Δ |
+|--------|-------:|------:|--:|
+| 1-proc 24t interleave   | 3.9 tok/s | **4.7 tok/s** | **+20%** |
+| 4-proc TP 7t/rank + SHM | 3.4 tok/s | **4.1 tok/s** | **+21%** |
+
+### Попытка 4-row unroll — регрессия
+
+Probe показал 1735 ns/row (×1.45 over 2-row), но в production под 24 threads
+деградация до 4.1 tok/s. Cache contention когда 24 threads каждый держат 4 row
+buffers одновременно. Откатил. Probe-win не переносится в production.
+
+### Новый ratio vs A100
+
+- A100 PromeTorch 82.6 / Эльбрус **4.7** = **×17.6** (было ×21)
+
+---
+
 ## 2026-04-21: TP output_weight tied fix — 4-proc TP 1.3 → 3.4 tok/s (+160%, commit `5ba5c03`)
 
 **Контекст:** продолжение работы над Эльбрус inference. 1-proc достиг 3.9 tok/s (24t +
