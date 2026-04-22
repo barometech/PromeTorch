@@ -1477,11 +1477,27 @@ public:
             rep(layer.q_ffn_up);
             rep(layer.q_ffn_down);
             rep(layer.q_attn_output);
+            // Q/K/V: agent_3_numa_audit.md flagged ~264 MB/token of
+            // attn_q/k/v reads as 30% cross-chip when replication is on for
+            // the other weights. Replicate these too now that infra supports it.
+            rep(layer.q_attn_q);
+            rep(layer.q_attn_k);
+            rep(layer.q_attn_v);
             total_bytes += layer.q_ffn_gate.total_bytes +
                            layer.q_ffn_up.total_bytes +
                            layer.q_ffn_down.total_bytes +
-                           layer.q_attn_output.total_bytes;
+                           layer.q_attn_output.total_bytes +
+                           layer.q_attn_q.total_bytes +
+                           layer.q_attn_k.total_bytes +
+                           layer.q_attn_v.total_bytes;
         }
+        // LM head: 208 MB of Q4_K read once per decoded token from whatever
+        // NUMA node got the first-touch on load. Ranks 1-3 then pay cross-
+        // chip latency for every token — agent_2 measured that at ~12% of
+        // serial budget.
+        rep(q_output_weight);
+        total_bytes += q_output_weight.total_bytes;
+
         std::cout << "[NUMA] Replicated hot weights across " << n << " nodes ("
                   << (total_bytes * n / (1024.0 * 1024.0)) << " MB total allocated)"
                   << std::endl;
@@ -2320,10 +2336,20 @@ public:
 
             if (can_fuse) {
                 // FUSED: RMSNorm + QKV projection (1 RMSNorm, shared x across 3 GEMVs)
+                // Pick per-NUMA replica for each weight. get() falls back to
+                // the original cpu_data when replication is off, so this is a
+                // no-op unless PT_NUMA_REPLICATE=1 was set.
+                int _node = c10::current_numa_node();
+                const void* w_q = layer.q_attn_q.numa_replica.get(_node);
+                const void* w_k = layer.q_attn_k.numa_replica.get(_node);
+                const void* w_v = layer.q_attn_v.numa_replica.get(_node);
+                if (!w_q) w_q = layer.q_attn_q.cpu_data;
+                if (!w_k) w_k = layer.q_attn_k.cpu_data;
+                if (!w_v) w_v = layer.q_attn_v.cpu_data;
                 cpu_quant::cpu_fused_rmsnorm_qkv_gemv(
                     x_ptr, layer.attn_norm.data_ptr<float>(), eps, add_one,
                     layer.q_attn_q.quant_type,
-                    layer.q_attn_q.cpu_data, layer.q_attn_k.cpu_data, layer.q_attn_v.cpu_data,
+                    w_q, w_k, w_v,
                     sp.q_buf, sp.k_buf, sp.v_buf,
                     H, layer.q_attn_q.rows, layer.q_attn_k.rows, layer.q_attn_v.rows,
                     layer.q_attn_q.row_stride_bytes);
@@ -2684,12 +2710,19 @@ public:
         // 4. Output projection -> logits (into scratch logits_buf)
         //    Use sparse GEMV for output projection if available
         if (use_quant_gemv_ && q_output_weight.valid && q_output_weight.cpu_data) {
+            // LM head is 208 MB/token Q4_K read per decoded step. Agent 2
+            // measured ~12% of serial budget spent on cross-chip fetch when
+            // it lived on one first-touch NUMA node. Pick local replica;
+            // falls back to original pointer when replication disabled.
+            int _node = c10::current_numa_node();
+            const void* w_out = q_output_weight.numa_replica.get(_node);
+            if (!w_out) w_out = q_output_weight.cpu_data;
             if (use_sparse_gemv_ && sparse_output_.valid && q_output_weight.is_q4k()) {
-                sparse_q4k_gemv(q_output_weight.cpu_data, sp.x_buf[cur], sp.logits_buf,
+                sparse_q4k_gemv(w_out, sp.x_buf[cur], sp.logits_buf,
                                 H, q_output_weight.rows, q_output_weight.row_stride_bytes,
                                 sparse_output_);
             } else {
-                cpu_quant::cpu_quant_gemv(q_output_weight.quant_type, q_output_weight.cpu_data,
+                cpu_quant::cpu_quant_gemv(q_output_weight.quant_type, w_out,
                     sp.x_buf[cur], sp.logits_buf, H, q_output_weight.rows, q_output_weight.row_stride_bytes);
             }
         } else if (output_weight.defined()) {
@@ -2789,10 +2822,17 @@ public:
                 layer.q_attn_q.row_stride_bytes == layer.q_attn_k.row_stride_bytes;
 
             if (can_fuse) {
+                int _node = c10::current_numa_node();
+                const void* w_q = layer.q_attn_q.numa_replica.get(_node);
+                const void* w_k = layer.q_attn_k.numa_replica.get(_node);
+                const void* w_v = layer.q_attn_v.numa_replica.get(_node);
+                if (!w_q) w_q = layer.q_attn_q.cpu_data;
+                if (!w_k) w_k = layer.q_attn_k.cpu_data;
+                if (!w_v) w_v = layer.q_attn_v.cpu_data;
                 cpu_quant::cpu_fused_rmsnorm_qkv_gemv(
                     x_ptr, layer.attn_norm.data_ptr<float>(), eps, add_one,
                     layer.q_attn_q.quant_type,
-                    layer.q_attn_q.cpu_data, layer.q_attn_k.cpu_data, layer.q_attn_v.cpu_data,
+                    w_q, w_k, w_v,
                     sp.q_buf, sp.k_buf, sp.v_buf,
                     H, layer.q_attn_q.rows, layer.q_attn_k.rows, layer.q_attn_v.rows,
                     layer.q_attn_q.row_stride_bytes);
