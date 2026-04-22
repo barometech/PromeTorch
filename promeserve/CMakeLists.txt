@@ -7,6 +7,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/main.cpp")
         ${PROJECT_SOURCE_DIR}/aten/src
     )
     target_link_libraries(promeserve PRIVATE c10 aten torch_autograd)
+    target_compile_definitions(promeserve PRIVATE PT_DEBUG_HTTP)
 
     # Windows sockets
     if(WIN32)
