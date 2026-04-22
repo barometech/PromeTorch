@@ -1,5 +1,16 @@
 #pragma once
 
+// ============================================================================
+// GGUF / GGML quantization format parser.
+//
+// File format (GGUF v3) and quantization block layouts (Q4_K / Q5_K / Q6_K /
+// Q8_0 etc.) are defined by the GGML project (https://github.com/ggerganov/ggml)
+// and llama.cpp (https://github.com/ggerganov/llama.cpp), both MIT-licensed.
+// Constants, super-block sizes and dequantization arithmetic below follow those
+// specifications so that this file can read .gguf checkpoints produced by
+// llama.cpp's convert.py. See THIRD_PARTY_NOTICES.md for license text.
+// ============================================================================
+
 #include <cstdint>
 #include <cstring>
 #include <string>

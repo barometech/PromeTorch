@@ -4,6 +4,12 @@
 // Warp-cooperative design: each warp handles one output row.
 // 32 threads read consecutive qs bytes → perfect coalescing.
 // x vector loaded into shared memory for zero-latency reuse.
+//
+// Attribution: the Q4_K / Q5_K / Q6_K super-block layouts and the packed qs
+// / qh / scales / mins unpacking conventions match GGML / llama.cpp (MIT,
+// https://github.com/ggerganov/llama.cpp) so that binary-compatible .gguf
+// weights can be consumed directly on GPU. Kernel implementations below are
+// independent from llama.cpp's ggml-cuda.cu. See THIRD_PARTY_NOTICES.md.
 
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>

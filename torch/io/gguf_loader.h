@@ -1,5 +1,12 @@
 #pragma once
 
+// ============================================================================
+// GGUF file loader — header parser, tensor-table reader, mmap backend.
+// The GGUF container format (magic "GGUF", metadata KV, tensor descriptors,
+// alignment rules) is specified by GGML/llama.cpp (MIT). Layout here follows
+// that spec; see THIRD_PARTY_NOTICES.md.
+// ============================================================================
+
 #include "torch/io/gguf_dequant.h"
 #include "aten/src/ATen/ATen.h"
 #include <string>

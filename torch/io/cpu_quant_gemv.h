@@ -11,6 +11,12 @@
 //   - Q5_K: 256 values per super-block, 176 bytes
 //
 // Each function computes y[N] = A_quant[N,K] @ x[K]
+//
+// Attribution: super-block layouts, scale packing and the GGML_FP16 helper
+// conventions are defined by GGML (https://github.com/ggerganov/ggml, MIT)
+// and llama.cpp (https://github.com/ggerganov/llama.cpp, MIT). The SIMD
+// dequant+dot kernels below are independent implementations that target the
+// same bit layout for binary compatibility. See THIRD_PARTY_NOTICES.md.
 // ============================================================================
 
 #include <cstdint>
