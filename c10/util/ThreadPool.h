@@ -212,48 +212,21 @@ private:
         // per-thread t_numa_node cache stays stable, and the NUMA replica
         // fetch in GEMV returns the same local pointer every iteration.
         if (pin_enabled_) {
+            // Round-robin pin: worker i → cpu (i % ncpu). Works both for
+            // 1-proc (where we want to hit every core) and TP (where the
+            // parent process is numactl --cpunodebind'd to N contiguous
+            // cores and kernel respects the cpuset).
+            //
+            // We tried globally-striped pinning across NUMA nodes here
+            // (commit 9663e88) but it regressed TP-4 from 5.5 → 1.7 tok/s
+            // because `cpu = node*cores_per_node + k` generated IDs outside
+            // the rank's cpuset → pthread_setaffinity_np either errored or
+            // clamped every worker onto the first allowed CPU, serialising
+            // all 7 workers. The agent-3 striping hypothesis was only valid
+            // for a SINGLE process with all cores available. Reverted.
             int ncpu = static_cast<int>(std::thread::hardware_concurrency());
             if (ncpu <= 0) ncpu = 1;
-
-            // Stripe workers across NUMA nodes instead of packing them onto
-            // the first N cores. With 24 workers and 32 cores (4 nodes × 8
-            // cores), naive `worker_id % ncpu` gives nodes 0-2 eight workers
-            // each and leaves node 3 empty — its DDR controller is idle while
-            // nodes 0-2 contend for cross-chip traffic to read replicas.
-            // Striped layout (agent_3_numa_audit.md rank 1):
-            //   worker 0 → node 0 core 0
-            //   worker 1 → node 1 core 0
-            //   worker 2 → node 2 core 0
-            //   worker 3 → node 3 core 0
-            //   worker 4 → node 0 core 1
-            //   ...
-            int nodes = 1;
-            int cores_per_node = ncpu;
-#  if C10_HAS_LIBNUMA
-            if (numa_available() >= 0) {
-                int n = numa_num_configured_nodes();
-                if (n > 0) {
-                    nodes = n;
-                    cores_per_node = (ncpu + n - 1) / n;
-                }
-            }
-#  endif
-            if (nodes <= 1) {
-                const char* env = std::getenv("PT_CORES_PER_NODE");
-                if (env && env[0]) {
-                    int v = std::atoi(env);
-                    if (v > 0) {
-                        cores_per_node = v;
-                        nodes = (ncpu + v - 1) / v;
-                    }
-                }
-            }
-
-            int node = worker_id % nodes;
-            int core_on_node = (worker_id / nodes) % cores_per_node;
-            int cpu = node * cores_per_node + core_on_node;
-            if (cpu >= ncpu) cpu = worker_id % ncpu;  // fallback safety
-
+            int cpu = worker_id % ncpu;
             cpu_set_t cs;
             CPU_ZERO(&cs);
             CPU_SET(cpu, &cs);
