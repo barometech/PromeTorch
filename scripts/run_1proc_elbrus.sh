@@ -1,14 +1,18 @@
 #!/bin/bash
 # Run qwen3:4b Q4_K_M inference on Эльбрус 8C2 4-NUMA server via PromeTorch,
-# single-process mode. Best-known peak config as of 2026-04-20:
-#   - 24 threads (leaves headroom for IO/kernel daemons, 32 threads causes
-#     context-switching overhead that eats ~10%)
-#   - numactl --interleave=all (round-robins Q4_K weight pages across all 4
-#     NUMA DDR controllers, eliminating cross-NUMA bandwidth contention that
-#     plagues first-touch placement)
-#
-# Measured: 3.8 tok/s on qwen3:4b Q4_K_M (vs 2.8 default 32t plain, +36%).
-# Details in BENCH_ELBRUS.md.
+# single-process mode. Config as of 2026-04-22:
+#   - 24 threads (leaves headroom for IO/kernel daemons)
+#   - PT_PIN_THREADS=1: worker i pinned to a specific core; kernel may not
+#     migrate workers between NUMA nodes, which would otherwise invalidate
+#     the thread_local numa_node cache and cause remote DRAM fetches.
+#   - PT_NUMA_REPLICATE=1: hot weights (attn_output, ffn_gate/up/down) are
+#     replicated once per NUMA node at load; each worker reads its local copy.
+#     Pre-2026-04-22 script never set this; baseline 4.7 tok/s ran with
+#     replication silently disabled (see vliw_mission/agent_3_numa_audit.md).
+#   - numactl --interleave=all: round-robins non-replicated pages across all
+#     4 DDR controllers (embedding, KV cache, biases).
+#   - OMP_PLACES / OMP_PROC_BIND intentionally NOT set — the hot GEMV path
+#     uses c10::ThreadPool, not OpenMP. Those vars are cargo for our code.
 #
 # Usage: ./run_1proc_elbrus.sh [--greedy|--sample] [prompt]
 
@@ -38,7 +42,8 @@ echo "=== PromeTorch 1-proc inference (qwen3:4b Q4_K_M, Эльбрус 8C2, 24t 
 date +"Start: %F %T"
 
 OMP_NUM_THREADS=24 \
-OMP_PLACES=cores OMP_PROC_BIND=close \
+PT_PIN_THREADS=1 \
+PT_NUMA_REPLICATE=1 \
 numactl --interleave=all \
     "$BIN" "$MODEL" \
     --max-tokens $MAX_TOK $MODE \

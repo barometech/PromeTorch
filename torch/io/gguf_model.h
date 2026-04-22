@@ -436,14 +436,18 @@ struct CPUScratchPool {
         int64_t inter = config.intermediate_size;
         int64_t V = config.vocab_size;
 
-        // Aligned allocation for AVX2 (32-byte aligned)
+        // Cacheline-aligned allocation (64-byte). AVX2 only requires 32 B but
+        // cachelines are 64 B on E8C2 and x86 — aligning scratch buffers to
+        // cacheline boundary eliminates false sharing when adjacent thread
+        // chunks write to y[i..i+chunk] regions.
+        // (agent_4_threadpool_audit.md Q2 / P2)
         auto alloc = [](int64_t n) -> float* {
-            // _aligned_malloc on Windows, aligned_alloc on Linux
+            // _aligned_malloc on Windows, posix_memalign on Linux
 #ifdef _WIN32
-            return static_cast<float*>(_aligned_malloc(n * sizeof(float), 32));
+            return static_cast<float*>(_aligned_malloc(n * sizeof(float), 64));
 #else
             void* ptr = nullptr;
-            posix_memalign(&ptr, 32, n * sizeof(float));
+            posix_memalign(&ptr, 64, n * sizeof(float));
             return static_cast<float*>(ptr);
 #endif
         };
