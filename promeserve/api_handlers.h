@@ -769,12 +769,27 @@ private:
             return;
         }
 
-        // Prefill
+        // Prefill. On CPU with quant weights, use the zero-alloc optimized
+        // per-token forward (forward_decode_cpu) — same fast path as CLI
+        // test_gguf_inference. The generic model->forward() runs a slow
+        // dense-tensor path that's ~20× slower on quantized models.
         at::Tensor logits;
         auto t_prompt_start = std::chrono::high_resolution_clock::now();
         try {
-            std::vector<int64_t> tokens_i64(input_tokens.begin(), input_tokens.end());
-            logits = model->forward(tokens_i64, true);
+#ifdef PT_USE_CUDA
+            if (model->use_cuda_) {
+                std::vector<int64_t> tokens_i64(input_tokens.begin(), input_tokens.end());
+                logits = model->forward(tokens_i64, true);
+            } else
+#endif
+            if (model->use_quant_gemv_) {
+                for (int t : input_tokens) {
+                    logits = model->forward_decode_cpu(static_cast<int64_t>(t));
+                }
+            } else {
+                std::vector<int64_t> tokens_i64(input_tokens.begin(), input_tokens.end());
+                logits = model->forward(tokens_i64, true);
+            }
         } catch (const std::exception& e) {
             std::cerr << "[Generate] ERROR in prefill forward(): " << e.what() << std::endl;
             std::string err = "{\"model\":\"" + json_escape(model_name) + "\""
