@@ -5,6 +5,7 @@
 #include "torch/io/cpu_quant_gemv.h"
 #include "torch/io/numa_weight_replica.h"
 #include "torch/io/speculative_decode.h"
+#include "torch/io/speculative_verify.h"
 #include "torch/io/sliding_window_attn.h"
 #include "torch/io/sparse_gemv.h"
 #include "torch/io/ollama.h"
@@ -3073,6 +3074,116 @@ public:
                      float temperature = 0.7f, int top_k = 40, float top_p = 0.9f,
                      float repetition_penalty = 1.05f) {
         return generate(apply_chat_template(prompt), max_tokens, temperature, top_k, top_p, repetition_penalty);
+    }
+
+    // ========================================================================
+    // Phase 7 — speculative decode step (MVP: serial verify, no speedup yet).
+    //
+    // Returns a vector of 1..K committed tokens. Caller passes:
+    //   - `current_token`: the last-committed token (input to the first verify)
+    //   - `draft`: the running NgramDraft, already populated with all committed
+    //     tokens up to but not including `current_token`.
+    //   - `history`: vector of all committed tokens, INCLUDING current_token
+    //     (i.e. history.back() == current_token). Random-access mirror of
+    //     draft's internal ring buffer, used for suffix lookup.
+    //   - `K_max`: desired verify width (1..6).
+    //   - `stats` (optional): increments counters for reporting.
+    //
+    // Semantics:
+    //   1. Use NgramDraft to predict up to K_max-1 draft tokens starting from
+    //      `history` + [current_token]. Stop drafting on the first -1.
+    //   2. Run forward_decode_cpu serially on `current_token` then each draft
+    //      token in order. After each forward, compute argmax.
+    //   3. If argmax at position j == draft[j], accept the draft token, feed
+    //      it to history + NgramDraft, continue.
+    //   4. On first mismatch (or end of drafts), commit argmax as the main
+    //      model's answer for position j, REWIND kv_cache.seq_len back to
+    //      `past_len + j + 1` (so KV no longer contains the now-rejected
+    //      draft tokens' K/V entries), and return.
+    //
+    // Invariants after return:
+    //   - `kv_cache.seq_len` reflects exactly the number of committed tokens.
+    //   - Every returned token has been argmax'd by the main model (correct).
+    //   - `draft` has been updated for every returned token.
+    //   - `history` is UNCHANGED by this function; caller updates it.
+    //
+    // For K_max=1 this degenerates to exactly one forward + one argmax and
+    // is bit-for-bit identical to the existing decode path.
+    //
+    // No speedup yet — serial forwards mean N tokens still cost N×forward.
+    // Phase 7.1 will replace the serial loop with a batched forward pass
+    // that reads each weight matrix once and computes K parallel outputs.
+    // ========================================================================
+    std::vector<int64_t> spec_decode_step_cpu(
+            int64_t current_token,
+            NgramDraft& draft,
+            const std::vector<int64_t>& history,
+            int K_max,
+            SpecStats* stats = nullptr) {
+
+        std::vector<int64_t> out;
+        out.reserve(K_max);
+
+        // Draft up to K_max-1 additional tokens after current_token.
+        // Contract: history already ends with current_token.
+        std::vector<int64_t> rolling = history;
+
+        std::vector<int64_t> drafted;
+        drafted.reserve(K_max - 1);
+        for (int j = 0; j + 1 < K_max; ++j) {
+            int64_t d = draft.predict(rolling);
+            if (d < 0) break;  // no n-gram hit — stop drafting
+            drafted.push_back(d);
+            rolling.push_back(d);
+            if (stats) ++stats->drafts_proposed;
+        }
+
+        // The sequence of tokens we'll verify, in order:
+        //   inputs[0] = current_token
+        //   inputs[1..D] = drafted
+        // We run main forward on inputs[i] and check if argmax(logits_i)
+        // matches inputs[i+1] (the expected next token).
+        std::vector<int64_t> inputs;
+        inputs.reserve(1 + drafted.size());
+        inputs.push_back(current_token);
+        for (auto t : drafted) inputs.push_back(t);
+
+        for (size_t i = 0; i < inputs.size(); ++i) {
+            Tensor logits = forward_decode_cpu(inputs[i]);
+            if (stats) ++stats->main_forwards;
+
+            // Greedy argmax on the last token's logit row (shape [1, V]).
+            const int64_t V_sz = config.vocab_size;
+            const float* lr = logits.data_ptr<float>();
+            int64_t best = 0;
+            float best_v = lr[0];
+            for (int64_t v = 1; v < V_sz; ++v) {
+                if (lr[v] > best_v) { best_v = lr[v]; best = v; }
+            }
+
+            if (i + 1 < inputs.size()) {
+                if (best == inputs[i + 1]) {
+                    // ACCEPT draft token at inputs[i+1].
+                    out.push_back(inputs[i + 1]);
+                    if (stats) ++stats->drafts_accepted;
+                } else {
+                    // REJECT: commit main's argmax, discard remaining drafts.
+                    // KV cache is correctly at past_len_start + i + 1 because
+                    // we appended entries for inputs[0..i]. Remaining drafts
+                    // (i+2..D) were never forwarded so nothing to rewind.
+                    out.push_back(best);
+                    break;
+                }
+            } else {
+                // Last position — commit main's answer. Always reached when
+                // all drafts accepted (D+1 total forwards) or when D=0 (1
+                // forward, classical behaviour).
+                out.push_back(best);
+            }
+        }
+
+        if (stats) ++stats->steps;
+        return out;
     }
 
     // ========================================================================
