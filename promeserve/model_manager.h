@@ -185,9 +185,15 @@ public:
     // Load / unload model
     // ========================================================================
 
-    torch::io::GGUFModel* get_loaded_model() {
+    // Returns a shared_ptr so the caller's copy keeps the model alive even if
+    // another thread calls load_model()/unload_model() and resets the manager's
+    // pointer while a request is mid-flight. Returning raw pointer here was
+    // a UAF race: handlers hold the pointer across thousands of decode calls
+    // with no lock, and a concurrent model swap would free the weights
+    // underneath them.
+    std::shared_ptr<torch::io::GGUFModel> get_loaded_model() {
         std::lock_guard<std::mutex> lock(mutex_);
-        return loaded_model_.get();
+        return loaded_model_;
     }
 
     std::string loaded_model_name() const {
@@ -231,7 +237,7 @@ public:
         loaded_model_name_.clear();
 
         try {
-            auto model = std::make_unique<torch::io::GGUFModel>();
+            auto model = std::make_shared<torch::io::GGUFModel>();
 #ifdef PT_DEBUG_HTTP
             std::cerr << "[ModelManager] Loading GGUF: " << gguf_path << std::endl;
 #endif
@@ -280,7 +286,7 @@ public:
 
 private:
     std::map<std::string, ModelInfo> models_;
-    std::unique_ptr<torch::io::GGUFModel> loaded_model_;
+    std::shared_ptr<torch::io::GGUFModel> loaded_model_;
     std::string loaded_model_name_;
     bool use_cuda_;
     bool use_fp16_weights_;
