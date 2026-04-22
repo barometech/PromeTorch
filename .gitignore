@@ -83,3 +83,15 @@ run_logs/
 *.log
 model*.pt
 *.pth
+
+# Model weights & checkpoints (large binaries — should never be committed)
+pir_ckpt/
+checkpoints/
+*.gguf
+*.ckpt
+*.bin
+*.safetensors
+
+# IDE / tooling artefacts
+compile_commands.json
+.DS_Store

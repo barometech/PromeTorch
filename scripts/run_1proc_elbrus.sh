@@ -15,7 +15,7 @@
 set -u
 cd ~/promethorch
 
-loginctl enable-linger user 2>/dev/null || true
+loginctl enable-linger "$USER" 2>/dev/null || true
 
 MODEL="$HOME/gguf_models/qwen3-4b-Q4_K_M.gguf"
 MODE="${1:---greedy}"

@@ -744,7 +744,7 @@ Web UI с streaming chat, markdown rendering, syntax highlighting.
 ├─────────────────────────────────────────────────────────┤
 │                    torch/ (фреймворк)                   │
 │  nn/modules/   optim/   data/   amp/   serialization   │
-│  97 модулей   10 opt    DataLoader  GradScaler  PTOR   │
+│  90 модулей   16 opt    DataLoader  GradScaler  PTOR   │
 ├─────────────────────────────────────────────────────────┤
 │                  torch/csrc/autograd/                   │
 │  Engine   Node   Edge   119 backward функций           │
@@ -802,7 +802,7 @@ Reverse-mode автоматическое дифференцирование:
 - **Conv2d/BatchNorm/Pool backward** — im2col-based, полная CNN тренировка
 - **Custom autograd functions** — CRTP `Function<Derived>` + gradient checkpointing
 
-### NN Modules — ~9,000 строк, 97 модулей
+### NN Modules — ~9,000 строк, 90 модулей
 
 | Категория | Модули |
 |-----------|--------|
