@@ -8,7 +8,7 @@ target_link_libraries(bench_promethorch PRIVATE
     c10 aten torch_autograd torch_nn torch_optim torch_data
 )
 if(PT_USE_CUDA)
-    target_link_libraries(bench_promethorch PRIVATE aten_cuda ${CUDA_LIBRARIES})
+    target_link_libraries(bench_promethorch PRIVATE aten_cuda)
     target_compile_definitions(bench_promethorch PRIVATE PT_USE_CUDA)
 endif()
 if(MSVC)
@@ -25,7 +25,7 @@ target_link_libraries(bench_optimized PRIVATE
     c10 aten torch_autograd torch_nn torch_optim torch_data
 )
 if(PT_USE_CUDA)
-    target_link_libraries(bench_optimized PRIVATE aten_cuda ${CUDA_LIBRARIES})
+    target_link_libraries(bench_optimized PRIVATE aten_cuda)
     target_compile_definitions(bench_optimized PRIVATE PT_USE_CUDA)
 endif()
 if(MSVC)

@@ -19,7 +19,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/main.cpp")
 
     # CUDA support
     if(PT_USE_CUDA)
-        target_link_libraries(promeserve PRIVATE aten_cuda ${CUDA_LIBRARIES})
+        target_link_libraries(promeserve PRIVATE aten_cuda)
         target_compile_definitions(promeserve PRIVATE PT_USE_CUDA)
     endif()
 
