@@ -44,7 +44,7 @@ for rank in 0 1 2 3; do
     # 4t=2.1, 6t=3.0, 7t=3.4, 8t=2.9.
     PT_NO_NUMA_POOL=1 \
     OMP_NUM_THREADS=7 \
-    OMP_PLACES=cores OMP_PROC_BIND=close \
+    PT_PIN_THREADS=1 \
     PT_DDP_SHM=1 \
     numactl --cpunodebind=$rank --membind=$rank \
         "$BIN" "$MODEL" \

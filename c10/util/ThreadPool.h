@@ -150,6 +150,15 @@ public:
         }
 
         int64_t chunk_size = (total + num_threads_ - 1) / num_threads_;
+        // Round chunk_size up to a multiple of 16 so thread boundaries never
+        // cut through a cacheline (16 × fp32 = 64 B). Otherwise adjacent
+        // threads ping-pong the shared cacheline at the boundary, and for
+        // decode-sized outputs (N=2560 / T=24 ≈ 107 chunks, 23 mis-aligned
+        // boundaries × ~217 parallel_fors / token ≈ ~5k invalidations per
+        // token). Only matters above the min_grain threshold where we
+        // actually parallelize, so it doesn't regress tiny ops.
+        // (agent_4_threadpool_audit.md Q2 / P2)
+        chunk_size = ((chunk_size + 15) / 16) * 16;
         int actual_chunks = 0;
 
         for (int i = 0; i < num_threads_; i++) {
@@ -205,7 +214,46 @@ private:
         if (pin_enabled_) {
             int ncpu = static_cast<int>(std::thread::hardware_concurrency());
             if (ncpu <= 0) ncpu = 1;
-            int cpu = worker_id % ncpu;
+
+            // Stripe workers across NUMA nodes instead of packing them onto
+            // the first N cores. With 24 workers and 32 cores (4 nodes × 8
+            // cores), naive `worker_id % ncpu` gives nodes 0-2 eight workers
+            // each and leaves node 3 empty — its DDR controller is idle while
+            // nodes 0-2 contend for cross-chip traffic to read replicas.
+            // Striped layout (agent_3_numa_audit.md rank 1):
+            //   worker 0 → node 0 core 0
+            //   worker 1 → node 1 core 0
+            //   worker 2 → node 2 core 0
+            //   worker 3 → node 3 core 0
+            //   worker 4 → node 0 core 1
+            //   ...
+            int nodes = 1;
+            int cores_per_node = ncpu;
+#  if C10_HAS_LIBNUMA
+            if (numa_available() >= 0) {
+                int n = numa_num_configured_nodes();
+                if (n > 0) {
+                    nodes = n;
+                    cores_per_node = (ncpu + n - 1) / n;
+                }
+            }
+#  endif
+            if (nodes <= 1) {
+                const char* env = std::getenv("PT_CORES_PER_NODE");
+                if (env && env[0]) {
+                    int v = std::atoi(env);
+                    if (v > 0) {
+                        cores_per_node = v;
+                        nodes = (ncpu + v - 1) / v;
+                    }
+                }
+            }
+
+            int node = worker_id % nodes;
+            int core_on_node = (worker_id / nodes) % cores_per_node;
+            int cpu = node * cores_per_node + core_on_node;
+            if (cpu >= ncpu) cpu = worker_id % ncpu;  // fallback safety
+
             cpu_set_t cs;
             CPU_ZERO(&cs);
             CPU_SET(cpu, &cs);
