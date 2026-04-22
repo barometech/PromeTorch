@@ -308,6 +308,192 @@ inline float q4k_q8_dot_avx2(const uint8_t* block, const Q8Block* x_q8) {
 //   Expected speedup: ~2x from int8 path + cache savings
 // ============================================================================
 
+// ============================================================================
+// Phase 6: SSE4.1 / 128-bit vertical-accumulate Q4_K GEMV kernel
+// ============================================================================
+// Rewrite of q4k_gemv_avx2 per Gemini 3.1 Pro's design in
+// vliw_mission/gemini_sse41_design.md.
+//
+// Key difference vs the AVX2 path:
+//   * ALL ops 128-bit (__m128i / __m128). Matches E2K's native QR register
+//     width — LCC 1.29 translates SSE4.1/SSSE3 → native QP 1:1; AVX2 256-bit
+//     is split into 2x128 with scheduling overhead.
+//   * NO horizontal reduce inside the j-loop. The 4 int32 lanes from
+//     maddubs→madd are converted to fp32 and accumulated VERTICALLY into a
+//     per-row __m128 acc. The super-block scale d_r is baked into the
+//     per-sub-block FP scale so acc aggregates across super-blocks too.
+//     A single _mm_hadd_ps + shuffle finalizes per row at the very end.
+//   * dmin correction is a pure scalar running sum (one fmadd per sub-block).
+//
+// Opt-in via PT_Q4K_V2=1 for A/B testing. Will become default after bisect
+// confirms speedup on Elbrus 8C2.
+// ============================================================================
+
+#ifdef __AVX2__
+inline float hsum_m128(__m128 v) {
+    __m128 sh = _mm_shuffle_ps(v, v, _MM_SHUFFLE(1, 0, 3, 2));
+    v = _mm_add_ps(v, sh);
+    sh = _mm_shuffle_ps(v, v, _MM_SHUFFLE(2, 3, 0, 1));
+    v = _mm_add_ps(v, sh);
+    return _mm_cvtss_f32(v);
+}
+
+inline void q4k_gemv_sse41_v(const void* weight_data, const float* x,
+                              float* y, int64_t K, int64_t N,
+                              int64_t row_stride_bytes,
+                              const torch::io::ReplicatedWeight* numa = nullptr) {
+    const int64_t blocks_per_row = K / 256;
+    const int64_t nb_q8 = K / 32;
+
+    Q8Block* x_q8;
+    Q8Block x_q8_stack[512];
+    std::unique_ptr<Q8Block[]> x_q8_heap;
+    if (nb_q8 <= 512) {
+        x_q8 = x_q8_stack;
+    } else {
+        x_q8_heap.reset(new Q8Block[nb_q8]);
+        x_q8 = x_q8_heap.get();
+    }
+    quantize_x_q8(x, x_q8, K);
+
+    const __m128i mask_lo4 = _mm_set1_epi8(0x0F);
+    const __m128i ones_16 = _mm_set1_epi16(1);
+
+    c10::get_thread_pool().parallel_for(0, N, [&](int64_t start, int64_t end) {
+        const uint8_t* __restrict raw = (numa && numa->num_replicas > 1)
+            ? static_cast<const uint8_t*>(numa->get(c10::current_numa_node()))
+            : static_cast<const uint8_t*>(weight_data);
+        int64_t n = start;
+
+        for (; n + 1 < end; n += 2) {
+            const uint8_t* __restrict row0 = raw + n * row_stride_bytes;
+            const uint8_t* __restrict row1 = raw + (n + 1) * row_stride_bytes;
+
+            // Per-row vertical 4-lane FP accumulator. Cross super-block safe
+            // because d_r (super-block scale) is baked into the scale we
+            // multiply with at the sub-block level.
+            __m128 acc0 = _mm_setzero_ps();
+            __m128 acc1 = _mm_setzero_ps();
+            // dmin correction — pure scalar running sum.
+            float dmin_sum0 = 0.0f;
+            float dmin_sum1 = 0.0f;
+
+            for (int64_t bi = 0; bi < blocks_per_row; ++bi) {
+                const uint8_t* __restrict blk0 = row0 + bi * 144;
+                const uint8_t* __restrict blk1 = row1 + bi * 144;
+                const Q8Block* __restrict xq = x_q8 + bi * 8;
+
+                if (bi + 1 < blocks_per_row) {
+                    __builtin_prefetch(row0 + (bi + 1) * 144,       0, 3);
+                    __builtin_prefetch(row0 + (bi + 1) * 144 + 64,  0, 3);
+                    __builtin_prefetch(row0 + (bi + 1) * 144 + 128, 0, 3);
+                    __builtin_prefetch(row1 + (bi + 1) * 144,       0, 3);
+                    __builtin_prefetch(row1 + (bi + 1) * 144 + 64,  0, 3);
+                    __builtin_prefetch(row1 + (bi + 1) * 144 + 128, 0, 3);
+                }
+
+                uint16_t d0_bits, dmin0_bits, d1_bits, dmin1_bits;
+                std::memcpy(&d0_bits,    blk0,     2);
+                std::memcpy(&dmin0_bits, blk0 + 2, 2);
+                std::memcpy(&d1_bits,    blk1,     2);
+                std::memcpy(&dmin1_bits, blk1 + 2, 2);
+                const float d_r0    = gguf::fp16_to_fp32(d0_bits);
+                const float dmin_r0 = gguf::fp16_to_fp32(dmin0_bits);
+                const float d_r1    = gguf::fp16_to_fp32(d1_bits);
+                const float dmin_r1 = gguf::fp16_to_fp32(dmin1_bits);
+                const uint8_t* sc0 = blk0 + 4;
+                const uint8_t* sc1 = blk1 + 4;
+                const uint8_t* qs0 = blk0 + 16;
+                const uint8_t* qs1 = blk1 + 16;
+
+                int q8_idx = 0;
+                for (int j = 0; j < 256; j += 64) {
+                    int is = j / 32;
+                    uint8_t sc_a0, m_a0, sc_b0, m_b0;
+                    uint8_t sc_a1, m_a1, sc_b1, m_b1;
+                    gguf::get_scale_min_k4(is,     sc0, &sc_a0, &m_a0);
+                    gguf::get_scale_min_k4(is + 1, sc0, &sc_b0, &m_b0);
+                    gguf::get_scale_min_k4(is,     sc1, &sc_a1, &m_a1);
+                    gguf::get_scale_min_k4(is + 1, sc1, &sc_b1, &m_b1);
+
+                    // Load 4 × 16 bytes (64 int8 input values) from two Q8Blocks.
+                    const int8_t* x_lo = reinterpret_cast<const int8_t*>(xq[q8_idx].qs);
+                    const int8_t* x_hi = reinterpret_cast<const int8_t*>(xq[q8_idx + 1].qs);
+                    __m128i x0 = _mm_loadu_si128((const __m128i*)(x_lo));
+                    __m128i x1 = _mm_loadu_si128((const __m128i*)(x_lo + 16));
+                    __m128i x2 = _mm_loadu_si128((const __m128i*)(x_hi));
+                    __m128i x3 = _mm_loadu_si128((const __m128i*)(x_hi + 16));
+                    const float dx_lo = xq[q8_idx].d;
+                    const float dx_hi = xq[q8_idx + 1].d;
+                    const float sx_lo = xq[q8_idx].sum;
+                    const float sx_hi = xq[q8_idx + 1].sum;
+
+                    // --- Row 0 ---
+                    __m128i w0_a = _mm_loadu_si128((const __m128i*)(qs0));
+                    __m128i w0_b = _mm_loadu_si128((const __m128i*)(qs0 + 16));
+                    __m128i w0a_lo = _mm_and_si128(w0_a, mask_lo4);
+                    __m128i w0a_hi = _mm_and_si128(_mm_srli_epi16(w0_a, 4), mask_lo4);
+                    __m128i w0b_lo = _mm_and_si128(w0_b, mask_lo4);
+                    __m128i w0b_hi = _mm_and_si128(_mm_srli_epi16(w0_b, 4), mask_lo4);
+
+                    __m128i s0a = _mm_add_epi32(
+                        _mm_madd_epi16(_mm_maddubs_epi16(w0a_lo, x0), ones_16),
+                        _mm_madd_epi16(_mm_maddubs_epi16(w0a_hi, x1), ones_16));
+                    __m128i s0b = _mm_add_epi32(
+                        _mm_madd_epi16(_mm_maddubs_epi16(w0b_lo, x2), ones_16),
+                        _mm_madd_epi16(_mm_maddubs_epi16(w0b_hi, x3), ones_16));
+
+                    // Bake d_r0 into the scale so acc0 can accumulate across super-blocks.
+                    __m128 scale0_a = _mm_set1_ps(d_r0 * sc_a0 * dx_lo);
+                    __m128 scale0_b = _mm_set1_ps(d_r0 * sc_b0 * dx_hi);
+                    acc0 = _mm_add_ps(acc0, _mm_mul_ps(_mm_cvtepi32_ps(s0a), scale0_a));
+                    acc0 = _mm_add_ps(acc0, _mm_mul_ps(_mm_cvtepi32_ps(s0b), scale0_b));
+                    dmin_sum0 += dmin_r0 * (m_a0 * sx_lo + m_b0 * sx_hi);
+
+                    // --- Row 1 --- (reuses x0..x3)
+                    __m128i w1_a = _mm_loadu_si128((const __m128i*)(qs1));
+                    __m128i w1_b = _mm_loadu_si128((const __m128i*)(qs1 + 16));
+                    __m128i w1a_lo = _mm_and_si128(w1_a, mask_lo4);
+                    __m128i w1a_hi = _mm_and_si128(_mm_srli_epi16(w1_a, 4), mask_lo4);
+                    __m128i w1b_lo = _mm_and_si128(w1_b, mask_lo4);
+                    __m128i w1b_hi = _mm_and_si128(_mm_srli_epi16(w1_b, 4), mask_lo4);
+
+                    __m128i s1a = _mm_add_epi32(
+                        _mm_madd_epi16(_mm_maddubs_epi16(w1a_lo, x0), ones_16),
+                        _mm_madd_epi16(_mm_maddubs_epi16(w1a_hi, x1), ones_16));
+                    __m128i s1b = _mm_add_epi32(
+                        _mm_madd_epi16(_mm_maddubs_epi16(w1b_lo, x2), ones_16),
+                        _mm_madd_epi16(_mm_maddubs_epi16(w1b_hi, x3), ones_16));
+
+                    __m128 scale1_a = _mm_set1_ps(d_r1 * sc_a1 * dx_lo);
+                    __m128 scale1_b = _mm_set1_ps(d_r1 * sc_b1 * dx_hi);
+                    acc1 = _mm_add_ps(acc1, _mm_mul_ps(_mm_cvtepi32_ps(s1a), scale1_a));
+                    acc1 = _mm_add_ps(acc1, _mm_mul_ps(_mm_cvtepi32_ps(s1b), scale1_b));
+                    dmin_sum1 += dmin_r1 * (m_a1 * sx_lo + m_b1 * sx_hi);
+
+                    qs0 += 32;
+                    qs1 += 32;
+                    q8_idx += 2;
+                }
+            }
+            // Horizontal reduce once per row at the very end.
+            y[n]     = hsum_m128(acc0) - dmin_sum0;
+            y[n + 1] = hsum_m128(acc1) - dmin_sum1;
+        }
+
+        // Odd remaining row — fall back to scalar dot (rare, not on hot path).
+        if (n < end) {
+            const uint8_t* row_data = raw + n * row_stride_bytes;
+            float sum = 0.0f;
+            for (int64_t bi = 0; bi < blocks_per_row; ++bi) {
+                sum += q4k_q8_dot_avx2(row_data + bi * 144, x_q8 + bi * 8);
+            }
+            y[n] = sum;
+        }
+    }, 1);
+}
+#endif
+
 inline void q4k_gemv_avx2(const void* weight_data, const float* x,
                            float* y, int64_t K, int64_t N,
                            int64_t row_stride_bytes,
@@ -1288,7 +1474,19 @@ inline void cpu_quant_gemv(uint32_t quant_type,
     switch (quant_type) {
         case 12: // GGML_TYPE_Q4_K
 #ifdef __AVX2__
-            q4k_gemv_avx2(weight_data, x, y, K, N, row_stride_bytes, numa);
+        {
+            // PT_Q4K_V2=1 selects the Phase 6 vertical-accumulate kernel
+            // (gemini_sse41_design.md). Checked once and cached.
+            static const bool use_v2 = [] {
+                const char* e = std::getenv("PT_Q4K_V2");
+                return e && e[0] == '1';
+            }();
+            if (use_v2) {
+                q4k_gemv_sse41_v(weight_data, x, y, K, N, row_stride_bytes, numa);
+            } else {
+                q4k_gemv_avx2(weight_data, x, y, K, N, row_stride_bytes, numa);
+            }
+        }
 #else
             q4k_gemv_scalar(weight_data, x, y, K, N, row_stride_bytes, numa);
 #endif
