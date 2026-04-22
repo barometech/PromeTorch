@@ -565,7 +565,7 @@ private:
         // We need a lock since the model is shared
         std::lock_guard<std::mutex> lock(generate_mutex_);
 
-        auto* model = models_.get_loaded_model();
+        auto model = models_.get_loaded_model();
         if (!model) {
             std::cerr << "[Generate] ERROR: model pointer is null after load" << std::endl;
             writer.write("{\"error\":\"model not loaded\",\"done\":true}\n");
@@ -670,7 +670,7 @@ private:
         auto t_total_start = std::chrono::high_resolution_clock::now();
         std::lock_guard<std::mutex> lock(generate_mutex_);
 
-        auto* model = models_.get_loaded_model();
+        auto model = models_.get_loaded_model();
         if (!model) {
             std::cerr << "[Chat] ERROR: model pointer is null after load" << std::endl;
             writer.write("{\"error\":\"model not loaded\",\"done\":true}\n");
@@ -1131,7 +1131,7 @@ private:
     std::string format_chat_messages(const json::JsonValue& messages, const std::string& model_name) {
         // Determine architecture from loaded model or model name
         std::string arch;
-        auto* model = models_.get_loaded_model();
+        auto model = models_.get_loaded_model();
         if (model) {
             arch = model->config.architecture;
         } else {
