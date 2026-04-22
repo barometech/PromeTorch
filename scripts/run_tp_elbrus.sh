@@ -8,7 +8,7 @@ set -u
 cd ~/promethorch
 
 # Safety: systemd must not kill processes on SSH disconnect.
-loginctl enable-linger user 2>/dev/null || true
+loginctl enable-linger "$USER" 2>/dev/null || true
 
 MODEL="$HOME/gguf_models/qwen3-4b-Q4_K_M.gguf"
 PROMPT="${2:-Write a short haiku about artificial intelligence}"

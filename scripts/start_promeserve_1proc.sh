@@ -11,7 +11,7 @@ cd "$HOME/promethorch"
 pkill -f promeserve 2>/dev/null || true
 sleep 2
 
-loginctl enable-linger user 2>/dev/null || true
+loginctl enable-linger "$USER" 2>/dev/null || true
 
 # Use tmux detached session — survives SSH disconnect reliably on Elbrus.
 tmux kill-session -t promeserve 2>/dev/null || true
