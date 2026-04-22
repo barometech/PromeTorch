@@ -345,7 +345,16 @@ inline void q4k_gemv_avx2(const void* weight_data, const float* x,
         for (; n + 1 < end; n += 2) {
             const uint8_t* row0 = raw + n * row_stride_bytes;
             const uint8_t* row1 = raw + (n + 1) * row_stride_bytes;
-            float sum0 = 0.0f, sum1 = 0.0f;
+            // Split each row's accumulator into two independent chains
+            // (sum*_a gets is_a terms, sum*_b gets is_b terms). Final sum
+            // = a + b. This halves the FP dependency chain length per
+            // super-block from 8 sequential +='s to 4, giving the LCC
+            // scheduler 4 independent FP chains per 2-row iteration. On
+            // E8C2 this moves us from ~2 to ~4 ALC channels utilized.
+            // Float associativity change is safe for decode (no bit-exact
+            // requirement against prior builds). agent_1_e2k_architecture.md P3.
+            float sum0_a = 0.0f, sum0_b = 0.0f;
+            float sum1_a = 0.0f, sum1_b = 0.0f;
 
             for (int64_t bi = 0; bi < blocks_per_row; ++bi) {
                 const uint8_t* blk0 = row0 + bi * 144;
@@ -423,8 +432,8 @@ inline void q4k_gemv_avx2(const void* weight_data, const float* x,
                     t1 = _mm_add_epi32(t1, _mm_shuffle_epi32(t1, _MM_SHUFFLE(2,3,0,1)));
                     int32_t is0_hi = _mm_cvtsi128_si32(t1);
 
-                    sum0 += d_r0 * sc_a0 * dx_lo * (float)is0_lo - dmin_r0 * m_a0 * sx_lo;
-                    sum0 += d_r0 * sc_b0 * dx_hi * (float)is0_hi - dmin_r0 * m_b0 * sx_hi;
+                    sum0_a += d_r0 * sc_a0 * dx_lo * (float)is0_lo - dmin_r0 * m_a0 * sx_lo;
+                    sum0_b += d_r0 * sc_b0 * dx_hi * (float)is0_hi - dmin_r0 * m_b0 * sx_hi;
 
                     // Row 1: extract nibbles + integer dot (reuses q8_lo, q8_hi)
                     __m256i raw1 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(qs1));
@@ -448,16 +457,16 @@ inline void q4k_gemv_avx2(const void* weight_data, const float* x,
                     t3 = _mm_add_epi32(t3, _mm_shuffle_epi32(t3, _MM_SHUFFLE(2,3,0,1)));
                     int32_t is1_hi = _mm_cvtsi128_si32(t3);
 
-                    sum1 += d_r1 * sc_a1 * dx_lo * (float)is1_lo - dmin_r1 * m_a1 * sx_lo;
-                    sum1 += d_r1 * sc_b1 * dx_hi * (float)is1_hi - dmin_r1 * m_b1 * sx_hi;
+                    sum1_a += d_r1 * sc_a1 * dx_lo * (float)is1_lo - dmin_r1 * m_a1 * sx_lo;
+                    sum1_b += d_r1 * sc_b1 * dx_hi * (float)is1_hi - dmin_r1 * m_b1 * sx_hi;
 
                     qs0 += 32;
                     qs1 += 32;
                     q8_idx += 2;
                 }
             }
-            y[n] = sum0;
-            y[n + 1] = sum1;
+            y[n] = sum0_a + sum0_b;
+            y[n + 1] = sum1_a + sum1_b;
         }
 
         // Handle odd remaining row
@@ -1025,7 +1034,10 @@ inline void q4k_gemv_k_slice_avx2(const void* sliced_weight, const float* x_loca
         for (; n + 1 < end; n += 2) {
             const uint8_t* row0 = raw + n * local_row_stride_bytes;
             const uint8_t* row1 = raw + (n + 1) * local_row_stride_bytes;
-            float sum0 = 0.0f, sum1 = 0.0f;
+            // Split accumulators (agent_1_e2k_architecture.md P3): 4 chains
+            // instead of 2 → better VLIW issue packing on E8C2.
+            float sum0_a = 0.0f, sum0_b = 0.0f;
+            float sum1_a = 0.0f, sum1_b = 0.0f;
 
             for (int64_t bi = 0; bi < local_blocks; ++bi) {
                 const uint8_t* blk0 = row0 + bi * 144;
@@ -1083,8 +1095,8 @@ inline void q4k_gemv_k_slice_avx2(const void* sliced_weight, const float* x_loca
                     t1 = _mm_add_epi32(t1, _mm_shuffle_epi32(t1, _MM_SHUFFLE(1,0,3,2)));
                     t1 = _mm_add_epi32(t1, _mm_shuffle_epi32(t1, _MM_SHUFFLE(2,3,0,1)));
                     int32_t is0_hi = _mm_cvtsi128_si32(t1);
-                    sum0 += d_r0 * sc_a0 * dx_lo * (float)is0_lo - dmin_r0 * m_a0 * sx_lo;
-                    sum0 += d_r0 * sc_b0 * dx_hi * (float)is0_hi - dmin_r0 * m_b0 * sx_hi;
+                    sum0_a += d_r0 * sc_a0 * dx_lo * (float)is0_lo - dmin_r0 * m_a0 * sx_lo;
+                    sum0_b += d_r0 * sc_b0 * dx_hi * (float)is0_hi - dmin_r0 * m_b0 * sx_hi;
 
                     // Row 1
                     __m256i raw1 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(qs1));
@@ -1104,16 +1116,16 @@ inline void q4k_gemv_k_slice_avx2(const void* sliced_weight, const float* x_loca
                     t3 = _mm_add_epi32(t3, _mm_shuffle_epi32(t3, _MM_SHUFFLE(1,0,3,2)));
                     t3 = _mm_add_epi32(t3, _mm_shuffle_epi32(t3, _MM_SHUFFLE(2,3,0,1)));
                     int32_t is1_hi = _mm_cvtsi128_si32(t3);
-                    sum1 += d_r1 * sc_a1 * dx_lo * (float)is1_lo - dmin_r1 * m_a1 * sx_lo;
-                    sum1 += d_r1 * sc_b1 * dx_hi * (float)is1_hi - dmin_r1 * m_b1 * sx_hi;
+                    sum1_a += d_r1 * sc_a1 * dx_lo * (float)is1_lo - dmin_r1 * m_a1 * sx_lo;
+                    sum1_b += d_r1 * sc_b1 * dx_hi * (float)is1_hi - dmin_r1 * m_b1 * sx_hi;
 
                     qs0 += 32;
                     qs1 += 32;
                     q8_idx += 2;
                 }
             }
-            y[n] = sum0;
-            y[n + 1] = sum1;
+            y[n] = sum0_a + sum0_b;
+            y[n + 1] = sum1_a + sum1_b;
         }
         if (n < end) {
             const uint8_t* row_data = raw + n * local_row_stride_bytes;
@@ -1507,7 +1519,9 @@ inline void cpu_quant_gemv_batched_qkv(
             for (; n + 1 < end; n += 2) {
                 const uint8_t* row0 = get_weight_row(n);
                 const uint8_t* row1 = get_weight_row(n + 1);
-                float sum0 = 0.0f, sum1 = 0.0f;
+                // Split accumulators (agent_1 P3) — 4 chains per iteration.
+                float sum0_a = 0.0f, sum0_b = 0.0f;
+                float sum1_a = 0.0f, sum1_b = 0.0f;
 
                 for (int64_t bi = 0; bi < blocks_per_row; ++bi) {
                     const uint8_t* blk0 = row0 + bi * 144;
@@ -1575,8 +1589,8 @@ inline void cpu_quant_gemv_batched_qkv(
                         t1 = _mm_add_epi32(t1, _mm_shuffle_epi32(t1, _MM_SHUFFLE(1,0,3,2)));
                         t1 = _mm_add_epi32(t1, _mm_shuffle_epi32(t1, _MM_SHUFFLE(2,3,0,1)));
                         int32_t is0_hi = _mm_cvtsi128_si32(t1);
-                        sum0 += d_r0 * sc_a0 * dx_lo * (float)is0_lo - dmin_r0 * m_a0 * sx_lo;
-                        sum0 += d_r0 * sc_b0 * dx_hi * (float)is0_hi - dmin_r0 * m_b0 * sx_hi;
+                        sum0_a += d_r0 * sc_a0 * dx_lo * (float)is0_lo - dmin_r0 * m_a0 * sx_lo;
+                        sum0_b += d_r0 * sc_b0 * dx_hi * (float)is0_hi - dmin_r0 * m_b0 * sx_hi;
 
                         // Row 1
                         __m256i raw1 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(qs1));
@@ -1596,16 +1610,16 @@ inline void cpu_quant_gemv_batched_qkv(
                         t3 = _mm_add_epi32(t3, _mm_shuffle_epi32(t3, _MM_SHUFFLE(1,0,3,2)));
                         t3 = _mm_add_epi32(t3, _mm_shuffle_epi32(t3, _MM_SHUFFLE(2,3,0,1)));
                         int32_t is1_hi = _mm_cvtsi128_si32(t3);
-                        sum1 += d_r1 * sc_a1 * dx_lo * (float)is1_lo - dmin_r1 * m_a1 * sx_lo;
-                        sum1 += d_r1 * sc_b1 * dx_hi * (float)is1_hi - dmin_r1 * m_b1 * sx_hi;
+                        sum1_a += d_r1 * sc_a1 * dx_lo * (float)is1_lo - dmin_r1 * m_a1 * sx_lo;
+                        sum1_b += d_r1 * sc_b1 * dx_hi * (float)is1_hi - dmin_r1 * m_b1 * sx_hi;
 
                         qs0 += 32;
                         qs1 += 32;
                         q8_idx += 2;
                     }
                 }
-                *get_output_ptr(n) = sum0;
-                *get_output_ptr(n + 1) = sum1;
+                *get_output_ptr(n) = sum0_a + sum0_b;
+                *get_output_ptr(n + 1) = sum1_a + sum1_b;
             }
             // Handle odd remaining row
             if (n < end) {
