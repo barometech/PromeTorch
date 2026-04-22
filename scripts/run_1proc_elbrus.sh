@@ -3,10 +3,15 @@
 # single-process mode.
 #
 # Measured on 2026-04-22 bisect (50-token greedy gen, qwen3:4b):
-#   R=0 P=0 (default, plain interleave):     4.6 tok/s   ← current best
+#   R=0 P=0 (default, plain interleave):     4.6 tok/s
 #   R=0 P=1 (pinned threads):                 4.5 tok/s
 #   R=1 P=0 (NUMA replicated weights):        4.3 tok/s   ← regresses
 #   R=1 P=1 (replicate + pin):                4.4 tok/s
+#
+# Thread count sweep (T=8..32 at R=0 interleave, 50-tok greedy, 2026-04-22):
+#   T=8  → 2.2      T=16 → 3.8      T=24 → 4.7
+#   T=28 → 5.0      T=30 → 5.0      T=32 → 4.0
+# → optimal T=30 (5.0 tok/s, +6.4% vs old T=24 baseline).
 #
 # Why PT_NUMA_REPLICATE=1 HURTS in 1-proc mode: `numactl --interleave=all`
 # already scatters every page across the 4 DDR controllers; adding per-node
@@ -43,7 +48,7 @@ mkdir -p run_logs
 echo "=== PromeTorch 1-proc inference (qwen3:4b Q4_K_M, Эльбрус 8C2, 24t + interleave=all) ==="
 date +"Start: %F %T"
 
-OMP_NUM_THREADS=24 \
+OMP_NUM_THREADS=30 \
 numactl --interleave=all \
     "$BIN" "$MODEL" \
     --max-tokens $MAX_TOK $MODE \

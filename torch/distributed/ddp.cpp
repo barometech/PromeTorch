@@ -16,6 +16,10 @@
 #include <thread>
 #include <vector>
 
+#if !defined(_WIN32)
+#include <sched.h>    // sched_yield for bounded-spin AllReduce
+#endif
+
 #if defined(_WIN32)
   // Stubs so the file at least parses on Windows. Real DDP runs on POSIX.
   #include <winsock2.h>
@@ -530,12 +534,32 @@ static void all_reduce_shm(PGState& s, float* data, int64_t numel) {
     // 2. Signal arrival.
     hdr->arrived[gen % 16].fetch_add(1, std::memory_order_release);
 
-    if (s.rank == 0) {
-        // 3a. Wait for all ranks to deposit.
-        while (hdr->arrived[gen % 16].load(std::memory_order_acquire)
-               != (uint32_t)s.world_size) {
+    // Bounded-spin wait helper. First ~1024 iterations just spin (expected
+    // contention <10 μs; the peer is about to arrive). Beyond that, start
+    // yielding the CPU so that if the peer is slow (cache miss, page fault,
+    // OS scheduler preemption) we don't burn 100% of the core while spinning
+    // — critical on Elbrus where the waiting rank's cycles are LOCAL CPU
+    // cycles and could otherwise be used for the next layer's prefetch.
+    auto spin_until = [&](auto&& pred) {
+        for (int i = 0; i < 1024; ++i) {
+            if (pred()) return;
             __sync_synchronize();
         }
+        // Slow path: yield back to the kernel. sched_yield is cheap if the
+        // peer is already ready (we immediately come back); expensive only
+        // when we're actually blocked — which is exactly when we want to
+        // stop burning CPU.
+        while (!pred()) {
+            sched_yield();
+        }
+    };
+
+    if (s.rank == 0) {
+        // 3a. Wait for all ranks to deposit.
+        spin_until([&]{
+            return hdr->arrived[gen % 16].load(std::memory_order_acquire)
+                   == (uint32_t)s.world_size;
+        });
         // Reduce (sum) all rank slots -> sum slot.
         // NOTE: sum_slot == rank_slot(0) by design, so rank 0's deposit is
         // already at sum. Accumulate workers 1..ws-1 into it.
@@ -552,18 +576,16 @@ static void all_reduce_shm(PGState& s, float* data, int64_t numel) {
         hdr->generation = gen + 1;
         __sync_synchronize();
         // Wait for all workers to depart (pick up sum) before reusing buffers.
-        while (hdr->departed[gen % 16].load(std::memory_order_acquire)
-               != (uint32_t)(s.world_size - 1)) {
-            __sync_synchronize();
-        }
+        spin_until([&]{
+            return hdr->departed[gen % 16].load(std::memory_order_acquire)
+                   == (uint32_t)(s.world_size - 1);
+        });
         // Reset counters for next round.
         hdr->arrived[gen % 16].store(0, std::memory_order_release);
         hdr->departed[gen % 16].store(0, std::memory_order_release);
     } else {
         // Workers: wait for rank-0 to publish new generation.
-        while (hdr->generation <= gen) {
-            __sync_synchronize();
-        }
+        spin_until([&]{ return hdr->generation > gen; });
         // 4. Copy sum back to output tensor.
         const float* sum = reinterpret_cast<const float*>(shm_sum_slot(base));
         std::memcpy(data, sum, nbytes);
