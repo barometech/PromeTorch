@@ -1308,6 +1308,133 @@ inline bool cpu_quant_gemv_supported(uint32_t quant_type) {
 }
 
 // ============================================================================
+// Batched Q4_K GEMV over N rows × 2 x vectors.
+// Core primitive for speculative decoding: when we have 2 query tokens
+// sharing the same weight matrix, read W once and dot against both x's.
+//
+// Weight bandwidth per row is amortized 2× — compute doubles but memory
+// traffic stays the same. Measured gain depends on how memory-bound the
+// single-row version is on Elbrus (typically L2/L3 resident weights, some
+// gain measurable).
+//
+// Caller must pre-quantize BOTH x0 and x1 to Q8 (same helper as scalar
+// path). Outputs y0[N], y1[N] are written independently.
+// ============================================================================
+#ifdef __AVX2__
+inline void q4k_gemv_avx2_batch2(
+    const void* weight_data,
+    const float* x0, const float* x1,   // two x vectors, same K
+    float* y0, float* y1,                // two output rows, size N each
+    int64_t K, int64_t N,
+    int64_t row_stride_bytes,
+    const torch::io::ReplicatedWeight* numa = nullptr) {
+
+    const int64_t blocks_per_row = K / 256;
+    const int64_t nb_q8 = K / 32;
+
+    Q8Block xq0_stack[512], xq1_stack[512];
+    std::unique_ptr<Q8Block[]> xq0_heap, xq1_heap;
+    Q8Block *xq0, *xq1;
+    if (nb_q8 <= 512) {
+        xq0 = xq0_stack; xq1 = xq1_stack;
+    } else {
+        xq0_heap.reset(new Q8Block[nb_q8]);
+        xq1_heap.reset(new Q8Block[nb_q8]);
+        xq0 = xq0_heap.get(); xq1 = xq1_heap.get();
+    }
+    quantize_x_q8(x0, xq0, K);
+    quantize_x_q8(x1, xq1, K);
+
+    const __m256i mask_lo4 = _mm256_set1_epi8(0x0F);
+    const __m256i ones_16  = _mm256_set1_epi16(1);
+
+    c10::get_thread_pool().parallel_for(0, N, [&](int64_t start, int64_t end) {
+        const uint8_t* raw = (numa && numa->num_replicas > 1)
+            ? static_cast<const uint8_t*>(numa->get(c10::current_numa_node()))
+            : static_cast<const uint8_t*>(weight_data);
+
+        for (int64_t n = start; n < end; ++n) {
+            const uint8_t* row = raw + n * row_stride_bytes;
+            float s0 = 0.0f, s1 = 0.0f;
+
+            for (int64_t bi = 0; bi < blocks_per_row; ++bi) {
+                const uint8_t* blk = row + bi * 144;
+
+                // Prefetch next block to L1 (same win as single-row kernel).
+                if (bi + 1 < blocks_per_row) {
+                    const uint8_t* nxt = row + (bi + 1) * 144;
+                    __builtin_prefetch(nxt,       0, 3);
+                    __builtin_prefetch(nxt + 64,  0, 3);
+                    __builtin_prefetch(nxt + 128, 0, 3);
+                }
+
+                uint16_t d_bits, dm_bits;
+                std::memcpy(&d_bits,  blk,     2);
+                std::memcpy(&dm_bits, blk + 2, 2);
+                const float d    = gguf::fp16_to_fp32(d_bits);
+                const float dmin = gguf::fp16_to_fp32(dm_bits);
+                const uint8_t* sc = blk + 4;
+                const uint8_t* qs = blk + 16;
+
+                // Q8 blocks for both x's at this position.
+                const Q8Block* xq0b = xq0 + bi * 8;
+                const Q8Block* xq1b = xq1 + bi * 8;
+
+                int q8_idx = 0;
+                for (int j = 0; j < 256; j += 64) {
+                    int is = j / 32;
+                    uint8_t sca, ma, scb, mb;
+                    gguf::get_scale_min_k4(is,     sc, &sca, &ma);
+                    gguf::get_scale_min_k4(is + 1, sc, &scb, &mb);
+
+                    // Load Q4 nibbles from weight ONCE per 64-chunk.
+                    __m256i raw_q4 = _mm256_loadu_si256((const __m256i*)qs);
+                    __m256i q4_lo = _mm256_and_si256(raw_q4, mask_lo4);
+                    __m256i q4_hi = _mm256_and_si256(_mm256_srli_epi16(raw_q4, 4), mask_lo4);
+
+                    // Dot with BOTH x0 and x1 Q8 blocks for lo+hi sub-blocks.
+                    auto dot_against = [&](const Q8Block* xqb, float& sum) {
+                        __m256i q8_lo = _mm256_loadu_si256((const __m256i*)xqb[q8_idx].qs);
+                        __m256i q8_hi = _mm256_loadu_si256((const __m256i*)xqb[q8_idx + 1].qs);
+                        float dx_lo = xqb[q8_idx].d,  dx_hi = xqb[q8_idx + 1].d;
+                        float sx_lo = xqb[q8_idx].sum, sx_hi = xqb[q8_idx + 1].sum;
+
+                        __m256i p_lo32 = _mm256_madd_epi16(
+                            _mm256_maddubs_epi16(q4_lo, q8_lo), ones_16);
+                        __m256i p_hi32 = _mm256_madd_epi16(
+                            _mm256_maddubs_epi16(q4_hi, q8_hi), ones_16);
+
+                        __m128i tlo = _mm_add_epi32(_mm256_castsi256_si128(p_lo32),
+                                                     _mm256_extracti128_si256(p_lo32, 1));
+                        tlo = _mm_add_epi32(tlo, _mm_shuffle_epi32(tlo, _MM_SHUFFLE(1,0,3,2)));
+                        tlo = _mm_add_epi32(tlo, _mm_shuffle_epi32(tlo, _MM_SHUFFLE(2,3,0,1)));
+                        int32_t is_lo = _mm_cvtsi128_si32(tlo);
+
+                        __m128i thi = _mm_add_epi32(_mm256_castsi256_si128(p_hi32),
+                                                     _mm256_extracti128_si256(p_hi32, 1));
+                        thi = _mm_add_epi32(thi, _mm_shuffle_epi32(thi, _MM_SHUFFLE(1,0,3,2)));
+                        thi = _mm_add_epi32(thi, _mm_shuffle_epi32(thi, _MM_SHUFFLE(2,3,0,1)));
+                        int32_t is_hi = _mm_cvtsi128_si32(thi);
+
+                        sum += d * sca * dx_lo * (float)is_lo - dmin * ma * sx_lo;
+                        sum += d * scb * dx_hi * (float)is_hi - dmin * mb * sx_hi;
+                    };
+
+                    dot_against(xq0b, s0);
+                    dot_against(xq1b, s1);
+
+                    qs += 32;
+                    q8_idx += 2;
+                }
+            }
+            y0[n] = s0;
+            y1[n] = s1;
+        }
+    }, 1);
+}
+#endif
+
+// ============================================================================
 // Batched QKV GEMV -- shared x vector across 3 weight matrices
 //
 // Instead of 3 separate GEMVs where each re-reads x from memory,
