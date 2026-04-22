@@ -1,7 +1,7 @@
 # ДОКУМЕНТАЦИЯ: Эльбрус-8СВ (E8C2) — Архитектура процессора
 
 > **ЭТО ДОКУМЕНТАЦИЯ ЭЛЬБРУСА!** Конкретно под наш процессор: 4-socket Elbrus-8SV (E8C2).
-> Сервер: &lt;private MCST server&gt;, 32 ядра, 125 GB RAM, LCC 1.29.
+> Сервер: <private MCST server>, 32 ядра, 125 GB RAM, LCC 1.29.
 > Источники: mcst.ru, dev.mcst.ru, wiki.elbrus.ru, habr.com, altlinux.org
 
 ---
