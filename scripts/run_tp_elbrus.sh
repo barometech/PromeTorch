@@ -42,9 +42,20 @@ for rank in 0 1 2 3; do
     # OMP_NUM_THREADS=7 (not 8): same sweet-spot reason as 1-proc 24-vs-32 —
     # leave 1 core per NUMA node free for OS daemons / IRQ handlers. Sweep:
     # 4t=2.1, 6t=3.0, 7t=3.4, 8t=2.9.
+    # PT_PIN_THREADS is deliberately NOT set here. In TP mode each rank is
+    # already numactl --cpunodebind'd to 8 contiguous cores, but the ThreadPool
+    # pin logic maps worker_id to absolute CPU IDs (0..31). Ranks 1–3 would
+    # therefore try to pin workers to CPUs outside their cpuset, which the
+    # kernel either rejects (setaffinity error) or forces onto the single
+    # first allowed CPU — serialising the rank and dropping tok/s to ~1.8.
+    # Confirmed 2026-04-22 bisect (vliw_mission/bisect_phase0-3_results.md).
+    #
+    # PT_NUMA_REPLICATE=1 gives a small, in-noise +0.2 tok/s on TP (5.3→5.5),
+    # but it's "free" in the sense that memory is already membind'd and the
+    # copy happens once at load. Keep it on.
     PT_NO_NUMA_POOL=1 \
     OMP_NUM_THREADS=7 \
-    PT_PIN_THREADS=1 \
+    PT_NUMA_REPLICATE=1 \
     PT_DDP_SHM=1 \
     numactl --cpunodebind=$rank --membind=$rank \
         "$BIN" "$MODEL" \
