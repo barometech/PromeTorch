@@ -1661,6 +1661,217 @@ inline void q4k_gemv_avx2_batch2(
 // This reduces x memory traffic from 3*K to ~K (shared across threads).
 // ============================================================================
 
+// ============================================================================
+// Phase 7.1 — batched Q4_K GEMV for speculative verify.
+//
+// Standard q4k_gemv reads 2.5 GB of weights per forward. For spec decode with
+// K draft tokens we want K forwards for the cost of ~1 weight read. That's
+// what this function does: weight read once, K partial dots computed per
+// weight super-block, K outputs written.
+//
+// Contract:
+//   x         — row-major [K_batch × H]. x[k*H + j] is element j of query k.
+//   y         — row-major [K_batch × N]. y[k*N + n] is the dot of query k
+//               with weight row n.
+//   K_batch   — number of queries to batch (1..kMaxSpecBatch=4). When K=1
+//               this is equivalent to q4k_gemv_avx2.
+//
+// Implementation: outer parallel_for over N (weight rows). Inside, per super-
+// block, the weight is loaded once and K independent sum accumulators are
+// updated. At row end, each sum is stored to y[k*N + n].
+// ============================================================================
+
+static constexpr int kMaxSpecBatch = 6;  // Gemini Deep Research finds K=5 optimal for p≈0.8; headroom for K=6
+
+#ifdef __AVX2__
+inline void q4k_gemv_batched_avx2(const void* weight_data,
+                                   const float* x,
+                                   float* y,
+                                   int K_batch,
+                                   int64_t H, int64_t N,
+                                   int64_t row_stride_bytes,
+                                   const torch::io::ReplicatedWeight* numa = nullptr) {
+    if (K_batch <= 0 || K_batch > kMaxSpecBatch) return;
+    const int64_t blocks_per_row = H / 256;
+    const int64_t nb_q8 = H / 32;
+
+    // Pre-quantize each of K_batch rows of x to its own Q8Block array.
+    // Stack: up to 6 × 512 = 3072 Q8Blocks × 40 B = 120 KB — safe with
+    // /STACK:67108864 on MSVC and default 8 MB pthread stack on Linux.
+    Q8Block x_q8_stack[kMaxSpecBatch * 512];
+    std::unique_ptr<Q8Block[]> x_q8_heap;
+    Q8Block* x_q8_all;
+    if (nb_q8 * K_batch <= (int64_t)(kMaxSpecBatch * 512)) {
+        x_q8_all = x_q8_stack;
+    } else {
+        x_q8_heap.reset(new Q8Block[nb_q8 * K_batch]);
+        x_q8_all = x_q8_heap.get();
+    }
+    for (int k = 0; k < K_batch; ++k) {
+        quantize_x_q8(x + k * H, x_q8_all + k * nb_q8, H);
+    }
+
+    const __m256i mask_lo4 = _mm256_set1_epi8(0x0F);
+    const __m256i ones_16  = _mm256_set1_epi16(1);
+
+    c10::get_thread_pool().parallel_for(0, N, [&](int64_t start, int64_t end) {
+        const uint8_t* __restrict raw = (numa && numa->num_replicas > 1)
+            ? static_cast<const uint8_t*>(numa->get(c10::current_numa_node()))
+            : static_cast<const uint8_t*>(weight_data);
+
+        for (int64_t n = start; n < end; ++n) {
+            const uint8_t* __restrict row = raw + n * row_stride_bytes;
+
+            // Split accumulator trick (Phase 3 / agent_1 P3): one pair per
+            // query. 2*K_batch independent FP chains so LCC can schedule
+            // plenty of packed adds in each VLIW bundle.
+            float sum_a[kMaxSpecBatch] = {0};
+            float sum_b[kMaxSpecBatch] = {0};
+
+            for (int64_t bi = 0; bi < blocks_per_row; ++bi) {
+                const uint8_t* __restrict blk = row + bi * 144;
+
+                if (bi + 1 < blocks_per_row) {
+                    __builtin_prefetch(row + (bi + 1) * 144,       0, 3);
+                    __builtin_prefetch(row + (bi + 1) * 144 + 64,  0, 3);
+                    __builtin_prefetch(row + (bi + 1) * 144 + 128, 0, 3);
+                }
+
+                uint16_t d_bits, dmin_bits;
+                std::memcpy(&d_bits,    blk,     2);
+                std::memcpy(&dmin_bits, blk + 2, 2);
+                const float d_r    = gguf::fp16_to_fp32(d_bits);
+                const float dmin_r = gguf::fp16_to_fp32(dmin_bits);
+                const uint8_t* sc = blk + 4;
+                const uint8_t* qs = blk + 16;
+
+                int q8_idx = 0;
+                for (int j = 0; j < 256; j += 64) {
+                    int is = j / 32;
+                    uint8_t sc_a, m_a, sc_b, m_b;
+                    gguf::get_scale_min_k4(is,     sc, &sc_a, &m_a);
+                    gguf::get_scale_min_k4(is + 1, sc, &sc_b, &m_b);
+
+                    // Weight block is loaded ONCE per super-block iteration,
+                    // reused across all K_batch queries.
+                    __m256i raw_w = _mm256_loadu_si256((const __m256i*)qs);
+                    __m256i q4_lo = _mm256_and_si256(raw_w, mask_lo4);
+                    __m256i q4_hi = _mm256_and_si256(_mm256_srli_epi16(raw_w, 4), mask_lo4);
+
+                    for (int k = 0; k < K_batch; ++k) {
+                        const Q8Block* xqk = x_q8_all + k * nb_q8 + bi * 8;
+                        __m256i q8_lo = _mm256_loadu_si256((const __m256i*)xqk[q8_idx].qs);
+                        __m256i q8_hi = _mm256_loadu_si256((const __m256i*)xqk[q8_idx + 1].qs);
+                        const float dx_lo = xqk[q8_idx].d;
+                        const float dx_hi = xqk[q8_idx + 1].d;
+                        const float sx_lo = xqk[q8_idx].sum;
+                        const float sx_hi = xqk[q8_idx + 1].sum;
+
+                        __m256i p_lo = _mm256_madd_epi16(
+                            _mm256_maddubs_epi16(q4_lo, q8_lo), ones_16);
+                        __m256i p_hi = _mm256_madd_epi16(
+                            _mm256_maddubs_epi16(q4_hi, q8_hi), ones_16);
+
+                        __m128i t_lo = _mm_add_epi32(_mm256_castsi256_si128(p_lo),
+                                                     _mm256_extracti128_si256(p_lo, 1));
+                        t_lo = _mm_add_epi32(t_lo, _mm_shuffle_epi32(t_lo, _MM_SHUFFLE(1,0,3,2)));
+                        t_lo = _mm_add_epi32(t_lo, _mm_shuffle_epi32(t_lo, _MM_SHUFFLE(2,3,0,1)));
+                        int32_t is_lo = _mm_cvtsi128_si32(t_lo);
+
+                        __m128i t_hi = _mm_add_epi32(_mm256_castsi256_si128(p_hi),
+                                                     _mm256_extracti128_si256(p_hi, 1));
+                        t_hi = _mm_add_epi32(t_hi, _mm_shuffle_epi32(t_hi, _MM_SHUFFLE(1,0,3,2)));
+                        t_hi = _mm_add_epi32(t_hi, _mm_shuffle_epi32(t_hi, _MM_SHUFFLE(2,3,0,1)));
+                        int32_t is_hi = _mm_cvtsi128_si32(t_hi);
+
+                        sum_a[k] += d_r * sc_a * dx_lo * (float)is_lo - dmin_r * m_a * sx_lo;
+                        sum_b[k] += d_r * sc_b * dx_hi * (float)is_hi - dmin_r * m_b * sx_hi;
+                    }
+
+                    qs += 32;
+                    q8_idx += 2;
+                }
+            }
+            for (int k = 0; k < K_batch; ++k) {
+                y[k * N + n] = sum_a[k] + sum_b[k];
+            }
+        }
+    }, 1);
+}
+#endif  // __AVX2__
+
+// Scalar fallback for batched Q4_K GEMV (when AVX2 not available).
+inline void q4k_gemv_batched_scalar(const void* weight_data,
+                                     const float* x,
+                                     float* y,
+                                     int K_batch,
+                                     int64_t H, int64_t N,
+                                     int64_t row_stride_bytes,
+                                     const torch::io::ReplicatedWeight* numa = nullptr) {
+    (void)numa;
+    const uint8_t* raw = static_cast<const uint8_t*>(weight_data);
+    const int64_t blocks_per_row = H / 256;
+
+    c10::get_thread_pool().parallel_for(0, N, [&](int64_t start, int64_t end) {
+        for (int64_t n = start; n < end; ++n) {
+            const uint8_t* row = raw + n * row_stride_bytes;
+            for (int k = 0; k < K_batch; ++k) {
+                float dot = 0.0f;
+                for (int64_t bi = 0; bi < blocks_per_row; ++bi) {
+                    const uint8_t* block = row + bi * 144;
+                    const int64_t base_k = bi * 256;
+                    uint16_t d_bits, dmin_bits;
+                    std::memcpy(&d_bits,    block,     2);
+                    std::memcpy(&dmin_bits, block + 2, 2);
+                    const float d    = gguf::fp16_to_fp32(d_bits);
+                    const float dmin = gguf::fp16_to_fp32(dmin_bits);
+                    const uint8_t* sc = block + 4;
+                    const uint8_t* qs = block + 16;
+                    for (int j = 0; j < 256; j += 32) {
+                        int is = j / 32;
+                        uint8_t sc_j, m_j;
+                        gguf::get_scale_min_k4(is, sc, &sc_j, &m_j);
+                        for (int l = 0; l < 32; ++l) {
+                            uint8_t raw_w = qs[(j / 2 + l / 2)];
+                            uint8_t q4 = (l & 1) ? (raw_w >> 4) : (raw_w & 0x0F);
+                            dot += (d * sc_j * (float)q4 - dmin * m_j)
+                                 * x[k * H + base_k + j + l];
+                        }
+                    }
+                }
+                y[k * N + n] = dot;
+            }
+        }
+    }, 1);
+}
+
+// Public dispatcher for batched Q4_K GEMV.
+inline void cpu_quant_gemv_batched(uint32_t quant_type,
+                                    const void* weight_data,
+                                    const float* x,
+                                    float* y,
+                                    int K_batch,
+                                    int64_t H, int64_t N,
+                                    int64_t row_stride_bytes,
+                                    const torch::io::ReplicatedWeight* numa = nullptr) {
+    switch (quant_type) {
+        case 12: // Q4_K
+#ifdef __AVX2__
+            q4k_gemv_batched_avx2(weight_data, x, y, K_batch, H, N, row_stride_bytes, numa);
+#else
+            q4k_gemv_batched_scalar(weight_data, x, y, K_batch, H, N, row_stride_bytes, numa);
+#endif
+            break;
+        default:
+            // Fallback: call non-batched kernel K_batch times. Correct but
+            // slow; not a speedup. Phase 7.2 will add batched Q6_K/Q8_0.
+            for (int k = 0; k < K_batch; ++k) {
+                cpu_quant_gemv(quant_type, weight_data, x + k * H, y + k * N,
+                               H, N, row_stride_bytes, numa);
+            }
+    }
+}
+
 inline void cpu_quant_gemv_batched_qkv(
     uint32_t quant_type,
     const void* w_q, const void* w_k, const void* w_v,
