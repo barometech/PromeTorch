@@ -3114,6 +3114,49 @@ public:
     // Phase 7.1 will replace the serial loop with a batched forward pass
     // that reads each weight matrix once and computes K parallel outputs.
     // ========================================================================
+    // ========================================================================
+    // Phase 7.2 — batched forward pass scaffold.
+    //
+    // Entry point that runs the main model on K consecutive tokens and
+    // returns K logit rows. Today (scaffold) this is literally K serial
+    // calls to forward_decode_cpu — same cost, same output, no speedup.
+    //
+    // Next iterations will replace specific inner calls with batched Q4_K
+    // kernels (cpu_quant_gemv_batched) reading each weight matrix ONCE for
+    // all K queries. The top-level signature will not change so callers
+    // (spec_decode_step_cpu) don't need revisiting.
+    //
+    // Call sites to convert in the per-layer loop (cumulative 180 ms / 192 ms
+    // decode budget, from prof-TP profile 2026-04-22):
+    //   1. cpu_fused_rmsnorm_qkv_gemv       (34.5 ms)   → batched QKV
+    //   2. cpu_quant_gemv(attn_output)      (20.4 ms)   → batched
+    //   3. cpu_fused_rmsnorm_gate_up_gemv   (74.4 ms)   → batched gate+up
+    //   4. cpu_quant_gemv(ffn_down)         (48.5 ms)   → batched
+    //   5. cpu_quant_gemv(output_proj)      (20.0 ms)   → batched
+    //
+    // Not batched (small, not BW-bound):
+    //   * RMSNorm preambles, SiLU, residual adds, embedding lookup
+    //   * Attention softmax + Q·K·V math (needs per-query causal mask)
+    //
+    // KV cache contract: on return, kv_cache.seq_len == past_len + K.
+    // Caller (spec_decode_step_cpu) may rewind if draft tokens were rejected.
+    //
+    // logits_out layout: row-major [K × vocab_size]. Row k is the logits
+    // distribution for predicting the (past_len+k+1)-th token, conditioned
+    // on tokens[0..k] appended to the KV cache before it.
+    // ========================================================================
+    void forward_decode_cpu_batched(const int64_t* tokens, int K,
+                                    float* logits_out) {
+        const int64_t V = config.vocab_size;
+        for (int k = 0; k < K; ++k) {
+            Tensor logits = forward_decode_cpu(tokens[k]);
+            // forward_decode_cpu returns [1, V] (last-token-only output).
+            std::memcpy(logits_out + k * V,
+                        logits.data_ptr<float>(),
+                        V * sizeof(float));
+        }
+    }
+
     std::vector<int64_t> spec_decode_step_cpu(
             int64_t current_token,
             NgramDraft& draft,
@@ -3148,36 +3191,45 @@ public:
         inputs.push_back(current_token);
         for (auto t : drafted) inputs.push_back(t);
 
-        for (size_t i = 0; i < inputs.size(); ++i) {
-            Tensor logits = forward_decode_cpu(inputs[i]);
-            if (stats) ++stats->main_forwards;
+        // One batched forward pass over all K inputs at once. For now the
+        // internal implementation is K serial forwards (same cost as the old
+        // loop), but Phase 7.2 will swap inner GEMVs for batched variants —
+        // no API changes needed here.
+        const int64_t V = config.vocab_size;
+        std::vector<float> logits_buf(inputs.size() * V);
+        forward_decode_cpu_batched(inputs.data(),
+                                   static_cast<int>(inputs.size()),
+                                   logits_buf.data());
+        if (stats) stats->main_forwards += static_cast<int64_t>(inputs.size());
 
-            // Greedy argmax on the last token's logit row (shape [1, V]).
-            const int64_t V_sz = config.vocab_size;
-            const float* lr = logits.data_ptr<float>();
+        // Accept/reject loop against the batched logits.
+        for (size_t i = 0; i < inputs.size(); ++i) {
+            const float* lr = logits_buf.data() + i * V;
             int64_t best = 0;
             float best_v = lr[0];
-            for (int64_t v = 1; v < V_sz; ++v) {
+            for (int64_t v = 1; v < V; ++v) {
                 if (lr[v] > best_v) { best_v = lr[v]; best = v; }
             }
 
             if (i + 1 < inputs.size()) {
                 if (best == inputs[i + 1]) {
-                    // ACCEPT draft token at inputs[i+1].
                     out.push_back(inputs[i + 1]);
                     if (stats) ++stats->drafts_accepted;
                 } else {
-                    // REJECT: commit main's argmax, discard remaining drafts.
-                    // KV cache is correctly at past_len_start + i + 1 because
-                    // we appended entries for inputs[0..i]. Remaining drafts
-                    // (i+2..D) were never forwarded so nothing to rewind.
+                    // REJECT: commit main's argmax. KV cache has entries for
+                    // positions past_len_start .. past_len_start + (i-1) from
+                    // this verify pass. Entry at past_len_start+i was created
+                    // by the forward on inputs[i] itself. The "wrong" draft
+                    // inputs[i+1] was NEVER forwarded, so its K/V slot was
+                    // never written. But forward_decode_cpu_batched advanced
+                    // seq_len by inputs.size(); we need to rewind by
+                    // (inputs.size() - i - 1) slots.
+                    const int64_t rewind = static_cast<int64_t>(inputs.size() - i - 1);
+                    if (rewind > 0) kv_cache.seq_len -= rewind;
                     out.push_back(best);
                     break;
                 }
             } else {
-                // Last position — commit main's answer. Always reached when
-                // all drafts accepted (D+1 total forwards) or when D=0 (1
-                // forward, classical behaviour).
                 out.push_back(best);
             }
         }
