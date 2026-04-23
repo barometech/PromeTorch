@@ -95,3 +95,7 @@ checkpoints/
 # IDE / tooling artefacts
 compile_commands.json
 .DS_Store
+docs/elbrus/ports/
+docs/elbrus/littlecc/
+docs/elbrus/elbrus-docs/
+docs/elbrus/habr_smartengines_optimization.html
