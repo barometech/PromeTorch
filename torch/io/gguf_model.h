@@ -709,6 +709,88 @@ public:
     bool use_sparse_gemv_ = false;            // Enable sparse GEMV
     int64_t sliding_window_size_ = 0;         // 0 = disabled
 
+    // Phase 7.5 — draft model for multi-token speculative verify. When
+    // PT_SPEC_DRAFT_PATH env points at a smaller same-family GGUF, we load
+    // it here and feed its argmax predictions into spec_decode_step_cpu
+    // instead of NgramDraft. Same tokenizer is REQUIRED — we compare raw
+    // token ids, no decode/encode in the hot path.
+    std::unique_ptr<GGUFModel> draft_model_;
+
+    // Ensure draft is loaded and its KV cache is allocated for max_seq.
+    // Called lazily from generate() when PT_SPEC_K>1 and draft path is set.
+    void ensure_draft_model(int64_t max_seq) {
+        if (draft_model_) {
+            // Already loaded — only re-allocate KV if the new max_seq is larger.
+            if (draft_model_->kv_cache.max_seq < max_seq) {
+                int64_t kv_dim = draft_model_->config.num_kv_heads
+                               * draft_model_->config.head_dim;
+                draft_model_->kv_cache.allocate(
+                    draft_model_->config.num_layers, max_seq, kv_dim, false);
+            }
+            return;
+        }
+        const char* p = std::getenv("PT_SPEC_DRAFT_PATH");
+        if (!p || !p[0]) return;
+        std::fprintf(stderr, "[spec-draft] loading draft model: %s\n", p);
+        draft_model_.reset(new GGUFModel());
+        draft_model_->load(p);
+        int64_t kv_dim = draft_model_->config.num_kv_heads
+                       * draft_model_->config.head_dim;
+        draft_model_->kv_cache.allocate(
+            draft_model_->config.num_layers, max_seq, kv_dim, false);
+        std::fprintf(stderr, "[spec-draft] loaded. vocab=%ld hidden=%ld layers=%ld\n",
+            (long)draft_model_->config.vocab_size,
+            (long)draft_model_->config.hidden_size,
+            (long)draft_model_->config.num_layers);
+    }
+
+    // Predict K-1 drafts via draft_model. Pre-condition: draft_model's KV
+    // is synced to main's KV length BEFORE current_token. Uses a temporary
+    // token that we forward on draft to produce draft_1, then draft_1 →
+    // draft_2, etc. Returns drafts in order. Stops early if draft's vocab
+    // is smaller than main's (shouldn't happen in same-family pairs).
+    std::vector<int64_t> draft_predict_model(int64_t current_token, int K_minus_1) {
+        std::vector<int64_t> out;
+        if (!draft_model_ || K_minus_1 <= 0) return out;
+        out.reserve(K_minus_1);
+        const int64_t V_draft = draft_model_->config.vocab_size;
+        const int64_t V_limit = std::min(V_draft, config.vocab_size);
+        int64_t tok = current_token;
+        for (int i = 0; i < K_minus_1; ++i) {
+            Tensor lg = draft_model_->forward_decode_cpu(tok);
+            const float* lr = lg.data_ptr<float>();
+            int64_t best = 0; float best_v = lr[0];
+            for (int64_t v = 1; v < V_limit; ++v) {
+                if (lr[v] > best_v) { best_v = lr[v]; best = v; }
+            }
+            out.push_back(best);
+            tok = best;
+        }
+        return out;
+    }
+
+    // After a spec step, main committed j+1 tokens (accepted drafts + best_j
+    // OR K accepted + best_{K-1}). Draft's KV has been advanced by K-1
+    // during draft_predict_model (for all the proposed drafts, only the
+    // first j of which turned out to be correct). Sync: rewind draft to
+    // new_main_seq_len - 1 (dropping K-1 - j slots), then forward the last
+    // committed token so draft's KV matches main's exactly.
+    void draft_sync_after_step(int64_t main_seq_len_after,
+                                int64_t last_committed_token,
+                                int drafts_proposed) {
+        if (!draft_model_) return;
+        const int64_t expected_after = main_seq_len_after;
+        const int64_t draft_seq      = draft_model_->kv_cache.seq_len;
+        if (draft_seq < expected_after) return;   // shouldn't happen
+        // draft is AT expected_after if all drafts matched + we want
+        // best_{K-1}'s KV appended. Or DRAFT IS PAST expected_after if a
+        // mismatch rejected drafts: drop the excess first, then forward
+        // last_committed_token to add its KV.
+        draft_model_->kv_cache.seq_len = expected_after - 1;
+        (void)draft_model_->forward_decode_cpu(last_committed_token);
+        (void)drafts_proposed;
+    }
+
     // Helper: move tensor to CPU
     Tensor to_cpu_tensor(const Tensor& t) const {
 #ifdef PT_USE_CUDA
@@ -3396,12 +3478,21 @@ public:
 
         std::vector<int64_t> drafted;
         drafted.reserve(K_max - 1);
-        for (int j = 0; j + 1 < K_max; ++j) {
-            int64_t d = draft.predict(rolling);
-            if (d < 0) break;  // no n-gram hit — stop drafting
-            drafted.push_back(d);
-            rolling.push_back(d);
-            if (stats) ++stats->drafts_proposed;
+        // Phase 7.5 — if a draft GGUF model is loaded, generate K-1 drafts
+        // by running draft.forward_decode_cpu serially on current + drafts.
+        // This typically achieves 0.5-0.85 acceptance on same-family pairs
+        // vs ~0.1 for n-gram — the whole point of spec decode.
+        if (draft_model_) {
+            drafted = draft_predict_model(current_token, K_max - 1);
+            if (stats) stats->drafts_proposed += static_cast<int64_t>(drafted.size());
+        } else {
+            for (int j = 0; j + 1 < K_max; ++j) {
+                int64_t d = draft.predict(rolling);
+                if (d < 0) break;  // no n-gram hit — stop drafting
+                drafted.push_back(d);
+                rolling.push_back(d);
+                if (stats) ++stats->drafts_proposed;
+            }
         }
 
         // The sequence of tokens we'll verify, in order:
@@ -3549,6 +3640,21 @@ public:
         io::SpecStats spec_stats;
         if (can_spec_verify) {
             for (auto t : tokens_i64) ngram_draft.append(t);
+            // Phase 7.5 — load draft model if PT_SPEC_DRAFT_PATH is set.
+            // Warm its KV cache by feeding the prompt tokens so it's aligned
+            // with main at entry of the first decode step.
+            ensure_draft_model(max_total_seq);
+            if (draft_model_) {
+                draft_model_->kv_cache.seq_len = 0;
+                // Prefill draft with prompt. forward_decode_cpu appends
+                // one token's KV per call.
+                for (auto t : tokens_i64) {
+                    (void)draft_model_->forward_decode_cpu(t);
+                }
+                std::fprintf(stderr,
+                    "[spec-draft] prefilled KV to seq_len=%ld\n",
+                    (long)draft_model_->kv_cache.seq_len);
+            }
         }
         std::fprintf(stderr,
             "[spec-init] spec_k=%d can_spec_verify=%d use_cuda=%d "
@@ -3723,6 +3829,20 @@ public:
                     !is_stop_token(last_committed) &&
                     (int)generated.size() < max_tokens) {
                     logits = forward_decode_cpu(static_cast<int64_t>(last_committed));
+                    // Phase 7.5 — sync draft KV to main's new seq_len AND
+                    // ensure draft has last_committed's KV too (so next step
+                    // can propose drafts from the correct context).
+                    if (draft_model_) {
+                        // Drop draft's excess KV (it had forwarded K-1
+                        // drafts; main committed fewer on mismatch, or
+                        // committed best_{K-1} which draft never saw).
+                        int64_t target = kv_cache.seq_len - 1;  // seq BEFORE last_committed
+                        if (draft_model_->kv_cache.seq_len > target) {
+                            draft_model_->kv_cache.seq_len = target;
+                        }
+                        (void)draft_model_->forward_decode_cpu(
+                            static_cast<int64_t>(last_committed));
+                    }
                 }
                 // Honour the user-facing max_tokens budget: spec commits up
                 // to K tokens per iteration, which would otherwise overshoot.
