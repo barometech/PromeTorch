@@ -2419,3 +2419,91 @@ LCC fixes:
 - omp parallel с throw → удалён (30 pragmas в nn modules)
 
 Следующий шаг: запустить PROMEPIR.py на Эльбрусе через PromeTorch.
+
+### 🔥 2026-04-24 — ROUND 2: 10 OPUS AGENTS + APB full application
+
+**Baseline (pre-round2):** 1-proc T=30 = 5.3 tok/s / TP-4 T=7 = 6.1-6.2 tok/s на qwen3:4b Q4_K_M.
+
+Публичный ceiling E2K (Alex Mikhaliuk llama.cpp-e2k 2023): Elbrus-16C 6.73-8.11 tok/s
+на Alpaca-7B Q4_0. **Наши 6.1 на Q4_K (сложнее формат) = state-of-the-art per-core-per-quant.**
+
+**10 Opus-агентов × 300-500 ms каждый, отчёты в `vliw_mission/round2/`.**
+
+Консолидированный roadmap до 20 tok/s:
+
+1. **Agent 5 — код-аудит нашёл реальные bugs:**
+   - SiLU в `forward_decode_cpu_batched:3412` scalar + serial → AVX2+parallel_for (в main decode уже есть, не портанул). **+1-2 tok/s.**
+   - Attention softmax scalar во ВСЕХ 3 decode paths (2591, 3027, 3358). AVX2 exp уже в `VectorizedOps.h`. **1.2M exp/tok при past_len=1024, огромный win.**
+   - Residual adds serial → parallel_for. 72 MB/tok STREAM-bound ~28ms → 1.5ms.
+   - `cpu_fused_rmsnorm_gate_up_gemv` ТЕРЯЕТ fusion когда NUMA replicas (cpu_quant_gemv.h:2255) — ровно TP сценарий!
+   - `__restrict` отсутствует в production `q4k_gemv_avx2` (только opt-in variants).
+   - Output-proj pre-resolves `w_out` на master thread → workers hit remote replica.
+
+2. **Agent 6 — weight repack SoA:**
+   Current Q4_K 144B AoS нарушает 2 правила MCST guide:
+   - APB требует stride < 32B (у нас 144)
+   - SoA > AoS (p.4389-4396): "темп падает до 64× при stride > 64B"
+   Split в 3 streams: `qs[N,K/2]` + `dc = d×sc` fp32 + `mc = dmin×m` fp32.
+   Memory +33%, load +4-6s amortized. **Expected: 14 GB/s → 18-20 GB/s per chip = +30-45%**.
+
+3. **Agent 9 — NUMA aggregate root cause:**
+   TP-4 даёт 1.15× (не 4×) потому что 42% весов REPLICATED: attn_output 11%, ffn_down 19%,
+   output_weight 12%. Per-chip BW drops только до 0.61× of total.
+   AllReduce 27ms = 95% straggler-barrier (compute 5μs, median 375μs).
+   **Top plan F: full replicate + row-parallel ON EVERY GEMV + async AR + tighter barrier
+   = +190-260% → 17-22 tok/s.** ~600 LoC, no retraining.
+
+4. **Agent 3 — cache/memory root numbers:**
+   L1D 64KB × L2 512KB × L3 16MB 16-way banked. Weights 2.5 GB = 156× larger than L3.
+   DMC 4 ch × DDR4-2400 = 76.8 GB/s/chip theoretical.
+   **Cross-chip MOESI coherence** = primary reason TP-4 stays at 6.1: shared weights
+   → directory bottleneck, effectively 1× bandwidth, not 4×.
+   **TLB thrash**: 2.5 GB / 4 KB = 640K pages vs ~1024 TLB entries = 99% miss = ~128ms/tok waste.
+   Fix: `mmap(MAP_ANONYMOUS | MAP_HUGETLB)` + `pread()` weights at load.
+   **Non-temporal loads `__builtin_e2k_ld_*_nt`** for Q4_K streaming (не загаживает L3).
+   Multi-level prefetch distance: current bi+1 (15 cycles) vs needed bi+14 (200 cycles DRAM).
+
+5. **Agent 1 — MCST guide deep:**
+   - `-fwhole` — cross-module inlining, +5-20% (упало на GNU ld, нужен MCST ld wrapper)
+   - PGO two-phase `-fprofile-generate` → run → `-fprofile-use`, +5-25% по guide
+   - `__builtin_prefetch(w + dist, 0, 2)` explicit (наш `-fprefetch` fails на 144B non-pow2 stride)
+   - Manual unroll 8× matches 4-APB × 4-ALU, +5-20%
+   - Diagnostic: `dprof -m TICKS,EXEC,BUB_E2,BUB_E0,IB_NO_COMMAND,L2_HIT`
+     различает memory vs L1-miss vs icache.
+
+6. **Agent 7 — pipeline overlap мостли провал:**
+   6 из 7 ideas отвергнуты — workload DDR-bound.
+   **Real bug:** `gguf_loader.h:261` `MADV_SEQUENTIAL` — дропает страницы после cursor, **WRONG
+   для re-decode**. Change to `MADV_RANDOM`. +0-5 ms/tok.
+   Scatter prefetch: +10-18 ms/tok.
+   Combined: 5.3 → 5.5-5.8 (мелочь).
+
+7. **Agent 10 — quant:** reject всё увеличивающее memory. ffn_gate/up sparse analysis
+   уже есть в коде но callsite не wired. Sparse Q4_K измерить на E2K (может регрессия
+   из-за APB-hostile branch).
+
+8. **Agent 4 — EML dead end:** нет quant GEMV, нет INT8 GEMM, нет neural primitives.
+
+9. **Agent 8 — public SOTA:** наши 5.3/6.1 = at/above public E2K ceiling.
+   **DIMM population на w205p не проверен!** Elbrus-16C: 77 GB/s с 8 DIMMs vs 18.65 с 2 DIMMs.
+   Либо free 2-4× headroom, либо hard ceiling.
+
+**Priority для applying (ranked by easiest-to-hardest):**
+
+| # | Fix | Gain | Effort |
+|---|-----|------|--------|
+| 1 | `MADV_SEQUENTIAL` → `MADV_RANDOM` | +0-5ms | 1 line |
+| 2 | AVX2 softmax exp (3 paths) — replace scalar `std::exp` | huge (~20% per-tok) | ~50 lines |
+| 3 | AVX2 SiLU в batched path | +1-2 tok/s | ~20 lines |
+| 4 | parallel_for residual adds | +2-3% | ~10 lines |
+| 5 | `__restrict` на `q4k_gemv_avx2` main | +3-8% | 1 line |
+| 6 | int q8_idx → int64_t в scalar+AVX2 | APB engagement | 10 lines |
+| 7 | fix `cpu_fused_rmsnorm_gate_up_gemv` NUMA replica loss | +5-10% TP | ~50 lines |
+| 8 | HugeTLB mmap for weights | +30% | ~100 lines |
+| 9 | Check DIMM population | diagnostic | 1 ssh cmd |
+| 10 | Multi-level prefetch + NT loads | +10% | ~50 lines |
+| 11 | Agent 6 Q4_K SoA repack | +30-45% | ~400 lines |
+| 12 | Agent 9 option F (full repl + row-par every GEMV) | 17-22 tok/s | ~600 lines |
+
+Отчёты в `vliw_mission/round2/agent_[1-10]_*.md`.
+
