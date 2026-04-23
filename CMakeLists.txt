@@ -131,22 +131,38 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "e2k|elbrus")
     message(STATUS "Elbrus E2K: enabling -O3, -ffast-math, LTO, EML BLAS")
 
     # Aggressive optimization: LCC VLIW scheduling benefits hugely from -O3
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -ffast-math")
+    # -ffast (below) subsumes -ffast-math so we don't add both.
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3")
 
-    # LCC-specific performance flags (from docs/elbrus/LCC_OPTIMIZATION.md +
-    # habr smartengines / mcst official optimization guide). These unlock:
-    #   * APB  — hardware array prefetch buffer, critical for memory-bound
-    #             workloads. Needs both `-fprefetch` AND int64_t loop
-    #             counters AND #pragma loop count (see cpu_quant_gemv.h).
-    #   * software pipelining with wider window (default 300 ops too small
-    #             for our 256-element Q4_K super-block bodies).
-    #   * cache-blocked pipelined loops (-fcache-opt).
-    #   * mtune=elbrus-8c2 picks the E8C2-specific instruction scheduler
-    #             weights instead of the generic e2k default.
+    # LCC-specific performance flags.
+    # MCST official guide (docs/elbrus/mcst_official/elbrus_prog_2020-05-30.pdf
+    # section 6.6) states bluntly: -ffast AND -faligned are REQUIRED for APB
+    # hardware prefetch on ISA versions V1-V5. We had only -ffast-math, which
+    # is a weaker alias (FP reordering only, no aligned-access assumption).
+    # Upgrade to -ffast (subsumes -ffast-math + aligned-access assumption) so
+    # APB actually engages on all streaming Q4_K reads.
+    #
+    # Quoted from p.95 of the MCST guide:
+    #   "-ffast, -faligned — включение режима оптимизации в предположении
+    #    выравненности обращений к памяти; необходимы для возможности
+    #    применения apb в версиях системы команд V1-V5."
+    #
+    # Table 6.2 p.74 shows -O3 vs -O3 -ffast: 1.05s → 0.69s (34% speedup)
+    # on a benchmark that looks very similar to our inner loop shape.
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ffast -faligned")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fprefetch -fcache-opt")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mtune=elbrus-8c2")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -frestrict-params")
+    # -frestrict-all applies __restrict to every pointer declared in the TU,
+    # including vector-intrinsic contexts where -frestrict-params alone is
+    # ignored. Upgrade from params-only.
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -frestrict-all")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fswp-maxopers=800")
+    # Intentionally NOT using -fwhole / -fwhole-shared. Both produce .o files
+    # in LCC's internal EIR format which the system `ld` cannot link:
+    #   "'.pack_pure_eir' is illegal during non-relocatable linkage".
+    # LCC ships its own linker wrapper but CMake invokes /usr/bin/ld directly
+    # here. Enabling whole-program opt would need either a custom
+    # CMAKE_<LANG>_LINK_EXECUTABLE rule or LCC's ld via wrapper — ROI low.
 
     # Link-Time Optimization: lets LCC optimize across TU boundaries
     # Disabled by default — LCC ar wrapper may not be found
