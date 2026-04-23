@@ -3147,14 +3147,236 @@ public:
     // ========================================================================
     void forward_decode_cpu_batched(const int64_t* tokens, int K,
                                     float* logits_out) {
-        const int64_t V = config.vocab_size;
-        for (int k = 0; k < K; ++k) {
-            Tensor logits = forward_decode_cpu(tokens[k]);
-            // forward_decode_cpu returns [1, V] (last-token-only output).
-            std::memcpy(logits_out + k * V,
-                        logits.data_ptr<float>(),
-                        V * sizeof(float));
+        const int64_t H          = config.hidden_size;
+        const int64_t q_dim      = config.num_heads * config.head_dim;
+        const int64_t kv_dim     = config.num_kv_heads * config.head_dim;
+        const int64_t head_dim   = config.head_dim;
+        const int64_t n_heads    = config.num_heads;
+        const int64_t n_kv_heads = config.num_kv_heads;
+        const int64_t inter      = config.intermediate_size;
+        const int64_t heads_per_group = n_heads / n_kv_heads;
+        const int64_t V          = config.vocab_size;
+        const float   eps        = config.rms_norm_eps;
+        const bool    add_one    = config.gemma_norm_add_one;
+        const int64_t past_len_0 = kv_cache.seq_len;
+        const int     _node      = c10::current_numa_node();
+
+        // Per-call batched scratch. Per-token forward uses CPUScratchPool
+        // (size K=1 buffers). Here we need K copies of every intermediate.
+        // For qwen3:4b with K=5 the total heap is ≈ 5 × (2*H + 2*q_dim +
+        // 2*kv_dim + q_dim + H + H + 2*inter + inter + H + V) × 4 B ≈
+        // 5 × (5 120 + 8 192 + 2 048 + 4 096 + 2 560 + 2 560 + 19 456 +
+        // 9 728 + 2 560 + 151 936) × 4 B ≈ 4.1 MB. Allocated on heap once
+        // per verify step; amortised over 36 layers.
+        std::vector<float> x_a  (K * H),          x_b  (K * H);
+        std::vector<float> x_na (K * H),          x_nf (K * H);
+        std::vector<float> q_b  (K * q_dim),      k_b  (K * kv_dim), v_b(K * kv_dim);
+        std::vector<float> attn (K * q_dim),      hbuf (K * H);
+        std::vector<float> gate (K * inter),      up_b (K * inter),  siluup(K * inter);
+        std::vector<float> down (K * H),          x_fin(K * H);
+        float* cur  = x_a.data();
+        float* next = x_b.data();
+
+        // 1. Embedding: K lookups.
+        {
+            const float* emb = token_embedding.data_ptr<float>();
+            for (int k = 0; k < K; ++k) {
+                std::memcpy(cur + k * H, emb + tokens[k] * H, H * sizeof(float));
+            }
+            if (config.scale_embeddings) {
+                float s = std::sqrt((float)H);
+                for (int64_t j = 0; j < (int64_t)K * H; ++j) cur[j] *= s;
+            }
         }
+
+        // 2. Transformer layers.
+        for (int64_t i = 0; i < config.num_layers; ++i) {
+            auto& layer = layers[i];
+
+            // 2a. K × RMSNorm (attn preamble).
+            const float* an_w = layer.attn_norm.data_ptr<float>();
+            for (int k = 0; k < K; ++k) {
+                std::memcpy(x_na.data() + k * H, cur + k * H, H * sizeof(float));
+                cpu_quant::cpu_rmsnorm_inplace(x_na.data() + k * H, an_w, eps, add_one, H);
+            }
+
+            // 2b. Batched QKV (weights read once per matrix, K outputs each).
+            {
+                const void* w_q = layer.q_attn_q.numa_replica.get(_node);
+                const void* w_k = layer.q_attn_k.numa_replica.get(_node);
+                const void* w_v = layer.q_attn_v.numa_replica.get(_node);
+                if (!w_q) w_q = layer.q_attn_q.cpu_data;
+                if (!w_k) w_k = layer.q_attn_k.cpu_data;
+                if (!w_v) w_v = layer.q_attn_v.cpu_data;
+                cpu_quant::cpu_quant_gemv_batched(
+                    layer.q_attn_q.quant_type, w_q, x_na.data(), q_b.data(),
+                    K, H, q_dim, layer.q_attn_q.row_stride_bytes);
+                cpu_quant::cpu_quant_gemv_batched(
+                    layer.q_attn_k.quant_type, w_k, x_na.data(), k_b.data(),
+                    K, H, kv_dim, layer.q_attn_k.row_stride_bytes);
+                cpu_quant::cpu_quant_gemv_batched(
+                    layer.q_attn_v.quant_type, w_v, x_na.data(), v_b.data(),
+                    K, H, kv_dim, layer.q_attn_v.row_stride_bytes);
+            }
+
+            // 2c. Per-token: bias + QK-norm + RoPE + KV cache write.
+            float* k_cache = kv_cache.key_cache[i].mutable_data_ptr<float>();
+            float* v_cache = kv_cache.value_cache[i].mutable_data_ptr<float>();
+            for (int k = 0; k < K; ++k) {
+                float* q  = q_b.data() + k * q_dim;
+                float* kk = k_b.data() + k * kv_dim;
+                float* vv = v_b.data() + k * kv_dim;
+                if (layer.attn_q_bias.defined()) {
+                    const float* bq = layer.attn_q_bias.data_ptr<float>();
+                    const float* bk = layer.attn_k_bias.data_ptr<float>();
+                    const float* bv = layer.attn_v_bias.data_ptr<float>();
+                    for (int64_t j = 0; j < q_dim;  ++j) q[j]  += bq[j];
+                    for (int64_t j = 0; j < kv_dim; ++j) { kk[j] += bk[j]; vv[j] += bv[j]; }
+                }
+                if (layer.attn_q_norm.defined()) {
+                    const float* qnw = layer.attn_q_norm.data_ptr<float>();
+                    const float* knw = layer.attn_k_norm.data_ptr<float>();
+                    for (int64_t h = 0; h < n_heads;    ++h)
+                        cpu_quant::cpu_rmsnorm_inplace(q  + h * head_dim, qnw, eps, add_one, head_dim);
+                    for (int64_t h = 0; h < n_kv_heads; ++h)
+                        cpu_quant::cpu_rmsnorm_inplace(kk + h * head_dim, knw, eps, add_one, head_dim);
+                }
+                float rope_cos[256], rope_sin[256];
+                at::native::hot::rope_precompute(rope_cos, rope_sin,
+                    past_len_0 + k, head_dim, config.rope_freq_base);
+                at::native::hot::rope_apply_fused(q, kk, rope_cos, rope_sin,
+                    n_heads, n_kv_heads, head_dim);
+                std::memcpy(k_cache + (past_len_0 + k) * kv_dim, kk, kv_dim * sizeof(float));
+                std::memcpy(v_cache + (past_len_0 + k) * kv_dim, vv, kv_dim * sizeof(float));
+            }
+
+            // 2d. Batched attention — K queries × n_heads, each attends to
+            //     its causal prefix of length past_len_0 + k + 1.
+            const float scale = 1.0f / std::sqrt((float)head_dim);
+            const float* k_cache_ro = kv_cache.key_cache[i].data_ptr<float>();
+            const float* v_cache_ro = kv_cache.value_cache[i].data_ptr<float>();
+            c10::get_thread_pool().parallel_for(0, (int64_t)K * n_heads,
+                [&](int64_t a_start, int64_t a_end) {
+                for (int64_t idx = a_start; idx < a_end; ++idx) {
+                    int64_t k   = idx / n_heads;
+                    int64_t h   = idx % n_heads;
+                    int64_t kv_h = h / heads_per_group;
+                    int64_t total_seq = past_len_0 + k + 1;
+                    const float* q_head = q_b.data() + k * q_dim + h * head_dim;
+                    float* out_head = attn.data() + k * q_dim + h * head_dim;
+                    float local_scores[8192];
+                    float* scores = (total_seq <= 8192) ? local_scores
+                                                         : new float[total_seq];
+                    for (int64_t t = 0; t < total_seq; ++t) {
+                        const float* kh = k_cache_ro + t * kv_dim + kv_h * head_dim;
+                        float dot = 0.0f;
+                        for (int64_t d = 0; d < head_dim; ++d) dot += q_head[d] * kh[d];
+                        scores[t] = dot * scale;
+                    }
+                    float mx = scores[0];
+                    for (int64_t t = 1; t < total_seq; ++t) if (scores[t] > mx) mx = scores[t];
+                    float sm = 0.0f;
+                    for (int64_t t = 0; t < total_seq; ++t) {
+                        scores[t] = std::exp(scores[t] - mx);
+                        sm += scores[t];
+                    }
+                    float inv = 1.0f / (sm + 1e-10f);
+                    for (int64_t t = 0; t < total_seq; ++t) scores[t] *= inv;
+                    std::fill(out_head, out_head + head_dim, 0.0f);
+                    for (int64_t t = 0; t < total_seq; ++t) {
+                        const float* vh = v_cache_ro + t * kv_dim + kv_h * head_dim;
+                        float w = scores[t];
+                        for (int64_t d = 0; d < head_dim; ++d) out_head[d] += w * vh[d];
+                    }
+                    if (total_seq > 8192) delete[] scores;
+                }
+            }, 1);
+
+            // 2e. Batched attn_output.
+            {
+                const void* w_o = layer.q_attn_output.numa_replica.get(_node);
+                if (!w_o) w_o = layer.q_attn_output.cpu_data;
+                cpu_quant::cpu_quant_gemv_batched(
+                    layer.q_attn_output.quant_type, w_o, attn.data(), hbuf.data(),
+                    K, q_dim, H, layer.q_attn_output.row_stride_bytes);
+            }
+
+            // 2f. Residual: next = cur + hbuf.
+            for (int64_t j = 0; j < (int64_t)K * H; ++j) next[j] = cur[j] + hbuf[j];
+            std::swap(cur, next);
+
+            // 2g. K × RMSNorm (FFN preamble).
+            const float* fn_w = layer.ffn_norm.data_ptr<float>();
+            for (int k = 0; k < K; ++k) {
+                std::memcpy(x_nf.data() + k * H, cur + k * H, H * sizeof(float));
+                cpu_quant::cpu_rmsnorm_inplace(x_nf.data() + k * H, fn_w, eps, add_one, H);
+            }
+
+            // 2h. Batched gate + up (two separate weight reads, K outputs each).
+            {
+                const void* w_g = layer.q_ffn_gate.numa_replica.get(_node);
+                const void* w_u = layer.q_ffn_up.numa_replica.get(_node);
+                if (!w_g) w_g = layer.q_ffn_gate.cpu_data;
+                if (!w_u) w_u = layer.q_ffn_up.cpu_data;
+                cpu_quant::cpu_quant_gemv_batched(
+                    layer.q_ffn_gate.quant_type, w_g, x_nf.data(), gate.data(),
+                    K, H, inter, layer.q_ffn_gate.row_stride_bytes);
+                cpu_quant::cpu_quant_gemv_batched(
+                    layer.q_ffn_up.quant_type, w_u, x_nf.data(), up_b.data(),
+                    K, H, inter, layer.q_ffn_up.row_stride_bytes);
+            }
+
+            // 2i. SiLU(gate) * up.
+            for (int64_t j = 0; j < (int64_t)K * inter; ++j) {
+                float g = gate[j];
+                float s = g / (1.0f + std::exp(-g));
+                siluup[j] = s * up_b[j];
+            }
+
+            // 2j. Batched ffn_down.
+            {
+                const void* w_d = layer.q_ffn_down.numa_replica.get(_node);
+                if (!w_d) w_d = layer.q_ffn_down.cpu_data;
+                cpu_quant::cpu_quant_gemv_batched(
+                    layer.q_ffn_down.quant_type, w_d, siluup.data(), down.data(),
+                    K, inter, H, layer.q_ffn_down.row_stride_bytes);
+            }
+
+            // 2k. Residual: next = cur + down.
+            for (int64_t j = 0; j < (int64_t)K * H; ++j) next[j] = cur[j] + down[j];
+            std::swap(cur, next);
+        }
+
+        // 3. Final RMSNorm (K parallel).
+        const float* on_w = output_norm.data_ptr<float>();
+        for (int k = 0; k < K; ++k) {
+            std::memcpy(x_fin.data() + k * H, cur + k * H, H * sizeof(float));
+            cpu_quant::cpu_rmsnorm_inplace(x_fin.data() + k * H, on_w, eps, add_one, H);
+        }
+
+        // 4. Batched output projection (biggest single GEMV — N = vocab_size).
+        if (q_output_weight.valid && q_output_weight.cpu_data) {
+            const void* w_o = q_output_weight.numa_replica.get(_node);
+            if (!w_o) w_o = q_output_weight.cpu_data;
+            cpu_quant::cpu_quant_gemv_batched(
+                q_output_weight.quant_type, w_o, x_fin.data(), logits_out,
+                K, H, V, q_output_weight.row_stride_bytes);
+        } else {
+            // FP32 fallback: scalar K × V × H (rare, never hot path on qwen3).
+            const float* W = output_weight.data_ptr<float>();
+            for (int k = 0; k < K; ++k) {
+                for (int64_t n = 0; n < V; ++n) {
+                    float dot = 0.0f;
+                    const float* xp = x_fin.data() + k * H;
+                    for (int64_t j = 0; j < H; ++j) dot += xp[j] * W[n * H + j];
+                    logits_out[k * V + n] = dot;
+                }
+            }
+        }
+
+        // 5. Advance seq_len by K — every draft position is now in the KV
+        // cache. Caller (spec_decode_step_cpu) rewinds if drafts rejected.
+        kv_cache.seq_len = past_len_0 + K;
     }
 
     std::vector<int64_t> spec_decode_step_cpu(
@@ -3162,7 +3384,8 @@ public:
             NgramDraft& draft,
             const std::vector<int64_t>& history,
             int K_max,
-            SpecStats* stats = nullptr) {
+            SpecStats* stats = nullptr,
+            float repetition_penalty = 1.0f) {
 
         std::vector<int64_t> out;
         out.reserve(K_max);
@@ -3203,8 +3426,29 @@ public:
         if (stats) stats->main_forwards += static_cast<int64_t>(inputs.size());
 
         // Accept/reject loop against the batched logits.
+        // Build a set of tokens for rep-pen (greedy path applies the penalty
+        // by dividing positive logits / multiplying negative ones for tokens
+        // that have appeared in history — matches the main decode's sampler).
+        const bool apply_rep = repetition_penalty > 1.0001f;
         for (size_t i = 0; i < inputs.size(); ++i) {
-            const float* lr = logits_buf.data() + i * V;
+            float* lr = logits_buf.data() + i * V;
+            if (apply_rep) {
+                const float inv_rp = 1.0f / repetition_penalty;
+                for (int64_t t : history) {
+                    if (t >= 0 && t < V) {
+                        lr[t] = (lr[t] > 0) ? (lr[t] * inv_rp)
+                                            : (lr[t] * repetition_penalty);
+                    }
+                }
+                // Also penalize any tokens committed earlier in THIS step.
+                for (size_t j = 0; j < i; ++j) {
+                    int64_t t = (j == 0) ? current_token : inputs[j];
+                    if (t >= 0 && t < V) {
+                        lr[t] = (lr[t] > 0) ? (lr[t] * inv_rp)
+                                            : (lr[t] * repetition_penalty);
+                    }
+                }
+            }
             int64_t best = 0;
             float best_v = lr[0];
             for (int64_t v = 1; v < V; ++v) {
@@ -3284,9 +3528,34 @@ public:
         int32_t speculative_next_token = -1;
         bool speculative_token_ready = false;
 
-        // Can we use speculative decode at all?
-        bool can_speculative = use_speculative_output_ && !use_cuda_ &&
+        // Phase 7 — multi-token speculative decode with batched verify. Opt
+        // in via PT_SPEC_K=N (1..6). Only runs on the CPU greedy quant path.
+        // NgramDraft is populated with prompt tokens so early decode steps
+        // can already propose drafts based on prompt patterns.
+        const int spec_k = io::spec_decode_k();
+        // Allow rep-pen with spec: we apply it on the K batched logit rows
+        // before argmax (see spec_decode_step_cpu). Greedy-only for now —
+        // true probabilistic accept/reject needs temperature > 0.
+        const bool can_spec_verify = (spec_k > 1) && !use_cuda_ &&
+            use_quant_gemv_ && temperature < 1e-6f;
+
+        // Low-rank output speculative (rank-256 GEMV + top-k exact). MUTEX
+        // with multi-token speculative verify: the latter needs full-vocab
+        // logits from forward_decode_cpu_batched, not a single top-k answer.
+        bool can_speculative = !can_spec_verify &&
+            use_speculative_output_ && !use_cuda_ &&
             use_quant_gemv_ && temperature < 1e-6f && repetition_penalty <= 1.0f;
+        NgramDraft ngram_draft(2, 2048);
+        io::SpecStats spec_stats;
+        if (can_spec_verify) {
+            for (auto t : tokens_i64) ngram_draft.append(t);
+        }
+        std::fprintf(stderr,
+            "[spec-init] spec_k=%d can_spec_verify=%d use_cuda=%d "
+            "use_quant_gemv=%d temperature=%.6f rep_pen=%.6f use_spec_out=%d\n",
+            spec_k, (int)can_spec_verify, (int)use_cuda_,
+            (int)use_quant_gemv_, temperature, repetition_penalty,
+            (int)use_speculative_output_);
 
         for (int step = 0; step < max_tokens; ++step) {
             int32_t next_token;
@@ -3404,6 +3673,60 @@ public:
                 speculative_next_token = forward_decode_cpu_speculative(
                     static_cast<int64_t>(next_token));
                 speculative_token_ready = true;
+            } else if (can_spec_verify) {
+                // PHASE 7 — multi-token speculative verify with batched forward.
+                // spec_decode_step_cpu runs forward_decode_cpu_batched on
+                // [next_token, draft_1, ..., draft_{K-1}], greedy-argmaxes
+                // each logit row, accepts drafts that match and rewinds KV
+                // on first mismatch.
+                ngram_draft.append(static_cast<int64_t>(next_token));
+                std::vector<int64_t> history;
+                history.reserve(tokens_i64.size() + generated.size() + 1);
+                for (auto t : tokens_i64) history.push_back(t);
+                for (auto t : generated)  history.push_back((int64_t)t);
+                // generated was just appended with next_token above, so it's
+                // already in history. Do NOT push next_token again.
+                auto out = spec_decode_step_cpu(
+                    static_cast<int64_t>(next_token),
+                    ngram_draft, history, spec_k, &spec_stats,
+                    repetition_penalty);
+
+                // Commit every accepted draft plus the main's answer at the
+                // end. generate()'s main loop increments `step` by 1 per
+                // iteration, so we print the extra tokens here without
+                // advancing the loop's step counter — decode will naturally
+                // exit when max_tokens is reached via generated.size().
+                // out[0] is ALWAYS either an accepted draft or main's first
+                // argmax, both of which are the "second" committed token
+                // for this verify step (next_token itself is the first and
+                // was already printed + generated.push_back'd above).
+                int32_t last_committed = next_token;
+                for (size_t i = 0; i < out.size(); ++i) {
+                    int32_t tok = (int32_t)out[i];
+                    generated.push_back(tok);
+                    ngram_draft.append(out[i]);
+                    std::string ts = tokenizer.decode_token(tok);
+#ifdef PT_DEBUG_DECODE
+                    std::cout << ts << std::flush;
+#else
+                    std::cout << ts;
+#endif
+                    last_committed = tok;
+                    if (tok == tokenizer.eos_id || is_stop_token(tok)) break;
+                    if ((int)generated.size() >= max_tokens) break;
+                }
+                // After spec_decode_step, the LAST committed token's KV is
+                // NOT yet in the cache (by contract). Forward it now to
+                // advance KV and get logits for the next iteration.
+                if (!out.empty() &&
+                    last_committed != tokenizer.eos_id &&
+                    !is_stop_token(last_committed) &&
+                    (int)generated.size() < max_tokens) {
+                    logits = forward_decode_cpu(static_cast<int64_t>(last_committed));
+                }
+                // Honour the user-facing max_tokens budget: spec commits up
+                // to K tokens per iteration, which would otherwise overshoot.
+                if ((int)generated.size() >= max_tokens) break;
             } else {
                 // Standard CPU decode path
                 if (use_quant_gemv_) {
@@ -3428,6 +3751,20 @@ public:
             d_argmax_idx = nullptr;
         }
 #endif
+
+        // Phase 7 — speculative decode stats dump (only if activated).
+        if (can_spec_verify && spec_stats.steps > 0) {
+            std::fprintf(stderr,
+                "[spec] K=%d  steps=%ld  main_forwards=%ld  drafts_proposed=%ld  "
+                "drafts_accepted=%ld  acceptance=%.3f  tokens_per_step=%.2f\n",
+                spec_k,
+                (long)spec_stats.steps,
+                (long)spec_stats.main_forwards,
+                (long)spec_stats.drafts_proposed,
+                (long)spec_stats.drafts_accepted,
+                spec_stats.acceptance_rate(),
+                (double)generated.size() / (double)spec_stats.steps);
+        }
 
         auto t_end = std::chrono::high_resolution_clock::now();
         double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
