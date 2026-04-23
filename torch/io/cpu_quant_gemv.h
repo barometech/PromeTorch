@@ -88,7 +88,7 @@ inline void q4k_gemv_avx2_float(const void* weight_data, const float* x,
             const uint8_t* qs = block + 16;
 
             int is = 0;
-            for (int j = 0; j < 256; j += 64) {
+            _Pragma("loop count(4)") _Pragma("ivdep") for (int64_t j = 0; j < 256; j += 64) {
                 uint8_t sc, m_val;
                 gguf::get_scale_min_k4(is, scales, &sc, &m_val);
                 const float d1 = d * sc;
@@ -102,7 +102,7 @@ inline void q4k_gemv_avx2_float(const void* weight_data, const float* x,
                 __m256 sum_qx_hi = _mm256_setzero_ps();
                 __m256 sum_x_hi  = _mm256_setzero_ps();
 
-                for (int l = 0; l < 32; l += 8) {
+                _Pragma("loop count(4)") _Pragma("ivdep") for (int64_t l = 0; l < 32; l += 8) {
                     __m128i qs8 = _mm_loadl_epi64(
                         reinterpret_cast<const __m128i*>(qs + l));
                     __m256i qi = _mm256_cvtepu8_epi32(qs8);
@@ -149,7 +149,7 @@ inline void quantize_x_q8(const float* x, Q8Block* x_q8, int64_t K) {
         const float* xb = x + i * 32;
         // Find max absolute value using AVX2
         __m256 vmax = _mm256_setzero_ps();
-        for (int j = 0; j < 32; j += 8) {
+        _Pragma("loop count(4)") _Pragma("ivdep") for (int64_t j = 0; j < 32; j += 8) {
             __m256 vx = _mm256_loadu_ps(xb + j);
             __m256 vabs = _mm256_andnot_ps(_mm256_set1_ps(-0.0f), vx);
             vmax = _mm256_max_ps(vmax, vabs);
@@ -169,7 +169,7 @@ inline void quantize_x_q8(const float* x, Q8Block* x_q8, int64_t K) {
 
         // Quantize + compute sum
         __m256i sum_i32 = _mm256_setzero_si256();
-        for (int j = 0; j < 32; j += 8) {
+        _Pragma("loop count(4)") _Pragma("ivdep") for (int64_t j = 0; j < 32; j += 8) {
             __m256 vx = _mm256_loadu_ps(xb + j);
             __m256 scaled = _mm256_mul_ps(vx, vid);
             // Round to nearest int
@@ -230,7 +230,7 @@ inline float q4k_q8_dot_avx2(const uint8_t* block, const Q8Block* x_q8) {
     float sumf = 0.0f;
     int q8_idx = 0;  // index into Q8 blocks (0..7 for 256 values)
 
-    for (int j = 0; j < 256; j += 64) {
+    _Pragma("loop count(4)") _Pragma("ivdep") for (int64_t j = 0; j < 256; j += 64) {
         // Get scales and mins for this 64-value group
         uint8_t sc1, m1, sc2, m2;
         int is = j / 32;
@@ -407,7 +407,7 @@ inline void q4k_gemv_sse41_v(const void* weight_data, const float* x,
                 const uint8_t* qs1 = blk1 + 16;
 
                 int q8_idx = 0;
-                for (int j = 0; j < 256; j += 64) {
+                _Pragma("loop count(4)") _Pragma("ivdep") for (int64_t j = 0; j < 256; j += 64) {
                     int is = j / 32;
                     uint8_t sc_a0, m_a0, sc_b0, m_b0;
                     uint8_t sc_a1, m_a1, sc_b1, m_b1;
@@ -576,7 +576,7 @@ inline void q4k_gemv_avx2(const void* weight_data, const float* x,
                 const uint8_t* qs1 = blk1 + 16;
 
                 int q8_idx = 0;
-                for (int j = 0; j < 256; j += 64) {
+                _Pragma("loop count(4)") _Pragma("ivdep") for (int64_t j = 0; j < 256; j += 64) {
                     int is = j / 32;
                     uint8_t sc_a0, m_a0, sc_b0, m_b0;
                     uint8_t sc_a1, m_a1, sc_b1, m_b1;
@@ -695,7 +695,7 @@ inline void q4k_gemv_scalar(const void* weight_data, const float* x,
             const uint8_t* qs = block + 16;
 
             int is = 0;
-            for (int j = 0; j < 256; j += 64) {
+            _Pragma("loop count(4)") _Pragma("ivdep") for (int64_t j = 0; j < 256; j += 64) {
                 uint8_t sc, m_val;
                 gguf::get_scale_min_k4(is, scales, &sc, &m_val);
                 float d1 = d * sc;
@@ -755,7 +755,7 @@ inline void q8_0_gemv_avx2(const void* weight_data, const float* x,
 
             // Process 32 int8 values in 4 groups of 8
             // Each group: load 8 int8 -> extend to int32 -> convert to float -> FMA
-            for (int l = 0; l < 32; l += 8) {
+            _Pragma("loop count(4)") _Pragma("ivdep") for (int64_t l = 0; l < 32; l += 8) {
                 // Load 8 int8 values and sign-extend to 8x int32
                 __m128i qs8 = _mm_loadl_epi64(
                     reinterpret_cast<const __m128i*>(qs + l));
@@ -853,7 +853,7 @@ inline void q6k_gemv_avx2(const void* weight_data, const float* x,
 
             // Process 256 values in 2 halves of 128
             for (int n_half = 0; n_half < 256; n_half += 128) {
-                for (int l = 0; l < 32; l += 8) {
+                _Pragma("loop count(4)") _Pragma("ivdep") for (int64_t l = 0; l < 32; l += 8) {
                     int is = n_half / 16 + l / 16;
 
                     // Reconstruct 6-bit values for 4 sub-groups of 8
@@ -1051,7 +1051,7 @@ inline void q5k_gemv_avx2(const void* weight_data, const float* x,
 
             int is = 0;
             uint8_t u1 = 1, u2 = 2;
-            for (int j = 0; j < 256; j += 64) {
+            _Pragma("loop count(4)") _Pragma("ivdep") for (int64_t j = 0; j < 256; j += 64) {
                 uint8_t sc, m_val;
                 gguf::get_scale_min_k4(is, scales, &sc, &m_val);
                 const float d1 = d * sc;
@@ -1065,7 +1065,7 @@ inline void q5k_gemv_avx2(const void* weight_data, const float* x,
                 __m256 sum_qx_hi = _mm256_setzero_ps();
                 __m256 sum_x_hi  = _mm256_setzero_ps();
 
-                for (int l = 0; l < 32; l += 8) {
+                _Pragma("loop count(4)") _Pragma("ivdep") for (int64_t l = 0; l < 32; l += 8) {
                     __m128i qs8 = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(qs + l));
                     __m256i qi = _mm256_cvtepu8_epi32(qs8);
 
@@ -1148,7 +1148,7 @@ inline void q5k_gemv_scalar(const void* weight_data, const float* x,
 
             int is = 0;
             uint8_t u1 = 1, u2 = 2;
-            for (int j = 0; j < 256; j += 64) {
+            _Pragma("loop count(4)") _Pragma("ivdep") for (int64_t j = 0; j < 256; j += 64) {
                 uint8_t sc, m_val;
                 gguf::get_scale_min_k4(is, scales, &sc, &m_val);
                 float d1 = d * sc;
@@ -1245,7 +1245,7 @@ inline void q4k_gemv_k_slice_avx2(const void* sliced_weight, const float* x_loca
                 const uint8_t* qs1 = blk1 + 16;
 
                 int q8_idx = 0;
-                for (int j = 0; j < 256; j += 64) {
+                _Pragma("loop count(4)") _Pragma("ivdep") for (int64_t j = 0; j < 256; j += 64) {
                     int is = j / 32;
                     uint8_t sc_a0, m_a0, sc_b0, m_b0;
                     uint8_t sc_a1, m_a1, sc_b1, m_b1;
@@ -1349,7 +1349,7 @@ inline void q4k_gemv_k_slice_scalar(const void* sliced_weight, const float* x_lo
             const uint8_t* qs = block + 16;
 
             int is = 0;
-            for (int j = 0; j < 256; j += 64) {
+            _Pragma("loop count(4)") _Pragma("ivdep") for (int64_t j = 0; j < 256; j += 64) {
                 uint8_t sc, m_val;
                 gguf::get_scale_min_k4(is, scales, &sc, &m_val);
                 float d1 = d * sc;
@@ -1597,7 +1597,7 @@ inline void q4k_gemv_avx2_batch2(
                 const Q8Block* xq1b = xq1 + bi * 8;
 
                 int q8_idx = 0;
-                for (int j = 0; j < 256; j += 64) {
+                _Pragma("loop count(4)") _Pragma("ivdep") for (int64_t j = 0; j < 256; j += 64) {
                     int is = j / 32;
                     uint8_t sca, ma, scb, mb;
                     gguf::get_scale_min_k4(is,     sc, &sca, &ma);
@@ -1746,7 +1746,7 @@ inline void q4k_gemv_batched_avx2(const void* weight_data,
                 const uint8_t* qs = blk + 16;
 
                 int q8_idx = 0;
-                for (int j = 0; j < 256; j += 64) {
+                _Pragma("loop count(4)") _Pragma("ivdep") for (int64_t j = 0; j < 256; j += 64) {
                     int is = j / 32;
                     uint8_t sc_a, m_a, sc_b, m_b;
                     gguf::get_scale_min_k4(is,     sc, &sc_a, &m_a);
@@ -1827,7 +1827,7 @@ inline void q4k_gemv_batched_scalar(const void* weight_data,
                     const float dmin = gguf::fp16_to_fp32(dmin_bits);
                     const uint8_t* sc = block + 4;
                     const uint8_t* qs = block + 16;
-                    for (int j = 0; j < 256; j += 32) {
+                    _Pragma("loop count(8)") _Pragma("ivdep") for (int64_t j = 0; j < 256; j += 32) {
                         int is = j / 32;
                         uint8_t sc_j, m_j;
                         gguf::get_scale_min_k4(is, sc, &sc_j, &m_j);
@@ -1962,7 +1962,7 @@ inline void cpu_quant_gemv_batched_qkv(
                     const uint8_t* qs1 = blk1 + 16;
 
                     int q8_idx = 0;
-                    for (int j = 0; j < 256; j += 64) {
+                    _Pragma("loop count(4)") _Pragma("ivdep") for (int64_t j = 0; j < 256; j += 64) {
                         int is = j / 32;
                         uint8_t sc_a0, m_a0, sc_b0, m_b0;
                         uint8_t sc_a1, m_a1, sc_b1, m_b1;

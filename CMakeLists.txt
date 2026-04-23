@@ -133,6 +133,21 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "e2k|elbrus")
     # Aggressive optimization: LCC VLIW scheduling benefits hugely from -O3
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -ffast-math")
 
+    # LCC-specific performance flags (from docs/elbrus/LCC_OPTIMIZATION.md +
+    # habr smartengines / mcst official optimization guide). These unlock:
+    #   * APB  — hardware array prefetch buffer, critical for memory-bound
+    #             workloads. Needs both `-fprefetch` AND int64_t loop
+    #             counters AND #pragma loop count (see cpu_quant_gemv.h).
+    #   * software pipelining with wider window (default 300 ops too small
+    #             for our 256-element Q4_K super-block bodies).
+    #   * cache-blocked pipelined loops (-fcache-opt).
+    #   * mtune=elbrus-8c2 picks the E8C2-specific instruction scheduler
+    #             weights instead of the generic e2k default.
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fprefetch -fcache-opt")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mtune=elbrus-8c2")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -frestrict-params")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fswp-maxopers=800")
+
     # Link-Time Optimization: lets LCC optimize across TU boundaries
     # Disabled by default — LCC ar wrapper may not be found
     # Enable manually: -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON
