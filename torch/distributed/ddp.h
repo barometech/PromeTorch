@@ -77,6 +77,17 @@ void all_reduce_inplace(float* data, int64_t numel);
 // output rows) and slices are concatenated rather than summed.
 void all_gather_inplace(float* data, int64_t per_rank_count);
 
+// Split-collective form of all_gather_inplace. Enables overlap between the
+// deposit-side barrier and local compute: after `post`, the caller can run
+// any work that does NOT depend on gathered output (e.g., prefetching the
+// next GEMV's weight rows), then `wait` finishes the gather.
+//
+// Must be paired 1:1 on each rank. `wait` completes the most recently-posted
+// gather (LIFO stack of depth 1 — nested posts are not supported). SHM
+// backend required; TCP fallback degrades to synchronous gather in `post`.
+void all_gather_post(float* data, int64_t per_rank_count);
+void all_gather_wait();
+
 // broadcast: src_rank sends tensor data to every other rank in-place.
 void broadcast(at::Tensor& tensor, int src_rank = 0);
 

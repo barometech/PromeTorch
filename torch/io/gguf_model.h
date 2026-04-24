@@ -4583,23 +4583,49 @@ public:
                 // attn_full_buf (all ranks get full q_dim vector), then every
                 // rank computes its N-row slice of h from the full replicated
                 // W_o, finally gather h slices.
-                torch::distributed::all_gather_inplace(
+                //
+                // Split-collective pattern (Step 4): call `post` to deposit+
+                // signal, issue weight prefetch loop over the upcoming GEMV's
+                // cachelines while barriers resolve, then `wait` to consume.
+                // Overlap is best-effort — if LCC ignores __builtin_prefetch
+                // this is a no-op and correctness is unchanged.
+                const int _node = c10::current_numa_node();
+                const void* w_ao_full = nullptr;
+                const uint8_t* w_ao_slice = nullptr;
+                int64_t w_ao_stride = 0;
+                if (use_quant_gemv_ && layer.q_attn_output.valid) {
+                    w_ao_full = layer.q_attn_output.numa_replica.get(_node);
+                    if (!w_ao_full) w_ao_full = layer.q_attn_output.cpu_data;
+                    w_ao_stride = layer.q_attn_output.row_stride_bytes;
+                    w_ao_slice = static_cast<const uint8_t*>(w_ao_full)
+                               + h_row_start * w_ao_stride;
+                }
+
+                torch::distributed::all_gather_post(
                     tp_.attn_full_buf.data(), tp_.q_dim_local);
+                // Overlap: warm the first ~2 KB of each of the first 4 rows
+                // of the attn_output weight slice. Total: ~8 KB of prefetch
+                // hints issued during the arrival barrier.
+                if (w_ao_slice) {
+                    int64_t pf_rows = std::min<int64_t>(H_local, 4);
+                    int64_t pf_bytes = std::min<int64_t>(w_ao_stride, 2048);
+                    for (int64_t r = 0; r < pf_rows; ++r) {
+                        const uint8_t* row_ptr = w_ao_slice + r * w_ao_stride;
+                        for (int64_t off = 0; off < pf_bytes; off += 64) {
+                            __builtin_prefetch(row_ptr + off, 0, 2);
+                        }
+                    }
+                }
+                torch::distributed::all_gather_wait();
                 if (tp_sec_timers_.on) tp_sec_timers_.allreduce_ao_ms += _tp_elapsed();
 
                 // N-slice GEMV on full replicated attn_output weight.
-                if (use_quant_gemv_ && layer.q_attn_output.valid) {
-                    const int _node = c10::current_numa_node();
-                    const void* w_full = layer.q_attn_output.numa_replica.get(_node);
-                    if (!w_full) w_full = layer.q_attn_output.cpu_data;
-                    const uint8_t* w_slice = static_cast<const uint8_t*>(w_full)
-                        + h_row_start * layer.q_attn_output.row_stride_bytes;
+                if (w_ao_slice) {
                     cpu_quant::cpu_quant_gemv(
-                        layer.q_attn_output.quant_type, w_slice,
+                        layer.q_attn_output.quant_type, w_ao_slice,
                         tp_.attn_full_buf.data(),
                         h_buf + h_row_start,
-                        q_dim, H_local,
-                        layer.q_attn_output.row_stride_bytes,
+                        q_dim, H_local, w_ao_stride,
                         /*numa=*/nullptr);
                 } else if (layer.attn_output.defined()) {
                     const float* w = layer.attn_output.data_ptr<float>();
@@ -4613,8 +4639,31 @@ public:
                 }
                 if (tp_sec_timers_.on) tp_sec_timers_.ao_ms += _tp_elapsed();
 
-                // Gather N-slices into full h_buf.
-                torch::distributed::all_gather_inplace(h_buf, H_local);
+                // Gather N-slices into full h_buf. Overlap: local residual
+                // + partial sum_sq on own slice — both operands already known
+                // before gather completes. Writes to x_next at own offset so
+                // we can skip redoing this part after wait().
+                torch::distributed::all_gather_post(h_buf, H_local);
+                {
+                    // Touch the first few rows of gate/up weights for the
+                    // FFN block to warm L2 while the arrival barrier resolves.
+                    const void* w_g = tl.q_ffn_gate.valid ? tl.q_ffn_gate.cpu_data : nullptr;
+                    const void* w_u = tl.q_ffn_up.valid   ? tl.q_ffn_up.cpu_data   : nullptr;
+                    int64_t pf_stride = tl.q_ffn_gate.valid ? tl.q_ffn_gate.row_stride_bytes : 0;
+                    if (w_g && w_u && pf_stride > 0) {
+                        int64_t pf_rows = 4;
+                        int64_t pf_bytes = std::min<int64_t>(pf_stride, 2048);
+                        for (int64_t r = 0; r < pf_rows; ++r) {
+                            const uint8_t* gp = static_cast<const uint8_t*>(w_g) + r * pf_stride;
+                            const uint8_t* up_ = static_cast<const uint8_t*>(w_u) + r * pf_stride;
+                            for (int64_t off = 0; off < pf_bytes; off += 64) {
+                                __builtin_prefetch(gp + off, 0, 2);
+                                __builtin_prefetch(up_ + off, 0, 2);
+                            }
+                        }
+                    }
+                }
+                torch::distributed::all_gather_wait();
                 if (tp_sec_timers_.on) tp_sec_timers_.allreduce_ao_ms += _tp_elapsed();
             } else {
                 // Legacy path: K-slice GEMV + AllReduce-sum.
@@ -4683,22 +4732,41 @@ public:
                 }
                 if (tp_sec_timers_.on) tp_sec_timers_.gateup_ms += _tp_elapsed();
 
-                torch::distributed::all_gather_inplace(
+                // Pre-compute ffn_down N-slice pointer so we can prefetch
+                // during the arrival barrier.
+                const int _node_fd = c10::current_numa_node();
+                const void* w_fd_full = nullptr;
+                const uint8_t* w_fd_slice = nullptr;
+                int64_t w_fd_stride = 0;
+                if (use_quant_gemv_ && layer.q_ffn_down.valid) {
+                    w_fd_full = layer.q_ffn_down.numa_replica.get(_node_fd);
+                    if (!w_fd_full) w_fd_full = layer.q_ffn_down.cpu_data;
+                    w_fd_stride = layer.q_ffn_down.row_stride_bytes;
+                    w_fd_slice = static_cast<const uint8_t*>(w_fd_full)
+                               + h_row_start * w_fd_stride;
+                }
+
+                torch::distributed::all_gather_post(
                     tp_.silu_full_buf.data(), tp_.inter_local);
+                if (w_fd_slice) {
+                    int64_t pf_rows = std::min<int64_t>(H_local, 4);
+                    int64_t pf_bytes = std::min<int64_t>(w_fd_stride, 2048);
+                    for (int64_t r = 0; r < pf_rows; ++r) {
+                        const uint8_t* row_ptr = w_fd_slice + r * w_fd_stride;
+                        for (int64_t off = 0; off < pf_bytes; off += 64) {
+                            __builtin_prefetch(row_ptr + off, 0, 2);
+                        }
+                    }
+                }
+                torch::distributed::all_gather_wait();
                 if (tp_sec_timers_.on) tp_sec_timers_.allreduce_fdown_ms += _tp_elapsed();
 
-                if (use_quant_gemv_ && layer.q_ffn_down.valid) {
-                    const int _node = c10::current_numa_node();
-                    const void* w_full = layer.q_ffn_down.numa_replica.get(_node);
-                    if (!w_full) w_full = layer.q_ffn_down.cpu_data;
-                    const uint8_t* w_slice = static_cast<const uint8_t*>(w_full)
-                        + h_row_start * layer.q_ffn_down.row_stride_bytes;
+                if (w_fd_slice) {
                     cpu_quant::cpu_quant_gemv(
-                        layer.q_ffn_down.quant_type, w_slice,
+                        layer.q_ffn_down.quant_type, w_fd_slice,
                         tp_.silu_full_buf.data(),
                         h_buf + h_row_start,
-                        inter, H_local,
-                        layer.q_ffn_down.row_stride_bytes,
+                        inter, H_local, w_fd_stride,
                         /*numa=*/nullptr);
                 } else if (layer.ffn_down.defined()) {
                     const float* w = layer.ffn_down.data_ptr<float>();
@@ -4716,7 +4784,30 @@ public:
                 }
                 if (tp_sec_timers_.on) tp_sec_timers_.fdown_ms += _tp_elapsed();
 
-                torch::distributed::all_gather_inplace(h_buf, H_local);
+                // Final gather of layer's output h. Overlap: prefetch the
+                // NEXT layer's attn_q/k/v row-sliced weights (tl entries are
+                // local slices, no NUMA resolution needed).
+                torch::distributed::all_gather_post(h_buf, H_local);
+                {
+                    int64_t next_i = i + 1;
+                    if (next_i < config.num_layers) {
+                        const auto& ntl = tp_.layers[next_i];
+                        const void* w_nq = ntl.q_attn_q.valid ? ntl.q_attn_q.cpu_data : nullptr;
+                        int64_t nq_stride = ntl.q_attn_q.valid ? ntl.q_attn_q.row_stride_bytes : 0;
+                        if (w_nq && nq_stride > 0) {
+                            int64_t pf_rows = 4;
+                            int64_t pf_bytes = std::min<int64_t>(nq_stride, 2048);
+                            for (int64_t r = 0; r < pf_rows; ++r) {
+                                const uint8_t* row_ptr = static_cast<const uint8_t*>(w_nq)
+                                                       + r * nq_stride;
+                                for (int64_t off = 0; off < pf_bytes; off += 64) {
+                                    __builtin_prefetch(row_ptr + off, 0, 2);
+                                }
+                            }
+                        }
+                    }
+                }
+                torch::distributed::all_gather_wait();
                 if (tp_sec_timers_.on) tp_sec_timers_.allreduce_fdown_ms += _tp_elapsed();
             } else {
                 // Legacy path: K-slice ffn_down + AllReduce-sum.
