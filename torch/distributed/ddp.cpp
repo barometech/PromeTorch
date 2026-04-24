@@ -162,6 +162,17 @@ struct PGState {
     // instead of sched_yield. Eliminates the 1 ms scheduler-tick wake latency
     // that showed up as 375 μs median straggler wait on Elbrus (Agent 9).
     bool     shm_use_futex = false;
+
+    // Pending split-collective state for async all_gather (Option F Step 4).
+    // Stores the generation + payload info captured by all_gather_post, so
+    // that all_gather_wait can complete the collective without re-passing
+    // parameters. Single-slot (no nested posts) — throws on double-post.
+    struct PendingGather {
+        float*   data = nullptr;
+        int64_t  per_rank_count = 0;
+        uint32_t gen = 0;
+        bool     active = false;
+    } pending_gather;
 };
 
 PGState& pg() {
@@ -510,6 +521,9 @@ void destroy_process_group() {
     s.shm_enabled = false;
     s.shm_use_futex = false;
     s.shm_gen = 0;
+    s.pending_gather.active = false;
+    s.pending_gather.data = nullptr;
+    s.pending_gather.per_rank_count = 0;
 #endif
     s.peers.clear();
     s.io_buf.clear();
@@ -749,11 +763,14 @@ void all_reduce_inplace(float* data, int64_t numel) {
 // symmetrically in reading all other ranks' slots.
 // ============================================================================
 #if !defined(_WIN32)
-static void all_gather_shm(PGState& s, float* data, int64_t per_rank_count) {
+// Split into post (deposit + arrival signal) and wait (barrier + copy +
+// departure signal). Caller may run independent compute between the two to
+// overlap with the arrival barrier's straggler wait.
+static void all_gather_shm_post(PGState& s, float* data, int64_t per_rank_count) {
     size_t slice_bytes = (size_t)per_rank_count * sizeof(float);
     if (slice_bytes > kShmSlotSize) {
         throw std::runtime_error(
-            "all_gather_shm: per-rank slice > kShmSlotSize (1MB). Payload too large.");
+            "all_gather_shm_post: per-rank slice > kShmSlotSize (1MB).");
     }
 
     char* base = static_cast<char*>(s.shm_base);
@@ -774,13 +791,29 @@ static void all_gather_shm(PGState& s, float* data, int64_t per_rank_count) {
         shm_futex_wake_all(reinterpret_cast<uint32_t*>(&hdr->arrived[gen % 16]));
     }
 
+    // Stash state for the matching wait() call.
+    s.pending_gather.data = data;
+    s.pending_gather.per_rank_count = per_rank_count;
+    s.pending_gather.gen = gen;
+    s.pending_gather.active = true;
+}
+
+static void all_gather_shm_wait(PGState& s) {
+    if (!s.pending_gather.active) return;
+
+    char* base = static_cast<char*>(s.shm_base);
+    auto* hdr  = reinterpret_cast<ShmHeader*>(base);
+    uint32_t gen = s.pending_gather.gen;
+    int64_t per_rank_count = s.pending_gather.per_rank_count;
+    float* data = s.pending_gather.data;
+    size_t slice_bytes = (size_t)per_rank_count * sizeof(float);
+    const bool use_futex = s.shm_use_futex;
+
     // 3. Wait for all ranks to deposit.
     shm_wait_counter_ge(&hdr->arrived[gen % 16],
                         (uint32_t)s.world_size, use_futex);
 
     // 4. Parallel gather: every rank copies all OTHER slots into its output.
-    // No reducer bottleneck — all N ranks pull in parallel. Own slice is
-    // already correct in `data` (caller deposited it there before calling).
     for (int r = 0; r < s.world_size; ++r) {
         if (r == s.rank) continue;
         const float* src = reinterpret_cast<const float*>(shm_rank_slot(base, r));
@@ -796,8 +829,6 @@ static void all_gather_shm(PGState& s, float* data, int64_t per_rank_count) {
     }
 
     if (s.rank == 0) {
-        // Rank 0 waits for all ranks (including itself) to have finished
-        // reading slots before resetting counters.
         shm_wait_counter_ge(&hdr->departed[gen % 16],
                             (uint32_t)s.world_size, use_futex);
         hdr->arrived[gen % 16].store(0, std::memory_order_release);
@@ -806,14 +837,57 @@ static void all_gather_shm(PGState& s, float* data, int64_t per_rank_count) {
         hdr->generation = gen + 1;
         if (use_futex) shm_futex_wake_all(&hdr->generation);
     } else {
-        // Workers block until rank 0 publishes the next generation — ensures
-        // rank 0 has reset counters before any rank starts the next round.
         shm_wait_gen_advance(&hdr->generation, gen, use_futex);
     }
 
     s.shm_gen = gen + 1;
+    s.pending_gather.active = false;
+    s.pending_gather.data = nullptr;
+    s.pending_gather.per_rank_count = 0;
+}
+
+// Convenience wrapper: post + wait with no overlap.
+static void all_gather_shm(PGState& s, float* data, int64_t per_rank_count) {
+    all_gather_shm_post(s, data, per_rank_count);
+    all_gather_shm_wait(s);
 }
 #endif
+
+void all_gather_post(float* data, int64_t per_rank_count) {
+    auto& s = pg();
+    if (!s.initialized) {
+        throw std::runtime_error("all_gather_post: process group not initialized");
+    }
+    if (s.world_size == 1 || per_rank_count == 0) return;
+
+#if !defined(_WIN32)
+    if (s.shm_enabled) {
+        if (s.pending_gather.active) {
+            throw std::runtime_error(
+                "all_gather_post: a previous post is still pending");
+        }
+        all_gather_shm_post(s, data, per_rank_count);
+        return;
+    }
+#endif
+    // TCP fallback: no true async path — run the sync version now, and mark
+    // nothing pending so wait() is a no-op. Keeps the split-API contract
+    // on non-SHM hosts (correctness preserved, no overlap gain).
+    all_gather_inplace(data, per_rank_count);
+}
+
+void all_gather_wait() {
+    auto& s = pg();
+    if (!s.initialized) return;
+    if (s.world_size == 1) return;
+#if !defined(_WIN32)
+    if (s.shm_enabled && s.pending_gather.active) {
+        all_gather_shm_wait(s);
+        return;
+    }
+#endif
+    // TCP fallback already ran the collective inside `post`; nothing to do.
+}
 
 void all_gather_inplace(float* data, int64_t per_rank_count) {
     auto& s = pg();
