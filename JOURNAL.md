@@ -2637,6 +2637,64 @@ Step 3. Если срабатывает — контроллер памяти г
 
 Total LoC: ~470 vs 570 planned (Step 2 был free).
 
+
+### 2026-04-24 — Option F: меряли на Эльбрусе, выводы
+
+Собрал ddp.cpp + gguf_model.h на Эльбрус, пересборка `test_gguf_inference`,
+3-way бенч (30 токенов, qwen3:4b Q4_K_M, TP-4, prompt "The sky is"):
+
+| Config | tok/s | Δ |
+|---|---|---|
+| baseline (SHM AR, spin+yield) | **4.8** | — |
+| futex (SHM AR, futex) | **4.7** | -2% (шум) |
+| gather (AllGather + futex + N-slice every GEMV) | **4.5** | -6% (регрессия) |
+
+Correctness: во всех 3 конфигах одинаковый текст `" the limit for the number
+of people who have been affected by the recent wildfires in California..."`.
+Gather bit-identical AllReduce — математически эквивалентно (disjoint slices,
+concat == sum-with-zero-pad).
+
+**Выводы по оптимизациям:**
+
+1. **Futex не помог.** Agent 9 измерял 375 μs медианную straggler-wait, но
+   futex заменил её на spin-yield без прироста. Значит ЛИБО straggler wait
+   на Эльбрусе гораздо меньше 375 μs (bounded-spin 1024 итер покрывает её),
+   ЛИБО wake-all overhead съедает выигрыш. Futex — neutral.
+
+2. **Gather **хуже** baseline.** 2 AllReduce/слой → 4 AllGather/слой.
+   Удвоение числа barrier'ов перевесило отсутствие reducer bottleneck.
+   Значит reducer bottleneck **не был** проблемой — агент 9 неправильно
+   диагностировал 95% straggler-barrier.
+
+3. **Реальный bottleneck — per-chip memory bandwidth на реплицированных
+   весах.** AllReduce-трафик = 73 calls × 10KB = 730 KB/token vs 2.3 GB
+   weight-sweep/token. AllReduce = 0.03% времени. Уменьшение количества
+   AR ничего не даст.
+
+Первая ошибка плана — ассumed AllReduce wait dominates, но это неправда.
+Futex-бенч это доказал.
+
+Бенч первой попытки провалился из-за FUTEX_PRIVATE_FLAG — он приватный
+для одного address space, а наш SHM `MAP_SHARED` между процессами.
+Deadlock до первого токена. Фиксанул в commit `fecc370` (drop private flag).
+
+**Что дальше:**
+
+Option F как задумано не ведёт к 20 tok/s. Истинная дорога:
+  * **Weight sharding**: каждый чип хранит 1/4 весов, а не реплицирует.
+    Это 4× меньше bandwidth per chip. Требует cross-chip compute fetch
+    = принципиально новая архитектура TP. Много работы.
+  * **Per-chip cache reuse**: keep hot weights (RoPE tables, norm scales)
+    в L1; current code копирует на каждый токен.
+  * **NUMA sharding of single GEMV** вместо replicate: 32 cores на GEMV.
+
+Option F инфраструктура (all_gather_inplace, split API, futex) остаётся —
+ложной идея использовать её для full-replicate ДА, но структуры полезны
+для будущего weight sharding.
+
+Артефакты: commits `583bee8`, `e1db809`, `fecc370`. Bench: `scripts/tp_optionf.sh`,
+логи `~/promethorch/run_logs/optionf_*/`.
+
 **Elbrus run plan**
 ```
 # Baseline (legacy, spin+yield) — expect 6.5 tok/s
