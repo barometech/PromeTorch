@@ -2809,3 +2809,71 @@ Correctness: bit-exact argmax vs legacy path expected for gather path
 
 Details in `vliw_mission/round2/OPTION_F_IMPL.md`.
 
+### 2026-04-24 — Per-section profiler + fused kernels в TP-path
+
+Включил встроенный `PT_PROFILE_LAYER=1` (`tp_sec_timers_`). Раскладка
+ms/token на TP-4 baseline:
+
+| Секция | ms | % |
+|---|---|---|
+| gate_up (RMSNorm + gate GEMV + up GEMV) | 72.9 | 34% |
+| ffn_down (SiLU + GEMV) | 53.3 | 25% |
+| attn_phase (RMSNorm + QKV + attention) | 34.0 | 16% |
+| output_proj | 23.7 | 11% |
+| attn_output | 16.9 | 8% |
+| **allreduce (ao+fdown)** | **11.7** | **6%** |
+| tail | 0.1 | 0% |
+| **TOTAL** | 212.5 | 100% |
+
+**AllReduce = 6%, не 95%.** Agent 9 ошибся фундаментально — Option F
+тюнил не то.
+
+**Заменил отдельные GEMV на fused-kernels в TP:**
+  * `cpu_rmsnorm_inplace` + 3× `cpu_quant_gemv` → `cpu_fused_rmsnorm_qkv_gemv`
+  * `cpu_rmsnorm_inplace` + 2× `cpu_quant_gemv` → `cpu_fused_rmsnorm_gate_up_gemv`
+
+Замер с fused (no futex):
+
+| Секция | До | После | Δ |
+|---|---|---|---|
+| attn_phase | 34.0 | 29.9 | -4.1 |
+| attn_output | 16.9 | 15.0 | -1.9 |
+| gate_up | 72.9 | 65.4 | -7.5 |
+| ffn_down | 53.3 | 48.9 | -4.4 |
+| **GEMV сумма** | 177.1 | 159.2 | **-17.9** |
+| allreduce_ao | 5.4 | 10.7 | +5.3 |
+| allreduce_fdown | 6.3 | 17.6 | +11.3 |
+| **AR сумма** | 11.7 | 28.3 | **+16.6** |
+| TOTAL | 212.5 | 211.5 | **-1.0** |
+
+GEMV ускорилось на 18 ms, но straggler barrier вырос на 17 ms. До
+fusing общий RMSNorm-scan синхронизировал ранги неявно; теперь каждый
+ранг сам fused-kernel'ом делает всё, skew виден. **Net = ~0.**
+Correctness ✓.
+
+С добавлением `PT_DDP_FUTEX=1`: allreduce_fdown 17.6→12.4 (-5), но
+GEMV секции +5 → тоже net 0. 4.8 tok/s опять.
+
+### Bandwidth-bound plateau объяснение
+
+Per-chip math:
+  * Weights per-rank per-token (sharded): ~575 MB
+  * Observed: 210 ms → 2.7 GB/s per-rank vs peak ~15 GB/s = **18% util**
+
+82% времени теряется не на I/O, а на compute/decode/sync:
+  * Q4_K dequant overhead (per-block dequant + FMA)
+  * master-thread prelude в EML GEMV
+  * parallel_for thread binding
+  * cross-numa coherence
+
+Чтобы прыгнуть к 20 tok/s:
+  * INT8 quantization (проще decode) — не попробовано
+  * Batch decode / speculative (амортизировать weight sweep) — Phase 7
+    был с 0% acceptance на qwen3 4b/0.6b
+  * Меньшая модель (qwen3:1.7B, 0.6B)
+  * GPU / NM Quad backend
+
+Sync-тюнинг (Option F, futex) исчерпан (sync всего 6%). Kernel-fusion
+тоже net 0 (skew перекрывает выигрыш). **Оставшиеся ветки только
+algorithm-level или hardware-level.**
+
