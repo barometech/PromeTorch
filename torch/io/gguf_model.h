@@ -4459,25 +4459,46 @@ public:
 
             if (tp_sec_timers_.on) _tp_elapsed();  // reset baseline for this layer
 
-            // --- RMSNorm(x) --- (use cpu_rmsnorm_inplace on a copy for AVX2-compatible math)
+            // --- RMSNorm(x) + fused Q/K/V GEMV (row-sliced weights) ---
+            // Profiler shows attn_phase = 34 ms/token; most of it is RMSNorm-
+            // scan of x + 3 separate GEMV passes. Fusing RMSNorm into the
+            // first GEMV pass (and batching Q/K/V through a single input
+            // stream) eliminates 3× reads of x_normed and 2× redundant
+            // RMSNorm scans. See cpu_fused_rmsnorm_qkv_gemv for details.
+            // x_normed is allocated unconditionally — the FFN block below
+            // needs a fresh RMSNorm(post-residual-x) scratch buffer regardless.
             std::vector<float> x_normed(H);
-            std::memcpy(x_normed.data(), x_ptr, H * sizeof(float));
-            cpu_quant::cpu_rmsnorm_inplace(x_normed.data(),
-                layer.attn_norm.data_ptr<float>(), eps, add_one, H);
-
-            // --- Q/K/V local projections (row-sliced weights) ---
             float* q_l = tp_.q_local_buf.data();
             float* k_l = tp_.k_local_buf.data();
             float* v_l = tp_.v_local_buf.data();
-            if (tl.q_attn_q.valid)
-                cpu_quant::cpu_quant_gemv(tl.q_attn_q.quant_type, tl.q_attn_q.cpu_data,
-                    x_normed.data(), q_l, H, tl.q_attn_q.rows, tl.q_attn_q.row_stride_bytes);
-            if (tl.q_attn_k.valid)
-                cpu_quant::cpu_quant_gemv(tl.q_attn_k.quant_type, tl.q_attn_k.cpu_data,
-                    x_normed.data(), k_l, H, tl.q_attn_k.rows, tl.q_attn_k.row_stride_bytes);
-            if (tl.q_attn_v.valid)
-                cpu_quant::cpu_quant_gemv(tl.q_attn_v.quant_type, tl.q_attn_v.cpu_data,
-                    x_normed.data(), v_l, H, tl.q_attn_v.rows, tl.q_attn_v.row_stride_bytes);
+            bool can_fuse_qkv = tl.q_attn_q.valid && tl.q_attn_k.valid && tl.q_attn_v.valid &&
+                tl.q_attn_q.quant_type == tl.q_attn_k.quant_type &&
+                tl.q_attn_q.quant_type == tl.q_attn_v.quant_type &&
+                tl.q_attn_q.row_stride_bytes == tl.q_attn_k.row_stride_bytes &&
+                tl.q_attn_q.row_stride_bytes == tl.q_attn_v.row_stride_bytes &&
+                cpu_quant::cpu_quant_gemv_supported(tl.q_attn_q.quant_type);
+            if (can_fuse_qkv) {
+                cpu_quant::cpu_fused_rmsnorm_qkv_gemv(
+                    x_ptr, layer.attn_norm.data_ptr<float>(), eps, add_one,
+                    tl.q_attn_q.quant_type,
+                    tl.q_attn_q.cpu_data, tl.q_attn_k.cpu_data, tl.q_attn_v.cpu_data,
+                    q_l, k_l, v_l,
+                    H, tl.q_attn_q.rows, tl.q_attn_k.rows, tl.q_attn_v.rows,
+                    tl.q_attn_q.row_stride_bytes);
+            } else {
+                std::memcpy(x_normed.data(), x_ptr, H * sizeof(float));
+                cpu_quant::cpu_rmsnorm_inplace(x_normed.data(),
+                    layer.attn_norm.data_ptr<float>(), eps, add_one, H);
+                if (tl.q_attn_q.valid)
+                    cpu_quant::cpu_quant_gemv(tl.q_attn_q.quant_type, tl.q_attn_q.cpu_data,
+                        x_normed.data(), q_l, H, tl.q_attn_q.rows, tl.q_attn_q.row_stride_bytes);
+                if (tl.q_attn_k.valid)
+                    cpu_quant::cpu_quant_gemv(tl.q_attn_k.quant_type, tl.q_attn_k.cpu_data,
+                        x_normed.data(), k_l, H, tl.q_attn_k.rows, tl.q_attn_k.row_stride_bytes);
+                if (tl.q_attn_v.valid)
+                    cpu_quant::cpu_quant_gemv(tl.q_attn_v.quant_type, tl.q_attn_v.cpu_data,
+                        x_normed.data(), v_l, H, tl.q_attn_v.rows, tl.q_attn_v.row_stride_bytes);
+            }
 
             // --- Biases (Qwen3) on rank-local slice ---
             if (layer.attn_q_bias.defined()) {
@@ -4704,21 +4725,37 @@ public:
             for (int64_t j = 0; j < H; ++j) tp_.x_buf[next][j] = tp_.x_buf[cur][j] + h_buf[j];
             cur = next;
 
-            // --- FFN RMSNorm(x) ---
+            // --- FFN: fused RMSNorm(x) + gate + up GEMV ---
+            // Profiler: gate_up = 73 ms/token (34% of total). Fused kernel
+            // eliminates 1 full RMSNorm scan + 1 x_normed memcpy + streams
+            // gate/up GEMV through single input tile — cuts ~20-30% on this
+            // hottest section.
             float* x_cur = tp_.x_buf[cur].data();
-            std::memcpy(x_normed.data(), x_cur, H * sizeof(float));
-            cpu_quant::cpu_rmsnorm_inplace(x_normed.data(),
-                layer.ffn_norm.data_ptr<float>(), eps, add_one, H);
-
-            // --- FFN gate/up local (row-sliced) ---
             float* gate_l = tp_.gate_local_buf.data();
             float* up_l   = tp_.up_local_buf.data();
-            if (tl.q_ffn_gate.valid)
-                cpu_quant::cpu_quant_gemv(tl.q_ffn_gate.quant_type, tl.q_ffn_gate.cpu_data,
-                    x_normed.data(), gate_l, H, tl.q_ffn_gate.rows, tl.q_ffn_gate.row_stride_bytes);
-            if (tl.q_ffn_up.valid)
-                cpu_quant::cpu_quant_gemv(tl.q_ffn_up.quant_type, tl.q_ffn_up.cpu_data,
-                    x_normed.data(), up_l, H, tl.q_ffn_up.rows, tl.q_ffn_up.row_stride_bytes);
+            bool can_fuse_ffn = tl.q_ffn_gate.valid && tl.q_ffn_up.valid &&
+                cpu_quant::cpu_quant_gemv_supported(tl.q_ffn_gate.quant_type) &&
+                cpu_quant::cpu_quant_gemv_supported(tl.q_ffn_up.quant_type);
+            if (can_fuse_ffn) {
+                cpu_quant::cpu_fused_rmsnorm_gate_up_gemv(
+                    x_cur, layer.ffn_norm.data_ptr<float>(), eps, add_one,
+                    tl.q_ffn_gate.quant_type, tl.q_ffn_gate.cpu_data,
+                    tl.q_ffn_up.quant_type,   tl.q_ffn_up.cpu_data,
+                    gate_l, up_l,
+                    H, tl.q_ffn_gate.rows, tl.q_ffn_up.rows,
+                    tl.q_ffn_gate.row_stride_bytes, tl.q_ffn_up.row_stride_bytes,
+                    /*numa_gate=*/nullptr, /*numa_up=*/nullptr);
+            } else {
+                std::memcpy(x_normed.data(), x_cur, H * sizeof(float));
+                cpu_quant::cpu_rmsnorm_inplace(x_normed.data(),
+                    layer.ffn_norm.data_ptr<float>(), eps, add_one, H);
+                if (tl.q_ffn_gate.valid)
+                    cpu_quant::cpu_quant_gemv(tl.q_ffn_gate.quant_type, tl.q_ffn_gate.cpu_data,
+                        x_normed.data(), gate_l, H, tl.q_ffn_gate.rows, tl.q_ffn_gate.row_stride_bytes);
+                if (tl.q_ffn_up.valid)
+                    cpu_quant::cpu_quant_gemv(tl.q_ffn_up.quant_type, tl.q_ffn_up.cpu_data,
+                        x_normed.data(), up_l, H, tl.q_ffn_up.rows, tl.q_ffn_up.row_stride_bytes);
+            }
             if (tp_sec_timers_.on) tp_sec_timers_.gateup_ms += _tp_elapsed();
 
             // --- SiLU(gate) * up + ffn_down ---
