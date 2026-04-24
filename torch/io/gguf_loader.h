@@ -248,22 +248,76 @@ public:
         }
         size_ = static_cast<size_t>(st.st_size);
 
-        data_ = ::mmap(nullptr, size_, PROT_READ, MAP_PRIVATE, fd_, 0);
-        if (data_ == MAP_FAILED) {
-            std::cerr << "[mmap] mmap() failed: " << strerror(errno) << std::endl;
-            data_ = nullptr;
-            ::close(fd_);
-            fd_ = -1;
-            return false;
+        // Round2 agent_3 item 5: 2.5 GB of weights in 4-KB pages = ~640K
+        // pages vs only ~1024 TLB entries on E8C2 → 99% TLB miss rate during
+        // decode. Huge pages (2 MB on Elbrus) bring it to ~1250 pages, well
+        // under TLB capacity. Two strategies tried in order:
+        //
+        //   1. PT_HUGETLB=1 env: anonymous MAP_HUGETLB allocation + pread()
+        //      the weights into it. Deterministically huge-paged; uses one
+        //      of the system's hugetlbfs reserves (see /proc/meminfo
+        //      HugePages_Free). Fails if insufficient huge-page reserves
+        //      → fall through to #2.
+        //
+        //   2. Default: file-backed mmap + MADV_HUGEPAGE. Kernel may promote
+        //      to THP transparently if kernel ≥ 5.7 and filesystem supports.
+        //      If it doesn't, we still get 4-KB pages but with MADV_RANDOM
+        //      preventing page-cache thrashing.
+        bool hugetlb_ok = false;
+        const char* hugetlb_env = std::getenv("PT_HUGETLB");
+        if (hugetlb_env && hugetlb_env[0] == '1') {
+            // Round up to 2 MB for hugetlb.
+            size_t rounded = (size_ + (2 * 1024 * 1024 - 1)) & ~((size_t)(2 * 1024 * 1024 - 1));
+            void* hp = ::mmap(nullptr, rounded, PROT_READ | PROT_WRITE,
+                              MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB, -1, 0);
+            if (hp != MAP_FAILED) {
+                // Copy file contents into the huge-page region.
+                size_t done = 0;
+                const size_t CHUNK = 64 * 1024 * 1024;  // 64 MB chunks
+                char* dst = static_cast<char*>(hp);
+                while (done < size_) {
+                    size_t req = std::min(CHUNK, size_ - done);
+                    ssize_t got = ::pread(fd_, dst + done, req, done);
+                    if (got <= 0) break;
+                    done += got;
+                }
+                if (done == size_) {
+                    // Drop write permission; we only read weights.
+                    ::mprotect(hp, rounded, PROT_READ);
+                    data_ = hp;
+                    // size_ stays at actual file size — callers slice off
+                    // that much, the trailing pad in `rounded - size_` is
+                    // never touched.
+                    hugetlb_ok = true;
+                    std::cerr << "[mmap] HugeTLB OK: " << (size_ / (1024 * 1024))
+                              << " MB in 2-MB pages\n";
+                } else {
+                    ::munmap(hp, rounded);
+                }
+            } else {
+                std::cerr << "[mmap] HugeTLB unavailable (need "
+                          << ((size_ / (2 * 1024 * 1024)) + 1)
+                          << " free 2MB hugepages; see /proc/meminfo HugePages_Free).\n";
+            }
         }
 
-        // Hint: random access. LLM decode visits every weight matrix once per
-        // token, so the hot access pattern is per-decode-step random across
-        // 2.5 GB, NOT a single linear scan. MADV_SEQUENTIAL tells the kernel
-        // to AGGRESSIVELY DROP pages behind the cursor — exactly wrong for us
-        // because the same pages are revisited on the next token's forward.
-        // (round2 agent_7 finding, gguf_loader.h:261).
-        madvise(data_, size_, MADV_RANDOM);
+        if (!hugetlb_ok) {
+            data_ = ::mmap(nullptr, size_, PROT_READ, MAP_PRIVATE, fd_, 0);
+            if (data_ == MAP_FAILED) {
+                std::cerr << "[mmap] mmap() failed: " << strerror(errno) << std::endl;
+                data_ = nullptr;
+                ::close(fd_);
+                fd_ = -1;
+                return false;
+            }
+            // Decode revisits every weight per token; MADV_RANDOM tells the
+            // kernel NOT to drop pages behind the cursor (MADV_SEQUENTIAL
+            // would do exactly that — wrong for our re-read pattern).
+            madvise(data_, size_, MADV_RANDOM);
+            // Suggest huge pages for the file-backed region (no-op on older
+            // kernels, a transparent promotion on ≥ 5.7).
+            madvise(data_, size_, MADV_HUGEPAGE);
+        }
 
         return true;
 #endif
