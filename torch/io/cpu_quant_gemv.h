@@ -390,6 +390,13 @@ inline void q4k_gemv_sse41_v(const void* weight_data, const float* x,
                     __builtin_prefetch(row1 + (bi + 1) * 144,       0, 3);
                     __builtin_prefetch(row1 + (bi + 1) * 144 + 64,  0, 3);
                     __builtin_prefetch(row1 + (bi + 1) * 144 + 128, 0, 3);
+                    // Round2 agent_3 item 6: multi-level. bi+1 covers only
+                    // 15 cycles of 200-cycle DRAM latency. Add bi+16 into
+                    // L2 (locality 2) to cover the rest.
+                    if (bi + 16 < blocks_per_row) {
+                        __builtin_prefetch(row0 + (bi + 16) * 144, 0, 2);
+                        __builtin_prefetch(row1 + (bi + 16) * 144, 0, 2);
+                    }
                 }
 
                 uint16_t d0_bits, dmin0_bits, d1_bits, dmin1_bits;
@@ -560,6 +567,13 @@ inline void q4k_gemv_avx2(const void* __restrict weight_data,
                     __builtin_prefetch(row1 + (bi + 1) * 144,       0, 3);
                     __builtin_prefetch(row1 + (bi + 1) * 144 + 64,  0, 3);
                     __builtin_prefetch(row1 + (bi + 1) * 144 + 128, 0, 3);
+                    // Round2 agent_3 item 6: multi-level. bi+1 covers only
+                    // 15 cycles of 200-cycle DRAM latency. Add bi+16 into
+                    // L2 (locality 2) to cover the rest.
+                    if (bi + 16 < blocks_per_row) {
+                        __builtin_prefetch(row0 + (bi + 16) * 144, 0, 2);
+                        __builtin_prefetch(row1 + (bi + 16) * 144, 0, 2);
+                    }
                 }
 
                 // Read block headers for both rows
