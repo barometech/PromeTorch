@@ -2549,3 +2549,40 @@ Working-tree files that had the leaks (`examples/nmquad/profile_nmquad.cpp`,
 `docs/elbrus/README_ELBRUS_RU.md`) now contain `user` in place of the username
 in every historical revision.
 
+
+### 2026-04-24 — Round 3: 6 of 7 items applied, TP-4 stabilized at 6.5
+
+Roadmap from Round 2 consolidation applied:
+
+| # | Item | Commit | Result |
+|---|------|--------|--------|
+| 1 | DIMM check on w205p | — | `sudo` required for dmidecode; confirmed 4-NUMA × 32 GB, 256 hugepages (512 MB) |
+| 2 | Fix cpu_fused_rmsnorm_gate_up_gemv NUMA fusion loss | `b9f2270` | Master-thread-resolve + drop bail guard — fusion restored in PT_NUMA_REPLICATE mode |
+| 3 | Output-proj master-thread w_out bug | `b9f2270` | Pass `&numa_replica` so workers resolve locally |
+| 4 | Pointless memcpy x→x_na before RMSNorm | `b9f2270` | Added cpu_rmsnorm_out helper + 3 call-site swaps |
+| 5 | Multi-level prefetch | `51ddb13` | bi+16 L2 hint in 2 kernels → variance collapse |
+| 6 | HugeTLB mmap | `b9f2270` | PT_HUGETLB=1 opt-in path; fallback to MADV_HUGEPAGE when hugepages insufficient (need 1191, have 256) |
+| 7 | Option F full-replicate row-parallel | `c02aa07` (plan only) | Documented as ~570 LoC next-session work |
+
+Live measurements after R3:
+  Start of mission:        4.7 1-proc / 5.4 TP-4
+  End of R2 (APB+audit):   5.3 1-proc / 6.5 TP-4 (variable 5.4-6.5)
+  End of R3:               5.4 1-proc / 6.5 TP-4 (stable × 3 runs)
+
+R3 win is mostly variance reduction: TP-4 was jittering 5.4-6.5 due to
+master-thread-resolved pointers making workers cross-chip, straggler
+barriers in AllReduce, and 15-cycle prefetch not covering 200-cycle
+DRAM. Collapse all three and median moves from ~5.8 to 6.5 locked.
+
+Remaining path to 20 tok/s (Option F, next session):
+  * Replace AllReduce (sum over disjoint slices) with AllGather — same
+    volume, no straggler-barrier compute phase
+  * Async AllGather overlapping with next op's RMSNorm
+  * Futex wait replacing spin+yield (95% of current 27 ms AR overhead
+    is sync variance per Agent 9 analysis)
+  * Row-parallel on EVERY GEMV (currently col-parallel for Q/K/V/gate/up)
+
+Per Agent 9 math: 2×-3× expected → 14-20 tok/s if all three land. ~570 LoC.
+
+Plan in `vliw_mission/round2/OPTION_F_PLAN.md` — commit `c02aa07`.
+
