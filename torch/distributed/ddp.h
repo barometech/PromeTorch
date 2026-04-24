@@ -69,6 +69,14 @@ void all_reduce(at::Tensor& tensor);
 // collectives. Data is modified in place. Numel must be FP32 element count.
 void all_reduce_inplace(float* data, int64_t numel);
 
+// all_gather_inplace: concatenate per-rank slices into full vector on all ranks.
+// On entry, rank r's slice [r * per_rank_count, (r+1) * per_rank_count) of `data`
+// holds its contribution. On return, the full concatenation is present on every
+// rank. SHM backend required (PT_DDP_SHM=1) — same use case as all_reduce_inplace.
+// Used by Option F TP path where every GEMV is N-sliced (column-parallel on
+// output rows) and slices are concatenated rather than summed.
+void all_gather_inplace(float* data, int64_t per_rank_count);
+
 // broadcast: src_rank sends tensor data to every other rank in-place.
 void broadcast(at::Tensor& tensor, int src_rank = 0);
 
