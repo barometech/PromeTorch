@@ -2759,6 +2759,39 @@ Option F infrastructure (all_gather_inplace, split API, futex, N-slice
 gemv path) остаётся в коде как env-gated — correctness доказана, но не
 включена по умолчанию. Готово к future work.
 
+### 2026-04-24 — Bisect: моя регрессия = 0, прошлый 6.5 был лукавый
+
+Юзер справедливо заметил: прошлая сессия закрывалась на 6.5 tok/s TP-4,
+текущая даёт 4.8. Подозрение — Option F сломал legacy путь.
+
+Проверил бисектом: откатил `torch/io/gguf_model.h` на состояние R3
+(commit `a4de6c4`, pre-Option F), пересобрал, запустил 3 раза:
+
+```
+RUN_1: 50 tokens in 10.5s (4.8 tok/s)
+RUN_2: 50 tokens in 10.6s (4.7 tok/s)
+RUN_3: 50 tokens in 10.6s (4.7 tok/s)
+```
+
+**Чистый R3 код даёт точно те же 4.7-4.8, что и Option F-версия.**
+Значит мои правки НЕ регрессировали legacy путь. Option F ветки
+env-gated и в `use_gather=false` состоянии идентичны R3.
+
+Предыдущая запись "6.5 стабильно × 3" в JOURNAL была:
+  * Либо best-of-many (не median × 3) — тогдашний бенч не запускался
+    3 раза подряд clean restart.
+  * Либо система была в другом состоянии (меньше background нагрузки,
+    другой thermal state, другие хот-страницы в кэше).
+  * Либо изменились внешние факторы (systemd задачи, swap активность).
+
+Бинарь Option F восстановлен, код на Эльбрусе = main HEAD. Correctness
+проверена раньше — во всех 3 конфигах одинаковый текст.
+
+**Реальная точка отсчёта: TP-4 на этой машине стабильно 4.7-4.8 tok/s.**
+Достижение 20 tok/s потребует оптимизации другого уровня — не sync и не
+kernel, а алгоритмика (batch-decode/speculative) или архитектура
+(настоящий sharding без replicate).
+
 **Elbrus run plan**
 ```
 # Baseline (legacy, spin+yield) — expect 6.5 tok/s
