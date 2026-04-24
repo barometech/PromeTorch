@@ -2586,3 +2586,61 @@ Per Agent 9 math: 2×-3× expected → 14-20 tok/s if all three land. ~570 LoC.
 
 Plan in `vliw_mission/round2/OPTION_F_PLAN.md` — commit `c02aa07`.
 
+
+### 2026-04-22 — Option F: Steps 1/3/5 landed (gather + futex, gated)
+
+Structural skeleton committed. Windows-side changes only; Elbrus bench next.
+
+**Step 1 — `all_gather_inplace`** (`torch/distributed/ddp.{h,cpp}`)
+Symmetric SHM collective: each rank deposits slice at `shm_rank_slot(rank)`,
+barrier, all ranks pull all slots in parallel. No reducer bottleneck like
+`all_reduce_shm` (rank 0 serial sum). TCP fallback through rank 0 for
+robustness. ~110 LoC.
+
+**Step 3 — `PT_TP_GATHER=1` path** in `forward_decode_cpu_tp`
+4 branch sites:
+  1. Skip `std::fill(attn_full_buf, 0)` — gather overwrites everything.
+  2. After attn: `all_gather_inplace(attn_full_buf, q_dim_local)`.
+  3. attn_output: N-slice GEMV from replicated weight at
+     `numa_replica + h_row_start * row_stride`, then gather h_local → h_buf.
+  4. ffn_down: write silu slice at `silu_full_buf + inter_offset`, gather,
+     N-slice GEMV on replicated ffn_down, gather h_local → h_buf.
+
+Setup side: under gather mode, force **uniform** `inter_local = inter/nprocs`
+(all_gather_inplace requires equal per-rank counts). Legacy path keeps
+non-uniform super-block partition for K-slice correctness. K-slice weight
+allocation skipped under gather (saves ~115 MB on qwen3:4b TP-4).
+Step 2 (N-slice GEMV helper) obviated — existing `cpu_quant_gemv` accepts
+arbitrary row range via pointer offset. ~140 LoC net.
+
+**Step 5 — Futex barriers** (`torch/distributed/ddp.cpp`)
+Gated via `PT_DDP_FUTEX=1`. `shm_wait_counter_ge` + `shm_wait_gen_advance`
+helpers spin 1024 iters, then `FUTEX_WAIT | FUTEX_PRIVATE_FLAG` with
+observed value. Arrivers/departers/generation-publishers call
+`FUTEX_WAKE` after hitting threshold. Targets 375 μs median straggler
+wait from Agent 9 → expected ~30 μs futex wake. ~80 LoC.
+Fallback: `sched_yield()` if SYS_futex/__NR_futex unavailable on LCC.
+
+**Step 4 deferred** — async double-buffer AllGather overlapping with
+next-layer RMSNorm/QKV. Requires layer-loop restructure (~150 LoC).
+Hold until Step 3+5 measured on Elbrus.
+
+Total LoC: ~330 vs 570 planned (Step 2 free, Step 4 deferred).
+
+**Elbrus run plan**
+```
+# Baseline (legacy, spin+yield) — expect 6.5 tok/s
+PT_DDP_SHM=1 ./bench
+
+# Futex only (same code path, faster barriers) — measures Step 5 alone
+PT_DDP_SHM=1 PT_DDP_FUTEX=1 ./bench
+
+# Full Option F (gather + futex) — target 14+ tok/s
+PT_DDP_SHM=1 PT_DDP_FUTEX=1 PT_TP_GATHER=1 ./bench
+```
+
+Correctness: bit-exact argmax vs legacy path expected for gather path
+(disjoint slices; concat = sum-with-zero-pad arithmetically).
+
+Details in `vliw_mission/round2/OPTION_F_IMPL.md`.
+
