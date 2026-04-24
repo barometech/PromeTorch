@@ -551,7 +551,10 @@ static inline void shm_futex_wait(uint32_t* addr, uint32_t expected) {
 #ifdef SYS_futex
     // FUTEX_WAIT sleeps if *addr == expected; returns immediately (EAGAIN) if
     // *addr already advanced since caller observed it. Safe against races.
-    ::syscall(SYS_futex, addr, FUTEX_WAIT | FUTEX_PRIVATE_FLAG,
+    // Note: NO FUTEX_PRIVATE_FLAG — our SHM region is shared across processes,
+    // and private-futexes only match between threads in the same address
+    // space; using it here caused a cross-process deadlock.
+    ::syscall(SYS_futex, addr, FUTEX_WAIT,
               expected, nullptr, nullptr, 0);
 #else
     (void)addr; (void)expected;
@@ -561,7 +564,7 @@ static inline void shm_futex_wait(uint32_t* addr, uint32_t expected) {
 
 static inline void shm_futex_wake_all(uint32_t* addr) {
 #ifdef SYS_futex
-    ::syscall(SYS_futex, addr, FUTEX_WAKE | FUTEX_PRIVATE_FLAG,
+    ::syscall(SYS_futex, addr, FUTEX_WAKE,
               INT32_MAX, nullptr, nullptr, 0);
 #else
     (void)addr;
