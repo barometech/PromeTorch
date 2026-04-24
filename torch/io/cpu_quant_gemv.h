@@ -228,12 +228,12 @@ inline float q4k_q8_dot_avx2(const uint8_t* block, const Q8Block* x_q8) {
     const __m256i mask_lo4 = _mm256_set1_epi8(0x0F);
 
     float sumf = 0.0f;
-    int q8_idx = 0;  // index into Q8 blocks (0..7 for 256 values)
+    int64_t q8_idx = 0;  // index into Q8 blocks (0..7 for 256 values)
 
     _Pragma("loop count(4)") _Pragma("ivdep") for (int64_t j = 0; j < 256; j += 64) {
         // Get scales and mins for this 64-value group
         uint8_t sc1, m1, sc2, m2;
-        int is = j / 32;
+        int64_t is = j / 32;
         gguf::get_scale_min_k4(is, scales, &sc1, &m1);
         gguf::get_scale_min_k4(is + 1, scales, &sc2, &m2);
 
@@ -406,9 +406,9 @@ inline void q4k_gemv_sse41_v(const void* weight_data, const float* x,
                 const uint8_t* qs0 = blk0 + 16;
                 const uint8_t* qs1 = blk1 + 16;
 
-                int q8_idx = 0;
+                int64_t q8_idx = 0;
                 _Pragma("loop count(4)") _Pragma("ivdep") for (int64_t j = 0; j < 256; j += 64) {
-                    int is = j / 32;
+                    int64_t is = j / 32;
                     uint8_t sc_a0, m_a0, sc_b0, m_b0;
                     uint8_t sc_a1, m_a1, sc_b1, m_b1;
                     gguf::get_scale_min_k4(is,     sc0, &sc_a0, &m_a0);
@@ -494,8 +494,10 @@ inline void q4k_gemv_sse41_v(const void* weight_data, const float* x,
 }
 #endif
 
-inline void q4k_gemv_avx2(const void* weight_data, const float* x,
-                           float* y, int64_t K, int64_t N,
+inline void q4k_gemv_avx2(const void* __restrict weight_data,
+                           const float* __restrict x,
+                           float* __restrict y,
+                           int64_t K, int64_t N,
                            int64_t row_stride_bytes,
                            const torch::io::ReplicatedWeight* numa = nullptr) {
     const int64_t blocks_per_row = K / 256;
@@ -575,9 +577,9 @@ inline void q4k_gemv_avx2(const void* weight_data, const float* x,
                 const uint8_t* qs0 = blk0 + 16;
                 const uint8_t* qs1 = blk1 + 16;
 
-                int q8_idx = 0;
+                int64_t q8_idx = 0;
                 _Pragma("loop count(4)") _Pragma("ivdep") for (int64_t j = 0; j < 256; j += 64) {
-                    int is = j / 32;
+                    int64_t is = j / 32;
                     uint8_t sc_a0, m_a0, sc_b0, m_b0;
                     uint8_t sc_a1, m_a1, sc_b1, m_b1;
                     gguf::get_scale_min_k4(is, sc0, &sc_a0, &m_a0);
@@ -1244,9 +1246,9 @@ inline void q4k_gemv_k_slice_avx2(const void* sliced_weight, const float* x_loca
                 const uint8_t* qs0 = blk0 + 16;
                 const uint8_t* qs1 = blk1 + 16;
 
-                int q8_idx = 0;
+                int64_t q8_idx = 0;
                 _Pragma("loop count(4)") _Pragma("ivdep") for (int64_t j = 0; j < 256; j += 64) {
-                    int is = j / 32;
+                    int64_t is = j / 32;
                     uint8_t sc_a0, m_a0, sc_b0, m_b0;
                     uint8_t sc_a1, m_a1, sc_b1, m_b1;
                     gguf::get_scale_min_k4(is, sc0, &sc_a0, &m_a0);
@@ -1596,9 +1598,9 @@ inline void q4k_gemv_avx2_batch2(
                 const Q8Block* xq0b = xq0 + bi * 8;
                 const Q8Block* xq1b = xq1 + bi * 8;
 
-                int q8_idx = 0;
+                int64_t q8_idx = 0;
                 _Pragma("loop count(4)") _Pragma("ivdep") for (int64_t j = 0; j < 256; j += 64) {
-                    int is = j / 32;
+                    int64_t is = j / 32;
                     uint8_t sca, ma, scb, mb;
                     gguf::get_scale_min_k4(is,     sc, &sca, &ma);
                     gguf::get_scale_min_k4(is + 1, sc, &scb, &mb);
@@ -1745,9 +1747,9 @@ inline void q4k_gemv_batched_avx2(const void* weight_data,
                 const uint8_t* sc = blk + 4;
                 const uint8_t* qs = blk + 16;
 
-                int q8_idx = 0;
+                int64_t q8_idx = 0;
                 _Pragma("loop count(4)") _Pragma("ivdep") for (int64_t j = 0; j < 256; j += 64) {
-                    int is = j / 32;
+                    int64_t is = j / 32;
                     uint8_t sc_a, m_a, sc_b, m_b;
                     gguf::get_scale_min_k4(is,     sc, &sc_a, &m_a);
                     gguf::get_scale_min_k4(is + 1, sc, &sc_b, &m_b);
@@ -1828,7 +1830,7 @@ inline void q4k_gemv_batched_scalar(const void* weight_data,
                     const uint8_t* sc = block + 4;
                     const uint8_t* qs = block + 16;
                     _Pragma("loop count(8)") _Pragma("ivdep") for (int64_t j = 0; j < 256; j += 32) {
-                        int is = j / 32;
+                        int64_t is = j / 32;
                         uint8_t sc_j, m_j;
                         gguf::get_scale_min_k4(is, sc, &sc_j, &m_j);
                         for (int l = 0; l < 32; ++l) {
@@ -1961,9 +1963,9 @@ inline void cpu_quant_gemv_batched_qkv(
                     const uint8_t* qs0 = blk0 + 16;
                     const uint8_t* qs1 = blk1 + 16;
 
-                    int q8_idx = 0;
+                    int64_t q8_idx = 0;
                     _Pragma("loop count(4)") _Pragma("ivdep") for (int64_t j = 0; j < 256; j += 64) {
-                        int is = j / 32;
+                        int64_t is = j / 32;
                         uint8_t sc_a0, m_a0, sc_b0, m_b0;
                         uint8_t sc_a1, m_a1, sc_b1, m_b1;
                         gguf::get_scale_min_k4(is, sc0, &sc_a0, &m_a0);
