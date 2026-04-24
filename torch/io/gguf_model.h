@@ -14,6 +14,7 @@
 #include "torch/distributed/ddp.h"
 #include "aten/src/ATen/ATen.h"
 #include "aten/src/ATen/native/cpu/hot_loops.h"
+#include "aten/src/ATen/native/cpu/VectorizedOps.h"
 #ifdef PT_USE_CUDA
 #include "aten/src/ATen/cuda/CUDADispatch.h"
 #include "aten/src/ATen/cuda/CuBLASHandle.h"
@@ -2588,7 +2589,51 @@ public:
                     }
 #endif
 
-                    // Softmax (online: max + exp + normalize)
+                    // Softmax (AVX2 vectorized: max + exp + normalize).
+                    // Round2 agent_5 P2: scalar std::exp over past_len=1024
+                    // tokens × 32 heads × 36 layers ≈ 1.2M exp/token wasted
+                    // on libm scalar. VectorizedOps.h provides exp256_ps.
+#ifdef __AVX2__
+                    float max_score = scores[0];
+                    {
+                        int64_t t = 1;
+                        __m256 vmax = _mm256_set1_ps(max_score);
+                        for (; t + 7 < total_seq; t += 8) {
+                            vmax = _mm256_max_ps(vmax, _mm256_loadu_ps(scores + t));
+                        }
+                        // horizontal max of vmax
+                        float lanes[8]; _mm256_storeu_ps(lanes, vmax);
+                        for (int k = 0; k < 8; ++k) if (lanes[k] > max_score) max_score = lanes[k];
+                        for (; t < total_seq; ++t) if (scores[t] > max_score) max_score = scores[t];
+                    }
+                    float sum_exp = 0.0f;
+                    {
+                        __m256 vmaxs = _mm256_set1_ps(max_score);
+                        __m256 vsum = _mm256_setzero_ps();
+                        int64_t t = 0;
+                        for (; t + 7 < total_seq; t += 8) {
+                            __m256 v = _mm256_sub_ps(_mm256_loadu_ps(scores + t), vmaxs);
+                            v = at::native::vec::exp256_ps(v);
+                            _mm256_storeu_ps(scores + t, v);
+                            vsum = _mm256_add_ps(vsum, v);
+                        }
+                        sum_exp = at::native::vec::hsum_avx2(vsum);
+                        for (; t < total_seq; ++t) {
+                            scores[t] = std::exp(scores[t] - max_score);
+                            sum_exp += scores[t];
+                        }
+                    }
+                    float inv_sum = 1.0f / (sum_exp + 1e-10f);
+                    {
+                        __m256 vinv = _mm256_set1_ps(inv_sum);
+                        int64_t t = 0;
+                        for (; t + 7 < total_seq; t += 8) {
+                            _mm256_storeu_ps(scores + t,
+                                _mm256_mul_ps(_mm256_loadu_ps(scores + t), vinv));
+                        }
+                        for (; t < total_seq; ++t) scores[t] *= inv_sum;
+                    }
+#else
                     float max_score = scores[0];
                     for (int64_t t = 1; t < total_seq; ++t) {
                         if (scores[t] > max_score) max_score = scores[t];
@@ -2600,6 +2645,7 @@ public:
                     }
                     float inv_sum = 1.0f / (sum_exp + 1e-10f);
                     for (int64_t t = 0; t < total_seq; ++t) scores[t] *= inv_sum;
+#endif
 
                     // Weighted sum of V
                     std::fill(out_head, out_head + head_dim, 0.0f);

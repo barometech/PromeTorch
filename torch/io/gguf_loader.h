@@ -257,8 +257,13 @@ public:
             return false;
         }
 
-        // Hint: sequential access for initial scan, random for inference
-        madvise(data_, size_, MADV_SEQUENTIAL);
+        // Hint: random access. LLM decode visits every weight matrix once per
+        // token, so the hot access pattern is per-decode-step random across
+        // 2.5 GB, NOT a single linear scan. MADV_SEQUENTIAL tells the kernel
+        // to AGGRESSIVELY DROP pages behind the cursor — exactly wrong for us
+        // because the same pages are revisited on the next token's forward.
+        // (round2 agent_7 finding, gguf_loader.h:261).
+        madvise(data_, size_, MADV_RANDOM);
 
         return true;
 #endif
