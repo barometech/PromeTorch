@@ -2507,3 +2507,45 @@ LCC fixes:
 
 Отчёты в `vliw_mission/round2/agent_[1-10]_*.md`.
 
+
+### 2026-04-24 — Git history deep-scrub (filter-repo round 2)
+
+User reported: "папку НТЦ МОДУЛЬ БЕСЕДЫ удалил, имена заредактил — но в .git/objects
+всё ещё живёт история". Verified, was correct:
+  * Commit subject `50d4e72` still contained "НТЦ МОДУЛЬ БЕСЕДЫ"
+  * Commit bodies still mentioned "paperclipdnb username"
+  * Blobs 3395793b / 8abaee65 / 46a249a0 still held the deleted folder
+  * `paperclipdnb` username alive in `examples/nmquad/profile_nmquad.cpp` +
+    `docs/elbrus/README_ELBRUS_RU.md` across ~10 historical commits
+
+Ran git-filter-repo 2.47.0 with three passes combined in one run:
+  1. `--invert-paths --path 'НТЦ МОДУЛЬ БЕСЕДЫ' --path-glob '.../​*'` — wipe
+      folder from every historical commit
+  2. `--replace-text` with rules file covering: paperclipdnb → user,
+     Trushkin/Pugachev/Konstantin → partner, BENCH_KONSTANTIN → BENCH_ELBRUS,
+     "НТЦ МОДУЛЬ БЕСЕДЫ" → "partner folder", "NTC Module" → "partner"
+  3. `--message-callback` with same pattern set applied to every commit
+     subject + body
+
+Parsed 430 commits in 1.71 s, repack in 2.74 s.
+HEAD was c77d69c, became 7aeee1b (subject identical, hashes changed).
+Force-pushed to origin/main.
+
+Post-scrub verification against remote:
+  * `git log --format='%H %s' | grep ...surnames/paperclipdnb/BENCH_K/НТЦ/NTC` → empty
+  * `git rev-list --all --objects | grep НТЦ|БЕСЕДЫ` → empty
+  * `git grep -l 'paperclipdnb' origin/main` → empty
+  * `git grep -il 'Trushkin|Pugachev|Konstantin A\.'` → empty
+
+Caveats:
+  * Any clone taken before this force-push still has the old objects locally.
+    Hash changes invalidate those clones; re-clone is required.
+  * GitHub's server-side GC typically runs within ~1h after force-push so the
+    old objects will stop being reachable via raw fetch shortly after.
+  * The PDF under `docs/elbrus/elbrus_switch_optimization.pdf` was previously
+    scrubbed by replacing with a metadata-clean copy; still in force-pushed tree.
+
+Working-tree files that had the leaks (`examples/nmquad/profile_nmquad.cpp`,
+`docs/elbrus/README_ELBRUS_RU.md`) now contain `user` in place of the username
+in every historical revision.
+
