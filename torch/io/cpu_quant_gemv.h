@@ -2252,18 +2252,33 @@ inline void cpu_fused_rmsnorm_gate_up_gemv(
 
     // Fuse gate and up into ONE parallel_for via batched_qkv (with N_v=0).
     // Saves 1 parallel_for sync (~120 us) per layer × 36 layers = ~4 ms/token.
-    // Conditions: same quant_type + same row_stride + no per-weight NUMA replica
-    // (batched_qkv doesn't yet thread numa through — falls back to 2-call path).
+    //
+    // Round2 agent_5 item 3a: previously we bailed to the 2-call path when
+    // either weight had a NUMA replica, losing fusion exactly in the TP
+    // scenario that motivated replication. Now we resolve master-thread-
+    // local replica pointers here and still take the batched path. In TP
+    // mode every rank's worker pool is already `--cpunodebind`'d to one
+    // node, so the resolved pointer IS node-local for every worker — no
+    // cross-chip read regression.
+    const void* w_gate_local = w_gate;
+    const void* w_up_local   = w_up;
+    if (numa_gate && numa_gate->num_replicas > 1) {
+        const void* p = numa_gate->get(c10::current_numa_node());
+        if (p) w_gate_local = p;
+    }
+    if (numa_up && numa_up->num_replicas > 1) {
+        const void* p = numa_up->get(c10::current_numa_node());
+        if (p) w_up_local = p;
+    }
     if (quant_type_gate == quant_type_up &&
-        row_stride_gate == row_stride_up &&
-        numa_gate == nullptr && numa_up == nullptr) {
+        row_stride_gate == row_stride_up) {
         cpu_quant_gemv_batched_qkv(
-            quant_type_gate, w_gate, w_up, nullptr,
+            quant_type_gate, w_gate_local, w_up_local, nullptr,
             x_norm, y_gate, y_up, nullptr,
             hidden, N_gate, N_up, 0, row_stride_gate);
     } else {
-        cpu_quant_gemv(quant_type_gate, w_gate, x_norm, y_gate, hidden, N_gate, row_stride_gate, numa_gate);
-        cpu_quant_gemv(quant_type_up, w_up, x_norm, y_up, hidden, N_up, row_stride_up, numa_up);
+        cpu_quant_gemv(quant_type_gate, w_gate_local, x_norm, y_gate, hidden, N_gate, row_stride_gate, nullptr);
+        cpu_quant_gemv(quant_type_up,   w_up_local,   x_norm, y_up,   hidden, N_up,   row_stride_up,   nullptr);
     }
 
     if (hidden > MAX_STACK_HIDDEN) std::free(x_norm);
@@ -2272,6 +2287,55 @@ inline void cpu_fused_rmsnorm_gate_up_gemv(
 // ============================================================================
 // In-place RMSNorm on a buffer (for use in zero-alloc decode path)
 // ============================================================================
+
+// Out-of-place RMSNorm: reads src, writes dst — saves the pointless
+// memcpy+inplace pattern (copy-and-then-overwrite) in batched paths.
+// Round2 agent_5 item 7.
+inline void cpu_rmsnorm_out(const float* src, float* dst,
+                             const float* gamma, float eps,
+                             bool add_one, int64_t hidden) {
+#ifdef __AVX2__
+    __m256 sum_sq_vec = _mm256_setzero_ps();
+    int64_t j = 0;
+    for (; j + 7 < hidden; j += 8) {
+        __m256 vx = _mm256_loadu_ps(src + j);
+        sum_sq_vec = _mm256_fmadd_ps(vx, vx, sum_sq_vec);
+    }
+    float sum_sq = hsum_avx(sum_sq_vec);
+    for (; j < hidden; ++j) sum_sq += src[j] * src[j];
+
+    float rms = 1.0f / std::sqrt(sum_sq / hidden + eps);
+    __m256 vrms = _mm256_set1_ps(rms);
+    j = 0;
+    if (add_one) {
+        __m256 one = _mm256_set1_ps(1.0f);
+        for (; j + 7 < hidden; j += 8) {
+            __m256 vx = _mm256_loadu_ps(src + j);
+            __m256 vg = _mm256_loadu_ps(gamma + j);
+            _mm256_storeu_ps(dst + j,
+                _mm256_mul_ps(_mm256_mul_ps(vx, vrms), _mm256_add_ps(vg, one)));
+        }
+    } else {
+        for (; j + 7 < hidden; j += 8) {
+            __m256 vx = _mm256_loadu_ps(src + j);
+            __m256 vg = _mm256_loadu_ps(gamma + j);
+            _mm256_storeu_ps(dst + j, _mm256_mul_ps(_mm256_mul_ps(vx, vrms), vg));
+        }
+    }
+    for (; j < hidden; ++j) {
+        float w = add_one ? (1.0f + gamma[j]) : gamma[j];
+        dst[j] = src[j] * rms * w;
+    }
+#else
+    float sum_sq = 0.0f;
+    for (int64_t j = 0; j < hidden; ++j) sum_sq += src[j] * src[j];
+    float rms = 1.0f / std::sqrt(sum_sq / hidden + eps);
+    for (int64_t j = 0; j < hidden; ++j) {
+        float w = add_one ? (1.0f + gamma[j]) : gamma[j];
+        dst[j] = src[j] * rms * w;
+    }
+#endif
+}
 
 inline void cpu_rmsnorm_inplace(float* x, const float* gamma, float eps,
                                  bool add_one, int64_t hidden) {
