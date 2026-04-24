@@ -2851,8 +2851,16 @@ public:
                                 H, q_output_weight.rows, q_output_weight.row_stride_bytes,
                                 sparse_output_);
             } else {
-                cpu_quant::cpu_quant_gemv(q_output_weight.quant_type, w_out,
-                    sp.x_buf[cur], sp.logits_buf, H, q_output_weight.rows, q_output_weight.row_stride_bytes);
+                // Round2 agent_5 item 3b: pass &numa_replica so each worker
+                // picks its LOCAL copy at chunk-start. Previously we passed
+                // only the pre-resolved master-thread pointer, causing
+                // workers on other NUMA nodes to cross-chip-fetch the
+                // 608 KB vocab stride.
+                cpu_quant::cpu_quant_gemv(q_output_weight.quant_type,
+                    q_output_weight.cpu_data,
+                    sp.x_buf[cur], sp.logits_buf,
+                    H, q_output_weight.rows, q_output_weight.row_stride_bytes,
+                    &q_output_weight.numa_replica);
             }
         } else if (output_weight.defined()) {
             // Float32 fallback — AVX2 + threaded GEMV
@@ -3324,8 +3332,7 @@ public:
             // 2a. K × RMSNorm (attn preamble).
             const float* an_w = layer.attn_norm.data_ptr<float>();
             for (int k = 0; k < K; ++k) {
-                std::memcpy(x_na.data() + k * H, cur + k * H, H * sizeof(float));
-                cpu_quant::cpu_rmsnorm_inplace(x_na.data() + k * H, an_w, eps, add_one, H);
+                cpu_quant::cpu_rmsnorm_out(cur + k * H, x_na.data() + k * H, an_w, eps, add_one, H);
             }
 
             // 2b. Batched QKV (weights read once per matrix, K outputs each).
@@ -3450,8 +3457,7 @@ public:
             // 2g. K × RMSNorm (FFN preamble).
             const float* fn_w = layer.ffn_norm.data_ptr<float>();
             for (int k = 0; k < K; ++k) {
-                std::memcpy(x_nf.data() + k * H, cur + k * H, H * sizeof(float));
-                cpu_quant::cpu_rmsnorm_inplace(x_nf.data() + k * H, fn_w, eps, add_one, H);
+                cpu_quant::cpu_rmsnorm_out(cur + k * H, x_nf.data() + k * H, fn_w, eps, add_one, H);
             }
 
             // 2h. Batched gate + up (two separate weight reads, K outputs each).
@@ -3527,8 +3533,7 @@ public:
         // 3. Final RMSNorm (K parallel).
         const float* on_w = output_norm.data_ptr<float>();
         for (int k = 0; k < K; ++k) {
-            std::memcpy(x_fin.data() + k * H, cur + k * H, H * sizeof(float));
-            cpu_quant::cpu_rmsnorm_inplace(x_fin.data() + k * H, on_w, eps, add_one, H);
+            cpu_quant::cpu_rmsnorm_out(cur + k * H, x_fin.data() + k * H, on_w, eps, add_one, H);
         }
 
         // 4. Batched output projection (biggest single GEMV — N = vocab_size).
