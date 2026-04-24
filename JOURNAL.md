@@ -2621,11 +2621,21 @@ observed value. Arrivers/departers/generation-publishers call
 wait from Agent 9 → expected ~30 μs futex wake. ~80 LoC.
 Fallback: `sched_yield()` if SYS_futex/__NR_futex unavailable on LCC.
 
-**Step 4 deferred** — async double-buffer AllGather overlapping with
-next-layer RMSNorm/QKV. Requires layer-loop restructure (~150 LoC).
-Hold until Step 3+5 measured on Elbrus.
+**Step 4 — split AllGather API + prefetch overlap** (`ddp.{h,cpp}` + `gguf_model.h`)
+Новый `all_gather_post(data, per_rank_count)` + `all_gather_wait()`. Post
+депозитит + сигналит arrived; wait делает barrier + copy + departed.
+`all_gather_inplace` теперь внутри == post+wait.
+Между post и wait — `__builtin_prefetch` первых 4 строк следующего
+GEMV (8 KB cache-warming hints). 4 точки overlap на слой:
+  1. Перед attn_output GEMV — префетч attn_output N-slice
+  2. После attn-блока — префетч gate+up row-slices (для следующего RMSNorm→FFN)
+  3. Перед ffn_down GEMV — префетч ffn_down N-slice
+  4. Финал слоя — префетч attn_q следующего слоя
+Overlap best-effort: если LCC игнорит __builtin_prefetch, код эквивалентен
+Step 3. Если срабатывает — контроллер памяти греет кэш пока идёт barrier.
+~140 LoC.
 
-Total LoC: ~330 vs 570 planned (Step 2 free, Step 4 deferred).
+Total LoC: ~470 vs 570 planned (Step 2 был free).
 
 **Elbrus run plan**
 ```

@@ -51,12 +51,24 @@ and `N = H_local`. No new kernel needed.
 - Targets the 375 μs median straggler wait (Agent 9) — expected reduction
   to ~30 μs per wakeup (futex wake path vs scheduler tick).
 
-### Step 4 — Async double-buffer AllGather (deferred)
-Not implemented. Requires layer-to-layer restructure (issue AllGather on
-layer L's output; do layer L+1's RMSNorm + QKV concurrently; wait only
-when layer L+1's attn_output needs the gathered attn_full). ~150 LoC
-touching the layer loop structure. Defer until Step 3+5 measured on
-Elbrus — if ≥14 tok/s, we're done; if still short, async is the next lever.
+### Step 4 — Split AllGather + prefetch overlap
+- New `all_gather_post(data, per_rank_count)` / `all_gather_wait()` API
+  in `ddp.cpp/ddp.h`. Post deposits + signals arrival; wait does the
+  barrier + copy + departure. Single pending slot (no nested posts).
+- `all_gather_inplace` now delegates to `post`+`wait` for code reuse.
+- In `forward_decode_cpu_tp` (gather path), every 1-shot gather split
+  into `post` → `__builtin_prefetch` of the next GEMV's first 4 rows
+  (~8 KB of cache-warming hints) → `wait`.
+- Four prefetch sites per layer:
+  1. Before attn_output GEMV: prefetch attn_output N-slice.
+  2. Before next-block RMSNorm/FFN: prefetch gate+up row-sliced weights.
+  3. Before ffn_down GEMV: prefetch ffn_down N-slice.
+  4. Before next-layer QKV: prefetch next layer's attn_q row slice.
+- Overlap is best-effort. If LCC ignores `__builtin_prefetch` on Elbrus,
+  this compiles to no-ops and correctness/perf are unchanged vs Step 3.
+  Where the hint fires, memory controller starts fetching the GEMV's
+  first cachelines while the barrier resolves — GEMV kernel entry is
+  cache-warm instead of cold.
 
 ## Elbrus session plan
 
@@ -105,6 +117,6 @@ PT_DDP_SHM=1 PT_DDP_FUTEX=1 PT_TP_GATHER=1 ./run_tp4_bench.sh --prompt "The sky 
 | 1    | 80      | ~110   | + TCP fallback path |
 | 2    | 60      | 0      | Existing GEMV sufficient |
 | 3    | 200     | ~140   | Tight branching; reused buffers |
-| 4    | 150     | 0      | Deferred |
+| 4    | 150     | ~140   | Split API + 4 prefetch overlap sites |
 | 5    | 80      | ~80    | Futex helpers + signal sites |
-| **Total** | **570** | **~330** | Step 4 pending; Step 2 free |
+| **Total** | **570** | **~470** | Step 2 free |
