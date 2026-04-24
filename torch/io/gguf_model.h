@@ -4107,14 +4107,31 @@ public:
         tp_.q_dim_local      = tp_.n_heads_local * head_dim;
         tp_.kv_dim_local     = tp_.n_kv_heads_local * head_dim;
 
-        // Non-uniform super-block partition of inter dim.
-        int64_t inter_total_blocks = inter / 256;
-        int64_t per_rank_blocks = inter_total_blocks / nprocs;
-        int64_t rem_blocks = inter_total_blocks % nprocs;
-        int64_t my_blocks = per_rank_blocks + (rank < rem_blocks ? 1 : 0);
-        int64_t my_block_start = rank * per_rank_blocks + std::min<int64_t>(rank, rem_blocks);
-        tp_.inter_local  = my_blocks * 256;
-        tp_.inter_offset = my_block_start * 256;
+        // Inter partition: uniform (inter/nprocs per rank) when PT_TP_GATHER=1
+        // because all_gather_inplace requires equal per_rank_count across ranks.
+        // Legacy path keeps the non-uniform super-block partition so that the
+        // K-slice of ffn_down respects Q4_K super-block (256-element) alignment.
+        const char* gather_env_setup = std::getenv("PT_TP_GATHER");
+        const bool gather_mode_setup = gather_env_setup && gather_env_setup[0] == '1';
+        if (gather_mode_setup) {
+            if (inter % nprocs != 0) {
+                std::cerr << "[TP] PT_TP_GATHER requires intermediate_size ("
+                          << inter << ") divisible by nprocs (" << nprocs << ")."
+                          << std::endl;
+                return false;
+            }
+            tp_.inter_local  = inter / nprocs;
+            tp_.inter_offset = rank * tp_.inter_local;
+        } else {
+            // Non-uniform super-block partition of inter dim.
+            int64_t inter_total_blocks = inter / 256;
+            int64_t per_rank_blocks = inter_total_blocks / nprocs;
+            int64_t rem_blocks = inter_total_blocks % nprocs;
+            int64_t my_blocks = per_rank_blocks + (rank < rem_blocks ? 1 : 0);
+            int64_t my_block_start = rank * per_rank_blocks + std::min<int64_t>(rank, rem_blocks);
+            tp_.inter_local  = my_blocks * 256;
+            tp_.inter_offset = my_block_start * 256;
+        }
 
         // Row-slice Q/K/V/gate/up from the already-loaded full quantized weights
         tp_.layers.resize(config.num_layers);
@@ -4249,12 +4266,19 @@ public:
             // K-slicing for Q4_K only. Q5_K/Q6_K fall back to replicated path
             // (marked via tl.q_attn_output.valid=false; forward will see valid=0
             // and use the full-weight zero-padded path).
-            slice_k_blocks(layer.q_attn_output, tl.q_attn_output,
-                           tl.attn_output_k_start, tl.attn_output_k_end,
-                           tl.attn_output_k_local, "attn_output");
-            slice_k_blocks(layer.q_ffn_down, tl.q_ffn_down,
-                           tl.ffn_down_k_start, tl.ffn_down_k_end,
-                           tl.ffn_down_k_local, "ffn_down");
+            //
+            // Skip K-slice allocation under PT_TP_GATHER — gather path uses
+            // replicated weights + pointer-offset N-slicing, never touches
+            // tl.q_attn_output / tl.q_ffn_down. Saves ~(attn_output + ffn_down)
+            // / nprocs bytes per layer (~115 MB for qwen3:4b Q4_K_M on N=4).
+            if (!gather_mode_setup) {
+                slice_k_blocks(layer.q_attn_output, tl.q_attn_output,
+                               tl.attn_output_k_start, tl.attn_output_k_end,
+                               tl.attn_output_k_local, "attn_output");
+                slice_k_blocks(layer.q_ffn_down, tl.q_ffn_down,
+                               tl.ffn_down_k_start, tl.ffn_down_k_end,
+                               tl.ffn_down_k_local, "ffn_down");
+            }
         }
 
         // Allocate scratch buffers (local dims for Q/K/V/gate/up,
@@ -4380,6 +4404,26 @@ public:
         const int64_t n_heads_l  = tp_.n_heads_local;
         const int64_t n_kv_l     = tp_.n_kv_heads_local;
         const int64_t heads_per_group = config.num_heads / config.num_kv_heads;
+
+        // Option F gather path: replaces the 2 per-layer AllReduce-SUM calls
+        // with 4 AllGather-CONCAT calls. Each GEMV becomes N-slice (rank r
+        // computes 1/N of output rows from the FULL replicated weight), and
+        // adjacent ops are joined by all_gather_inplace. Net wins come from
+        // (1) no serial reducer bottleneck in all_gather, (2) smaller per-call
+        // payload (H/N vs H), (3) more opportunities for futex-accelerated
+        // barriers. Requires H, q_dim, inter divisible by nprocs.
+        static const bool use_gather = [] {
+            const char* e = std::getenv("PT_TP_GATHER");
+            return e && e[0] == '1';
+        }();
+        if (use_gather) {
+            if (H % tp_.nprocs != 0 || q_dim % tp_.nprocs != 0 || inter % tp_.nprocs != 0) {
+                throw std::runtime_error(
+                    "PT_TP_GATHER: H/q_dim/inter must be divisible by nprocs");
+            }
+        }
+        const int64_t H_local = H / tp_.nprocs;
+        const int64_t h_row_start = tp_.rank * H_local;
         // Within-rank group offset mapping (local Q head -> local KV head):
         // Global Q head h → global KV head h/heads_per_group. Since Q and KV
         // heads are sliced in aligned chunks (rank gets contiguous head range
@@ -4474,9 +4518,13 @@ public:
             std::memcpy(v_cache + past_len * tp_.kv_dim_local, v_l, tp_.kv_dim_local * sizeof(float));
 
             // --- Attention over local heads (fill rank's slice of attn_full_buf, zero rest) ---
-            // Zero full buffer first so other ranks' slices stay 0 (for the
-            // replicated output-proj GEMV + AllReduce-sum trick).
-            std::fill(tp_.attn_full_buf.begin(), tp_.attn_full_buf.end(), 0.0f);
+            // AllReduce path: zero full buffer first so other ranks' slices stay
+            // 0 (for the replicated output-proj GEMV + AllReduce-sum trick).
+            // AllGather path: no zero-pad — other slices are overwritten by
+            // all_gather_inplace after attention.
+            if (!use_gather) {
+                std::fill(tp_.attn_full_buf.begin(), tp_.attn_full_buf.end(), 0.0f);
+            }
             {
                 int64_t total_seq = past_len + 1;
                 float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
@@ -4529,44 +4577,78 @@ public:
             // proves the data. (qkv_ms initially 0, attn_ms holds combined time.)
 
             // --- Output projection ---
-            // Fast path: K-sliced RowParallel (only Q4_K weights). Each rank
-            // computes h_partial = W_o[:, k_start:k_end] @ attn_local_slice
-            // then AllReduce-sum. Fallback: replicated full GEMV on zero-
-            // padded attn_full_buf + AllReduce-sum (Q5_K/Q6_K/F16).
             float* h_buf = tp_.h_buf.data();
-            if (tl.q_attn_output.valid && tl.q_attn_output.cpu_data) {
-                const float* input_slice = tp_.attn_full_buf.data() + (tp_.rank * tp_.q_dim_local);
-                int64_t local_blocks = tl.attn_output_k_end - tl.attn_output_k_start;
-                cpu_quant::cpu_quant_gemv_k_slice(
-                    tl.q_attn_output.quant_type,
-                    tl.q_attn_output.cpu_data,
-                    input_slice,
-                    h_buf,
-                    local_blocks,
-                    tl.q_attn_output.rows,             // full H
-                    tl.q_attn_output.row_stride_bytes);
-            } else if (use_quant_gemv_ && layer.q_attn_output.valid && layer.q_attn_output.cpu_data) {
-                // Fallback: replicated GEMV (original path, Q5_K/Q6_K compatible)
-                cpu_quant::cpu_quant_gemv(
-                    layer.q_attn_output.quant_type, layer.q_attn_output.cpu_data,
-                    tp_.attn_full_buf.data(), h_buf, q_dim,
-                    layer.q_attn_output.rows, layer.q_attn_output.row_stride_bytes);
-            } else if (layer.attn_output.defined()) {
-                // Fallback (non-Q4_K or CPU float): replicated full GEMV + AllReduce.
-                const float* w = layer.attn_output.data_ptr<float>();
-                int64_t N_out = layer.attn_output.size(0);
-                for (int64_t n = 0; n < N_out; ++n) {
-                    float dot = 0.0f;
-                    for (int64_t k = 0; k < q_dim; ++k) dot += tp_.attn_full_buf[k] * w[n * q_dim + k];
-                    h_buf[n] = dot;
+            if (use_gather) {
+                // Option F: first gather local attention slices into full
+                // attn_full_buf (all ranks get full q_dim vector), then every
+                // rank computes its N-row slice of h from the full replicated
+                // W_o, finally gather h slices.
+                torch::distributed::all_gather_inplace(
+                    tp_.attn_full_buf.data(), tp_.q_dim_local);
+                if (tp_sec_timers_.on) tp_sec_timers_.allreduce_ao_ms += _tp_elapsed();
+
+                // N-slice GEMV on full replicated attn_output weight.
+                if (use_quant_gemv_ && layer.q_attn_output.valid) {
+                    const int _node = c10::current_numa_node();
+                    const void* w_full = layer.q_attn_output.numa_replica.get(_node);
+                    if (!w_full) w_full = layer.q_attn_output.cpu_data;
+                    const uint8_t* w_slice = static_cast<const uint8_t*>(w_full)
+                        + h_row_start * layer.q_attn_output.row_stride_bytes;
+                    cpu_quant::cpu_quant_gemv(
+                        layer.q_attn_output.quant_type, w_slice,
+                        tp_.attn_full_buf.data(),
+                        h_buf + h_row_start,
+                        q_dim, H_local,
+                        layer.q_attn_output.row_stride_bytes,
+                        /*numa=*/nullptr);
+                } else if (layer.attn_output.defined()) {
+                    const float* w = layer.attn_output.data_ptr<float>();
+                    for (int64_t n = 0; n < H_local; ++n) {
+                        int64_t global_n = h_row_start + n;
+                        float dot = 0.0f;
+                        for (int64_t k = 0; k < q_dim; ++k)
+                            dot += tp_.attn_full_buf[k] * w[global_n * q_dim + k];
+                        h_buf[h_row_start + n] = dot;
+                    }
                 }
+                if (tp_sec_timers_.on) tp_sec_timers_.ao_ms += _tp_elapsed();
+
+                // Gather N-slices into full h_buf.
+                torch::distributed::all_gather_inplace(h_buf, H_local);
+                if (tp_sec_timers_.on) tp_sec_timers_.allreduce_ao_ms += _tp_elapsed();
+            } else {
+                // Legacy path: K-slice GEMV + AllReduce-sum.
+                if (tl.q_attn_output.valid && tl.q_attn_output.cpu_data) {
+                    const float* input_slice = tp_.attn_full_buf.data() + (tp_.rank * tp_.q_dim_local);
+                    int64_t local_blocks = tl.attn_output_k_end - tl.attn_output_k_start;
+                    cpu_quant::cpu_quant_gemv_k_slice(
+                        tl.q_attn_output.quant_type,
+                        tl.q_attn_output.cpu_data,
+                        input_slice,
+                        h_buf,
+                        local_blocks,
+                        tl.q_attn_output.rows,             // full H
+                        tl.q_attn_output.row_stride_bytes);
+                } else if (use_quant_gemv_ && layer.q_attn_output.valid && layer.q_attn_output.cpu_data) {
+                    cpu_quant::cpu_quant_gemv(
+                        layer.q_attn_output.quant_type, layer.q_attn_output.cpu_data,
+                        tp_.attn_full_buf.data(), h_buf, q_dim,
+                        layer.q_attn_output.rows, layer.q_attn_output.row_stride_bytes);
+                } else if (layer.attn_output.defined()) {
+                    const float* w = layer.attn_output.data_ptr<float>();
+                    int64_t N_out = layer.attn_output.size(0);
+                    for (int64_t n = 0; n < N_out; ++n) {
+                        float dot = 0.0f;
+                        for (int64_t k = 0; k < q_dim; ++k) dot += tp_.attn_full_buf[k] * w[n * q_dim + k];
+                        h_buf[n] = dot;
+                    }
+                }
+
+                if (tp_sec_timers_.on) tp_sec_timers_.ao_ms += _tp_elapsed();
+
+                torch::distributed::all_reduce_inplace(h_buf, H);
+                if (tp_sec_timers_.on) tp_sec_timers_.allreduce_ao_ms += _tp_elapsed();
             }
-
-            if (tp_sec_timers_.on) tp_sec_timers_.ao_ms += _tp_elapsed();
-
-            // --- AllReduce-sum h_buf across ranks (zero-alloc fast path) ---
-            torch::distributed::all_reduce_inplace(h_buf, H);
-            if (tp_sec_timers_.on) tp_sec_timers_.allreduce_ao_ms += _tp_elapsed();
 
             // --- Residual add: x_next = x + h ---
             int next = 1 - cur;
@@ -4590,49 +4672,89 @@ public:
                     x_normed.data(), up_l, H, tl.q_ffn_up.rows, tl.q_ffn_up.row_stride_bytes);
             if (tp_sec_timers_.on) tp_sec_timers_.gateup_ms += _tp_elapsed();
 
-            // --- SiLU(gate) * up ---
-            // Two paths:
-            //   A) Fast (Q4_K ffn_down): local compact buffer [inter_local],
-            //      passed to k_slice gemv.
-            //   B) Fallback (Q5_K/Q6_K): zero-padded silu_full_buf, replicated
-            //      full gemv + AllReduce-sum.
-            if (tl.q_ffn_down.valid && tl.q_ffn_down.cpu_data) {
-                // Fast: compact silu_local.
-                std::vector<float> silu_local(tp_.inter_local);
-                for (int64_t j = 0; j < tp_.inter_local; ++j) {
-                    float g = gate_l[j];
-                    silu_local[j] = (g / (1.0f + std::exp(-g))) * up_l[j];
-                }
-                int64_t local_blocks = tl.ffn_down_k_end - tl.ffn_down_k_start;
-                cpu_quant::cpu_quant_gemv_k_slice(
-                    tl.q_ffn_down.quant_type,
-                    tl.q_ffn_down.cpu_data,
-                    silu_local.data(),
-                    h_buf,
-                    local_blocks,
-                    tl.q_ffn_down.rows,                   // full H
-                    tl.q_ffn_down.row_stride_bytes);
-            } else if (use_quant_gemv_ && layer.q_ffn_down.valid && layer.q_ffn_down.cpu_data) {
-                // Fallback: zero-padded silu_full_buf + replicated full gemv.
-                std::fill(tp_.silu_full_buf.begin(), tp_.silu_full_buf.end(), 0.0f);
+            // --- SiLU(gate) * up + ffn_down ---
+            if (use_gather) {
+                // Option F: write local silu into silu_full_buf at rank's
+                // offset, all-gather to get full inter-vector on every rank,
+                // then compute N-slice of ffn_down.
                 for (int64_t j = 0; j < tp_.inter_local; ++j) {
                     float g = gate_l[j];
                     tp_.silu_full_buf[tp_.inter_offset + j] = (g / (1.0f + std::exp(-g))) * up_l[j];
                 }
-                cpu_quant::cpu_quant_gemv(
-                    layer.q_ffn_down.quant_type, layer.q_ffn_down.cpu_data,
-                    tp_.silu_full_buf.data(), h_buf, inter,
-                    layer.q_ffn_down.rows, layer.q_ffn_down.row_stride_bytes);
-            }
+                if (tp_sec_timers_.on) tp_sec_timers_.gateup_ms += _tp_elapsed();
 
-            if (layer.post_ffw_norm.defined()) {
-                throw std::runtime_error("TP: post_ffw_norm unsupported (Gemma3 not yet wired)");
-            }
-            if (tp_sec_timers_.on) tp_sec_timers_.fdown_ms += _tp_elapsed();
+                torch::distributed::all_gather_inplace(
+                    tp_.silu_full_buf.data(), tp_.inter_local);
+                if (tp_sec_timers_.on) tp_sec_timers_.allreduce_fdown_ms += _tp_elapsed();
 
-            // --- AllReduce-sum h_buf across ranks (zero-alloc fast path) ---
-            torch::distributed::all_reduce_inplace(h_buf, H);
-            if (tp_sec_timers_.on) tp_sec_timers_.allreduce_fdown_ms += _tp_elapsed();
+                if (use_quant_gemv_ && layer.q_ffn_down.valid) {
+                    const int _node = c10::current_numa_node();
+                    const void* w_full = layer.q_ffn_down.numa_replica.get(_node);
+                    if (!w_full) w_full = layer.q_ffn_down.cpu_data;
+                    const uint8_t* w_slice = static_cast<const uint8_t*>(w_full)
+                        + h_row_start * layer.q_ffn_down.row_stride_bytes;
+                    cpu_quant::cpu_quant_gemv(
+                        layer.q_ffn_down.quant_type, w_slice,
+                        tp_.silu_full_buf.data(),
+                        h_buf + h_row_start,
+                        inter, H_local,
+                        layer.q_ffn_down.row_stride_bytes,
+                        /*numa=*/nullptr);
+                } else if (layer.ffn_down.defined()) {
+                    const float* w = layer.ffn_down.data_ptr<float>();
+                    for (int64_t n = 0; n < H_local; ++n) {
+                        int64_t global_n = h_row_start + n;
+                        float dot = 0.0f;
+                        for (int64_t k = 0; k < inter; ++k)
+                            dot += tp_.silu_full_buf[k] * w[global_n * inter + k];
+                        h_buf[h_row_start + n] = dot;
+                    }
+                }
+
+                if (layer.post_ffw_norm.defined()) {
+                    throw std::runtime_error("TP: post_ffw_norm unsupported (Gemma3 not yet wired)");
+                }
+                if (tp_sec_timers_.on) tp_sec_timers_.fdown_ms += _tp_elapsed();
+
+                torch::distributed::all_gather_inplace(h_buf, H_local);
+                if (tp_sec_timers_.on) tp_sec_timers_.allreduce_fdown_ms += _tp_elapsed();
+            } else {
+                // Legacy path: K-slice ffn_down + AllReduce-sum.
+                if (tl.q_ffn_down.valid && tl.q_ffn_down.cpu_data) {
+                    std::vector<float> silu_local(tp_.inter_local);
+                    for (int64_t j = 0; j < tp_.inter_local; ++j) {
+                        float g = gate_l[j];
+                        silu_local[j] = (g / (1.0f + std::exp(-g))) * up_l[j];
+                    }
+                    int64_t local_blocks = tl.ffn_down_k_end - tl.ffn_down_k_start;
+                    cpu_quant::cpu_quant_gemv_k_slice(
+                        tl.q_ffn_down.quant_type,
+                        tl.q_ffn_down.cpu_data,
+                        silu_local.data(),
+                        h_buf,
+                        local_blocks,
+                        tl.q_ffn_down.rows,                   // full H
+                        tl.q_ffn_down.row_stride_bytes);
+                } else if (use_quant_gemv_ && layer.q_ffn_down.valid && layer.q_ffn_down.cpu_data) {
+                    std::fill(tp_.silu_full_buf.begin(), tp_.silu_full_buf.end(), 0.0f);
+                    for (int64_t j = 0; j < tp_.inter_local; ++j) {
+                        float g = gate_l[j];
+                        tp_.silu_full_buf[tp_.inter_offset + j] = (g / (1.0f + std::exp(-g))) * up_l[j];
+                    }
+                    cpu_quant::cpu_quant_gemv(
+                        layer.q_ffn_down.quant_type, layer.q_ffn_down.cpu_data,
+                        tp_.silu_full_buf.data(), h_buf, inter,
+                        layer.q_ffn_down.rows, layer.q_ffn_down.row_stride_bytes);
+                }
+
+                if (layer.post_ffw_norm.defined()) {
+                    throw std::runtime_error("TP: post_ffw_norm unsupported (Gemma3 not yet wired)");
+                }
+                if (tp_sec_timers_.on) tp_sec_timers_.fdown_ms += _tp_elapsed();
+
+                torch::distributed::all_reduce_inplace(h_buf, H);
+                if (tp_sec_timers_.on) tp_sec_timers_.allreduce_fdown_ms += _tp_elapsed();
+            }
 
             // --- Residual add ---
             next = 1 - cur;

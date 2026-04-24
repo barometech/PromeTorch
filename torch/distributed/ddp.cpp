@@ -18,6 +18,22 @@
 
 #if !defined(_WIN32)
 #include <sched.h>    // sched_yield for bounded-spin AllReduce
+#include <sys/syscall.h>   // SYS_futex for futex-based barrier (Option F)
+#include <unistd.h>        // syscall()
+// linux/futex.h would give us FUTEX_WAIT/WAKE, but we define them explicitly
+// to avoid kernel-header collisions on older Elbrus LCC toolchains.
+#ifndef FUTEX_WAIT
+#  define FUTEX_WAIT  0
+#endif
+#ifndef FUTEX_WAKE
+#  define FUTEX_WAKE  1
+#endif
+#ifndef FUTEX_PRIVATE_FLAG
+#  define FUTEX_PRIVATE_FLAG 128
+#endif
+#if !defined(SYS_futex) && defined(__NR_futex)
+#  define SYS_futex __NR_futex
+#endif
 #endif
 
 #if defined(_WIN32)
@@ -140,6 +156,12 @@ struct PGState {
     int      shm_fd      = -1;
     std::string shm_path;
     uint32_t shm_gen     = 0;   // local counter (matched with header->generation)
+
+    // Futex-based barrier mode (Option F step 5). Gated by PT_DDP_FUTEX=1.
+    // When enabled, SHM wait loops call futex(FUTEX_WAIT) after bounded-spin
+    // instead of sched_yield. Eliminates the 1 ms scheduler-tick wake latency
+    // that showed up as 375 μs median straggler wait on Elbrus (Agent 9).
+    bool     shm_use_futex = false;
 };
 
 PGState& pg() {
@@ -393,6 +415,8 @@ void init_process_group(const DDPConfig& cfg) {
     // multi-process TP. Gated by env PT_DDP_SHM=1. TCP path still present as
     // fallback (large payloads or debugging). All ranks use the same path.
     const char* shm_env = std::getenv("PT_DDP_SHM");
+    const char* futex_env = std::getenv("PT_DDP_FUTEX");
+    if (futex_env && futex_env[0] == '1') s.shm_use_futex = true;
     if (shm_env && shm_env[0] == '1' && cfg.world_size > 1 && cfg.world_size <= 16) {
         std::string path = "/dev/shm/prometorch_ddp_" +
                            std::to_string(cfg.master_port);
@@ -427,7 +451,9 @@ void init_process_group(const DDPConfig& cfg) {
             s.shm_size = total;
             s.shm_path = path;
             s.shm_enabled = true;
-            std::cout << "[DDP] SHM AllReduce enabled (" << path << ")" << std::endl;
+            std::cout << "[DDP] SHM AllReduce enabled (" << path << ")"
+                      << (s.shm_use_futex ? " [futex]" : " [spin+yield]")
+                      << std::endl;
         } else {
             // Workers: open + mmap. Retry for up to timeout_sec.
             auto deadline = std::chrono::steady_clock::now() +
@@ -482,6 +508,7 @@ void destroy_process_group() {
         s.shm_path.clear();
     }
     s.shm_enabled = false;
+    s.shm_use_futex = false;
     s.shm_gen = 0;
 #endif
     s.peers.clear();
@@ -499,6 +526,74 @@ int  get_world_size() { return pg().world_size; }
 // Collectives
 // ============================================================================
 #if !defined(_WIN32)
+
+// ---- Futex-based barrier helpers (Option F Step 5) -------------------------
+// These drop in to replace the bounded-spin + sched_yield pattern. sched_yield
+// has 1 ms (one scheduler tick) wake latency on stock Linux; futex_wait is
+// microseconds. Agent 9 measured 375 μs median waiter stall → multiplying
+// 73 AR/token = 27 ms — that's the 95% straggler overhead we're chasing.
+
+static inline void shm_futex_wait(uint32_t* addr, uint32_t expected) {
+#ifdef SYS_futex
+    // FUTEX_WAIT sleeps if *addr == expected; returns immediately (EAGAIN) if
+    // *addr already advanced since caller observed it. Safe against races.
+    ::syscall(SYS_futex, addr, FUTEX_WAIT | FUTEX_PRIVATE_FLAG,
+              expected, nullptr, nullptr, 0);
+#else
+    (void)addr; (void)expected;
+    sched_yield();  // fallback if no futex syscall constant available
+#endif
+}
+
+static inline void shm_futex_wake_all(uint32_t* addr) {
+#ifdef SYS_futex
+    ::syscall(SYS_futex, addr, FUTEX_WAKE | FUTEX_PRIVATE_FLAG,
+              INT32_MAX, nullptr, nullptr, 0);
+#else
+    (void)addr;
+#endif
+}
+
+// Spin for ~1024 iters (cache-hot fast path when peers are microseconds away),
+// then block until *counter >= threshold. Uses futex_wait when use_futex=true,
+// otherwise sched_yield (legacy behaviour).
+static inline void shm_wait_counter_ge(std::atomic<uint32_t>* counter,
+                                       uint32_t threshold, bool use_futex) {
+    for (int i = 0; i < 1024; ++i) {
+        if (counter->load(std::memory_order_acquire) >= threshold) return;
+        __sync_synchronize();
+    }
+    while (true) {
+        uint32_t cur = counter->load(std::memory_order_acquire);
+        if (cur >= threshold) return;
+        if (use_futex) {
+            shm_futex_wait(reinterpret_cast<uint32_t*>(counter), cur);
+        } else {
+            sched_yield();
+        }
+    }
+}
+
+// Spin/block until generation counter strictly exceeds `gen_val`.
+// `gen_ptr` is a plain uint32_t (not atomic in the struct) but aligned writes
+// are atomic on x86/E2K/ARM; use __atomic_load_n for fence semantics.
+static inline void shm_wait_gen_advance(uint32_t* gen_ptr, uint32_t gen_val,
+                                        bool use_futex) {
+    for (int i = 0; i < 1024; ++i) {
+        if (__atomic_load_n(gen_ptr, __ATOMIC_ACQUIRE) > gen_val) return;
+        __sync_synchronize();
+    }
+    while (true) {
+        uint32_t cur = __atomic_load_n(gen_ptr, __ATOMIC_ACQUIRE);
+        if (cur > gen_val) return;
+        if (use_futex) {
+            shm_futex_wait(gen_ptr, cur);
+        } else {
+            sched_yield();
+        }
+    }
+}
+
 // Shared-memory AllReduce. Called when s.shm_enabled. For small payloads
 // (<256 KB) this skips kernel syscalls entirely and just reads/writes
 // cache-coherent shared memory backed by /dev/shm.
@@ -524,73 +619,60 @@ static void all_reduce_shm(PGState& s, float* data, int64_t numel) {
     char* base = static_cast<char*>(s.shm_base);
     auto* hdr  = reinterpret_cast<ShmHeader*>(base);
     uint32_t gen = s.shm_gen;
+    const bool use_futex = s.shm_use_futex;
 
     // 1. Deposit own payload.
     float* my_slot = reinterpret_cast<float*>(shm_rank_slot(base, s.rank));
     std::memcpy(my_slot, data, nbytes);
-    // Ensure writes visible before arrival signal.
-    __sync_synchronize();
+    __sync_synchronize();  // writes visible before arrival signal
 
-    // 2. Signal arrival.
-    hdr->arrived[gen % 16].fetch_add(1, std::memory_order_release);
-
-    // Bounded-spin wait helper. First ~1024 iterations just spin (expected
-    // contention <10 μs; the peer is about to arrive). Beyond that, start
-    // yielding the CPU so that if the peer is slow (cache miss, page fault,
-    // OS scheduler preemption) we don't burn 100% of the core while spinning
-    // — critical on Elbrus where the waiting rank's cycles are LOCAL CPU
-    // cycles and could otherwise be used for the next layer's prefetch.
-    auto spin_until = [&](auto&& pred) {
-        for (int i = 0; i < 1024; ++i) {
-            if (pred()) return;
-            __sync_synchronize();
-        }
-        // Slow path: yield back to the kernel. sched_yield is cheap if the
-        // peer is already ready (we immediately come back); expensive only
-        // when we're actually blocked — which is exactly when we want to
-        // stop burning CPU.
-        while (!pred()) {
-            sched_yield();
-        }
-    };
+    // 2. Signal arrival. Last arriver wakes any peer futex-waiting on this
+    // counter (rank 0, typically, which is blocked at step 3a).
+    uint32_t new_arrived = hdr->arrived[gen % 16]
+                              .fetch_add(1, std::memory_order_release) + 1;
+    if (use_futex && new_arrived == (uint32_t)s.world_size) {
+        shm_futex_wake_all(reinterpret_cast<uint32_t*>(&hdr->arrived[gen % 16]));
+    }
 
     if (s.rank == 0) {
         // 3a. Wait for all ranks to deposit.
-        spin_until([&]{
-            return hdr->arrived[gen % 16].load(std::memory_order_acquire)
-                   == (uint32_t)s.world_size;
-        });
-        // Reduce (sum) all rank slots -> sum slot.
-        // NOTE: sum_slot == rank_slot(0) by design, so rank 0's deposit is
-        // already at sum. Accumulate workers 1..ws-1 into it.
+        shm_wait_counter_ge(&hdr->arrived[gen % 16],
+                            (uint32_t)s.world_size, use_futex);
+        // Reduce (sum) all rank slots -> sum slot. sum_slot == rank_slot(0),
+        // so rank 0's deposit is already at sum. Accumulate workers 1..ws-1.
         float* sum = reinterpret_cast<float*>(shm_sum_slot(base));
         for (int r = 1; r < s.world_size; ++r) {
             const float* src = reinterpret_cast<const float*>(shm_rank_slot(base, r));
             for (int64_t i = 0; i < numel; ++i) sum[i] += src[i];
         }
-        // Copy reduced sum back into caller's tensor (workers do this via
-        // the post-generation memcpy, rank 0 must do it explicitly).
         std::memcpy(data, sum, nbytes);
         __sync_synchronize();
-        // 4. Publish new generation so workers see result is ready.
+        // 4. Publish new generation so workers see result is ready, and wake
+        // every worker currently blocked at their "wait for gen advance".
         hdr->generation = gen + 1;
         __sync_synchronize();
+        if (use_futex) {
+            shm_futex_wake_all(&hdr->generation);
+        }
         // Wait for all workers to depart (pick up sum) before reusing buffers.
-        spin_until([&]{
-            return hdr->departed[gen % 16].load(std::memory_order_acquire)
-                   == (uint32_t)(s.world_size - 1);
-        });
+        shm_wait_counter_ge(&hdr->departed[gen % 16],
+                            (uint32_t)(s.world_size - 1), use_futex);
         // Reset counters for next round.
         hdr->arrived[gen % 16].store(0, std::memory_order_release);
         hdr->departed[gen % 16].store(0, std::memory_order_release);
     } else {
-        // Workers: wait for rank-0 to publish new generation.
-        spin_until([&]{ return hdr->generation > gen; });
+        // Workers: wait for rank 0 to publish new generation.
+        shm_wait_gen_advance(&hdr->generation, gen, use_futex);
         // 4. Copy sum back to output tensor.
         const float* sum = reinterpret_cast<const float*>(shm_sum_slot(base));
         std::memcpy(data, sum, nbytes);
-        // Signal departure.
-        hdr->departed[gen % 16].fetch_add(1, std::memory_order_release);
+        // Signal departure. If we're the last worker to depart, wake rank 0
+        // (which is futex-waiting on departed == world_size - 1).
+        uint32_t new_departed = hdr->departed[gen % 16]
+                                    .fetch_add(1, std::memory_order_release) + 1;
+        if (use_futex && new_departed == (uint32_t)(s.world_size - 1)) {
+            shm_futex_wake_all(reinterpret_cast<uint32_t*>(&hdr->departed[gen % 16]));
+        }
     }
 
     s.shm_gen = gen + 1;
@@ -653,6 +735,133 @@ void all_reduce(at::Tensor& tensor) {
 // Avoids the at::empty + 2 memcpys around each call.
 void all_reduce_inplace(float* data, int64_t numel) {
     all_reduce_impl(data, numel);
+}
+
+// ============================================================================
+// all_gather_inplace — SHM concat collective for Option F TP path.
+//
+// Semantics: on entry, rank r's slice [r * per_rank_count, (r+1) * per_rank_count)
+// of `data` holds its contribution (other slots may be garbage). On return,
+// every rank has the full concatenated vector of size world_size * per_rank_count.
+//
+// Wire protocol is similar to all_reduce_shm (generation counter + arrived[] +
+// departed[]) but without the reducer step — every rank participates
+// symmetrically in reading all other ranks' slots.
+// ============================================================================
+#if !defined(_WIN32)
+static void all_gather_shm(PGState& s, float* data, int64_t per_rank_count) {
+    size_t slice_bytes = (size_t)per_rank_count * sizeof(float);
+    if (slice_bytes > kShmSlotSize) {
+        throw std::runtime_error(
+            "all_gather_shm: per-rank slice > kShmSlotSize (1MB). Payload too large.");
+    }
+
+    char* base = static_cast<char*>(s.shm_base);
+    auto* hdr  = reinterpret_cast<ShmHeader*>(base);
+    uint32_t gen = s.shm_gen;
+    const bool use_futex = s.shm_use_futex;
+
+    // 1. Deposit own slice into own SHM slot.
+    float* my_slot = reinterpret_cast<float*>(shm_rank_slot(base, s.rank));
+    const float* my_slice = data + (int64_t)s.rank * per_rank_count;
+    std::memcpy(my_slot, my_slice, slice_bytes);
+    __sync_synchronize();
+
+    // 2. Signal arrival. Last arriver wakes any peer futex-waiting.
+    uint32_t new_arrived = hdr->arrived[gen % 16]
+                              .fetch_add(1, std::memory_order_release) + 1;
+    if (use_futex && new_arrived == (uint32_t)s.world_size) {
+        shm_futex_wake_all(reinterpret_cast<uint32_t*>(&hdr->arrived[gen % 16]));
+    }
+
+    // 3. Wait for all ranks to deposit.
+    shm_wait_counter_ge(&hdr->arrived[gen % 16],
+                        (uint32_t)s.world_size, use_futex);
+
+    // 4. Parallel gather: every rank copies all OTHER slots into its output.
+    // No reducer bottleneck — all N ranks pull in parallel. Own slice is
+    // already correct in `data` (caller deposited it there before calling).
+    for (int r = 0; r < s.world_size; ++r) {
+        if (r == s.rank) continue;
+        const float* src = reinterpret_cast<const float*>(shm_rank_slot(base, r));
+        float* dst = data + (int64_t)r * per_rank_count;
+        std::memcpy(dst, src, slice_bytes);
+    }
+
+    // 5. Signal departure. Last departer wakes rank 0.
+    uint32_t new_departed = hdr->departed[gen % 16]
+                                .fetch_add(1, std::memory_order_release) + 1;
+    if (use_futex && new_departed == (uint32_t)s.world_size) {
+        shm_futex_wake_all(reinterpret_cast<uint32_t*>(&hdr->departed[gen % 16]));
+    }
+
+    if (s.rank == 0) {
+        // Rank 0 waits for all ranks (including itself) to have finished
+        // reading slots before resetting counters.
+        shm_wait_counter_ge(&hdr->departed[gen % 16],
+                            (uint32_t)s.world_size, use_futex);
+        hdr->arrived[gen % 16].store(0, std::memory_order_release);
+        hdr->departed[gen % 16].store(0, std::memory_order_release);
+        __sync_synchronize();
+        hdr->generation = gen + 1;
+        if (use_futex) shm_futex_wake_all(&hdr->generation);
+    } else {
+        // Workers block until rank 0 publishes the next generation — ensures
+        // rank 0 has reset counters before any rank starts the next round.
+        shm_wait_gen_advance(&hdr->generation, gen, use_futex);
+    }
+
+    s.shm_gen = gen + 1;
+}
+#endif
+
+void all_gather_inplace(float* data, int64_t per_rank_count) {
+    auto& s = pg();
+    if (!s.initialized) {
+        throw std::runtime_error("all_gather_inplace: process group not initialized");
+    }
+    if (s.world_size == 1) return;
+    if (per_rank_count == 0) return;
+
+#if !defined(_WIN32)
+    if (s.shm_enabled) {
+        all_gather_shm(s, data, per_rank_count);
+        return;
+    }
+#endif
+
+    // TCP fallback: star-topology gather + broadcast through rank 0. Slow but
+    // correct — keeps non-SHM hosts functional (debug / cross-host runs).
+    int64_t numel = (int64_t)s.world_size * per_rank_count;
+    size_t  slice_bytes = (size_t)per_rank_count * sizeof(float);
+    size_t  full_bytes  = (size_t)numel * sizeof(float);
+
+    if (s.rank == 0) {
+        // Rank 0 already has its own slice in data[0..]. Receive each worker's
+        // slice into its correct position.
+        for (int r = 1; r < s.world_size; ++r) {
+            float* dst = data + (int64_t)r * per_rank_count;
+            if (!recv_msg(s.peers[r], dst, slice_bytes)) {
+                throw std::runtime_error("all_gather_inplace: recv from rank " +
+                                         std::to_string(r) + " failed");
+            }
+        }
+        // Broadcast assembled full vector back to everyone.
+        for (int r = 1; r < s.world_size; ++r) {
+            if (!send_msg(s.peers[r], data, full_bytes)) {
+                throw std::runtime_error("all_gather_inplace: send to rank " +
+                                         std::to_string(r) + " failed");
+            }
+        }
+    } else {
+        float* my_slice = data + (int64_t)s.rank * per_rank_count;
+        if (!send_msg(s.peers[0], my_slice, slice_bytes)) {
+            throw std::runtime_error("all_gather_inplace: send to rank 0 failed");
+        }
+        if (!recv_msg(s.peers[0], data, full_bytes)) {
+            throw std::runtime_error("all_gather_inplace: recv from rank 0 failed");
+        }
+    }
 }
 
 void broadcast(at::Tensor& tensor, int src_rank) {
