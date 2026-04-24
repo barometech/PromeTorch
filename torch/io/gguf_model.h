@@ -3429,8 +3429,22 @@ public:
                     K, q_dim, H, layer.q_attn_output.row_stride_bytes);
             }
 
-            // 2f. Residual: next = cur + hbuf.
-            for (int64_t j = 0; j < (int64_t)K * H; ++j) next[j] = cur[j] + hbuf[j];
+            // 2f. Residual: next = cur + hbuf — parallel AVX2.
+            {
+                const int64_t total = (int64_t)K * H;
+                c10::get_thread_pool().parallel_for(0, total,
+                    [&](int64_t start, int64_t end) {
+                    int64_t j = start;
+#ifdef __AVX2__
+                    for (; j + 7 < end; j += 8) {
+                        _mm256_storeu_ps(next + j,
+                            _mm256_add_ps(_mm256_loadu_ps(cur + j),
+                                          _mm256_loadu_ps(hbuf.data() + j)));
+                    }
+#endif
+                    for (; j < end; ++j) next[j] = cur[j] + hbuf[j];
+                }, 1024);
+            }
             std::swap(cur, next);
 
             // 2g. K × RMSNorm (FFN preamble).
@@ -3454,11 +3468,32 @@ public:
                     K, H, inter, layer.q_ffn_up.row_stride_bytes);
             }
 
-            // 2i. SiLU(gate) * up.
-            for (int64_t j = 0; j < (int64_t)K * inter; ++j) {
-                float g = gate[j];
-                float s = g / (1.0f + std::exp(-g));
-                siluup[j] = s * up_b[j];
+            // 2i. SiLU(gate) * up — parallel + AVX2.
+            // Round2 agent_5 P1: was scalar + serial, 48k exp/token at K=5
+            // wasted. Main decode has the AVX2+parallel pattern already;
+            // just wasn't ported to the batched path.
+            {
+                const int64_t total = (int64_t)K * inter;
+                c10::get_thread_pool().parallel_for(0, total,
+                    [&](int64_t start, int64_t end) {
+                    int64_t j = start;
+#ifdef __AVX2__
+                    for (; j + 7 < end; j += 8) {
+                        __m256 g = _mm256_loadu_ps(gate.data() + j);
+                        __m256 negg = _mm256_sub_ps(_mm256_setzero_ps(), g);
+                        __m256 ex = at::native::vec::exp256_ps(negg);
+                        __m256 den = _mm256_add_ps(_mm256_set1_ps(1.0f), ex);
+                        __m256 s = _mm256_div_ps(g, den);
+                        __m256 u = _mm256_loadu_ps(up_b.data() + j);
+                        _mm256_storeu_ps(siluup.data() + j, _mm256_mul_ps(s, u));
+                    }
+#endif
+                    for (; j < end; ++j) {
+                        float g = gate[j];
+                        float s = g / (1.0f + std::exp(-g));
+                        siluup[j] = s * up_b[j];
+                    }
+                }, 1024);
             }
 
             // 2j. Batched ffn_down.
@@ -3470,8 +3505,22 @@ public:
                     K, inter, H, layer.q_ffn_down.row_stride_bytes);
             }
 
-            // 2k. Residual: next = cur + down.
-            for (int64_t j = 0; j < (int64_t)K * H; ++j) next[j] = cur[j] + down[j];
+            // 2k. Residual: next = cur + down — parallel AVX2.
+            {
+                const int64_t total = (int64_t)K * H;
+                c10::get_thread_pool().parallel_for(0, total,
+                    [&](int64_t start, int64_t end) {
+                    int64_t j = start;
+#ifdef __AVX2__
+                    for (; j + 7 < end; j += 8) {
+                        _mm256_storeu_ps(next + j,
+                            _mm256_add_ps(_mm256_loadu_ps(cur + j),
+                                          _mm256_loadu_ps(down.data() + j)));
+                    }
+#endif
+                    for (; j < end; ++j) next[j] = cur[j] + down[j];
+                }, 1024);
+            }
             std::swap(cur, next);
         }
 
