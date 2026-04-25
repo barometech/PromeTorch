@@ -134,6 +134,172 @@ static void q8_gemv_vnni_presum(const uint8_t* weight,
     }
 }
 
+// VNNI Q8 GEMV v4: keep block accumulator in FP32 SIMD form across the
+// blocks, eliminating per-block scalar extract. Pattern:
+//   per block: i32 vec → fp32 vec (qpistofs) → mul scale_w (qpfmuls)
+//              → add to fp32 acc vec (qpfadds)
+//   per row end: ONE horizontal reduction of the 4 fp32 lanes
+// Reduces per-block work from 16 scalar extracts (~110 cycles) to 4 packed
+// SIMD ops (~4 cycles).
+//
+// Note: sum_w correction kept scalar but folded into a single fp32 acc.
+typedef float v4sf __attribute__((vector_size(16)));
+static void q8_gemv_vnni_fp32acc(const uint8_t* weight,
+                                  const int16_t* sum_w_table,
+                                  const uint8_t* a_u8,
+                                  float scale_a,
+                                  int K, int N, int row_stride_bytes, float* y) {
+    int bpr = K / 32;
+    for (int n = 0; n < N; n++) {
+        const uint8_t* row = weight + (size_t)n * row_stride_bytes;
+        const int16_t* sw = sum_w_table + n * bpr;
+        v2di fp_acc_v = {0, 0};   // 4 fp32 lanes (used via reinterpret as v4sf)
+        float corr_acc = 0;
+        for (int b = 0; b < bpr; b++) {
+            const uint8_t* block = row + b*34;
+            float scale_w = fp16_to_fp32(*(const ggml_fp16_t*)block);
+            float sw_a = scale_w * scale_a;
+            const int8_t* w_s8 = (const int8_t*)(block + 2);
+            v2di a0 = *(const v2di*)(a_u8 + b*32);
+            v2di a1 = *(const v2di*)(a_u8 + b*32 + 16);
+            v2di w0 = *(const v2di*)(w_s8);
+            v2di w1 = *(const v2di*)(w_s8 + 16);
+            v2di p16a = __builtin_e2k_qpmaddubsh(w0, a0);
+            v2di p16b = __builtin_e2k_qpmaddubsh(w1, a1);
+            v2di p32a = __builtin_e2k_qpmaddh(p16a, ONES16);
+            v2di p32b = __builtin_e2k_qpmaddh(p16b, ONES16);
+            v2di s_v  = __builtin_e2k_qpaddw(p32a, p32b);  // 4 i32 lanes
+            // i32 → fp32 SIMD convert
+            v2di s_fp = __builtin_e2k_qpistofs(s_v);
+            // Broadcast sw_a into 4 fp32 lanes
+            v4sf sw_v = {sw_a, sw_a, sw_a, sw_a};
+            v2di sw_v_di;
+            memcpy(&sw_v_di, &sw_v, 16);
+            // fp_acc += s_fp * sw_v
+            v2di prod = __builtin_e2k_qpfmuls(s_fp, sw_v_di);
+            fp_acc_v = __builtin_e2k_qpfadds(fp_acc_v, prod);
+            // sum_w correction kept scalar (1 fp32 op/block)
+            corr_acc += sw_a * 128.f * (float)sw[b];
+        }
+        // Horizontal sum of 4 fp32 lanes (single extract per row)
+        v4sf fp_acc; memcpy(&fp_acc, &fp_acc_v, 16);
+        y[n] = fp_acc[0] + fp_acc[1] + fp_acc[2] + fp_acc[3] - corr_acc;
+    }
+}
+
+// VNNI Q8 GEMV v3: 4-row unroll. Process 4 N-rows simultaneously, sharing
+// the activation tile in registers. Goal — give LCC 4 independent
+// dependency chains so it can dual-issue qpmaddubsh + qpmaddh + qpaddw
+// across VLIW channels. v2 was bound by reduction-chain serialization.
+static void q8_gemv_vnni_4row(const uint8_t* weight,
+                               const int16_t* sum_w_table,
+                               const uint8_t* a_u8,
+                               float scale_a,
+                               int K, int N, int row_stride_bytes, float* y) {
+    int bpr = K / 32;
+    int n = 0;
+    for (; n + 3 < N; n += 4) {
+        const uint8_t* row0 = weight + (size_t)(n+0) * row_stride_bytes;
+        const uint8_t* row1 = weight + (size_t)(n+1) * row_stride_bytes;
+        const uint8_t* row2 = weight + (size_t)(n+2) * row_stride_bytes;
+        const uint8_t* row3 = weight + (size_t)(n+3) * row_stride_bytes;
+        const int16_t* sw0 = sum_w_table + (n+0) * bpr;
+        const int16_t* sw1 = sum_w_table + (n+1) * bpr;
+        const int16_t* sw2 = sum_w_table + (n+2) * bpr;
+        const int16_t* sw3 = sum_w_table + (n+3) * bpr;
+        float acc0 = 0, acc1 = 0, acc2 = 0, acc3 = 0;
+        for (int b = 0; b < bpr; b++) {
+            v2di a0 = *(const v2di*)(a_u8 + b*32);
+            v2di a1 = *(const v2di*)(a_u8 + b*32 + 16);
+
+            const uint8_t* blk0 = row0 + b*34;
+            const uint8_t* blk1 = row1 + b*34;
+            const uint8_t* blk2 = row2 + b*34;
+            const uint8_t* blk3 = row3 + b*34;
+            float s0 = fp16_to_fp32(*(const ggml_fp16_t*)blk0);
+            float s1 = fp16_to_fp32(*(const ggml_fp16_t*)blk1);
+            float s2 = fp16_to_fp32(*(const ggml_fp16_t*)blk2);
+            float s3 = fp16_to_fp32(*(const ggml_fp16_t*)blk3);
+            v2di w00 = *(const v2di*)(blk0 + 2);
+            v2di w01 = *(const v2di*)(blk0 + 2 + 16);
+            v2di w10 = *(const v2di*)(blk1 + 2);
+            v2di w11 = *(const v2di*)(blk1 + 2 + 16);
+            v2di w20 = *(const v2di*)(blk2 + 2);
+            v2di w21 = *(const v2di*)(blk2 + 2 + 16);
+            v2di w30 = *(const v2di*)(blk3 + 2);
+            v2di w31 = *(const v2di*)(blk3 + 2 + 16);
+
+            // 8 independent qpmaddubsh — LCC should ILP-pack them
+            v2di p0a = __builtin_e2k_qpmaddubsh(w00, a0);
+            v2di p0b = __builtin_e2k_qpmaddubsh(w01, a1);
+            v2di p1a = __builtin_e2k_qpmaddubsh(w10, a0);
+            v2di p1b = __builtin_e2k_qpmaddubsh(w11, a1);
+            v2di p2a = __builtin_e2k_qpmaddubsh(w20, a0);
+            v2di p2b = __builtin_e2k_qpmaddubsh(w21, a1);
+            v2di p3a = __builtin_e2k_qpmaddubsh(w30, a0);
+            v2di p3b = __builtin_e2k_qpmaddubsh(w31, a1);
+
+            // pmaddwd-style reduce to int32 (8 instructions)
+            v2di r0a = __builtin_e2k_qpmaddh(p0a, ONES16);
+            v2di r0b = __builtin_e2k_qpmaddh(p0b, ONES16);
+            v2di r1a = __builtin_e2k_qpmaddh(p1a, ONES16);
+            v2di r1b = __builtin_e2k_qpmaddh(p1b, ONES16);
+            v2di r2a = __builtin_e2k_qpmaddh(p2a, ONES16);
+            v2di r2b = __builtin_e2k_qpmaddh(p2b, ONES16);
+            v2di r3a = __builtin_e2k_qpmaddh(p3a, ONES16);
+            v2di r3b = __builtin_e2k_qpmaddh(p3b, ONES16);
+
+            v2di s0v = __builtin_e2k_qpaddw(r0a, r0b);
+            v2di s1v = __builtin_e2k_qpaddw(r1a, r1b);
+            v2di s2v = __builtin_e2k_qpaddw(r2a, r2b);
+            v2di s3v = __builtin_e2k_qpaddw(r3a, r3b);
+
+            int d0 = ((int*)&s0v)[0] + ((int*)&s0v)[1] + ((int*)&s0v)[2] + ((int*)&s0v)[3];
+            int d1 = ((int*)&s1v)[0] + ((int*)&s1v)[1] + ((int*)&s1v)[2] + ((int*)&s1v)[3];
+            int d2 = ((int*)&s2v)[0] + ((int*)&s2v)[1] + ((int*)&s2v)[2] + ((int*)&s2v)[3];
+            int d3 = ((int*)&s3v)[0] + ((int*)&s3v)[1] + ((int*)&s3v)[2] + ((int*)&s3v)[3];
+
+            int ss0 = d0 - 128 * (int)sw0[b];
+            int ss1 = d1 - 128 * (int)sw1[b];
+            int ss2 = d2 - 128 * (int)sw2[b];
+            int ss3 = d3 - 128 * (int)sw3[b];
+
+            acc0 += s0 * scale_a * (float)ss0;
+            acc1 += s1 * scale_a * (float)ss1;
+            acc2 += s2 * scale_a * (float)ss2;
+            acc3 += s3 * scale_a * (float)ss3;
+        }
+        y[n+0] = acc0;
+        y[n+1] = acc1;
+        y[n+2] = acc2;
+        y[n+3] = acc3;
+    }
+    // Tail
+    for (; n < N; n++) {
+        const uint8_t* row = weight + (size_t)n * row_stride_bytes;
+        const int16_t* sw = sum_w_table + n * bpr;
+        float acc = 0;
+        for (int b = 0; b < bpr; b++) {
+            const uint8_t* block = row + b*34;
+            float scale_w = fp16_to_fp32(*(const ggml_fp16_t*)block);
+            v2di a0 = *(const v2di*)(a_u8 + b*32);
+            v2di a1 = *(const v2di*)(a_u8 + b*32 + 16);
+            v2di w0 = *(const v2di*)(block + 2);
+            v2di w1 = *(const v2di*)(block + 2 + 16);
+            v2di p16a = __builtin_e2k_qpmaddubsh(w0, a0);
+            v2di p16b = __builtin_e2k_qpmaddubsh(w1, a1);
+            v2di p32a = __builtin_e2k_qpmaddh(p16a, ONES16);
+            v2di p32b = __builtin_e2k_qpmaddh(p16b, ONES16);
+            v2di sum32 = __builtin_e2k_qpaddw(p32a, p32b);
+            int dot_us = ((int*)&sum32)[0] + ((int*)&sum32)[1]
+                       + ((int*)&sum32)[2] + ((int*)&sum32)[3];
+            int dot_ss = dot_us - 128 * (int)sw[b];
+            acc += scale_w * scale_a * (float)dot_ss;
+        }
+        y[n] = acc;
+    }
+}
+
 int main(void){
     const int K = 2560;
     const int N = 2432;
@@ -220,7 +386,42 @@ int main(void){
         if (fabsf(y_ref[n]) > mr) mr = fabsf(y_ref[n]);
     }
     printf("presum correctness: max_err=%.6f rel=%.4f%%\n", err_ps, 100.0f*err_ps/mr);
-    free(sum_w_table); free(y_presum);
+
+    // VNNI 4-row unroll
+    float* y_4r = (float*)aligned_alloc(64, N * sizeof(float));
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    for (int it = 0; it < N_iters; it++)
+        q8_gemv_vnni_4row(weight, sum_w_table, a_u8, scale_a, K, N, row_stride, y_4r);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    double t_4r = (t1.tv_sec-t0.tv_sec)+(t1.tv_nsec-t0.tv_nsec)*1e-9;
+    long long ops3 = (long long)N_iters * N * K * 2;
+    printf("VNNI 4-row unroll:%.3f s, %.2f GOPS (per GEMV: %.2f ms, vs FP32: %.2fx)\n",
+           t_4r, ops3/t_4r/1e9, t_4r/N_iters*1000, t_ref/t_4r);
+    float err_4r = 0;
+    for (int i = 0; i < N; i++) {
+        float e = fabsf(y_ref[i] - y_4r[i]);
+        if (e > err_4r) err_4r = e;
+    }
+    printf("4-row correctness: max_err=%.6f rel=%.4f%%\n", err_4r, 100.0f*err_4r/mr);
+
+    // VNNI fp32-acc: keep accumulator SIMD throughout, scalar extract once/row
+    float* y_fp = (float*)aligned_alloc(64, N * sizeof(float));
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    for (int it = 0; it < N_iters; it++)
+        q8_gemv_vnni_fp32acc(weight, sum_w_table, a_u8, scale_a, K, N, row_stride, y_fp);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    double t_fp = (t1.tv_sec-t0.tv_sec)+(t1.tv_nsec-t0.tv_nsec)*1e-9;
+    long long ops4 = (long long)N_iters * N * K * 2;
+    printf("VNNI fp32-acc:    %.3f s, %.2f GOPS (per GEMV: %.2f ms, vs FP32: %.2fx)\n",
+           t_fp, ops4/t_fp/1e9, t_fp/N_iters*1000, t_ref/t_fp);
+    float err_fp = 0;
+    for (int i = 0; i < N; i++) {
+        float e = fabsf(y_ref[i] - y_fp[i]);
+        if (e > err_fp) err_fp = e;
+    }
+    printf("fp32-acc correctness: max_err=%.6f rel=%.4f%%\n", err_fp, 100.0f*err_fp/mr);
+
+    free(sum_w_table); free(y_presum); free(y_4r); free(y_fp);
 
 #ifndef NO_EML
     // EML cblas_sgemv FP32 baseline: dequantize weight to FP32 first (one-off
