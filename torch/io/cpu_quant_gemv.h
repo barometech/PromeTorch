@@ -720,6 +720,24 @@ inline void q4k_gemv_scalar(const void* weight_data, const float* x,
             const uint8_t* block = row_data + bi * 144;
             const int64_t base_k = bi * 256;
 
+            // Software prefetch: warm next-block header into L1, far-block
+            // payload into L2/L3. Critical on E2K — there's no AVX2 path here
+            // and LCC's APB only sees current row; without these hints every
+            // super-block's 144B header is a cold fetch (the dominant stall
+            // per agent_5 audit). Lead distance 4 blocks ≈ 576B at 12 GB/s
+            // ≈ 50 ns ahead — covers DDR latency.
+            if (bi + 4 < blocks_per_row) {
+                const uint8_t* nxt = row_data + (bi + 4) * 144;
+                __builtin_prefetch(nxt,       0, 1);  // header → L2
+                __builtin_prefetch(nxt + 64,  0, 1);
+                __builtin_prefetch(nxt + 128, 0, 1);  // covers all 3 lines of 144B
+            }
+            if (n + 1 < end && bi == 0) {
+                // Warm first cacheline of next row into L3 (long lead).
+                const uint8_t* row_next = raw + (n + 1) * row_stride_bytes;
+                __builtin_prefetch(row_next, 0, 0);
+            }
+
             const float d    = dpair_buf[bi*2 + 0];
             const float dmin = dpair_buf[bi*2 + 1];
             const uint8_t* scales = block + 4;
@@ -821,6 +839,20 @@ inline void q8_0_gemv_scalar(const void* weight_data, const float* x,
         for (int64_t bi = 0; bi < blocks_per_row; ++bi) {
             const uint8_t* block = row_data + bi * 34;
             const int64_t base_k = bi * 32;
+
+            // Software prefetch (no AVX2 here; APB covers current row only).
+            // Q8_0 blocks are 34B — small, so 8-block lead = 272B = ~22 ns @
+            // 12 GB/s, plenty for L2 fill. Less aggressive than Q4_K's 144B
+            // blocks which need 4-block lead.
+            if (bi + 8 < blocks_per_row) {
+                const uint8_t* nxt = row_data + (bi + 8) * 34;
+                __builtin_prefetch(nxt,      0, 1);
+                __builtin_prefetch(nxt + 64, 0, 1);
+            }
+            if (n + 1 < end && bi == 0) {
+                const uint8_t* row_next = raw + (n + 1) * row_stride_bytes;
+                __builtin_prefetch(row_next, 0, 0);
+            }
 
             uint16_t d_bits;
             std::memcpy(&d_bits, block, 2);
@@ -1383,6 +1415,18 @@ inline void q4k_gemv_k_slice_scalar(const void* sliced_weight, const float* x_lo
             const uint8_t* block = row_data + bi * 144;
             const int64_t base_k = bi * 256;  // index into x_local
 
+            // Software prefetch (no AVX2 here; APB covers only current row).
+            if (bi + 4 < local_blocks) {
+                const uint8_t* nxt = row_data + (bi + 4) * 144;
+                __builtin_prefetch(nxt,       0, 1);
+                __builtin_prefetch(nxt + 64,  0, 1);
+                __builtin_prefetch(nxt + 128, 0, 1);
+            }
+            if (n + 1 < end && bi == 0) {
+                const uint8_t* row_next = raw + (n + 1) * local_row_stride_bytes;
+                __builtin_prefetch(row_next, 0, 0);
+            }
+
             const float d = dpair_buf[bi*2 + 0];
             const float dmin = dpair_buf[bi*2 + 1];
             const uint8_t* scales = block + 4;
@@ -1514,10 +1558,7 @@ inline void cpu_quant_gemv_k_slice(
 }
 
 inline bool cpu_quant_gemv_k_slice_supported(uint32_t quant_type) {
-    // Q8_0 k-slice causes broken decode in TP — slice copy or layout mismatch
-    // somewhere; disabled until traced. Caller falls back to replicated GEMV
-    // + AllReduce-sum which is 4x slower but correct.
-    return quant_type == 12 || quant_type == 14;  // Q4_K, Q6_K
+    return quant_type == 12 || quant_type == 14 || quant_type == 8; // Q4_K, Q6_K, Q8_0
 }
 
 // ============================================================================
@@ -1894,6 +1935,18 @@ inline void q4k_gemv_batched_scalar(const void* weight_data,
                 for (int64_t bi = 0; bi < blocks_per_row; ++bi) {
                     const uint8_t* block = row + bi * 144;
                     const int64_t base_k = bi * 256;
+                    // Software prefetch (E2K has no AVX2 SIMD prefetch hints
+                    // here; APB covers only current row). 4-block lead.
+                    if (bi + 4 < blocks_per_row) {
+                        const uint8_t* nxt = row + (bi + 4) * 144;
+                        __builtin_prefetch(nxt,       0, 1);
+                        __builtin_prefetch(nxt + 64,  0, 1);
+                        __builtin_prefetch(nxt + 128, 0, 1);
+                    }
+                    if (n + 1 < end && bi == 0 && k == 0) {
+                        const uint8_t* row_next = raw + (n + 1) * row_stride_bytes;
+                        __builtin_prefetch(row_next, 0, 0);
+                    }
                     const float d    = dpair_buf[bi*2 + 0];
                     const float dmin = dpair_buf[bi*2 + 1];
                     const uint8_t* sc = block + 4;

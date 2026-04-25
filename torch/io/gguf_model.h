@@ -4123,14 +4123,32 @@ public:
             tp_.inter_local  = inter / nprocs;
             tp_.inter_offset = rank * tp_.inter_local;
         } else {
-            // Non-uniform super-block partition of inter dim.
-            int64_t inter_total_blocks = inter / 256;
+            // Non-uniform super-block partition of inter dim. Granularity must
+            // match the K-slice block size used for ffn_down (and the row-slice
+            // alignment for ffn_gate/ffn_up which feed silu_local). Default 256
+            // for Q4_K/Q6_K; Q8_0 has 32-elem blocks so partition must align to 32.
+            // Mismatch here was the root cause of Q8_0 TP-4 producing NaN
+            // ("!!!!!!" decode): rank's silu region (256-aligned) didn't agree
+            // with the K-slice partition (32-aligned), causing OOB reads in
+            // q8_0_gemv_k_slice → uninitialized memory → NaN cascade.
+            int64_t inter_qbe = 256;
+            if (config.num_layers > 0 && layers[0].q_ffn_down.valid) {
+                uint32_t qt = layers[0].q_ffn_down.quant_type;
+                if (qt == 8)                     inter_qbe = 32;   // Q8_0
+                else if (qt == 12 || qt == 14)   inter_qbe = 256;  // Q4_K / Q6_K
+            }
+            if (inter % inter_qbe != 0) {
+                std::cerr << "[TP] inter (" << inter << ") not divisible by "
+                          << inter_qbe << " for ffn_down quant_type" << std::endl;
+                return false;
+            }
+            int64_t inter_total_blocks = inter / inter_qbe;
             int64_t per_rank_blocks = inter_total_blocks / nprocs;
             int64_t rem_blocks = inter_total_blocks % nprocs;
             int64_t my_blocks = per_rank_blocks + (rank < rem_blocks ? 1 : 0);
             int64_t my_block_start = rank * per_rank_blocks + std::min<int64_t>(rank, rem_blocks);
-            tp_.inter_local  = my_blocks * 256;
-            tp_.inter_offset = my_block_start * 256;
+            tp_.inter_local  = my_blocks * inter_qbe;
+            tp_.inter_offset = my_block_start * inter_qbe;
         }
 
         // Row-slice Q/K/V/gate/up from the already-loaded full quantized weights
@@ -4215,8 +4233,7 @@ public:
                 int64_t bytes_per_block, elems_per_block;
                 if (full.quant_type == 12)      { bytes_per_block = 144; elems_per_block = 256; }
                 else if (full.quant_type == 14) { bytes_per_block = 210; elems_per_block = 256; }
-                // Q8_0 k-slice attempted but produces broken decode in TP —
-                // disabled until layout bug traced. Falls back to replicated.
+                else if (full.quant_type ==  8) { bytes_per_block =  34; elems_per_block =  32; }
                 else {
                     std::cerr << "[TP slice_k] " << dbg_name
                               << " unsupported qtype=" << full.quant_type
