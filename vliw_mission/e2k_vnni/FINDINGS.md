@@ -102,7 +102,35 @@ output against hand-computed dot on (200u × -50s): arg-swapped gave
 | FP32 scalar dequant             | 23.3 ms | 0.53 | 1.0× | 0.04× |
 | VNNI qpmaddubsh (sum_w inline)  |  4.83 ms | 2.58 | 4.8× | 0.22× |
 | VNNI qpmaddubsh (presum sum_w)  |  4.37 ms | 2.85 | 5.3× | 0.23× |
+| VNNI qpmaddubsh (4-row unroll)  |  4.42 ms | 2.82 | 5.3× | 0.23× |
+| VNNI qpmaddubsh (fp32-acc SIMD) |  5.87 ms | 2.12 | 4.0× | 0.17× |
 | **EML cblas_sgemv (FP32)**      | **1.02 ms** | **12.20** | **22×** | **1.0×** |
+
+### Why 4-row unroll didn't help
+
+Multi-accumulator unroll (4 N-rows simultaneously, shared activation,
+4 independent dependency chains) was supposed to expose ILP and let LCC
+dual-issue qpmaddubsh+qpmaddh+qpaddw. **It gave zero speedup.**
+
+Profiling the hot loop showed the actual bottleneck is **horizontal
+reduction inside the inner block**: each block needs to extract the
+4×i32 lanes of `s0v` to a scalar to apply the per-block fp16 scale and
+sum_w correction. On E2K, `((int*)&v)[i]` forces a vector→memory store
+followed by scalar load — ~7 cycles each. With 4 lanes × 4 rows × 80
+blocks = 1,280 extractions per GEMV ≈ 9,000 cycles. The qpmaddubsh
+math itself only takes ~1,600 cycles. We're bound by reduction, not
+compute.
+
+To break past this we'd need either:
+1. **SoA weight layout** (4-row interleaved at byte level) so each
+   qpmaddubsh produces SoA lanes, one per row → no per-block extract,
+   single horizontal reduce at end of GEMV. Requires offline weight
+   repack and a second weight format.
+2. **Per-row scale** instead of Q8_0 per-block scale (defer dequant to
+   end of row). Loses precision; not GGUF-compatible.
+3. **Vectorized i32→f32 + multiply** using `qpfmuls`/`qpfadds` (which
+   *are* available on v5) to keep dequant in SIMD form. Most promising
+   but requires re-architecting block accumulation.
 
 Correctness (VNNI vs FP32 dequant reference): max rel error **0.24%**
 at K=2560 — matches expected Q8_0 quantization noise.
@@ -132,6 +160,30 @@ Real VNNI-level speedup requires ISA v7. The tuning work done here
 (multiple-accumulator VNNI path) remains valuable for future-proofing to
 12C, where `qpidotsbwss` would immediately deliver ~4× on top of
 current numbers.
+
+### The instruction-throughput math
+
+```
+FP32 peak (8C2):   2 FMA-ops × 4 lanes × 1 inst/cycle = 8 ops/cycle
+INT8 qpmaddubsh:   16 byte-ops × 1 inst/cycle         = 16 ops/cycle (raw)
+Reduce chain (qpmaddubsh + qpmaddh + qpaddw):           3 inst per useful sum
+Effective INT8 throughput on 8C2:  16/3 ≈ 5.3 ops/cycle
+```
+
+The reduce chain dominates. `qpmaddubsh` produces 8 int16 partial sums
+that need `qpmaddh+qpaddw` to fuse into 4 int32 lanes — that's already
+3 instructions for what should be 1 if the ISA had a true VNNI dot
+instruction. Below FP32 peak (8 ops/cycle).
+
+`qpidotsbwss` on v7 collapses all 3 into one instruction → INT8
+effective throughput jumps to 16 ops/cycle = **2× FP32 peak**, finally
+making the INT8 path strictly faster than well-tuned FP32 GEMV.
+
+**On 8C2 there is no software path that beats EML FP32 GEMV via the
+quantized route** without changing the weight format itself (e.g.,
+SoA 4-row interleaved layout offline-repacked). That is a model
+preprocessing change, not a kernel optimization. With current Q8_0
+GGUF format, the ISA simply lacks the instruction needed.
 
 ### Artefacts
 
