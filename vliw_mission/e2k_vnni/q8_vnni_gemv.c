@@ -134,6 +134,44 @@ static void q8_gemv_vnni_presum(const uint8_t* weight,
     }
 }
 
+// VNNI Q8 GEMV v5: same hot loop as v2 but scales pre-converted to FP32
+// (no fp16->fp32 inside inner loop). Eliminates ~16 inst/block of bit-twiddle
+// fp16 conversion that LCC inlines (no native fp16 instruction on v5).
+static void q8_gemv_vnni_fp32scale(const uint8_t* weight,
+                                    const float* scales_fp32,  // bpr * N entries
+                                    const int16_t* sum_w_table,
+                                    const uint8_t* a_u8,
+                                    float scale_a,
+                                    int K, int N, int row_stride_bytes, float* y) {
+    int bpr = K / 32;
+    for (int n = 0; n < N; n++) {
+        const uint8_t* row = weight + (size_t)n * row_stride_bytes;
+        const float* sc_row = scales_fp32 + n * bpr;
+        const int16_t* sw = sum_w_table + n * bpr;
+        float acc = 0;
+        #pragma loop count(80)
+        for (int b = 0; b < bpr; b++) {
+            const uint8_t* block = row + b*34;
+            float scale_w = sc_row[b];
+            const int8_t* w_s8 = (const int8_t*)(block + 2);
+            v2di a0 = *(const v2di*)(a_u8 + b*32);
+            v2di a1 = *(const v2di*)(a_u8 + b*32 + 16);
+            v2di w0 = *(const v2di*)(w_s8);
+            v2di w1 = *(const v2di*)(w_s8 + 16);
+            v2di p16a = __builtin_e2k_qpmaddubsh(w0, a0);
+            v2di p16b = __builtin_e2k_qpmaddubsh(w1, a1);
+            v2di p32a = __builtin_e2k_qpmaddh(p16a, ONES16);
+            v2di p32b = __builtin_e2k_qpmaddh(p16b, ONES16);
+            v2di sum32 = __builtin_e2k_qpaddw(p32a, p32b);
+            int dot_us = ((int*)&sum32)[0] + ((int*)&sum32)[1]
+                       + ((int*)&sum32)[2] + ((int*)&sum32)[3];
+            int dot_ss = dot_us - 128 * (int)sw[b];
+            acc += scale_w * scale_a * (float)dot_ss;
+        }
+        y[n] = acc;
+    }
+}
+
 // VNNI Q8 GEMV v4: keep block accumulator in FP32 SIMD form across the
 // blocks, eliminating per-block scalar extract. Pattern:
 //   per block: i32 vec → fp32 vec (qpistofs) → mul scale_w (qpfmuls)
@@ -420,6 +458,31 @@ int main(void){
         if (e > err_fp) err_fp = e;
     }
     printf("fp32-acc correctness: max_err=%.6f rel=%.4f%%\n", err_fp, 100.0f*err_fp/mr);
+
+    // Precompute fp32 scales table
+    float* scales_fp32 = (float*)aligned_alloc(64, (size_t)N * bpr * sizeof(float));
+    for (int n = 0; n < N; n++) {
+        const uint8_t* row = weight + (size_t)n * row_stride;
+        for (int b = 0; b < bpr; b++) {
+            scales_fp32[n*bpr + b] = fp16_to_fp32(*(const ggml_fp16_t*)(row + b*34));
+        }
+    }
+    float* y_fp32sc = (float*)aligned_alloc(64, N * sizeof(float));
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    for (int it = 0; it < N_iters; it++)
+        q8_gemv_vnni_fp32scale(weight, scales_fp32, sum_w_table, a_u8, scale_a, K, N, row_stride, y_fp32sc);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    double t_fp32sc = (t1.tv_sec-t0.tv_sec)+(t1.tv_nsec-t0.tv_nsec)*1e-9;
+    long long ops5 = (long long)N_iters * N * K * 2;
+    printf("VNNI fp32-scale:  %.3f s, %.2f GOPS (per GEMV: %.2f ms, vs FP32: %.2fx)\n",
+           t_fp32sc, ops5/t_fp32sc/1e9, t_fp32sc/N_iters*1000, t_ref/t_fp32sc);
+    float err_sc = 0;
+    for (int i = 0; i < N; i++) {
+        float e = fabsf(y_ref[i] - y_fp32sc[i]);
+        if (e > err_sc) err_sc = e;
+    }
+    printf("fp32-scale correctness: max_err=%.6f rel=%.4f%%\n", err_sc, 100.0f*err_sc/mr);
+    free(scales_fp32); free(y_fp32sc);
 
     free(sum_w_table); free(y_presum); free(y_4r); free(y_fp);
 

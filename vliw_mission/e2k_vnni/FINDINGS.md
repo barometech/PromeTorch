@@ -104,6 +104,7 @@ output against hand-computed dot on (200u × -50s): arg-swapped gave
 | VNNI qpmaddubsh (presum sum_w)  |  4.37 ms | 2.85 | 5.3× | 0.23× |
 | VNNI qpmaddubsh (4-row unroll)  |  4.42 ms | 2.82 | 5.3× | 0.23× |
 | VNNI qpmaddubsh (fp32-acc SIMD) |  5.87 ms | 2.12 | 4.0× | 0.17× |
+| **VNNI qpmaddubsh (fp32-scale precomputed)** | **1.91 ms** | **6.52** | **12.2×** | **0.54×** |
 | **EML cblas_sgemv (FP32)**      | **1.02 ms** | **12.20** | **22×** | **1.0×** |
 
 ### Why 4-row unroll didn't help
@@ -184,6 +185,64 @@ quantized route** without changing the weight format itself (e.g.,
 SoA 4-row interleaved layout offline-repacked). That is a model
 preprocessing change, not a kernel optimization. With current Q8_0
 GGUF format, the ISA simply lacks the instruction needed.
+
+---
+
+## Update 2 (2026-04-25): The fp16-in-hot-loop trap
+
+After Trushkin (МЦСТ) pointed out that 8C2 has both APB (Array Prefetch
+Buffer) and SWP (SoftWare Pipeline) and "the hardware is already there,
+just feed the compiler the right pattern", I disassembled the v2 hot
+loop. LCC was already SWP-pipelining (`loop_mode` + `fapb` blocks
+emitted), but the inner block contained ~16 instructions of bit-twiddle
+fp16→fp32 conversion (8C2 has no native fp16 instruction). Those
+instructions were getting interleaved with qpmaddubsh+qpmaddh+qpaddw,
+fragmenting the pipeline.
+
+### Fix: pre-convert all per-block fp16 scales to fp32 once at weight-load
+
+```c
+// At weight-load time (one-shot):
+for each row n: for each block b:
+    scales_fp32[n*bpr+b] = fp16_to_fp32(...);
+
+// In hot loop: read fp32 directly, no conversion
+float scale_w = sc_row[b];
+```
+
+Eliminates ~16 inst/block × 80 blocks × 2432 rows = ~3.1M instructions
+per GEMV that were fighting for VLIW slots with the actual SIMD compute.
+
+### Result on q8_vnni_gemv K=2560 N=2432
+
+```
+VNNI presum (fp16 in loop):    4.37 ms, 2.85 GOPS (5.3× FP32 scalar)
+VNNI fp32-scale precomputed:   1.91 ms, 6.52 GOPS (12.2× FP32 scalar)  ← +2.3×
+EML cblas_sgemv (FP32):        1.02 ms, 12.20 GOPS  (22× FP32 scalar)
+```
+
+VNNI fp32-scale closes the gap to EML from **4.3× to 1.86×**. We're now
+within striking distance — `qpmaddubsh` actually produces useful work
+on 8C2 once the fp16 dequantization noise is removed from the SWP path.
+
+### Implication for production Q4_K_M kernel
+
+`cpu_quant_gemv.h` Q4_K_M kernel reads fp16 super-block scales and 6-bit
+sub-scales inside its hot loop. Same trap. Pre-converting these to fp32
+at weight-load (one-shot ~50 MB cost on qwen3:4b) should give a similar
+2-3× speedup on the production GEMV used by TP-4 inference.
+
+This is the single biggest practical optimization available on 8C2
+without changing model format. Estimated gain: **4.8 tok/s → 8-12 tok/s**
+on qwen3:4b Q4_K_M TP-4 by removing fp16-in-hot-loop from all 8 GEMV
+weight types (Q/K/V, gate, up, attn_output, ffn_down, output_proj).
+
+### Credit
+
+Insight from Trushkin: "load on the side of compute is what VLIW does;
+if you don't see it, your code is hiding the pattern from the compiler."
+Disassembly confirmed exactly that — fp16 software conversion was
+literally hiding the SIMD chain inside its own dependency mess.
 
 ### Artefacts
 
