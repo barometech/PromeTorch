@@ -694,19 +694,34 @@ inline void q4k_gemv_scalar(const void* weight_data, const float* x,
     const int64_t blocks_per_row = K / 256;
 
     c10::get_thread_pool().parallel_for(0, N, [&](int64_t start, int64_t end) {
+    // Per-row stack buffer for pre-converted fp32 (d, dmin) pairs. 8C2 has
+    // no native fp16->fp32 instruction; LCC inlines ~16 ops of bit-twiddle
+    // for each gguf::fp16_to_fp32, which fragments the SWP pattern of the
+    // hot loop. Pre-converting moves those ops into a tight pre-loop the
+    // compiler can pipeline cheaply, leaving the hot loop on clean fp32 +
+    // 4-bit unpack + scalar FMA — what LCC's SWP scheduler is best at.
+    // Max K = 256 * 80 = 20480 covers any GGUF tensor we'd hit.
+    float dpair_buf[80 * 2];
     for (int64_t n = start; n < end; ++n) {
         const uint8_t* row_data = raw + n * row_stride_bytes;
         float dot = 0.0f;
+
+        // Pre-loop: fp16 -> fp32 once per super-block in this row.
+        for (int64_t bi = 0; bi < blocks_per_row; ++bi) {
+            const uint8_t* block = row_data + bi * 144;
+            uint16_t d_bits, dmin_bits;
+            std::memcpy(&d_bits, block, 2);
+            std::memcpy(&dmin_bits, block + 2, 2);
+            dpair_buf[bi*2 + 0] = gguf::fp16_to_fp32(d_bits);
+            dpair_buf[bi*2 + 1] = gguf::fp16_to_fp32(dmin_bits);
+        }
 
         for (int64_t bi = 0; bi < blocks_per_row; ++bi) {
             const uint8_t* block = row_data + bi * 144;
             const int64_t base_k = bi * 256;
 
-            uint16_t d_bits, dmin_bits;
-            std::memcpy(&d_bits, block, 2);
-            std::memcpy(&dmin_bits, block + 2, 2);
-            const float d = gguf::fp16_to_fp32(d_bits);
-            const float dmin = gguf::fp16_to_fp32(dmin_bits);
+            const float d    = dpair_buf[bi*2 + 0];
+            const float dmin = dpair_buf[bi*2 + 1];
             const uint8_t* scales = block + 4;
             const uint8_t* qs = block + 16;
 
@@ -1348,19 +1363,28 @@ inline void q4k_gemv_k_slice_scalar(const void* sliced_weight, const float* x_lo
     const uint8_t* raw = static_cast<const uint8_t*>(sliced_weight);
 
     c10::get_thread_pool().parallel_for(0, N, [&](int64_t start, int64_t end) {
+    // Per-row pre-converted (d, dmin) fp32 buffer — see q4k_gemv_scalar
+    // comment for rationale. local_blocks max ≤ inter_max/256 ≈ 80 for qwen3.
+    float dpair_buf[80 * 2];
     for (int64_t n = start; n < end; ++n) {
         const uint8_t* row_data = raw + n * local_row_stride_bytes;
         float dot = 0.0f;
 
         for (int64_t bi = 0; bi < local_blocks; ++bi) {
             const uint8_t* block = row_data + bi * 144;
-            const int64_t base_k = bi * 256;  // index into x_local
-
             uint16_t d_bits, dmin_bits;
             std::memcpy(&d_bits, block, 2);
             std::memcpy(&dmin_bits, block + 2, 2);
-            const float d = gguf::fp16_to_fp32(d_bits);
-            const float dmin = gguf::fp16_to_fp32(dmin_bits);
+            dpair_buf[bi*2 + 0] = gguf::fp16_to_fp32(d_bits);
+            dpair_buf[bi*2 + 1] = gguf::fp16_to_fp32(dmin_bits);
+        }
+
+        for (int64_t bi = 0; bi < local_blocks; ++bi) {
+            const uint8_t* block = row_data + bi * 144;
+            const int64_t base_k = bi * 256;  // index into x_local
+
+            const float d = dpair_buf[bi*2 + 0];
+            const float dmin = dpair_buf[bi*2 + 1];
             const uint8_t* scales = block + 4;
             const uint8_t* qs = block + 16;
 
@@ -1829,18 +1853,31 @@ inline void q4k_gemv_batched_scalar(const void* weight_data,
     const int64_t blocks_per_row = H / 256;
 
     c10::get_thread_pool().parallel_for(0, N, [&](int64_t start, int64_t end) {
+        // Per-row stack buffer for pre-converted fp32 scales (d, dmin pairs).
+        // 8C2 has no native fp16->fp32 instruction; LCC emits ~16 ops of bit-
+        // twiddle for each gguf::fp16_to_fp32, fragmenting the inner-loop
+        // SWP pattern. Pre-converting in a tight pre-loop gives the hot loop
+        // a clean (fp32 read + 4-bit unpack + scalar FMA) shape that LCC's
+        // pipeline scheduler can pack tightly into VLIW bundles.
+        float dpair_buf[80 * 2];
         for (int64_t n = start; n < end; ++n) {
             const uint8_t* row = raw + n * row_stride_bytes;
+            // Pre-loop: fp16 -> fp32 once for all super-blocks of this row.
+            for (int64_t bi = 0; bi < blocks_per_row; ++bi) {
+                const uint8_t* block = row + bi * 144;
+                uint16_t d_bits, dmin_bits;
+                std::memcpy(&d_bits,    block,     2);
+                std::memcpy(&dmin_bits, block + 2, 2);
+                dpair_buf[bi*2 + 0] = gguf::fp16_to_fp32(d_bits);
+                dpair_buf[bi*2 + 1] = gguf::fp16_to_fp32(dmin_bits);
+            }
             for (int k = 0; k < K_batch; ++k) {
                 float dot = 0.0f;
                 for (int64_t bi = 0; bi < blocks_per_row; ++bi) {
                     const uint8_t* block = row + bi * 144;
                     const int64_t base_k = bi * 256;
-                    uint16_t d_bits, dmin_bits;
-                    std::memcpy(&d_bits,    block,     2);
-                    std::memcpy(&dmin_bits, block + 2, 2);
-                    const float d    = gguf::fp16_to_fp32(d_bits);
-                    const float dmin = gguf::fp16_to_fp32(dmin_bits);
+                    const float d    = dpair_buf[bi*2 + 0];
+                    const float dmin = dpair_buf[bi*2 + 1];
                     const uint8_t* sc = block + 4;
                     const uint8_t* qs = block + 16;
                     _Pragma("loop count(8)") _Pragma("ivdep") for (int64_t j = 0; j < 256; j += 32) {
