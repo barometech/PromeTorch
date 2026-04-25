@@ -4204,17 +4204,19 @@ public:
             auto slice_k_blocks = [&](const QuantizedWeight& full, TPSlicedWeight& out,
                                        int64_t& k_start_out, int64_t& k_end_out,
                                        int64_t& k_local_out, const char* dbg_name) -> bool {
-                // Q4_K (qtype=12) + Q6_K (qtype=14) supported. Both use 256-element
-                // super-blocks; byte sizes differ (144 vs 210).
+                // Q4_K (qtype=12, 256-elem block, 144B), Q6_K (qtype=14, 256-elem,
+                // 210B), Q8_0 (qtype=8, 32-elem block, 34B).
                 if (!full.valid || !full.cpu_data) {
                     std::cerr << "[TP slice_k] " << dbg_name
                               << " fail: valid=" << full.valid
                               << " cpu=" << (full.cpu_data != nullptr) << std::endl;
                     return false;
                 }
-                int64_t bytes_per_block;
-                if (full.quant_type == 12) bytes_per_block = 144;       // Q4_K
-                else if (full.quant_type == 14) bytes_per_block = 210;  // Q6_K
+                int64_t bytes_per_block, elems_per_block;
+                if (full.quant_type == 12)      { bytes_per_block = 144; elems_per_block = 256; }
+                else if (full.quant_type == 14) { bytes_per_block = 210; elems_per_block = 256; }
+                // Q8_0 k-slice attempted but produces broken decode in TP —
+                // disabled until layout bug traced. Falls back to replicated.
                 else {
                     std::cerr << "[TP slice_k] " << dbg_name
                               << " unsupported qtype=" << full.quant_type
@@ -4222,12 +4224,12 @@ public:
                     return false;
                 }
                 int64_t K_full = full.cols;
-                if (K_full % 256 != 0) {
+                if (K_full % elems_per_block != 0) {
                     std::cerr << "[TP slice_k] " << dbg_name << " K_full=" << K_full
-                              << " not multiple of 256" << std::endl;
+                              << " not multiple of " << elems_per_block << std::endl;
                     return false;
                 }
-                int64_t total_blocks = K_full / 256;
+                int64_t total_blocks = K_full / elems_per_block;
                 int64_t per_rank = total_blocks / nprocs;
                 int64_t rem = total_blocks % nprocs;
                 int64_t k_start = rank * per_rank + std::min((int64_t)rank, rem);
@@ -4241,8 +4243,6 @@ public:
                 out.cpu_data = std::malloc(total_local_bytes);
                 if (!out.cpu_data) return false;
 
-                // Copy each row's K-slice into contiguous local buffer.
-                // This malloc goes to caller's NUMA-local DDR under membind.
                 char* dst = static_cast<char*>(out.cpu_data);
                 const char* src = static_cast<const char*>(full.cpu_data);
                 int64_t offset_bytes = k_start * bytes_per_block;
@@ -4252,14 +4252,14 @@ public:
                                 local_row_stride);
                 }
                 out.rows = full.rows;
-                out.cols = local_blocks * 256;
+                out.cols = local_blocks * elems_per_block;
                 out.row_stride_bytes = local_row_stride;
                 out.total_bytes = total_local_bytes;
                 out.quant_type = full.quant_type;
                 out.valid = true;
                 k_start_out = k_start;
                 k_end_out = k_end;
-                k_local_out = local_blocks * 256;
+                k_local_out = local_blocks * elems_per_block;
                 return true;
             };
 
