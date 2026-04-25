@@ -1490,16 +1490,34 @@ inline void cpu_quant_gemv_k_slice(
                 local_blocks * 256, N, local_row_stride_bytes);
 #endif
             break;
+        case 8: // Q8_0
+            // Q8_0 has 32-element blocks (vs 256 for Q4_K/Q6_K). Sliced
+            // layout = compact subset of blocks per row, identical layout,
+            // just smaller K. Reuse the standard Q8_0 GEMV with K = local_blocks*32.
+            //
+            // local_blocks here is in 32-element units (caller's slice_k_blocks
+            // accounts for the smaller QK_BLOCK = 32 for Q8_0).
+#ifdef __AVX2__
+            q8_0_gemv_avx2(sliced_weight, x_local, y,
+                local_blocks * 32, N, local_row_stride_bytes);
+#else
+            q8_0_gemv_scalar(sliced_weight, x_local, y,
+                local_blocks * 32, N, local_row_stride_bytes);
+#endif
+            break;
         default:
-            // Q5_K / Q8_0 — unsupported k-slice fast path. Caller detects
-            // valid=false and falls back to replicated GEMV + AllReduce.
+            // Q5_K — unsupported k-slice fast path. Caller detects valid=false
+            // and falls back to replicated GEMV + AllReduce.
             for (int64_t i = 0; i < N; ++i) y[i] = 0.0f / 0.0f;
             break;
     }
 }
 
 inline bool cpu_quant_gemv_k_slice_supported(uint32_t quant_type) {
-    return quant_type == 12;  // Q4_K only for now
+    // Q8_0 k-slice causes broken decode in TP — slice copy or layout mismatch
+    // somewhere; disabled until traced. Caller falls back to replicated GEMV
+    // + AllReduce-sum which is 4x slower but correct.
+    return quant_type == 12 || quant_type == 14;  // Q4_K, Q6_K
 }
 
 // ============================================================================
