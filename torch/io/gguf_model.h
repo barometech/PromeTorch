@@ -605,6 +605,15 @@ struct GGUFTPConfig {
     // Per-layer row-sliced quantized weights
     std::vector<TPLayer> layers;
 
+    // Round 3 Option D: K-slice the output (lm_head) projection so each rank
+    // reads only 1/N of its bytes. Currently 175 MB/token of output_weight
+    // gets read replicated; K-slicing → 44 MB/rank → saves ~131 MB/token
+    // aggregate bandwidth.
+    TPSlicedWeight q_output_weight_k_slice;
+    int64_t output_weight_k_start  = 0;
+    int64_t output_weight_k_end    = 0;
+    int64_t output_weight_k_local  = 0;
+
     // Scratch buffers sized to local dims
     std::vector<float> x_buf[2];       // [H] (hidden state, replicated)
     std::vector<float> q_local_buf;    // [q_dim_local]
@@ -4178,6 +4187,67 @@ public:
         int64_t kv_row_start   = rank * tp_.kv_dim_local;
         int64_t inter_row_start = tp_.inter_offset;  // non-uniform offset
 
+        // K-DIM SLICING lambda — pulled out of the layer loop so it can be
+        // reused for output_weight K-slice (Round 3 Option D) after the loop.
+        auto slice_k_blocks = [&](const QuantizedWeight& full, TPSlicedWeight& out,
+                                   int64_t& k_start_out, int64_t& k_end_out,
+                                   int64_t& k_local_out, const char* dbg_name) -> bool {
+            if (!full.valid || !full.cpu_data) {
+                std::cerr << "[TP slice_k] " << dbg_name
+                          << " fail: valid=" << full.valid
+                          << " cpu=" << (full.cpu_data != nullptr) << std::endl;
+                return false;
+            }
+            int64_t bytes_per_block, elems_per_block;
+            if (full.quant_type == 12)      { bytes_per_block = 144; elems_per_block = 256; }
+            else if (full.quant_type == 14) { bytes_per_block = 210; elems_per_block = 256; }
+            else if (full.quant_type ==  8) { bytes_per_block =  34; elems_per_block =  32; }
+            else {
+                std::cerr << "[TP slice_k] " << dbg_name
+                          << " unsupported qtype=" << full.quant_type
+                          << " (will use replicated fallback)" << std::endl;
+                return false;
+            }
+            int64_t K_full = full.cols;
+            if (K_full % elems_per_block != 0) {
+                std::cerr << "[TP slice_k] " << dbg_name << " K_full=" << K_full
+                          << " not multiple of " << elems_per_block << std::endl;
+                return false;
+            }
+            int64_t total_blocks = K_full / elems_per_block;
+            int64_t per_rank = total_blocks / nprocs;
+            int64_t rem = total_blocks % nprocs;
+            int64_t k_start = rank * per_rank + std::min((int64_t)rank, rem);
+            int64_t local_blocks = per_rank + (rank < rem ? 1 : 0);
+            int64_t k_end = k_start + local_blocks;
+
+            int64_t local_row_stride = local_blocks * bytes_per_block;
+            int64_t full_row_stride = full.row_stride_bytes;
+            int64_t total_local_bytes = full.rows * local_row_stride;
+
+            out.cpu_data = std::malloc(total_local_bytes);
+            if (!out.cpu_data) return false;
+
+            char* dst = static_cast<char*>(out.cpu_data);
+            const char* src = static_cast<const char*>(full.cpu_data);
+            int64_t offset_bytes = k_start * bytes_per_block;
+            for (int64_t n = 0; n < full.rows; ++n) {
+                std::memcpy(dst + n * local_row_stride,
+                            src + n * full_row_stride + offset_bytes,
+                            local_row_stride);
+            }
+            out.rows = full.rows;
+            out.cols = local_blocks * elems_per_block;
+            out.row_stride_bytes = local_row_stride;
+            out.total_bytes = total_local_bytes;
+            out.quant_type = full.quant_type;
+            out.valid = true;
+            k_start_out = k_start;
+            k_end_out = k_end;
+            k_local_out = local_blocks * elems_per_block;
+            return true;
+        };
+
         for (int64_t i = 0; i < config.num_layers; ++i) {
             const auto& layer = layers[i];
             auto& tl = tp_.layers[i];
@@ -4212,73 +4282,9 @@ public:
 
             // ============================================================
             // K-DIM SLICING for attn_output and ffn_down (RowParallel).
-            // Each rank keeps a local copy of the full N rows, but only of
-            // its own K-super-block range. Partial sum output → AllReduce.
-            //
-            // Non-uniform split handles non-divisible super-block counts:
-            // rank r gets k_blocks = (K_full/256)/nprocs + (r < rem ? 1 : 0)
-            // where rem = (K_full/256) % nprocs.
+            // Lambda hoisted out to function scope above to be reused for
+            // output_weight after the layer loop (Round 3 Option D).
             // ============================================================
-            auto slice_k_blocks = [&](const QuantizedWeight& full, TPSlicedWeight& out,
-                                       int64_t& k_start_out, int64_t& k_end_out,
-                                       int64_t& k_local_out, const char* dbg_name) -> bool {
-                // Q4_K (qtype=12, 256-elem block, 144B), Q6_K (qtype=14, 256-elem,
-                // 210B), Q8_0 (qtype=8, 32-elem block, 34B).
-                if (!full.valid || !full.cpu_data) {
-                    std::cerr << "[TP slice_k] " << dbg_name
-                              << " fail: valid=" << full.valid
-                              << " cpu=" << (full.cpu_data != nullptr) << std::endl;
-                    return false;
-                }
-                int64_t bytes_per_block, elems_per_block;
-                if (full.quant_type == 12)      { bytes_per_block = 144; elems_per_block = 256; }
-                else if (full.quant_type == 14) { bytes_per_block = 210; elems_per_block = 256; }
-                else if (full.quant_type ==  8) { bytes_per_block =  34; elems_per_block =  32; }
-                else {
-                    std::cerr << "[TP slice_k] " << dbg_name
-                              << " unsupported qtype=" << full.quant_type
-                              << " (will use replicated fallback)" << std::endl;
-                    return false;
-                }
-                int64_t K_full = full.cols;
-                if (K_full % elems_per_block != 0) {
-                    std::cerr << "[TP slice_k] " << dbg_name << " K_full=" << K_full
-                              << " not multiple of " << elems_per_block << std::endl;
-                    return false;
-                }
-                int64_t total_blocks = K_full / elems_per_block;
-                int64_t per_rank = total_blocks / nprocs;
-                int64_t rem = total_blocks % nprocs;
-                int64_t k_start = rank * per_rank + std::min((int64_t)rank, rem);
-                int64_t local_blocks = per_rank + (rank < rem ? 1 : 0);
-                int64_t k_end = k_start + local_blocks;
-
-                int64_t local_row_stride = local_blocks * bytes_per_block;
-                int64_t full_row_stride = full.row_stride_bytes;
-                int64_t total_local_bytes = full.rows * local_row_stride;
-
-                out.cpu_data = std::malloc(total_local_bytes);
-                if (!out.cpu_data) return false;
-
-                char* dst = static_cast<char*>(out.cpu_data);
-                const char* src = static_cast<const char*>(full.cpu_data);
-                int64_t offset_bytes = k_start * bytes_per_block;
-                for (int64_t n = 0; n < full.rows; ++n) {
-                    std::memcpy(dst + n * local_row_stride,
-                                src + n * full_row_stride + offset_bytes,
-                                local_row_stride);
-                }
-                out.rows = full.rows;
-                out.cols = local_blocks * elems_per_block;
-                out.row_stride_bytes = local_row_stride;
-                out.total_bytes = total_local_bytes;
-                out.quant_type = full.quant_type;
-                out.valid = true;
-                k_start_out = k_start;
-                k_end_out = k_end;
-                k_local_out = local_blocks * elems_per_block;
-                return true;
-            };
 
             // K-slicing for Q4_K only. Q5_K/Q6_K fall back to replicated path
             // (marked via tl.q_attn_output.valid=false; forward will see valid=0
@@ -4296,6 +4302,17 @@ public:
                                tl.ffn_down_k_start, tl.ffn_down_k_end,
                                tl.ffn_down_k_local, "ffn_down");
             }
+        }
+
+        // Round 3 Option D: K-slice the output (lm_head) projection ONCE
+        // (not per-layer). Currently each rank reads full output_weight
+        // ~175 MB/token; K-sliced → 44 MB/rank/token = -131 MB aggregate
+        // per-token bandwidth. Followed by AllReduce-sum on logits buffer.
+        // Per Round 2 agent_9 §4.2: +14% (about +0.7 tok/s) alone.
+        if (!gather_mode_setup && q_output_weight.valid && q_output_weight.cpu_data) {
+            slice_k_blocks(q_output_weight, tp_.q_output_weight_k_slice,
+                           tp_.output_weight_k_start, tp_.output_weight_k_end,
+                           tp_.output_weight_k_local, "output_weight");
         }
 
         // Allocate scratch buffers (local dims for Q/K/V/gate/up,
@@ -4918,18 +4935,39 @@ public:
         // Per-rank work: 1/nprocs of vocab rows → ~4× speedup on output_proj.
         // Needs kShmSlotSize >= V*4 bytes — raised to 1 MB to fit vocab=152k.
         int64_t V = config.vocab_size;
-        if (use_quant_gemv_ && q_output_weight.valid && q_output_weight.cpu_data) {
+        // Round 3 Option D: prefer K-slice path. Each rank reads only 1/N
+        // of the output_weight bytes (~44 MB vs 175 MB of N-row split),
+        // computes partial logits over FULL vocab, AllReduce-sum to combine.
+        // Eliminates the replicated-K-read that was costing ~131 MB/token
+        // aggregate bandwidth. Per Round 2 agent_9 §4.2: +14% alone (~+0.7 tok/s).
+        if (use_quant_gemv_ && tp_.q_output_weight_k_slice.valid &&
+            tp_.q_output_weight_k_slice.cpu_data) {
+            // K-slice path: rank reads its 1/N of input dim K (=H)
+            int64_t local_blocks = tp_.output_weight_k_end - tp_.output_weight_k_start;
+            // Q4_K is 256 elements/block; output_weight uses Q4_K typically.
+            int64_t elems_per_block = (tp_.q_output_weight_k_slice.quant_type == 8) ? 32 : 256;
+            const float* x_local =
+                tp_.x_buf[cur].data() + tp_.output_weight_k_start * elems_per_block;
+            cpu_quant::cpu_quant_gemv_k_slice(
+                tp_.q_output_weight_k_slice.quant_type,
+                tp_.q_output_weight_k_slice.cpu_data,
+                x_local,
+                tp_.logits_buf.data(),
+                local_blocks,
+                tp_.q_output_weight_k_slice.rows,    // = V (full vocab)
+                tp_.q_output_weight_k_slice.row_stride_bytes);
+            torch::distributed::all_reduce_inplace(tp_.logits_buf.data(), V);
+        } else if (use_quant_gemv_ && q_output_weight.valid && q_output_weight.cpu_data) {
+            // Legacy fallback: N-row split (each rank reads full K of its 1/N rows).
+            // This path runs when K-slice setup failed (e.g. PT_TP_GATHER=1 mode
+            // skipped slicing) or for quant types that don't support k-slice.
             int64_t rank_rows = V / tp_.nprocs;
             int64_t row_start = tp_.rank * rank_rows;
             int64_t row_end   = (tp_.rank == tp_.nprocs - 1) ? V : row_start + rank_rows;
             int64_t local_rows = row_end - row_start;
 
-            // Zero the logits buffer first — other ranks' slices must read 0.
             std::memset(tp_.logits_buf.data(), 0, V * sizeof(float));
 
-            // Compute just our row-slice, writing directly into the output
-            // region. cpu_quant_gemv with N=local_rows + weight pointer offset
-            // by row_start * row_stride_bytes.
             const uint8_t* w_slice = static_cast<const uint8_t*>(q_output_weight.cpu_data)
                                    + row_start * q_output_weight.row_stride_bytes;
             cpu_quant::cpu_quant_gemv(
@@ -4937,8 +4975,6 @@ public:
                 tp_.x_buf[cur].data(), tp_.logits_buf.data() + row_start,
                 H, local_rows, q_output_weight.row_stride_bytes);
 
-            // AllReduce-sum: each rank's buffer has its slice non-zero, rest
-            // zero; sum yields the full concatenated logits on all ranks.
             torch::distributed::all_reduce_inplace(tp_.logits_buf.data(), V);
         } else if (output_weight.defined()) {
             // FP32 fallback — no split, scalar main-thread path (slow but rare
