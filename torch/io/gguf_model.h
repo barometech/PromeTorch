@@ -3595,12 +3595,27 @@ public:
             drafted = draft_predict_model(current_token, K_max - 1);
             if (stats) stats->drafts_proposed += static_cast<int64_t>(drafted.size());
         } else {
-            for (int j = 0; j + 1 < K_max; ++j) {
-                int64_t d = draft.predict(rolling);
-                if (d < 0) break;  // no n-gram hit — stop drafting
-                drafted.push_back(d);
-                rolling.push_back(d);
-                if (stats) ++stats->drafts_proposed;
+            // PT_PLD=1 enables Round 3 PLD draft (Saxena 2023): variable-n
+            // match (3→2→1) over full history, returning up to K-1 tokens at
+            // once. ON ELBRUS THIS REGRESSES (4.3 → 2.7 tok/s) because
+            // forward_decode_cpu_batched is currently K-serial internally,
+            // not truly batched — needs Phase 7.3 finishing work to deliver
+            // the win. Default = old single-token NgramDraft.predict() loop.
+            static const bool use_pld = [] {
+                const char* e = std::getenv("PT_PLD");
+                return e && e[0] == '1';
+            }();
+            if (use_pld) {
+                drafted = draft.predict_pld(rolling, K_max - 1);
+                if (stats) stats->drafts_proposed += static_cast<int64_t>(drafted.size());
+            } else {
+                for (int j = 0; j + 1 < K_max; ++j) {
+                    int64_t d = draft.predict(rolling);
+                    if (d < 0) break;
+                    drafted.push_back(d);
+                    rolling.push_back(d);
+                    if (stats) ++stats->drafts_proposed;
+                }
             }
         }
 
