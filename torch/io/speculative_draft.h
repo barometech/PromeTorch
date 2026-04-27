@@ -132,6 +132,67 @@ public:
         if (accepted) stats.accepts++;
     }
 
+    // Caller reports how many of K drafted tokens the verifier accepted.
+    // Used for predict_pld stats. counts each accepted token as a hit-accept.
+    void record_accepts(int n_accepted) const {
+        stats.accepts += n_accepted;
+    }
+
+    // Prompt-Lookup Decoding (Saxena 2023, https://arxiv.org/abs/2309.06181).
+    // Variable-n match (n=3 → 2 → 1) over `history` (which should include both
+    // PROMPT and committed-generated tokens). On match, returns up to K
+    // continuation tokens from the matched span.
+    //
+    // Why this beats the original predict():
+    //   1. Caller passes FULL history (prompt + generation) — repetitions in
+    //      prompt itself become draftable. NgramDraft.buf_ alone holds only
+    //      generated tokens; PLD looks at everything.
+    //   2. Returns K tokens at a time, not 1. With α=0.7 acceptance, that's
+    //      4× fewer verifier calls per accepted token vs single-step.
+    //   3. Variable-n (3 → 2 → 1) increases hit rate without precision loss:
+    //      n=3 strict match is ~10-20% but very high quality; n=1 fallback
+    //      catches simpler unigram repetitions.
+    //
+    // Returns a vector of up to K predicted tokens. Empty vector = no match.
+    std::vector<int64_t> predict_pld(const std::vector<int64_t>& history,
+                                      int K) const {
+        std::vector<int64_t> result;
+        result.reserve(K);
+        if (history.empty() || K <= 0) return result;
+
+        const int64_t H = (int64_t)history.size();
+        const int64_t* hp = history.data();
+
+        // Try n = 3 down to 1. Larger n = more selective (better quality).
+        for (int n = 3; n >= 1; --n) {
+            if (H < n) continue;
+            const int64_t* suffix = hp + H - n;
+            // Reverse scan history (most recent first) for matches.
+            // Skip the very last n positions — they ARE the suffix itself.
+            for (int64_t i = H - n - 1; i >= 0; --i) {
+                bool match = true;
+                for (int k = 0; k < n; ++k) {
+                    if (hp[i + k] != suffix[k]) { match = false; break; }
+                }
+                if (match) {
+                    // Emit up to K tokens following the matched span.
+                    int64_t start = i + n;
+                    int64_t avail = H - start;
+                    if (avail <= 0) continue;  // match at very end, no continuation
+                    int64_t emit = std::min<int64_t>(K, avail);
+                    for (int64_t j = 0; j < emit; ++j) {
+                        result.push_back(hp[start + j]);
+                    }
+                    stats.predictions++;
+                    if (!result.empty()) stats.hits++;
+                    return result;
+                }
+            }
+        }
+        stats.predictions++;
+        return result;  // no match
+    }
+
 private:
     // Physical access — maps logical index to buf_ index accounting for wrap.
     int64_t get(int64_t logical_i) const {
