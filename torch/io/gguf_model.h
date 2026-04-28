@@ -3,6 +3,7 @@
 #include "torch/io/gguf_loader.h"
 #include "torch/io/gguf_dequant.h"
 #include "torch/io/cpu_quant_gemv.h"
+#include "torch/io/q8_soa_repack.h"
 #include "torch/io/numa_weight_replica.h"
 #include "torch/io/speculative_decode.h"
 #include "torch/io/speculative_verify.h"
@@ -522,6 +523,11 @@ struct TPSlicedWeight {
     uint32_t quant_type = 0;
     bool valid = false;
 
+    // Round 3 Agent 5: Q8 SoA4 4-row interleaved weight, populated only when
+    // PT_Q8_SOA=1 at TP setup. When valid, forward path uses q8_soa4_gemv
+    // instead of cpu_quant_gemv. Falls back to Q4_K kernel otherwise.
+    cpu_quant::Q8SoA4 q8_soa;
+
     ~TPSlicedWeight() {
         if (cpu_data) std::free(cpu_data);
     }
@@ -545,6 +551,7 @@ private:
         total_bytes = o.total_bytes;
         quant_type = o.quant_type;
         valid = o.valid;
+        q8_soa = std::move(o.q8_soa);
     }
 };
 
@@ -626,6 +633,13 @@ struct GGUFTPConfig {
     std::vector<float> silu_full_buf;  // [inter] (zero-padded; local slice filled)
     std::vector<float> logits_buf;     // [vocab]
     bool scratch_ready = false;
+
+    // Round 3 Agent 5: Q8 SoA4 path scratch buffers. Sized at TP setup to
+    // max K seen across all GEMVs (= hidden_size). Activation broadcast uses
+    // 4 bytes per input element; sum_a is 4 bytes per 32-element block.
+    std::vector<uint8_t> soa_act_b16;   // up to K_max*4 bytes
+    std::vector<int32_t> soa_sum_a;     // up to K_max/32 ints
+    float                soa_scale_a = 1.0f;
 };
 
 // ============================================================================
@@ -4345,7 +4359,55 @@ public:
         tp_.up_local_buf.assign(tp_.inter_local, 0.0f);
         tp_.silu_full_buf.assign(inter, 0.0f);
         tp_.logits_buf.assign(config.vocab_size, 0.0f);
+        // Q8 SoA4 activation broadcast scratch sized to max K seen at runtime.
+        // K_max = max(hidden, q_dim_local, inter, vocab_K_slice) — the largest
+        // is `inter` (9728 for qwen3:4b). a_b16 = K*4 bytes; sum_a = K/32 ints.
+        int64_t K_act_max = std::max<int64_t>({(int64_t)H, (int64_t)inter,
+                                                (int64_t)tp_.q_dim_local,
+                                                (int64_t)config.vocab_size});
+        tp_.soa_act_b16.assign(K_act_max * 4, 0);
+        tp_.soa_sum_a.assign(K_act_max / 32 + 1, 0);
         tp_.scratch_ready = true;
+
+        // Round 3 Agent 5: Q8 SoA4 weight repack — gated by PT_Q8_SOA=1.
+        // For each TP-sliced Q4_K weight, build the 4-row interleaved Q8
+        // layout used by q8_soa4_gemv. ~1.32× memory inflation per weight,
+        // but enables 4-row parallel qpmaddubsh in inner loop. Microbench
+        // shows 0.85× EML (1.21 ms vs 1.03 ms for K=2560 N=2432 single-core).
+        const char* soa_env = std::getenv("PT_Q8_SOA");
+        bool use_q8_soa = soa_env && soa_env[0] == '1';
+        if (use_q8_soa) {
+            int64_t soa_count = 0;
+            int64_t soa_bytes = 0;
+            auto try_repack = [&](TPSlicedWeight& tl, const char* name) {
+                if (!tl.valid || !tl.cpu_data) return;
+                if (tl.quant_type != 12) return;  // Q4_K only for now
+                if (tl.rows % 4 != 0 || tl.cols % 256 != 0) return;
+                if (cpu_quant::repack_q4k_to_q8soa4(
+                        tl.cpu_data, tl.rows, tl.cols,
+                        tl.row_stride_bytes, &tl.q8_soa)) {
+                    soa_count++;
+                    soa_bytes += (tl.rows / 4) * tl.q8_soa.group_stride;
+                } else {
+                    std::cerr << "[Q8_SOA] failed to repack " << name
+                              << " rows=" << tl.rows << " cols=" << tl.cols << std::endl;
+                }
+            };
+            for (int64_t i = 0; i < config.num_layers; ++i) {
+                auto& tl = tp_.layers[i];
+                try_repack(tl.q_attn_q,    "attn_q");
+                try_repack(tl.q_attn_k,    "attn_k");
+                try_repack(tl.q_attn_v,    "attn_v");
+                try_repack(tl.q_ffn_gate,  "ffn_gate");
+                try_repack(tl.q_ffn_up,    "ffn_up");
+                try_repack(tl.q_attn_output,"attn_output");
+                try_repack(tl.q_ffn_down,  "ffn_down");
+            }
+            try_repack(tp_.q_output_weight_k_slice, "output_weight");
+            std::cout << "[Q8_SOA] repacked " << soa_count
+                      << " TP-sliced Q4_K weights, " << (soa_bytes / (1024*1024))
+                      << " MB SoA4 storage" << std::endl;
+        }
 
         std::cout << "[TP] Tensor-parallel enabled: rank " << rank << "/" << nprocs
                   << " heads[" << tp_.head_start << ".." << tp_.head_end << ") "
@@ -4520,13 +4582,36 @@ public:
             float* q_l = tp_.q_local_buf.data();
             float* k_l = tp_.k_local_buf.data();
             float* v_l = tp_.v_local_buf.data();
+            // Q8_SoA4 path (PT_Q8_SOA=1): if SoA4 builds exist for Q/K/V,
+            // use the 4-row interleaved kernel. Otherwise fall back to
+            // existing fused/scalar Q4_K kernel.
+            bool use_soa_qkv = tl.q_attn_q.q8_soa.valid &&
+                               tl.q_attn_k.q8_soa.valid &&
+                               tl.q_attn_v.q8_soa.valid;
             bool can_fuse_qkv = tl.q_attn_q.valid && tl.q_attn_k.valid && tl.q_attn_v.valid &&
                 tl.q_attn_q.quant_type == tl.q_attn_k.quant_type &&
                 tl.q_attn_q.quant_type == tl.q_attn_v.quant_type &&
                 tl.q_attn_q.row_stride_bytes == tl.q_attn_k.row_stride_bytes &&
                 tl.q_attn_q.row_stride_bytes == tl.q_attn_v.row_stride_bytes &&
                 cpu_quant::cpu_quant_gemv_supported(tl.q_attn_q.quant_type);
-            if (can_fuse_qkv) {
+            if (use_soa_qkv) {
+                // RMSNorm into x_normed, then int8-quant + broadcast once for QKV.
+                std::memcpy(x_normed.data(), x_ptr, H * sizeof(float));
+                cpu_quant::cpu_rmsnorm_inplace(x_normed.data(),
+                    layer.attn_norm.data_ptr<float>(), eps, add_one, H);
+                cpu_quant::q8_soa4_quant_activation(x_normed.data(), H,
+                    tp_.soa_act_b16.data(), tp_.soa_sum_a.data(),
+                    &tp_.soa_scale_a);
+                cpu_quant::q8_soa4_gemv(&tl.q_attn_q.q8_soa,
+                    tp_.soa_act_b16.data(), tp_.soa_sum_a.data(),
+                    tp_.soa_scale_a, q_l);
+                cpu_quant::q8_soa4_gemv(&tl.q_attn_k.q8_soa,
+                    tp_.soa_act_b16.data(), tp_.soa_sum_a.data(),
+                    tp_.soa_scale_a, k_l);
+                cpu_quant::q8_soa4_gemv(&tl.q_attn_v.q8_soa,
+                    tp_.soa_act_b16.data(), tp_.soa_sum_a.data(),
+                    tp_.soa_scale_a, v_l);
+            } else if (can_fuse_qkv) {
                 cpu_quant::cpu_fused_rmsnorm_qkv_gemv(
                     x_ptr, layer.attn_norm.data_ptr<float>(), eps, add_one,
                     tl.q_attn_q.quant_type,
@@ -4782,10 +4867,24 @@ public:
             float* x_cur = tp_.x_buf[cur].data();
             float* gate_l = tp_.gate_local_buf.data();
             float* up_l   = tp_.up_local_buf.data();
+            bool use_soa_ffn = tl.q_ffn_gate.q8_soa.valid && tl.q_ffn_up.q8_soa.valid;
             bool can_fuse_ffn = tl.q_ffn_gate.valid && tl.q_ffn_up.valid &&
                 cpu_quant::cpu_quant_gemv_supported(tl.q_ffn_gate.quant_type) &&
                 cpu_quant::cpu_quant_gemv_supported(tl.q_ffn_up.quant_type);
-            if (can_fuse_ffn) {
+            if (use_soa_ffn) {
+                std::memcpy(x_normed.data(), x_cur, H * sizeof(float));
+                cpu_quant::cpu_rmsnorm_inplace(x_normed.data(),
+                    layer.ffn_norm.data_ptr<float>(), eps, add_one, H);
+                cpu_quant::q8_soa4_quant_activation(x_normed.data(), H,
+                    tp_.soa_act_b16.data(), tp_.soa_sum_a.data(),
+                    &tp_.soa_scale_a);
+                cpu_quant::q8_soa4_gemv(&tl.q_ffn_gate.q8_soa,
+                    tp_.soa_act_b16.data(), tp_.soa_sum_a.data(),
+                    tp_.soa_scale_a, gate_l);
+                cpu_quant::q8_soa4_gemv(&tl.q_ffn_up.q8_soa,
+                    tp_.soa_act_b16.data(), tp_.soa_sum_a.data(),
+                    tp_.soa_scale_a, up_l);
+            } else if (can_fuse_ffn) {
                 cpu_quant::cpu_fused_rmsnorm_gate_up_gemv(
                     x_cur, layer.ffn_norm.data_ptr<float>(), eps, add_one,
                     tl.q_ffn_gate.quant_type, tl.q_ffn_gate.cpu_data,
