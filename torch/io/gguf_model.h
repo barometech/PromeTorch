@@ -4996,7 +4996,23 @@ public:
                 if (tp_sec_timers_.on) tp_sec_timers_.allreduce_fdown_ms += _tp_elapsed();
             } else {
                 // Legacy path: K-slice ffn_down + AllReduce-sum.
-                if (tl.q_ffn_down.valid && tl.q_ffn_down.cpu_data) {
+                if (tl.q_ffn_down.q8_soa.valid) {
+                    // Round 3 SoA path: input is silu_local (size inter_local).
+                    // Build broadcast int8 activation, then run q8_soa4_gemv.
+                    // Compute silu inline.
+                    std::vector<float> silu_local(tp_.inter_local);
+                    for (int64_t j = 0; j < tp_.inter_local; ++j) {
+                        float g = gate_l[j];
+                        silu_local[j] = (g / (1.0f + std::exp(-g))) * up_l[j];
+                    }
+                    cpu_quant::q8_soa4_quant_activation(silu_local.data(),
+                        tp_.inter_local,
+                        tp_.soa_act_b16.data(), tp_.soa_sum_a.data(),
+                        &tp_.soa_scale_a);
+                    cpu_quant::q8_soa4_gemv(&tl.q_ffn_down.q8_soa,
+                        tp_.soa_act_b16.data(), tp_.soa_sum_a.data(),
+                        tp_.soa_scale_a, h_buf);
+                } else if (tl.q_ffn_down.valid && tl.q_ffn_down.cpu_data) {
                     std::vector<float> silu_local(tp_.inter_local);
                     for (int64_t j = 0; j < tp_.inter_local; ++j) {
                         float g = gate_l[j];
