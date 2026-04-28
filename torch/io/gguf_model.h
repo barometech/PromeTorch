@@ -4822,7 +4822,17 @@ public:
                 if (tp_sec_timers_.on) tp_sec_timers_.allreduce_ao_ms += _tp_elapsed();
             } else {
                 // Legacy path: K-slice GEMV + AllReduce-sum.
-                if (tl.q_attn_output.valid && tl.q_attn_output.cpu_data) {
+                if (tl.q_attn_output.q8_soa.valid) {
+                    // Round 3 SoA path: input is rank's q_dim_local slice of attn_full_buf.
+                    const float* input_slice = tp_.attn_full_buf.data() + (tp_.rank * tp_.q_dim_local);
+                    cpu_quant::q8_soa4_quant_activation(input_slice,
+                        tp_.q_dim_local,
+                        tp_.soa_act_b16.data(), tp_.soa_sum_a.data(),
+                        &tp_.soa_scale_a);
+                    cpu_quant::q8_soa4_gemv(&tl.q_attn_output.q8_soa,
+                        tp_.soa_act_b16.data(), tp_.soa_sum_a.data(),
+                        tp_.soa_scale_a, h_buf);
+                } else if (tl.q_attn_output.valid && tl.q_attn_output.cpu_data) {
                     const float* input_slice = tp_.attn_full_buf.data() + (tp_.rank * tp_.q_dim_local);
                     int64_t local_blocks = tl.attn_output_k_end - tl.attn_output_k_start;
                     cpu_quant::cpu_quant_gemv_k_slice(
@@ -5070,7 +5080,21 @@ public:
         // computes partial logits over FULL vocab, AllReduce-sum to combine.
         // Eliminates the replicated-K-read that was costing ~131 MB/token
         // aggregate bandwidth. Per Round 2 agent_9 §4.2: +14% alone (~+0.7 tok/s).
-        if (use_quant_gemv_ && tp_.q_output_weight_k_slice.valid &&
+        if (tp_.q_output_weight_k_slice.q8_soa.valid) {
+            // Round 3 SoA path: each rank's K-slice of output_weight on SoA4.
+            int64_t elems_per_block = (tp_.q_output_weight_k_slice.quant_type == 8) ? 32 : 256;
+            const float* x_local =
+                tp_.x_buf[cur].data() + tp_.output_weight_k_start * elems_per_block;
+            int64_t local_K = tp_.q_output_weight_k_slice.q8_soa.K;
+            cpu_quant::q8_soa4_quant_activation(x_local,
+                local_K,
+                tp_.soa_act_b16.data(), tp_.soa_sum_a.data(),
+                &tp_.soa_scale_a);
+            cpu_quant::q8_soa4_gemv(&tp_.q_output_weight_k_slice.q8_soa,
+                tp_.soa_act_b16.data(), tp_.soa_sum_a.data(),
+                tp_.soa_scale_a, tp_.logits_buf.data());
+            torch::distributed::all_reduce_inplace(tp_.logits_buf.data(), V);
+        } else if (use_quant_gemv_ && tp_.q_output_weight_k_slice.valid &&
             tp_.q_output_weight_k_slice.cpu_data) {
             // K-slice path: rank reads its 1/N of input dim K (=H)
             int64_t local_blocks = tp_.output_weight_k_end - tp_.output_weight_k_start;
