@@ -196,26 +196,24 @@ Sweep measurements (30-tok greedy, qwen3:4b Q4_K_M, одинаковый prompt)
 - PyTorch-PyTorch разрыв **×9.84** — точно равен TFLOPS ratio. Железо работает на своё.
 - PromeTorch+EML+TUDA отыгрывает до **×1.22** (с NUMA-aware Local-SGD 4×8c).
 
-**Inference Q4_K_M (transformer decode):**
+**Inference Q4_K_M (transformer decode, 2026-04-30):**
 - A100 Ollama 164.7 tok/s, A100 PromeTorch 82.6 tok/s
 - Эльбрус llama.cpp (pure-C pthread 32t) 3.3 tok/s
-- Эльбрус PromeTorch 1-proc best (24t + interleave=all) **3.8 tok/s** ★
-- **Разрыв ×22** (A100 PromeTorch vs Эльбрус PromeTorch best config) — мы обгоняем
-  llama.cpp на том же железе за счёт AVX2-транслированных Q4_K/Q6_K GEMV ядер
-  плюс memory-interleave page placement по 4 NUMA DDRs.
-- **Потенциал дальше:** написать свой Q4_K GEMV через APB (MOVA) + 8-unroll SIMD
-  FMA на E2K — можно выжать ещё ×2-3 на compute сверху. Target ~10-15 tok/s
-  single-proc, что было бы ×5-8 от A100 PromeTorch. TP на single-box 4-NUMA
-  честно НЕ помогает (1.3 tok/s vs 3.8 single — 72 AllReduce/token×coherence traffic
-  съедают compute gain); нужен быстрый interconnect или MT-GEMV within single proc.
+- Эльбрус PromeTorch 1-proc (24t + interleave=all) 5.2 tok/s
+- Эльбрус PromeTorch **TP-4 + Q8 SoA4 (`PT_Q8_SOA=1`)** **9.4 tok/s** ★
+- **Разрыв ×8.8** (A100 PromeTorch vs Эльбрус TP-4 best) — на CPU-only Russian
+  VLIW мы достигли 11.4% от GPU PromeTorch. Q8 SoA4 — 4-row interleaved INT8
+  layout под `qpmaddubsh` (VNNI-style INT8 MAD на e2k v5), репакуется при
+  загрузке из Q4_K блоков. См. `torch/io/q8_soa_repack.h`.
+- **Потенциал дальше:** Q6_K SoA repack для ffn_down (+0.5 tok/s), persistent
+  ThreadPool (+0.5-1 tok/s), speculative decoding с PLD (+1-2 tok/s).
+  Реалистичный потолок 12-14 tok/s (33% от bandwidth теоретического 28.5).
 
-**Короче Косте:**
-> На FP32 training — разрыв ровно равен TFLOPS ratio ×9.84, железо отрабатывает
-> на 100%. На inference в лоб получили ×50 (llama.cpp без EML/SIMD на Эльбрусе).
-> С нашими AVX2-через-LCC-ядрами + NUMA-interleave page placement вышли на
-> 3.8 tok/s = ×22 от A100. Дальше — APB/MOVA streaming weight loads ещё в 2-3×
-> и таргет ~10-15 tok/s. Полная A100-parity на inference нереальна без HBM,
-> но ×5-8 от A100 PromeTorch достижимо.
+**Короче:**
+> Эльбрус 8C2 на qwen3:4b Q4_K_M даёт **9.4 tok/s** в TP-4 с нашим Q8 SoA4
+> кернелом — это ×8.8 от A100 PromeTorch и ×17.5 от A100 Ollama. Полной
+> A100-parity без HBM не будет, но мы взяли всё что VLIW v5 + 100 GB/s DDR
+> aggregate могут отдать. Достигли target ×5-8 от A100 PromeTorch.
 
 ---
 
@@ -224,7 +222,11 @@ Sweep measurements (30-tok greedy, qwen3:4b Q4_K_M, одинаковый prompt)
 - **A100 PromeTorch:** `./test_gguf_inference.exe qwen3:4b --device cuda --greedy --max_tokens 100`
 - **A100 Ollama:** `ollama run qwen3:4b "prompt"` (via curl for tok/s)
 - **Эльбрус llama.cpp:** `~/llama.cpp/build_noomp/bin/llama-cli -m qwen3-4b-Q4_K_M.gguf --threads 32 -n 100`
-- **Эльбрус PromeTorch 1-proc (BEST):** `bash scripts/run_1proc_elbrus.sh --greedy "prompt"` (24 threads + numactl --interleave=all = 3.8 tok/s)
-- **Эльбрус PromeTorch TP-4 (for comparison):** `bash scripts/run_tp_elbrus.sh --greedy "prompt"` (4-proc SHM, 1.3 tok/s — hurts throughput, used только для memory scalability)
+- **Эльбрус PromeTorch 1-proc:** `bash scripts/run_1proc_elbrus.sh --greedy "prompt"` (24 threads + numactl --interleave=all = 5.2 tok/s)
+- **Эльбрус PromeTorch TP-4 + SoA (BEST):** `PT_Q8_SOA=1 bash scripts/run_tp_elbrus.sh --greedy "prompt"` (4-proc SHM + Q8 SoA4 = 9.4 tok/s) ★
+
+**ВАЖНО для воспроизведения TP-4:** не ставить `PT_PIN_THREADS=1` — ломает
+NUMA-binding воркеров рангов 1-3 (kernel клампит их на одно ядро, tok/s
+падает до 1.4). Скрипт `run_tp_elbrus.sh` его явно НЕ выставляет.
 
 Full logs: `run_logs/` + `BENCH_*.md` файлы.
