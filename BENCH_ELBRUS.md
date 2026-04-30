@@ -200,7 +200,8 @@ Sweep measurements (30-tok greedy, qwen3:4b Q4_K_M, одинаковый prompt)
 - A100 Ollama 164.7 tok/s, A100 PromeTorch 82.6 tok/s
 - Эльбрус llama.cpp (pure-C pthread 32t) 3.3 tok/s
 - Эльбрус PromeTorch 1-proc (24t + interleave=all) 5.2 tok/s
-- Эльбрус PromeTorch **TP-4 + Q8 SoA4 (`PT_Q8_SOA=1`)** **9.4 tok/s** ★
+- Эльбрус PromeTorch TP-4 + Q8 SoA4 (`PT_Q8_SOA=1`) 9.4 tok/s
+- Эльбрус PromeTorch **TP-4 + Q8 SoA4 + persistent ThreadPool** **9.9 tok/s** ★ (Round 4 Step 1)
 - **Разрыв ×8.8** (A100 PromeTorch vs Эльбрус TP-4 best) — на CPU-only Russian
   VLIW мы достигли 11.4% от GPU PromeTorch. Q8 SoA4 — 4-row interleaved INT8
   layout под `qpmaddubsh` (VNNI-style INT8 MAD на e2k v5), репакуется при

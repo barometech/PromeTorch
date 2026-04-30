@@ -105,7 +105,8 @@ Astra/ALT/RED/Elbrus OS. Autograd engine работает одинаково н�
 
 | Config | Cores | tok/s | vs A100 PromeTorch (82.6) |
 |--------|------:|------:|--------------------------:|
-| **PromeTorch 4-proc TP + Q8 SoA4 (qpmaddubsh) — `PT_Q8_SOA=1`** | **28/32** | **9.4** ★ | **×8.8** |
+| **PromeTorch 4-proc TP + Q8 SoA4 + persistent ThreadPool — `PT_Q8_SOA=1`** | **28/32** | **9.9** ★ | **×8.3** |
+| PromeTorch 4-proc TP + Q8 SoA4 (qpmaddubsh) — `PT_Q8_SOA=1` | 28/32 | 9.4 | ×8.8 |
 | PromeTorch 4-proc TP + Q8 SoA4 attn_output + output_proj | 28/32 | 7.4 | ×11.2 |
 | PromeTorch 4-proc TP + Q8 SoA4 ffn_down | 28/32 | 6.9 | ×12.0 |
 | PromeTorch 4-proc TP + Q8 SoA4 QKV+gate_up | 28/32 | 6.4 | ×12.9 |
