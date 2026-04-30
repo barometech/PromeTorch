@@ -31,3 +31,19 @@ endif()
 if(MSVC)
     target_link_options(bench_optimized PRIVATE /STACK:10485760)
 endif()
+
+# === Round 4 — ThreadPool overhead microbench (Step 1 gate) ===
+add_executable(bench_threadpool_overhead
+    ${PROJECT_SOURCE_DIR}/examples/benchmarks/threadpool_overhead_bench.cpp)
+target_include_directories(bench_threadpool_overhead PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/aten/src
+)
+target_link_libraries(bench_threadpool_overhead PRIVATE c10)
+if(NOT MSVC)
+    target_link_libraries(bench_threadpool_overhead PRIVATE pthread)
+    find_library(NUMA_LIB numa)
+    if(NUMA_LIB)
+        target_link_libraries(bench_threadpool_overhead PRIVATE ${NUMA_LIB})
+    endif()
+endif()
