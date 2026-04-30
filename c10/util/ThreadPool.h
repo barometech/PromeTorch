@@ -7,34 +7,47 @@
 #endif
 
 // ============================================================================
-// ThreadPool.h — Persistent thread pool replacing OpenMP fork/join
+// ThreadPool.h — Persistent broadcast-dispatch pool (Round 4 rev)
 // ============================================================================
-// On Elbrus E2K, OpenMP #pragma omp parallel for creates/destroys threads
-// on EACH parallel region (~10ms per fork/join). For MNIST with 937 batches
-// x ~10 regions = 9,370 fork/joins = 93 seconds of pure overhead.
+// Замена mutex+queue+CV паттерна (10ms fork/join overhead на каждый
+// parallel_for) на:
+//   - один shared task descriptor (master-written, workers-read)
+//   - atomic gen counter с futex wake/wait
+//   - per-worker ack slots (cacheline-padded, false-sharing-free)
+//   - master также участвует в drain (extra worker для small jobs)
 //
-// This pool creates threads ONCE, they wait on a condition variable for work.
-// Compatible with LCC (pthreads) and MSVC (std::thread).
+// Ключевые инварианты (предотвращение Round 3 deadlock):
+//   I1. Master НЕ публикует новый descriptor пока все воркеры не ack'нули
+//       предыдущий gen — `slot.ack == prev_gen` для всех слотов.
+//   I2. Воркер всегда перечитывает `state_.n_chunks` ПОСЛЕ observed gen
+//       change, не кеширует между gen.
+//   I3. `next_chunk` reset master'ом ТОЛЬКО после всех ack — workers
+//       не могут случайно claim chunks от prev gen.
+//   I4. `tp_in_parallel` thread_local флаг блокирует nested parallel_for
+//       (превращает его в serial), предотвращая deadlock self-recursion.
+//   I5. Watchdog timer — если PT_TP_TIMEOUT_MS установлен, master timeout
+//       на done_count → assert (для отладки, не production).
 //
-// Usage in hot_loops.cpp:
-//   c10::parallel_for_1d(n, [&](int64_t start, int64_t end) {
-//       for (int64_t i = start; i < end; ++i) out[i] = ...;
-//   });
+// Drop-in replacement для предыдущего ThreadPool.h: API public идентичный.
 // ============================================================================
 
 #include <thread>
 #include <vector>
-#include <queue>
-#include <mutex>
-#include <condition_variable>
+#include <memory>
 #include <functional>
 #include <atomic>
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
+#include <stdexcept>
+
+#include "Futex.h"
 
 #if defined(__linux__) && !defined(_WIN32)
-#  define _GNU_SOURCE
+#  ifndef _GNU_SOURCE
+#    define _GNU_SOURCE
+#  endif
 #  include <sched.h>
 #  include <pthread.h>
 #  if __has_include(<numa.h>)
@@ -49,13 +62,9 @@
 
 namespace c10 {
 
-// Per-thread NUMA node id. Written once on worker start (or on demand for
-// the main thread). Read by NUMA-aware code paths (e.g. quant GEMV with
-// per-node weight replicas) to pick the correct local copy.
+// Per-thread NUMA node id. Cached; populated lazily on first call.
 inline thread_local int t_numa_node = -1;
 
-// Query or lazily-initialize current thread's NUMA node. Returns 0 if the
-// system has no NUMA API. Safe to call from any thread, any time.
 inline int current_numa_node() {
     if (t_numa_node >= 0) return t_numa_node;
 #if defined(__linux__) && !defined(_WIN32)
@@ -68,9 +77,6 @@ inline int current_numa_node() {
         return t_numa_node;
     }
 #  endif
-    // Fallback without libnuma: assume homogeneous layout where cores are
-    // packed per node. Env PT_CORES_PER_NODE overrides default 8 (Elbrus
-    // E8C2). Good-enough heuristic for single-socket NUMA boxes.
     int cores_per = 8;
     const char* env = std::getenv("PT_CORES_PER_NODE");
     if (env && env[0]) { int v = std::atoi(env); if (v > 0) cores_per = v; }
@@ -82,13 +88,13 @@ inline int current_numa_node() {
 #endif
 }
 
+// I4 reentrancy guard. thread_local — каждый воркер свой, master свой.
+inline thread_local bool t_in_parallel = false;
+
 class ThreadPool {
 public:
     explicit ThreadPool(int num_threads = 0) {
         if (num_threads <= 0) {
-            // Allow env overrides for multi-process TP on NUMA systems.
-            // PT_NUM_THREADS is ours; fall back to OMP_NUM_THREADS for
-            // consistency with the rest of the stack, then hardware_concurrency.
             const char* env = std::getenv("PT_NUM_THREADS");
             if (!env || !env[0]) env = std::getenv("OMP_NUM_THREADS");
             if (env && env[0]) {
@@ -100,190 +106,233 @@ public:
             }
             if (num_threads <= 0) num_threads = 4;
         }
-        num_threads_ = num_threads;
-        // If PT_PIN_THREADS=1 we spread worker i across cores round-robin,
-        // one core per worker. This is what OMP_PLACES=cores OMP_PROC_BIND=close
-        // does for OpenMP pools, but our std::thread pool doesn't inherit that.
-        pin_enabled_ = false;
-        {
-            const char* env = std::getenv("PT_PIN_THREADS");
-            if (env && env[0] == '1') pin_enabled_ = true;
+        num_workers_ = num_threads;
+        slots_ = std::unique_ptr<Slot[]>(new Slot[num_workers_]);
+        for (int i = 0; i < num_workers_; ++i) {
+            slots_[i].ack.store(0, std::memory_order_relaxed);
         }
-        for (int i = 0; i < num_threads; i++) {
+
+        // Watchdog timeout (debug). 0 = disabled.
+        const char* wd = std::getenv("PT_TP_TIMEOUT_MS");
+        watchdog_ms_ = (wd && wd[0]) ? static_cast<uint32_t>(std::atoi(wd)) : 0;
+
+        for (int i = 0; i < num_workers_; ++i) {
             workers_.emplace_back(&ThreadPool::worker_loop, this, i);
         }
     }
 
     ~ThreadPool() {
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            stop_ = true;
-        }
-        cv_.notify_all();
+        // Сигнал shutdown: stop=true, бамп gen, wake all workers
+        stop_.store(1, std::memory_order_release);
+        gen_.fetch_add(1, std::memory_order_release);
+        futex_wake_all(&gen_);
         for (auto& w : workers_) {
             if (w.joinable()) w.join();
         }
     }
 
-    // Non-copyable, non-movable
-    ThreadPool(const ThreadPool&) = delete;
+    ThreadPool(const ThreadPool&)            = delete;
     ThreadPool& operator=(const ThreadPool&) = delete;
 
-    // ========================================================================
-    // parallel_for: splits [begin, end) across workers, blocks until done
-    // ========================================================================
-    // fn(chunk_start, chunk_end) is called once per worker with its range.
-    // min_grain: minimum elements per chunk (avoids overhead for small ops).
-    // If total < min_grain * num_threads, runs serially.
-    // ========================================================================
+    int num_threads() const { return num_workers_; }
 
+    // Главный API. Семантика идентична предыдущему ThreadPool::parallel_for.
     void parallel_for(int64_t begin, int64_t end,
                       const std::function<void(int64_t, int64_t)>& fn,
                       int64_t min_grain = 1024) {
-        int64_t total = end - begin;
+        const int64_t total = end - begin;
         if (total <= 0) return;
 
-        // Serial for small work or single-thread pool
-        if (total < min_grain * num_threads_ || num_threads_ <= 1) {
+        // I4: nested parallel_for внутри текущего pool'а — serial.
+        if (t_in_parallel) { fn(begin, end); return; }
+
+        // Маленькая работа — serial без bouncing на воркеров.
+        if (total < min_grain * num_workers_ || num_workers_ <= 1) {
             fn(begin, end);
             return;
         }
 
-        int64_t chunk_size = (total + num_threads_ - 1) / num_threads_;
-        // Round chunk_size up to a multiple of 16 so thread boundaries never
-        // cut through a cacheline (16 × fp32 = 64 B). Otherwise adjacent
-        // threads ping-pong the shared cacheline at the boundary, and for
-        // decode-sized outputs (N=2560 / T=24 ≈ 107 chunks, 23 mis-aligned
-        // boundaries × ~217 parallel_fors / token ≈ ~5k invalidations per
-        // token). Only matters above the min_grain threshold where we
-        // actually parallelize, so it doesn't regress tiny ops.
-        // (agent_4_threadpool_audit.md Q2 / P2)
+        // Round chunk_size до 16 (cache line × 4) для предотвращения
+        // false sharing на boundaries.
+        int64_t chunk_size = (total + num_workers_ - 1) / num_workers_;
         chunk_size = ((chunk_size + 15) / 16) * 16;
-        int actual_chunks = 0;
 
-        for (int i = 0; i < num_threads_; i++) {
-            int64_t start = begin + i * chunk_size;
-            if (start >= end) break;
-            actual_chunks++;
+        // Реальное число chunks — сколько workers получит работу.
+        int n_chunks = 0;
+        for (int i = 0; i < num_workers_; ++i) {
+            int64_t s = begin + (int64_t)i * chunk_size;
+            if (s >= end) break;
+            n_chunks++;
+        }
+        if (n_chunks <= 1) { fn(begin, end); return; }
+
+        // I1: ждём пока все воркеры ack'нули предыдущий gen.
+        const uint32_t prev_gen = gen_.load(std::memory_order_relaxed);
+        for (int i = 0; i < num_workers_; ++i) {
+            // Простой spin — обычно занят 0 циклов в steady state
+            for (int spin = 0; spin < 256; ++spin) {
+                if (slots_[i].ack.load(std::memory_order_acquire) == prev_gen) goto next_slot;
+            }
+            // Slot отстаёт — ждём
+            while (slots_[i].ack.load(std::memory_order_acquire) != prev_gen) {
+                std::this_thread::yield();
+            }
+        next_slot:;
         }
 
-        if (actual_chunks <= 1) {
-            fn(begin, end);
-            return;
-        }
+        // I3: сейчас ВСЕ воркеры sleeping на gen_, безопасно публиковать
+        // descriptor.
+        cur_fn_     = &fn;
+        cur_begin_  = begin;
+        cur_end_    = end;
+        cur_chunk_  = chunk_size;
+        cur_n_chunks_.store(n_chunks, std::memory_order_relaxed);
+        next_chunk_.store(0, std::memory_order_relaxed);
+        done_count_.store(0, std::memory_order_relaxed);
 
-        std::atomic<int> tasks_done{0};
+        // Бампим gen и будим всех — release-store пары с acquire-load
+        // в worker_loop'е.
+        const uint32_t new_gen = prev_gen + 1;
+        gen_.store(new_gen, std::memory_order_release);
+        futex_wake_all(&gen_);
 
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            for (int i = 0; i < actual_chunks; i++) {
-                int64_t start = begin + i * chunk_size;
-                int64_t chunk_end = (std::min)(start + chunk_size, end);
-                tasks_.push([&fn, start, chunk_end, &tasks_done, this] {
-                    fn(start, chunk_end);
-                    tasks_done.fetch_add(1, std::memory_order_release);
-                    // FIX 3.3: wake main thread via condition_variable
-                    { std::lock_guard<std::mutex> lk(done_mutex_); }
-                    done_cv_.notify_one();
-                });
+        // Master тоже работает (не ждёт впустую).
+        t_in_parallel = true;
+        for (;;) {
+            const uint32_t k = next_chunk_.fetch_add(1, std::memory_order_acq_rel);
+            if (static_cast<int>(k) >= n_chunks) break;
+            const int64_t s = begin + (int64_t)k * chunk_size;
+            const int64_t e = std::min(s + chunk_size, end);
+            fn(s, e);
+            const uint32_t d = done_count_.fetch_add(1, std::memory_order_acq_rel) + 1;
+            if (d == static_cast<uint32_t>(n_chunks)) {
+                futex_wake_all(&done_count_);
             }
         }
-        cv_.notify_all();
+        t_in_parallel = false;
 
-        // FIX 3.3: sleep instead of burn CPU (was yield() spinlock)
-        {
-            std::unique_lock<std::mutex> lk(done_mutex_);
-            done_cv_.wait(lk, [&] { return tasks_done.load(std::memory_order_acquire) >= actual_chunks; });
+        // Ждём пока все chunks dispatched. Spin → futex_wait.
+        for (int spin = 0; spin < 1024; ++spin) {
+            if (done_count_.load(std::memory_order_acquire)
+                >= static_cast<uint32_t>(n_chunks)) goto done_wait;
         }
+        for (;;) {
+            const uint32_t cur = done_count_.load(std::memory_order_acquire);
+            if (cur >= static_cast<uint32_t>(n_chunks)) break;
+            if (watchdog_ms_) {
+                bool ok = futex_wait_timed(&done_count_, cur, watchdog_ms_);
+                if (!ok && done_count_.load() < (uint32_t)n_chunks) {
+                    // Watchdog fire — debug assert
+                    std::fprintf(stderr,
+                        "[ThreadPool] watchdog fire: gen=%u, done=%u/%d\n",
+                        new_gen, done_count_.load(), n_chunks);
+                    // Не abort — просто продолжаем ждать
+                }
+            } else {
+                futex_wait(&done_count_, cur);
+            }
+        }
+    done_wait:;
+        // Note: воркеры теперь ack'нут new_gen в своих slot'ах перед тем
+        // как уснуть на следующем gen_. Master НЕ ждёт ack здесь —
+        // следующий parallel_for сделает это в I1 wait выше.
     }
 
-    // Legacy overload: parallel_for(n, fn) == parallel_for(0, n, fn)
     void parallel_for(int64_t n, const std::function<void(int64_t, int64_t)>& fn) {
         parallel_for(0, n, fn);
     }
 
-    int num_threads() const { return num_threads_; }
-
 private:
+    struct alignas(64) Slot {
+        std::atomic<uint32_t> ack{0};
+        uint32_t pad[15];  // pad до 64 байт
+    };
+
     void worker_loop(int worker_id) {
 #if defined(__linux__) && !defined(_WIN32)
-        // Optional affinity pin: worker i → core i (round-robin over available).
-        // With NUMA-aware pinning, workers pin to specific NUMA nodes so the
-        // per-thread t_numa_node cache stays stable, and the NUMA replica
-        // fetch in GEMV returns the same local pointer every iteration.
-        if (pin_enabled_) {
-            // Round-robin pin: worker i → cpu (i % ncpu). Works both for
-            // 1-proc (where we want to hit every core) and TP (where the
-            // parent process is numactl --cpunodebind'd to N contiguous
-            // cores and kernel respects the cpuset).
-            //
-            // We tried globally-striped pinning across NUMA nodes here
-            // (commit 9663e88) but it regressed TP-4 from 5.5 → 1.7 tok/s
-            // because `cpu = node*cores_per_node + k` generated IDs outside
-            // the rank's cpuset → pthread_setaffinity_np either errored or
-            // clamped every worker onto the first allowed CPU, serialising
-            // all 7 workers. The agent-3 striping hypothesis was only valid
-            // for a SINGLE process with all cores available. Reverted.
+        // Pin доступен через PT_PIN_THREADS=1, но для TP-режима
+        // (numactl --cpunodebind) НЕ устанавливается — иначе воркеры
+        // ranks 1-3 пытаются pin'нуться вне их cpuset → kernel клампит
+        // их на одно ядро (см. scripts/run_tp_elbrus.sh guard).
+        const char* pin = std::getenv("PT_PIN_THREADS");
+        if (pin && pin[0] == '1') {
             int ncpu = static_cast<int>(std::thread::hardware_concurrency());
             if (ncpu <= 0) ncpu = 1;
             int cpu = worker_id % ncpu;
-            cpu_set_t cs;
-            CPU_ZERO(&cs);
-            CPU_SET(cpu, &cs);
+            cpu_set_t cs; CPU_ZERO(&cs); CPU_SET(cpu, &cs);
             pthread_setaffinity_np(pthread_self(), sizeof(cs), &cs);
         }
 #endif
-        // Prime thread-local NUMA node cache so first parallel_for doesn't
-        // pay sched_getcpu+numa_node_of_cpu latency on the critical path.
-        (void)current_numa_node();
+        (void)current_numa_node();  // прогрев t_numa_node
         (void)worker_id;
 
-        while (true) {
-            std::function<void()> task;
-            {
-                std::unique_lock<std::mutex> lock(mutex_);
-                cv_.wait(lock, [this] { return stop_ || !tasks_.empty(); });
-                if (stop_ && tasks_.empty()) return;
-                task = std::move(tasks_.front());
-                tasks_.pop();
+        uint32_t observed_gen = 0;
+
+        for (;;) {
+            // Ждём изменения gen
+            for (;;) {
+                if (stop_.load(std::memory_order_acquire)) return;
+                const uint32_t g = gen_.load(std::memory_order_acquire);
+                if (g != observed_gen) { observed_gen = g; break; }
+                // Sleep на futex до wake
+                futex_wait(&gen_, observed_gen);
             }
-            task();
+
+            if (stop_.load(std::memory_order_acquire)) return;
+
+            // I2: перечитываем descriptor КАЖДЫЙ wake — не кешируем.
+            const int n_chunks = cur_n_chunks_.load(std::memory_order_acquire);
+
+            // Drain chunks. master также drain'ит — race на next_chunk_
+            // отрабатывается atomic fetch_add.
+            t_in_parallel = true;
+            for (;;) {
+                const uint32_t k = next_chunk_.fetch_add(1, std::memory_order_acq_rel);
+                if (static_cast<int>(k) >= n_chunks) break;
+                const int64_t s = cur_begin_ + (int64_t)k * cur_chunk_;
+                const int64_t e = std::min(s + cur_chunk_, cur_end_);
+                (*cur_fn_)(s, e);
+                const uint32_t d = done_count_.fetch_add(1, std::memory_order_acq_rel) + 1;
+                if (d == static_cast<uint32_t>(n_chunks)) {
+                    futex_wake_all(&done_count_);
+                }
+            }
+            t_in_parallel = false;
+
+            // Ack текущий gen → master разрешит следующий dispatch
+            slots_[worker_id].ack.store(observed_gen, std::memory_order_release);
         }
     }
 
-    std::vector<std::thread> workers_;
-    std::queue<std::function<void()>> tasks_;
-    std::mutex mutex_;
-    std::condition_variable cv_;
-    std::mutex done_mutex_;              // FIX 3.3: for parallel_for completion
-    std::condition_variable done_cv_;    // FIX 3.3: wake main thread
-    bool stop_ = false;
-    int num_threads_;
-    bool pin_enabled_ = false;  // PT_PIN_THREADS=1 → 1 worker per core
+    int num_workers_ = 0;
+    uint32_t watchdog_ms_ = 0;
+
+    // Workers
+    std::vector<std::thread>  workers_;
+    std::unique_ptr<Slot[]>   slots_;
+
+    // Synchronization
+    std::atomic<uint32_t> gen_{0};
+    std::atomic<uint32_t> next_chunk_{0};
+    std::atomic<uint32_t> done_count_{0};
+    std::atomic<int>      cur_n_chunks_{0};
+    std::atomic<uint32_t> stop_{0};
+
+    // Descriptor (master-written under wait_workers_idle protection)
+    const std::function<void(int64_t,int64_t)>* cur_fn_ = nullptr;
+    int64_t cur_begin_ = 0;
+    int64_t cur_end_   = 0;
+    int64_t cur_chunk_ = 0;
 };
 
-// Global thread pool singleton — created once, lives forever
 inline ThreadPool& get_thread_pool() {
     static ThreadPool pool;
     return pool;
 }
 
-// Convenience: parallel_for(n, fn) using global pool
 inline void parallel_for(int64_t n, const std::function<void(int64_t, int64_t)>& fn) {
     get_thread_pool().parallel_for(n, fn);
 }
-
-// ============================================================================
-// parallel_for_1d: threshold-gated parallel loop
-// ============================================================================
-// Only parallelizes when n > threshold. For small ops, runs inline.
-// Use this in hot_loops.cpp to replace #pragma omp parallel for.
-//
-// Example:
-//   c10::parallel_for_1d(n, [&](int64_t s, int64_t e) {
-//       for (int64_t i = s; i < e; ++i) out[i] = in[i] * 2.0f;
-//   }, 65536);
-// ============================================================================
 
 inline void parallel_for_1d(int64_t n,
                             const std::function<void(int64_t, int64_t)>& fn,
@@ -295,4 +344,4 @@ inline void parallel_for_1d(int64_t n,
     }
 }
 
-} // namespace c10
+}  // namespace c10
