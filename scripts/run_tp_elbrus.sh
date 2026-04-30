@@ -10,6 +10,17 @@ cd ~/promethorch
 # Safety: systemd must not kill processes on SSH disconnect.
 loginctl enable-linger "$USER" 2>/dev/null || true
 
+# Guard: PT_PIN_THREADS=1 в TP-режиме катастрофически ломает производительность.
+# ThreadPool маппит worker_id на абсолютные CPU ID (0..31), а ранки 1-3 уже
+# numactl --cpunodebind'ы на CPU 8-15 / 16-23 / 24-31 — pin на 0..7 либо
+# отбрасывается kernel'ом, либо клампит всех на одно allowed CPU. Падает до
+# 1.4 tok/s вместо 9.4. Bisect: 2026-04-30.
+if [ "${PT_PIN_THREADS:-}" = "1" ]; then
+    echo "ERROR: PT_PIN_THREADS=1 в TP-режиме ломает NUMA-binding и режет tok/s в ~7 раз." >&2
+    echo "       Сними этот env и запусти снова. См. BENCH_ELBRUS.md." >&2
+    exit 1
+fi
+
 MODEL="$HOME/gguf_models/qwen3-4b-Q4_K_M.gguf"
 PROMPT="${2:-Write a short haiku about artificial intelligence}"
 MODE="${1:---greedy}"
