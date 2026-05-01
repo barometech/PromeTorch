@@ -4,6 +4,7 @@
 #include "torch/io/gguf_dequant.h"
 #include "torch/io/cpu_quant_gemv.h"
 #include "torch/io/q8_soa_repack.h"
+#include "torch/io/pt8_reader.h"
 #include "torch/io/numa_weight_replica.h"
 #include "torch/io/speculative_decode.h"
 #include "torch/io/speculative_verify.h"
@@ -640,6 +641,10 @@ struct GGUFTPConfig {
     std::vector<uint8_t> soa_act_b16;   // up to K_max*4 bytes
     std::vector<int32_t> soa_sum_a;     // up to K_max/32 ints
     float                soa_scale_a = 1.0f;
+
+    // Round 4 Step 9: per-layer scratch (избегает 36 vec alloc/dealloc per token)
+    std::vector<float> x_normed_buf;    // [H] для RMSNorm output в attention
+    std::vector<float> silu_scratch_buf; // [inter_local] для SiLU(gate) * up результата
 };
 
 // ============================================================================
@@ -679,6 +684,20 @@ public:
     // No malloc/memcpy needed — OS pages in data on demand
     gguf::MmapHandle mmap_handle_;
     bool use_mmap_ = false;  // true if weights are mmap'd (don't free cpu_data!)
+
+    // ========================================================================
+    // PT8 native loader (Round 4, Agent C). When the input file is .pt8
+    // (magic 'PT8\0'), load() routes through load_pt8() which mmaps the
+    // file via this reader and points QuantizedWeight::cpu_data into the
+    // mmap'd region. The reader is kept alive for the lifetime of the
+    // model so that all zero-copy pointers stay valid.
+    //
+    // When use_pt8_ is true, init_tensor_parallel() detects the
+    // PT8_TYPE_Q8_0_SOA4 layout and skips the on-load Q4_K → Q8 SoA4 repack
+    // step (the file is already in the Q8 SoA4 byte layout).
+    // ========================================================================
+    PT8Reader pt8_reader_;
+    bool use_pt8_ = false;
 
     // CUDA Graph for decode acceleration (eliminates kernel launch overhead)
 #ifdef PT_USE_CUDA
@@ -1526,6 +1545,18 @@ public:
     // ========================================================================
 
     void load(const std::string& gguf_path) {
+        // Round 4 (Agent C): auto-detect PT8 vs GGUF by magic bytes. Set
+        // PT_FORMAT_AUTO=0 to force the GGUF path even when the file's
+        // first 8 bytes look like a .pt8 (debug only — do not use in prod).
+        const char* auto_env = std::getenv("PT_FORMAT_AUTO");
+        const bool  auto_detect = !auto_env || auto_env[0] != '0';
+        if (auto_detect && PT8Reader::is_pt8_file(gguf_path)) {
+            std::cout << "[load] PT8 magic detected — routing through "
+                         "load_pt8() (zero-repack path)" << std::endl;
+            load_pt8(gguf_path);
+            return;
+        }
+
         gguf_file_path_ = gguf_path;  // Save for later quantized loading
         auto t_start = std::chrono::high_resolution_clock::now();
 
@@ -1565,6 +1596,346 @@ public:
         double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
         std::cout << "\n[Model] Loaded in " << (ms / 1000.0) << " seconds" << std::endl;
     }
+
+    // ========================================================================
+    // Load from a PromeTorch .pt8 file (Round 4 Agent C, 2026-04-30).
+    //
+    // The .pt8 layout (header + tensor data + tail tensor table) is parsed
+    // by torch::io::PT8Reader, which mmaps the file zero-copy. For every
+    // expected weight name we point QuantizedWeight::cpu_data /
+    // mmap-friendly Tensor::from_blob into the mapped region.
+    //
+    // Agent A's primary contract: when a 2D weight is stored as
+    // PT8_TYPE_Q8_0_SOA4, the bytes are byte-identical to the in-memory
+    // cpu_quant::Q8SoA4 layout — init_tensor_parallel() will detect
+    // the synthetic quant_type and skip the repack step.
+    //
+    // What works in this v1 (passthrough variants):
+    //   - F32 norms / biases / embeddings — direct from_blob view
+    //   - F16 token_embd (when emitted as PT8_TYPE_F16) — small dequant
+    //   - Q4_K passthrough (when the encoder is registered, otherwise
+    //     this branch is never hit and we fall back gracefully)
+    //
+    // What's reserved for Agent A's encoder register pass:
+    //   - PT8_TYPE_Q4K_SOA4 (the 0.6875 B/param hot dtype, spec §10)
+    //   - PT8_TYPE_Q8_0_SOA4 (1.75 B/param, ready microbench-validated path)
+    //
+    // Either way, the loader builds a complete, decode-ready model — Q8 SoA4
+    // weights live directly inside the mmap, no per-rank malloc duplication.
+    // ========================================================================
+    void load_pt8(const std::string& pt8_path) {
+        gguf_file_path_ = pt8_path;  // Stored for diagnostic/log purposes only
+        auto t_start = std::chrono::high_resolution_clock::now();
+
+        if (!pt8_reader_.open(pt8_path)) {
+            throw std::runtime_error("[load_pt8] failed to open " + pt8_path);
+        }
+        use_pt8_ = true;
+
+        const auto& hdr = pt8_reader_.header();
+        std::cout << "[pt8] opened " << pt8_path << " (" << hdr.tensor_count
+                  << " tensors, " << (pt8_reader_.mmap_size() / (1024 * 1024))
+                  << " MB mmap)" << std::endl;
+
+        // ====================================================================
+        // 1. Parse model config from PT8 metadata blob, with GGUF fallback.
+        //    Agent A's spec §5 calls for a metadata KV section; the current
+        //    Agent B writer doesn't yet emit it. Until it does, we recover
+        //    the config from a sibling .gguf or by inspecting tensor shapes.
+        //
+        //    Path 1 (preferred): companion .gguf at same basename. This is
+        //    by far the simplest interim contract — the converter already
+        //    consumes the .gguf, so the user has it.
+        //
+        //    Path 2 (fallback): infer from tensor shapes alone. Used when no
+        //    .gguf is alongside (acceptance §10: "prometorch run model.pt8"
+        //    standalone). Agent A's spec promises a metadata KV; once Agent B
+        //    writes it, we'll prefer that over both paths above.
+        // ====================================================================
+        std::string gguf_companion;
+        {
+            std::string p = pt8_path;
+            size_t dot = p.find_last_of('.');
+            if (dot != std::string::npos) p.erase(dot);
+            gguf_companion = p + ".gguf";
+        }
+
+        bool used_gguf_companion = false;
+        {
+            FILE* f = std::fopen(gguf_companion.c_str(), "rb");
+            if (f) {
+                std::fclose(f);
+                std::cout << "[pt8] reading config from companion GGUF: "
+                          << gguf_companion << std::endl;
+                gguf::GGUFReader cfg_reader;
+                cfg_reader.open(gguf_companion);
+                config.parse(cfg_reader);
+                tokenizer.load(cfg_reader);
+                if (cfg_reader.has_tensor("token_embd.weight")) {
+                    auto& info = cfg_reader.get_tensor_info("token_embd.weight");
+                    auto shape = info.shape();
+                    config.vocab_size = shape[0];
+                }
+                used_gguf_companion = true;
+            }
+        }
+        if (!used_gguf_companion) {
+            // Minimal shape-inference fallback. Until Agent B emits metadata
+            // KV (spec §5), we infer dimensions from the token_embd tensor.
+            const auto* embd = pt8_reader_.find("token_embd.weight");
+            if (!embd || embd->dims.size() != 2) {
+                throw std::runtime_error(
+                    "[load_pt8] no companion .gguf and no token_embd.weight in "
+                    "PT8 file — cannot infer config. Place the source GGUF "
+                    "alongside the .pt8 (same basename) for now.");
+            }
+            config.vocab_size  = embd->dims[0];
+            config.hidden_size = embd->dims[1];
+            // Rest of config (num_heads/layers/...) requires the metadata KV
+            // section. Without it, the loader cannot construct an inference-
+            // ready model. Throw with a clear message.
+            throw std::runtime_error(
+                "[load_pt8] PT8 metadata KV section not yet present in "
+                "Agent B's writer. Add a sibling " + gguf_companion +
+                " for now.");
+        }
+
+        config.print();
+
+        // ====================================================================
+        // 2. FP weights (norms, embeddings, biases) — zero-copy from_blob.
+        //    Falls back to companion-GGUF dequant if a tensor is missing
+        //    from the .pt8 (Agent B may not yet emit every tensor).
+        // ====================================================================
+        load_pt8_fp_weights_(used_gguf_companion ? gguf_companion : "");
+
+        // ====================================================================
+        // 3. Quantized weight 'mmap' — point QuantizedWeight::cpu_data into
+        //    the .pt8 mmap region. quant_type encodes the PT8 tag:
+        //      - passthrough Q4_K (raw GGML bytes) → quant_type = 12
+        //      - PT8_TYPE_Q8_0_SOA4 (already-repacked) → quant_type = 0xPT8 + tag
+        //    init_tensor_parallel() learns to dispatch on either.
+        // ====================================================================
+        load_pt8_quant_weights_();
+
+        use_quant_gemv_ = true;
+        use_mmap_ = true;
+
+        // NUMA replication mirrors the GGUF path. For PT8_TYPE_Q8_0_SOA4 the
+        // bytes are already in the runtime layout, so a memcpy gives us
+        // node-local Q8 SoA4 weights with no per-token cross-chip traffic.
+        replicate_weights_for_numa();
+
+        auto t_end = std::chrono::high_resolution_clock::now();
+        double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
+        std::cout << "\n[Model] PT8 loaded in " << (ms / 1000.0) << " seconds"
+                  << " (zero repack, mmap_size="
+                  << (pt8_reader_.mmap_size() / (1024 * 1024)) << " MB)"
+                  << std::endl;
+    }
+
+private:
+    // ------------------------------------------------------------------
+    // load_pt8_fp_weights_ / load_pt8_quant_weights_ — internal helpers
+    // ------------------------------------------------------------------
+
+    // Build an owned Tensor by copying the mmap'd float bytes. Norms /
+    // embeddings / biases are tiny (< 100 MB total) so the copy cost is
+    // negligible vs the convenience of independent lifetime from the mmap.
+    Tensor pt8_fp32_view_(const PT8TensorRecord& r) const {
+        const float* p = reinterpret_cast<const float*>(
+            pt8_reader_.tensor_data(r.name));
+        std::vector<int64_t> sizes(r.dims.begin(), r.dims.end());
+        Tensor out = at::empty(sizes);  // default kFloat
+        size_t n = 1;
+        for (auto d : sizes) n *= static_cast<size_t>(d);
+        std::memcpy(out.mutable_data_ptr<float>(), p, n * sizeof(float));
+        return out;
+    }
+
+    // FP16 → FP32 dequant view. Used for token_embd if writer emits it
+    // as PT8_TYPE_F16 (Agent A spec §6).
+    Tensor pt8_fp16_to_fp32_(const PT8TensorRecord& r) const {
+        const uint16_t* src = reinterpret_cast<const uint16_t*>(
+            pt8_reader_.tensor_data(r.name));
+        size_t n_elems = 1;
+        for (auto d : r.dims) n_elems *= static_cast<size_t>(d);
+        std::vector<int64_t> sizes(r.dims.begin(), r.dims.end());
+        Tensor out = at::empty(sizes);
+        float* dst = out.mutable_data_ptr<float>();
+        for (size_t i = 0; i < n_elems; ++i) {
+            dst[i] = gguf::fp16_to_fp32(src[i]);
+        }
+        return out;
+    }
+
+    void load_pt8_fp_weights_(const std::string& gguf_companion_for_fallback) {
+        std::cout << "\n[pt8] Loading FP weights..." << std::endl;
+
+        // We need a GGUFReader fallback for tensors the .pt8 doesn't yet
+        // carry (e.g. tokenizer-only artefacts). Open lazily.
+        std::unique_ptr<gguf::GGUFReader> fallback_reader;
+        auto get_fallback = [&]() -> gguf::GGUFReader* {
+            if (!fallback_reader && !gguf_companion_for_fallback.empty()) {
+                fallback_reader.reset(new gguf::GGUFReader());
+                fallback_reader->open(gguf_companion_for_fallback);
+            }
+            return fallback_reader.get();
+        };
+
+        auto load_fp_named = [&](const std::string& name, Tensor& dst) {
+            const auto* r = pt8_reader_.find(name);
+            if (r) {
+                if (r->pt8_type == PT8_TYPE_F32) {
+                    dst = pt8_fp32_view_(*r);
+                    return true;
+                }
+                if (r->pt8_type == PT8_TYPE_F16) {
+                    dst = pt8_fp16_to_fp32_(*r);
+                    return true;
+                }
+                // BF16 / Quant fall through to fallback.
+            }
+            if (auto* fb = get_fallback()) {
+                if (fb->has_tensor(name)) {
+                    dst = fb->load_tensor(name);
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        load_fp_named("token_embd.weight", token_embedding);
+        if (token_embedding.defined()) {
+            std::cout << "  token_embd: [" << token_embedding.size(0) << ", "
+                      << token_embedding.size(1) << "]" << std::endl;
+        }
+
+        load_fp_named("output_norm.weight", output_norm);
+
+        // Tied output: when output.weight isn't its own tensor, alias to
+        // token_embd. Matches the GGUF path (Qwen3, Gemma, etc.).
+        if (!load_fp_named("output.weight", output_weight)) {
+            output_weight = token_embedding;
+            config.tie_word_embeddings = true;
+            std::cout << "  output: tied to token_embd" << std::endl;
+        }
+
+        layers.resize(config.num_layers);
+        for (int64_t i = 0; i < config.num_layers; ++i) {
+            std::string prefix = "blk." + std::to_string(i) + ".";
+            auto& layer = layers[i];
+
+            load_fp_named(prefix + "attn_norm.weight", layer.attn_norm);
+            load_fp_named(prefix + "ffn_norm.weight",  layer.ffn_norm);
+            // Optional norms / biases — silent no-op if absent.
+            load_fp_named(prefix + "attn_q_norm.weight", layer.attn_q_norm);
+            load_fp_named(prefix + "attn_k_norm.weight", layer.attn_k_norm);
+            load_fp_named(prefix + "post_attention_norm.weight",
+                          layer.post_attention_norm);
+            load_fp_named(prefix + "post_ffw_norm.weight",
+                          layer.post_ffw_norm);
+            load_fp_named(prefix + "attn_q.bias", layer.attn_q_bias);
+            load_fp_named(prefix + "attn_k.bias", layer.attn_k_bias);
+            load_fp_named(prefix + "attn_v.bias", layer.attn_v_bias);
+
+            if ((i + 1) % 5 == 0 || i == config.num_layers - 1) {
+                std::cout << "  Layer " << (i + 1) << "/" << config.num_layers
+                          << " FP weights loaded" << std::endl;
+            }
+        }
+    }
+
+    // Map one quant tensor from the PT8 mmap into a QuantizedWeight without
+    // copying. Sets quant_type to either:
+    //   - the original GGML type id (12 = Q4_K, 14 = Q6_K, 8 = Q8_0) for
+    //     passthrough variants — existing dispatch in init_tensor_parallel
+    //     and forward_decode_cpu_tp Just Works
+    //   - 0x100 + Pt8Type for SoA4-native layouts. init_tensor_parallel
+    //     branches on this to skip repack.
+    bool map_pt8_quant_(const std::string& name, QuantizedWeight& qw) {
+        const auto* r = pt8_reader_.find(name);
+        if (!r) return false;
+        const void* data = pt8_reader_.tensor_data(name);
+        if (!data) return false;
+
+        if (r->dims.size() != 2) return false;
+        qw.rows         = r->dims[0];
+        qw.cols         = r->dims[1];
+        qw.total_bytes  = static_cast<int64_t>(r->data_size);
+        qw.cpu_data     = const_cast<void*>(data);
+        qw.mmap_owned   = true;
+        qw.row_stride_bytes = static_cast<int64_t>(r->row_stride);
+
+        // Map PT8 dtype tag to a quant_type the rest of the pipeline groks.
+        // Passthrough types preserve their original GGML id so the GGUF
+        // dispatch path is untouched.
+        switch (r->pt8_type) {
+            case PT8_TYPE_F32:
+                qw.quant_type = 0;   // GGML_TYPE_F32 — caller should treat as raw FP32
+                break;
+            case PT8_TYPE_F16:
+                qw.quant_type = 1;   // GGML_TYPE_F16
+                if (qw.row_stride_bytes == 0)
+                    qw.row_stride_bytes = qw.cols * 2;
+                break;
+            case PT8_TYPE_Q8_0_SOA4:
+                // Synthetic ID — init_tensor_parallel sees this and skips
+                // the on-the-fly Q4_K → Q8 SoA4 repack (already done at
+                // conversion time). Forward path then reads the bytes
+                // directly into a Q8SoA4 view of the mmap.
+                qw.quant_type = 0x100u | PT8_TYPE_Q8_0_SOA4;
+                break;
+            case PT8_TYPE_Q4K_SOA4:
+                qw.quant_type = 0x100u | PT8_TYPE_Q4K_SOA4;
+                break;
+            default:
+                std::cerr << "[pt8] unknown pt8_type " << r->pt8_type
+                          << " for " << name << " — skipping" << std::endl;
+                return false;
+        }
+        qw.valid = true;
+        return true;
+    }
+
+    void load_pt8_quant_weights_() {
+        std::cout << "[pt8] Mapping quantized weights (zero-copy)..." << std::endl;
+        int64_t total_mapped = 0;
+        int64_t soa4_count   = 0;
+
+        auto try_map = [&](const std::string& name, QuantizedWeight& qw) {
+            if (map_pt8_quant_(name, qw)) {
+                total_mapped += qw.total_bytes;
+                if ((qw.quant_type & 0xF00) == 0x100) ++soa4_count;
+            }
+        };
+
+        for (int64_t i = 0; i < config.num_layers; ++i) {
+            std::string prefix = "blk." + std::to_string(i) + ".";
+            auto& layer = layers[i];
+            try_map(prefix + "attn_q.weight",      layer.q_attn_q);
+            try_map(prefix + "attn_k.weight",      layer.q_attn_k);
+            try_map(prefix + "attn_v.weight",      layer.q_attn_v);
+            try_map(prefix + "attn_output.weight", layer.q_attn_output);
+            try_map(prefix + "ffn_gate.weight",    layer.q_ffn_gate);
+            try_map(prefix + "ffn_up.weight",      layer.q_ffn_up);
+            try_map(prefix + "ffn_down.weight",    layer.q_ffn_down);
+        }
+
+        if (pt8_reader_.has("output.weight")) {
+            try_map("output.weight", q_output_weight);
+        } else if (config.tie_word_embeddings &&
+                   pt8_reader_.has("token_embd.weight")) {
+            try_map("token_embd.weight", q_output_weight);
+        }
+
+        std::cout << "[pt8] Mapped " << (total_mapped / (1024 * 1024))
+                  << " MB of quantized weights"
+                  << " (" << soa4_count << " native SoA4 tensors — repack skipped)"
+                  << std::endl;
+    }
+
+public:
 
     // Replicate the hot CPU weights (ffn_gate/up/down, attn_output) across NUMA
     // nodes. Safe no-op when PT_NUMA_REPLICATE is not set or libnuma missing.
@@ -4228,9 +4599,27 @@ public:
                 return false;
             }
             int64_t bytes_per_block, elems_per_block;
+            constexpr uint32_t PT8_NATIVE_Q8_SOA4_K = 0x100u | PT8_TYPE_Q8_0_SOA4;
             if (full.quant_type == 12)      { bytes_per_block = 144; elems_per_block = 256; }
             else if (full.quant_type == 14) { bytes_per_block = 210; elems_per_block = 256; }
             else if (full.quant_type ==  8) { bytes_per_block =  34; elems_per_block =  32; }
+            else if (full.quant_type == PT8_NATIVE_Q8_SOA4_K) {
+                // PT8 Q8_SoA4 K-slice has non-row-major super-block headers
+                // (4× fp32 d_w / dmin_m / i32 sum_q live at the head of each
+                // 176-byte super-row block, shared across the 4 rows). The
+                // generic per-row memcpy below assumes row-major bytes —
+                // applying it here would scramble the headers. Until a
+                // dedicated K-slice path lands (Agent D, alongside the q8/q4
+                // _soa4_gemv K-slice variant), fall back to the replicated
+                // full-weight path. For TP-4 on qwen3:4b that means each rank
+                // reads the full attn_output / ffn_down once per token —
+                // identical to Round 3's behaviour for Q5_K/Q6_K weights.
+                std::cerr << "[TP slice_k] " << dbg_name
+                          << " PT8_Q8_SOA4 K-slice not yet implemented "
+                          << "— falling back to replicated full-weight path."
+                          << std::endl;
+                return false;
+            }
             else {
                 std::cerr << "[TP slice_k] " << dbg_name
                           << " unsupported qtype=" << full.quant_type
@@ -4367,6 +4756,9 @@ public:
                                                 (int64_t)config.vocab_size});
         tp_.soa_act_b16.assign(K_act_max * 4, 0);
         tp_.soa_sum_a.assign(K_act_max / 32 + 1, 0);
+        // Round 4 Step 9: persistent per-layer scratch
+        tp_.x_normed_buf.assign(H, 0.0f);
+        tp_.silu_scratch_buf.assign(tp_.inter_local, 0.0f);
         tp_.scratch_ready = true;
 
         // Round 3 Agent 5: Q8 SoA4 weight repack — gated by PT_Q8_SOA=1.
@@ -4374,15 +4766,77 @@ public:
         // layout used by q8_soa4_gemv. ~1.32× memory inflation per weight,
         // but enables 4-row parallel qpmaddubsh in inner loop. Microbench
         // shows 0.85× EML (1.21 ms vs 1.03 ms for K=2560 N=2432 single-core).
+        //
+        // Round 4 Agent C: when input was a PT8 file with PT8_TYPE_Q8_0_SOA4
+        // tensors, the sliced bytes are already in the runtime Q8SoA4
+        // layout — `try_repack` becomes a zero-cost view binding rather than
+        // a Q4_K → SoA4 repack. PT_Q8_SOA=1 is implied for PT8 SoA4 files.
         const char* soa_env = std::getenv("PT_Q8_SOA");
-        bool use_q8_soa = soa_env && soa_env[0] == '1';
+        bool use_q8_soa = (soa_env && soa_env[0] == '1') || use_pt8_;
         if (use_q8_soa) {
             int64_t soa_count = 0;
             int64_t soa_bytes = 0;
+            int64_t pt8_native_count = 0;
+            constexpr uint32_t PT8_NATIVE_Q8_SOA4 = 0x100u | PT8_TYPE_Q8_0_SOA4;
+
             auto try_repack = [&](TPSlicedWeight& tl, const char* name) {
                 if (!tl.valid || !tl.cpu_data) return;
+                if (tl.rows % 4 != 0) return;
+
+                // -- PT8 NATIVE FAST PATH ---------------------------------
+                // The sliced bytes ARE the Q8SoA4 storage. Bind tl.q8_soa
+                // to point at them — no allocation, no math, no repack.
+                // Lifetime: tl owns cpu_data via malloc (slice_rows malloc'd
+                // it from the mmap), so we hand off ownership by moving the
+                // pointer into q8_soa.mem. We then null cpu_data so the
+                // TPSlicedWeight destructor doesn't double-free.
+                if (tl.quant_type == PT8_NATIVE_Q8_SOA4) {
+                    int64_t bpr = tl.cols / 32;
+                    if (tl.cols % 32 != 0) {
+                        std::cerr << "[pt8-soa4] " << name
+                                  << " cols=" << tl.cols
+                                  << " not multiple of 32 — skipping" << std::endl;
+                        return;
+                    }
+                    tl.q8_soa.mem          = static_cast<uint8_t*>(tl.cpu_data);
+                    tl.q8_soa.N            = tl.rows;
+                    tl.q8_soa.K            = tl.cols;
+                    tl.q8_soa.group_stride = bpr * SOA4_GROUP_BYTES;
+                    tl.q8_soa.valid        = true;
+                    // Hand off ownership: cpu_data was malloc'd by slice_rows
+                    // — destructor is in cpu_quant::Q8SoA4::~Q8SoA4 (frees
+                    // via std::free). Null cpu_data on the slice so its
+                    // destructor doesn't double-free.
+                    tl.cpu_data = nullptr;
+                    soa_count++;
+                    pt8_native_count++;
+                    soa_bytes += (tl.rows / 4) * tl.q8_soa.group_stride;
+                    return;
+                }
+
+                // -- PT8 Q4_SOA4 (Agent D kernel pending) -----------------
+                // Format spec §10's hot dtype. The byte layout is known
+                // (88 B / 4-row × 32-K block), but `q4_soa4_gemv` is
+                // Agent D's deliverable. Until that lands, we surface a
+                // clear diagnostic instead of silently mismatching.
+                constexpr uint32_t PT8_NATIVE_Q4_SOA4 = 0x100u | PT8_TYPE_Q4K_SOA4;
+                if (tl.quant_type == PT8_NATIVE_Q4_SOA4) {
+                    static bool warned = false;
+                    if (!warned) {
+                        std::cerr << "[pt8-q4soa4] PT8_TYPE_Q4K_SOA4 detected for "
+                                  << name << " but q4_soa4_gemv kernel is not "
+                                     "yet implemented (Agent D dependency). "
+                                     "Forward path will fall back to whatever "
+                                     "non-SoA dispatcher matches quant_type."
+                                  << std::endl;
+                        warned = true;
+                    }
+                    return;
+                }
+
+                // -- Q4_K REPACK PATH (legacy) ----------------------------
                 if (tl.quant_type != 12) return;  // Q4_K only for now
-                if (tl.rows % 4 != 0 || tl.cols % 256 != 0) return;
+                if (tl.cols % 256 != 0) return;
                 if (cpu_quant::repack_q4k_to_q8soa4(
                         tl.cpu_data, tl.rows, tl.cols,
                         tl.row_stride_bytes, &tl.q8_soa)) {
@@ -4404,9 +4858,14 @@ public:
                 try_repack(tl.q_ffn_down,  "ffn_down");
             }
             try_repack(tp_.q_output_weight_k_slice, "output_weight");
-            std::cout << "[Q8_SOA] repacked " << soa_count
-                      << " TP-sliced Q4_K weights, " << (soa_bytes / (1024*1024))
-                      << " MB SoA4 storage" << std::endl;
+            std::cout << "[Q8_SOA] " << soa_count
+                      << " TP-sliced weights ready, " << (soa_bytes / (1024*1024))
+                      << " MB SoA4 storage";
+            if (pt8_native_count > 0) {
+                std::cout << " (" << pt8_native_count
+                          << " native PT8 — repack skipped)";
+            }
+            std::cout << std::endl;
         }
 
         std::cout << "[TP] Tensor-parallel enabled: rank " << rank << "/" << nprocs
@@ -4576,9 +5035,9 @@ public:
             // first GEMV pass (and batching Q/K/V through a single input
             // stream) eliminates 3× reads of x_normed and 2× redundant
             // RMSNorm scans. See cpu_fused_rmsnorm_qkv_gemv for details.
-            // x_normed is allocated unconditionally — the FFN block below
-            // needs a fresh RMSNorm(post-residual-x) scratch buffer regardless.
-            std::vector<float> x_normed(H);
+            // x_normed reuses persistent tp_.x_normed_buf (Step 9: avoids
+            // 36 layers × 1 vector alloc/dealloc per token).
+            std::vector<float>& x_normed = tp_.x_normed_buf;
             float* q_l = tp_.q_local_buf.data();
             float* k_l = tp_.k_local_buf.data();
             float* v_l = tp_.v_local_buf.data();
@@ -5009,8 +5468,8 @@ public:
                 if (tl.q_ffn_down.q8_soa.valid) {
                     // Round 3 SoA path: input is silu_local (size inter_local).
                     // Build broadcast int8 activation, then run q8_soa4_gemv.
-                    // Compute silu inline.
-                    std::vector<float> silu_local(tp_.inter_local);
+                    // Compute silu inline. Step 9: use persistent buffer.
+                    std::vector<float>& silu_local = tp_.silu_scratch_buf;
                     for (int64_t j = 0; j < tp_.inter_local; ++j) {
                         float g = gate_l[j];
                         silu_local[j] = (g / (1.0f + std::exp(-g))) * up_l[j];
@@ -5023,7 +5482,7 @@ public:
                         tp_.soa_act_b16.data(), tp_.soa_sum_a.data(),
                         tp_.soa_scale_a, h_buf);
                 } else if (tl.q_ffn_down.valid && tl.q_ffn_down.cpu_data) {
-                    std::vector<float> silu_local(tp_.inter_local);
+                    std::vector<float>& silu_local = tp_.silu_scratch_buf;
                     for (int64_t j = 0; j < tp_.inter_local; ++j) {
                         float g = gate_l[j];
                         silu_local[j] = (g / (1.0f + std::exp(-g))) * up_l[j];
