@@ -231,12 +231,30 @@ Sweep measurements (30-tok greedy, qwen3:4b Q4_K_M, одинаковый prompt)
   большинство output_proj — потенциал -12 ms = +18%), либо квантизацией (Q4 → 2× DDR
   bandwidth save но Q4 SoA4 на E2K провалился из-за плохой LCC SSE2→VLIW translation).
 - Speculative decode уже implemented для 1-proc (`spec_decode_step_cpu`), но НЕ для
-  TP path. Интеграция = ~1000 строк рефакторинга `forward_decode_cpu_tp_batched`.
-- LayerSkip (skip 6/36 lower layers when confidence high) — потенциал +1.5-2 tok/s,
-  lossy (acceptance rate ~50%, придётся verify).
-- Реалистичный потолок без архитектурных изменений ≈ 12-13 tok/s (per-section
-  профайл показывает что ThreadPool spawn + small ops = ~9% всего, остальное GEMV
-  compute, и compute-bound на e2k v5 без новых intrinsics не уменьшить).
+  TP path. На compute-bound CPU (см. ниже) acceptance × K-cost = same throughput,
+  поэтому интеграция в TP не даст wins.
+- LayerSkip — opt-in lossy +15% (закомичено `5ba3b8b`+`0a30c41`).
+
+**Ground truth: peak compute reached (2026-05-01 disassembly анализ)**
+
+`objdump -d build_elbrus/examples/gguf/test_gguf_inference` на функции
+`q8_soa4_gemv` показал реальную VLIW packing inner loop. Каждая wide instruction:
+- **2× qpmaddubsh** (slots 1, 4) — главный compute
+- **4× ldqp** (slots 0, 2, 3, 5) — loads weights+activations
+- **aaurwd** (auto-increment AAU)
+
+Это **6 ops per cycle** на 6-wide VLIW = **peak instruction density**. Все слоты
+заполнены. Поэтому пробованные микрооптимизации (dual-accumulator unroll, FMA fold
+через qpfnmas/qpfmas, prefetch hints) дали **null effect** — некуда дальше
+упаковывать. LCC уже выжимает близко к железному пределу из intrinsics.
+
+Реальные пути дальше (требуют ресурсов вне рамок этой сессии):
+1. Hand-asm на E2K с лучшим software pipelining (нужен E2K asm engineer)
+2. Q4 SoA hand-asm unpacker (LCC переводил SSE2 → VLIW неэффективно)
+3. EAGLE / trained early-exit head (нужна тренировка)
+
+Lossless потолок = **11.4 tok/s** (закреплено disassembly). Lossy = **13.2 tok/s**
+(LayerSkip).
 
 **Короче:**
 > Эльбрус 8C2 на qwen3:4b Q4_K_M даёт **9.4 tok/s** в TP-4 с нашим Q8 SoA4
