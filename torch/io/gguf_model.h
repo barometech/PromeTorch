@@ -5142,22 +5142,39 @@ public:
             {
                 int64_t total_seq = past_len + 1;
                 float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
-                // Where rank's heads land in the full q_dim buffer
                 int64_t q_off = tp_.rank * tp_.q_dim_local;
                 for (int64_t hl = 0; hl < n_heads_l; ++hl) {
                     int64_t global_h = tp_.head_start + hl;
-                    int64_t kv_hl    = hl / heads_per_group;  // within rank
+                    int64_t kv_hl    = hl / heads_per_group;
                     (void)global_h;
                     const float* q_head = q_l + hl * head_dim;
                     float* out_head = tp_.attn_full_buf.data() + q_off + hl * head_dim;
                     std::vector<float> scores(total_seq);
+                    // Round 4: AVX2 Q@K (head_dim=128 → 16 iters of 8-fp32)
                     for (int64_t t = 0; t < total_seq; ++t) {
                         const float* k_head = k_cache + t * tp_.kv_dim_local + kv_hl * head_dim;
+#if defined(__AVX2__)
+                        __m256 acc = _mm256_setzero_ps();
+                        int64_t d = 0;
+                        for (; d + 8 <= head_dim; d += 8) {
+                            __m256 q = _mm256_loadu_ps(q_head + d);
+                            __m256 k = _mm256_loadu_ps(k_head + d);
+                            acc = _mm256_fmadd_ps(q, k, acc);
+                        }
+                        // horizontal sum 8 floats
+                        __m128 lo = _mm256_castps256_ps128(acc);
+                        __m128 hi = _mm256_extractf128_ps(acc, 1);
+                        __m128 s = _mm_add_ps(lo, hi);
+                        s = _mm_hadd_ps(s, s);
+                        s = _mm_hadd_ps(s, s);
+                        float dot = _mm_cvtss_f32(s);
+                        for (; d < head_dim; ++d) dot += q_head[d] * k_head[d];
+#else
                         float dot = 0.0f;
                         for (int64_t d = 0; d < head_dim; ++d) dot += q_head[d] * k_head[d];
+#endif
                         scores[t] = dot * scale;
                     }
-                    // softmax
                     float mx = scores[0];
                     for (int64_t t = 1; t < total_seq; ++t) if (scores[t] > mx) mx = scores[t];
                     float se = 0.0f;
@@ -5167,12 +5184,24 @@ public:
                     }
                     float inv = 1.0f / (se + 1e-10f);
                     for (int64_t t = 0; t < total_seq; ++t) scores[t] *= inv;
-                    // weighted sum
                     std::fill(out_head, out_head + head_dim, 0.0f);
+                    // Round 4: AVX2 weighted-sum @V
                     for (int64_t t = 0; t < total_seq; ++t) {
                         const float* v_head = v_cache + t * tp_.kv_dim_local + kv_hl * head_dim;
                         float w = scores[t];
+#if defined(__AVX2__)
+                        __m256 wv = _mm256_set1_ps(w);
+                        int64_t d = 0;
+                        for (; d + 8 <= head_dim; d += 8) {
+                            __m256 v = _mm256_loadu_ps(v_head + d);
+                            __m256 o = _mm256_loadu_ps(out_head + d);
+                            o = _mm256_fmadd_ps(wv, v, o);
+                            _mm256_storeu_ps(out_head + d, o);
+                        }
+                        for (; d < head_dim; ++d) out_head[d] += w * v_head[d];
+#else
                         for (int64_t d = 0; d < head_dim; ++d) out_head[d] += w * v_head[d];
+#endif
                     }
                 }
             }
