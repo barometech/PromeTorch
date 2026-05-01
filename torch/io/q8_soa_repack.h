@@ -255,6 +255,53 @@ inline void q8_soa4_quant_activation(const float* x, int64_t K,
     }
 }
 
+// q8_soa4_silu_quant_activation_fused — SiLU(gate)*up + Q8 SoA4 quant
+// activation in 2 passes (vs scalar SiLU + q8_soa4_quant_activation = 5
+// passes + 1 vector alloc). Lossless: identical arithmetic, just fewer
+// memory passes and no per-call std::vector<uint8_t>(K) allocation.
+//   silu_out: K floats — written as f32 SiLU result (still needed for the
+//     ffn_down legacy path on neighbouring branches).
+//   a_b16, sum_a_per_block, out_scale_a: same as q8_soa4_quant_activation.
+inline void q8_soa4_silu_quant_activation_fused(
+    const float* gate, const float* up,
+    int64_t K, float* silu_out,
+    uint8_t* a_b16, int32_t* sum_a_per_block,
+    float* out_scale_a) {
+    float max_a = 0.0f;
+    for (int64_t i = 0; i < K; i++) {
+        float g = gate[i];
+        float s = (g / (1.0f + std::exp(-g))) * up[i];
+        silu_out[i] = s;
+        float v = std::fabs(s);
+        if (v > max_a) max_a = v;
+    }
+    float scale_a = max_a > 0.0f ? max_a / 127.0f : 1.0f;
+    *out_scale_a = scale_a;
+    float inv_a = 1.0f / scale_a;
+
+    int64_t bpr = K / 32;
+    for (int64_t b = 0; b < bpr; b++) {
+        int sb_sum = 0;
+        const float* row = silu_out + b * 32;
+        uint8_t* dst_block = a_b16 + b * 128;  // 8 K-groups × 16 bytes
+        for (int kg = 0; kg < 8; kg++) {
+            uint8_t buf4[4];
+            for (int r = 0; r < 4; r++) {
+                int v = (int)std::lrint(row[kg*4 + r] * inv_a);
+                if (v > 127) v = 127; else if (v < -127) v = -127;
+                buf4[r] = static_cast<uint8_t>(v + 128);
+                sb_sum += v;
+            }
+            uint8_t* dst = dst_block + kg * 16;
+            dst[0]  = buf4[0]; dst[1]  = buf4[1]; dst[2]  = buf4[2]; dst[3]  = buf4[3];
+            dst[4]  = buf4[0]; dst[5]  = buf4[1]; dst[6]  = buf4[2]; dst[7]  = buf4[3];
+            dst[8]  = buf4[0]; dst[9]  = buf4[1]; dst[10] = buf4[2]; dst[11] = buf4[3];
+            dst[12] = buf4[0]; dst[13] = buf4[1]; dst[14] = buf4[2]; dst[15] = buf4[3];
+        }
+        sum_a_per_block[b] = sb_sum;
+    }
+}
+
 // ==============================================================================
 // q8_soa4_gemv: production multi-threaded GEMV.
 // ==============================================================================
@@ -448,6 +495,82 @@ inline void q8_soa4_gemv_dual(const Q8SoA4* w0, const Q8SoA4* w1,
     // Non-E2K fallback: 2 separate calls
     q8_soa4_gemv(w0, a_b16, sum_a_per_block, scale_a, y0);
     q8_soa4_gemv(w1, a_b16, sum_a_per_block, scale_a, y1);
+#endif
+}
+
+// ==============================================================================
+// q8_soa4_gemv_triple — fused 3-output GEMV (для Q+K+V): single parallel_for.
+// w0/w1/w2 могут иметь РАЗНЫЕ N (qwen3 ratio Q:K:V = 4:1:1). Все три
+// должны иметь одинаковый K.
+// ==============================================================================
+inline void q8_soa4_gemv_triple(const Q8SoA4* w0, const Q8SoA4* w1, const Q8SoA4* w2,
+                                 const uint8_t* a_b16,
+                                 const int32_t* sum_a_per_block,
+                                 float scale_a,
+                                 float* y0, float* y1, float* y2) {
+    int64_t bpr   = w0->K / 32;
+    int64_t gpr0  = w0->N / 4;
+    int64_t gpr1  = w1->N / 4;
+    int64_t gpr2  = w2->N / 4;
+    int64_t gpr_max = std::max(gpr0, std::max(gpr1, gpr2));
+
+#ifdef __e2k__
+    v2di scale_a_v;
+    {
+        float arr[4] = {scale_a, scale_a, scale_a, scale_a};
+        std::memcpy(&scale_a_v, arr, 16);
+    }
+
+    auto compute_one = [&](const Q8SoA4* w, int64_t g, float* y) {
+        const uint8_t* gp = w->mem + g * w->group_stride;
+        v2di fp_acc = {0, 0};
+        for (int64_t b = 0; b < bpr; b++) {
+            const uint8_t* sb = gp + b * SOA4_GROUP_BYTES;
+            v2di scales_v = *(const v2di*)(sb + 0);
+            v2di dmins_v  = *(const v2di*)(sb + 16);
+            v2di sum_q_v  = *(const v2di*)(sb + 32);
+            const v2di* W_v = (const v2di*)(sb + 48);
+            const v2di* A_v = (const v2di*)(a_b16 + b*128);
+
+            v2di acc_i32 = {0, 0};
+            _Pragma("loop count(8)") _Pragma("ivdep")
+            for (int kg = 0; kg < 8; kg++) {
+                v2di p16 = __builtin_e2k_qpmaddubsh(W_v[kg], A_v[kg]);
+                v2di p32 = __builtin_e2k_qpmaddh(p16, SOA4_ONES16);
+                acc_i32  = __builtin_e2k_qpaddw(acc_i32, p32);
+            }
+
+            v2di shift_v = __builtin_e2k_qpmullw(sum_q_v, SOA4_SHIFT128);
+            v2di dot_signed = __builtin_e2k_qpsubw(acc_i32, shift_v);
+            v2di acc_f = __builtin_e2k_qpistofs(dot_signed);
+            float sa_b_val = static_cast<float>(sum_a_per_block[b]);
+            v2di sa_v;
+            {
+                float arr[4] = {sa_b_val, sa_b_val, sa_b_val, sa_b_val};
+                std::memcpy(&sa_v, arr, 16);
+            }
+            v2di term_w = __builtin_e2k_qpfmuls(scales_v, acc_f);
+            v2di term_d = __builtin_e2k_qpfmuls(dmins_v, sa_v);
+            v2di delta  = __builtin_e2k_qpfmuls(scale_a_v,
+                          __builtin_e2k_qpfsubs(term_w, term_d));
+            fp_acc = __builtin_e2k_qpfadds(fp_acc, delta);
+        }
+        float lanes[4]; std::memcpy(lanes, &fp_acc, 16);
+        y[g*4 + 0] = lanes[0]; y[g*4 + 1] = lanes[1];
+        y[g*4 + 2] = lanes[2]; y[g*4 + 3] = lanes[3];
+    };
+
+    c10::get_thread_pool().parallel_for(0, gpr_max, [&](int64_t g_start, int64_t g_end) {
+        for (int64_t g = g_start; g < g_end; g++) {
+            if (g < gpr0) compute_one(w0, g, y0);
+            if (g < gpr1) compute_one(w1, g, y1);
+            if (g < gpr2) compute_one(w2, g, y2);
+        }
+    }, 1);
+#else
+    q8_soa4_gemv(w0, a_b16, sum_a_per_block, scale_a, y0);
+    q8_soa4_gemv(w1, a_b16, sum_a_per_block, scale_a, y1);
+    q8_soa4_gemv(w2, a_b16, sum_a_per_block, scale_a, y2);
 #endif
 }
 
