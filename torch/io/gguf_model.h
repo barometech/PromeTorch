@@ -5022,7 +5022,37 @@ public:
             return ms;
         };
 
+        // PT_LAYER_SKIP="20,21,22" — пропускать перечисленные слои (lossy).
+        // Residual identity: x_buf[cur] остаётся как есть (нет нового block contribution).
+        // Кэшируется один раз per process. Каждый skip = ~2.5 ms/token (на 36-слойной qwen3:4b).
+        static const std::vector<int> skip_layers = []() {
+            std::vector<int> s;
+            const char* env = std::getenv("PT_LAYER_SKIP");
+            if (env && env[0]) {
+                const char* p = env;
+                while (*p) {
+                    while (*p == ',' || *p == ' ') ++p;
+                    if (!*p) break;
+                    int v = 0; bool any = false;
+                    while (*p >= '0' && *p <= '9') { v = v*10 + (*p - '0'); ++p; any = true; }
+                    if (any) s.push_back(v);
+                }
+            }
+            return s;
+        }();
+        auto is_skipped_layer = [](int64_t idx) {
+            for (int v : skip_layers) if (v == (int)idx) return true;
+            return false;
+        };
+
         for (int64_t i = 0; i < config.num_layers; ++i) {
+            if (is_skipped_layer(i)) {
+                // Skip layer entirely — identity residual. KV cache for this
+                // layer remains uninitialized at past_len position; that's
+                // intentional (subsequent tokens won't read from it because
+                // the layer is skipped for them too).
+                continue;
+            }
             const auto& layer   = layers[i];
             const auto& tl      = tp_.layers[i];
             float* x_ptr = tp_.x_buf[cur].data();
