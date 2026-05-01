@@ -5061,15 +5061,13 @@ public:
                 cpu_quant::q8_soa4_quant_activation(x_normed.data(), H,
                     tp_.soa_act_b16.data(), tp_.soa_sum_a.data(),
                     &tp_.soa_scale_a);
-                cpu_quant::q8_soa4_gemv(&tl.q_attn_q.q8_soa,
+                // Triple-fused: 1 parallel_for dispatch вместо 3, shared
+                // activation reads, shared pool wakeup. Save ~3×200μs ×
+                // 36 layers ≈ 20 ms/token overhead.
+                cpu_quant::q8_soa4_gemv_triple(
+                    &tl.q_attn_q.q8_soa, &tl.q_attn_k.q8_soa, &tl.q_attn_v.q8_soa,
                     tp_.soa_act_b16.data(), tp_.soa_sum_a.data(),
-                    tp_.soa_scale_a, q_l);
-                cpu_quant::q8_soa4_gemv(&tl.q_attn_k.q8_soa,
-                    tp_.soa_act_b16.data(), tp_.soa_sum_a.data(),
-                    tp_.soa_scale_a, k_l);
-                cpu_quant::q8_soa4_gemv(&tl.q_attn_v.q8_soa,
-                    tp_.soa_act_b16.data(), tp_.soa_sum_a.data(),
-                    tp_.soa_scale_a, v_l);
+                    tp_.soa_scale_a, q_l, k_l, v_l);
             } else if (can_fuse_qkv) {
                 cpu_quant::cpu_fused_rmsnorm_qkv_gemv(
                     x_ptr, layer.attn_norm.data_ptr<float>(), eps, add_one,
