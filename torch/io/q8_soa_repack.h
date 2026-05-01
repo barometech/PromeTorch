@@ -352,6 +352,105 @@ inline void q8_soa4_gemv(const Q8SoA4* w,
 #endif
 }
 
+// ==============================================================================
+// q8_soa4_gemv_dual — fused 2-output GEMV (для gate+up): одна parallel_for
+// dispatch вместо двух, single read of activation buffer per N-row group.
+//
+// Output layout: y0[N0], y1[N0] sequential. Both weights matrices must have
+// equal N (gate.N == up.N == inter_local) и equal K. Каждый rank computes
+// его 1/4 N-rows для обоих matrix.
+// ==============================================================================
+inline void q8_soa4_gemv_dual(const Q8SoA4* w0, const Q8SoA4* w1,
+                               const uint8_t* a_b16,
+                               const int32_t* sum_a_per_block,
+                               float scale_a,
+                               float* y0, float* y1) {
+    int64_t bpr = w0->K / 32;
+    int64_t gpr = w0->N / 4;
+
+#ifdef __e2k__
+    v2di scale_a_v;
+    {
+        float arr[4] = {scale_a, scale_a, scale_a, scale_a};
+        std::memcpy(&scale_a_v, arr, 16);
+    }
+
+    c10::get_thread_pool().parallel_for(0, gpr, [&](int64_t g_start, int64_t g_end) {
+        for (int64_t g = g_start; g < g_end; g++) {
+            const uint8_t* gp0 = w0->mem + g * w0->group_stride;
+            const uint8_t* gp1 = w1->mem + g * w1->group_stride;
+            v2di fp_acc0 = {0, 0};
+            v2di fp_acc1 = {0, 0};
+            for (int64_t b = 0; b < bpr; b++) {
+                const uint8_t* sb0 = gp0 + b * SOA4_GROUP_BYTES;
+                const uint8_t* sb1 = gp1 + b * SOA4_GROUP_BYTES;
+                v2di scales0_v = *(const v2di*)(sb0 + 0);
+                v2di dmins0_v  = *(const v2di*)(sb0 + 16);
+                v2di sum_q0_v  = *(const v2di*)(sb0 + 32);
+                v2di scales1_v = *(const v2di*)(sb1 + 0);
+                v2di dmins1_v  = *(const v2di*)(sb1 + 16);
+                v2di sum_q1_v  = *(const v2di*)(sb1 + 32);
+                const v2di* W0_v = (const v2di*)(sb0 + 48);
+                const v2di* W1_v = (const v2di*)(sb1 + 48);
+                const v2di* A_v  = (const v2di*)(a_b16 + b*128);
+
+                v2di acc_i32_0 = {0, 0};
+                v2di acc_i32_1 = {0, 0};
+                _Pragma("loop count(8)") _Pragma("ivdep")
+                for (int kg = 0; kg < 8; kg++) {
+                    v2di a_kg = A_v[kg];
+                    v2di p16_0 = __builtin_e2k_qpmaddubsh(W0_v[kg], a_kg);
+                    v2di p16_1 = __builtin_e2k_qpmaddubsh(W1_v[kg], a_kg);
+                    v2di p32_0 = __builtin_e2k_qpmaddh(p16_0, SOA4_ONES16);
+                    v2di p32_1 = __builtin_e2k_qpmaddh(p16_1, SOA4_ONES16);
+                    acc_i32_0  = __builtin_e2k_qpaddw(acc_i32_0, p32_0);
+                    acc_i32_1  = __builtin_e2k_qpaddw(acc_i32_1, p32_1);
+                }
+
+                float sa_b_val = static_cast<float>(sum_a_per_block[b]);
+                v2di sa_v;
+                {
+                    float arr[4] = {sa_b_val, sa_b_val, sa_b_val, sa_b_val};
+                    std::memcpy(&sa_v, arr, 16);
+                }
+                // matrix 0
+                {
+                    v2di shift_v = __builtin_e2k_qpmullw(sum_q0_v, SOA4_SHIFT128);
+                    v2di dot_signed = __builtin_e2k_qpsubw(acc_i32_0, shift_v);
+                    v2di acc_f = __builtin_e2k_qpistofs(dot_signed);
+                    v2di term_w = __builtin_e2k_qpfmuls(scales0_v, acc_f);
+                    v2di term_d = __builtin_e2k_qpfmuls(dmins0_v, sa_v);
+                    v2di delta  = __builtin_e2k_qpfmuls(scale_a_v,
+                                  __builtin_e2k_qpfsubs(term_w, term_d));
+                    fp_acc0 = __builtin_e2k_qpfadds(fp_acc0, delta);
+                }
+                // matrix 1
+                {
+                    v2di shift_v = __builtin_e2k_qpmullw(sum_q1_v, SOA4_SHIFT128);
+                    v2di dot_signed = __builtin_e2k_qpsubw(acc_i32_1, shift_v);
+                    v2di acc_f = __builtin_e2k_qpistofs(dot_signed);
+                    v2di term_w = __builtin_e2k_qpfmuls(scales1_v, acc_f);
+                    v2di term_d = __builtin_e2k_qpfmuls(dmins1_v, sa_v);
+                    v2di delta  = __builtin_e2k_qpfmuls(scale_a_v,
+                                  __builtin_e2k_qpfsubs(term_w, term_d));
+                    fp_acc1 = __builtin_e2k_qpfadds(fp_acc1, delta);
+                }
+            }
+            float lanes0[4]; std::memcpy(lanes0, &fp_acc0, 16);
+            float lanes1[4]; std::memcpy(lanes1, &fp_acc1, 16);
+            y0[g*4 + 0] = lanes0[0]; y0[g*4 + 1] = lanes0[1];
+            y0[g*4 + 2] = lanes0[2]; y0[g*4 + 3] = lanes0[3];
+            y1[g*4 + 0] = lanes1[0]; y1[g*4 + 1] = lanes1[1];
+            y1[g*4 + 2] = lanes1[2]; y1[g*4 + 3] = lanes1[3];
+        }
+    }, 1);
+#else
+    // Non-E2K fallback: 2 separate calls
+    q8_soa4_gemv(w0, a_b16, sum_a_per_block, scale_a, y0);
+    q8_soa4_gemv(w1, a_b16, sum_a_per_block, scale_a, y1);
+#endif
+}
+
 }  // namespace cpu_quant
 }  // namespace io
 }  // namespace torch
