@@ -5495,16 +5495,14 @@ public:
             } else {
                 // Legacy path: K-slice ffn_down + AllReduce-sum.
                 if (tl.q_ffn_down.q8_soa.valid) {
-                    // Round 3 SoA path: input is silu_local (size inter_local).
-                    // Build broadcast int8 activation, then run q8_soa4_gemv.
-                    // Compute silu inline. Step 9: use persistent buffer.
+                    // Round 4 Item 2: fused SiLU + Q8 SoA4 quant in
+                    // q8_soa_repack.h (out-of-line so LCC can optimize it).
+                    // 2 passes vs old 5 + per-call vector<uint8_t>(K) alloc.
+                    // Lossless — identical FP/INT arithmetic.
                     std::vector<float>& silu_local = tp_.silu_scratch_buf;
-                    for (int64_t j = 0; j < tp_.inter_local; ++j) {
-                        float g = gate_l[j];
-                        silu_local[j] = (g / (1.0f + std::exp(-g))) * up_l[j];
-                    }
-                    cpu_quant::q8_soa4_quant_activation(silu_local.data(),
-                        tp_.inter_local,
+                    cpu_quant::q8_soa4_silu_quant_activation_fused(
+                        gate_l, up_l,
+                        tp_.inter_local, silu_local.data(),
                         tp_.soa_act_b16.data(), tp_.soa_sum_a.data(),
                         &tp_.soa_scale_a);
                     cpu_quant::q8_soa4_gemv(&tl.q_ffn_down.q8_soa,
