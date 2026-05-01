@@ -70,6 +70,7 @@ for rank in 0 1 2 3; do
     OMP_NUM_THREADS=8 \
     PT_NUMA_REPLICATE=0 \
     PT_DDP_SHM=1 \
+    PT_Q8_SOA="${PT_Q8_SOA:-1}" \
     numactl --cpunodebind=$rank --membind=$rank \
         "$BIN" "$MODEL" \
         --nprocs 4 --rank $rank \
