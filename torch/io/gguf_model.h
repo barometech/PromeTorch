@@ -645,6 +645,10 @@ struct GGUFTPConfig {
     // Round 4 Step 9: per-layer scratch (избегает 36 vec alloc/dealloc per token)
     std::vector<float> x_normed_buf;    // [H] для RMSNorm output в attention
     std::vector<float> silu_scratch_buf; // [inter_local] для SiLU(gate) * up результата
+
+    // PT_LAYER_SKIP применяется ТОЛЬКО когда in_decode_phase=true. Prefill всегда
+    // прогоняет полные 36 слоёв (важно для accurate prompt KV cache).
+    bool in_decode_phase = true;
 };
 
 // ============================================================================
@@ -5046,7 +5050,7 @@ public:
         };
 
         for (int64_t i = 0; i < config.num_layers; ++i) {
-            if (is_skipped_layer(i)) {
+            if (tp_.in_decode_phase && is_skipped_layer(i)) {
                 // Skip layer entirely — identity residual. KV cache for this
                 // layer remains uninitialized at past_len position; that's
                 // intentional (subsequent tokens won't read from it because
@@ -5695,11 +5699,15 @@ public:
             std::cout << "[Generate-TP] Prompt tokens: " << input_tokens.size() << std::endl;
         }
 
-        // Prefill: run every prompt token through forward_decode_cpu_tp one at a time
+        // Prefill: run every prompt token through forward_decode_cpu_tp one at a time.
+        // tp_.in_decode_phase=false → PT_LAYER_SKIP отключён внутри forward_decode_cpu_tp
+        // на prefill (сохраняем accurate prompt encoding; prefill-throughput неважен).
+        tp_.in_decode_phase = false;
         Tensor logits;
         for (int64_t t : input_tokens) {
             logits = forward_decode_cpu_tp(t);
         }
+        tp_.in_decode_phase = true;
 
         // Generation loop
         std::vector<int32_t> generated;
