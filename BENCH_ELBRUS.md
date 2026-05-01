@@ -205,8 +205,26 @@ Sweep measurements (30-tok greedy, qwen3:4b Q4_K_M, одинаковый prompt)
 - Эльбрус PromeTorch TP-4 + Q8 SoA4 + persistent ThreadPool (8t/rank) 10.6 tok/s
 - Эльбрус PromeTorch + fused gate+up Q8 SoA4 GEMV 10.8 tok/s
 - Эльбрус PromeTorch **+ AVX2 attention math + fused SiLU+Q8 quant + triple-fused QKV (commits `4365799`..`bf18c10`)** **11.4 tok/s** ★ (Round 4 lossless)
-- Эльбрус PromeTorch **+ PT_LAYER_SKIP="22,24,26,28,30,32" decode-only (Item 3, lossy)** **13.2 tok/s** (commits `5ba3b8b`+`0a30c41`)
-- Эльбрус PromeTorch **+ PT_LAYER_SKIP=15-26 contiguous (12 слоёв)** **15.1 tok/s** — но output деградирует
+- Эльбрус PromeTorch **+ PT_LAYER_SKIP="22,24,26,28,30,32" decode-only (6 alt, lossy)** **13.2 tok/s**
+- Эльбрус PromeTorch **+ PT_LAYER_SKIP="14,16,18,20,22,24,26,28,30,32,34" (11 alt)** **14.9 tok/s** — text "poem repeats", читаемо
+- Эльбрус PromeTorch **+ PT_LAYER_SKIP="12,14,16,18,20,22,24,26,28,30,32,34" (12 alt)** **15.5 tok/s** ★ — text короткий, sometimes garbage
+- Эльбрус PromeTorch + skip 15-26 contiguous (12 слоёв) **15.1 tok/s** — output полностью деградирует
+
+**LayerSkip sweep (decode-only, PT_Q8_SOA=1, qwen3:4b Q4_K_M):**
+
+| Pattern | Layers | tok/s | Quality |
+|---------|-------:|------:|---------|
+| baseline | 0 | 11.4 | clean |
+| 22,24,26,28,30,32 | 6 alt high | 13.2 | "and the moon" repeat |
+| 20,22,...,34 | 8 alt | 13.8 | unicode garbage |
+| 18,20,...,34 | 9 alt | 14.4 | "1. 1. The Rain" |
+| 16,18,...,34 | 10 alt | 14.7 | mixed |
+| 14,16,...,34 | 11 alt | **14.9** | "poem" repeat — best readable@high |
+| 12,14,...,34 | 12 alt | **15.5** ★ | short / garbage |
+| 15-26 contiguous | 12 cont | 15.1 | full garbage |
+
+Alternating pattern сохраняет coherence лучше contiguous — каждый skip layer
+имеет соседний non-skip обрабатывающий context window.
 - **Разрыв ×7.2** (A100 PromeTorch vs Эльбрус TP-4 best) — на CPU-only Russian
   VLIW мы достигли 13.8% от GPU PromeTorch. Q8 SoA4 — 4-row interleaved INT8
   layout под `qpmaddubsh` (VNNI-style INT8 MAD на e2k v5), репакуется при
