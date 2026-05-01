@@ -196,20 +196,45 @@ Sweep measurements (30-tok greedy, qwen3:4b Q4_K_M, одинаковый prompt)
 - PyTorch-PyTorch разрыв **×9.84** — точно равен TFLOPS ratio. Железо работает на своё.
 - PromeTorch+EML+TUDA отыгрывает до **×1.22** (с NUMA-aware Local-SGD 4×8c).
 
-**Inference Q4_K_M (transformer decode, 2026-04-30):**
+**Inference Q4_K_M (transformer decode, 2026-05-01):**
 - A100 Ollama 164.7 tok/s, A100 PromeTorch 82.6 tok/s
 - Эльбрус llama.cpp (pure-C pthread 32t) 3.3 tok/s
 - Эльбрус PromeTorch 1-proc (24t + interleave=all) 5.2 tok/s
 - Эльбрус PromeTorch TP-4 + Q8 SoA4 (`PT_Q8_SOA=1`) 9.4 tok/s
 - Эльбрус PromeTorch TP-4 + Q8 SoA4 + persistent ThreadPool (7t/rank) 9.9 tok/s
-- Эльбрус PromeTorch **TP-4 + Q8 SoA4 + persistent ThreadPool (8t/rank, no NUMA replicate)** **10.6 tok/s** ★ (Round 4)
-- **Разрыв ×8.8** (A100 PromeTorch vs Эльбрус TP-4 best) — на CPU-only Russian
-  VLIW мы достигли 11.4% от GPU PromeTorch. Q8 SoA4 — 4-row interleaved INT8
+- Эльбрус PromeTorch TP-4 + Q8 SoA4 + persistent ThreadPool (8t/rank) 10.6 tok/s
+- Эльбрус PromeTorch + fused gate+up Q8 SoA4 GEMV 10.8 tok/s
+- Эльбрус PromeTorch **+ AVX2 attention math + fused SiLU+Q8 quant + triple-fused QKV (commits `4365799`..`bf18c10`)** **11.4 tok/s** ★ (Round 4)
+- **Разрыв ×7.2** (A100 PromeTorch vs Эльбрус TP-4 best) — на CPU-only Russian
+  VLIW мы достигли 13.8% от GPU PromeTorch. Q8 SoA4 — 4-row interleaved INT8
   layout под `qpmaddubsh` (VNNI-style INT8 MAD на e2k v5), репакуется при
   загрузке из Q4_K блоков. См. `torch/io/q8_soa_repack.h`.
-- **Потенциал дальше:** Q6_K SoA repack для ffn_down (+0.5 tok/s), persistent
-  ThreadPool (+0.5-1 tok/s), speculative decoding с PLD (+1-2 tok/s).
-  Реалистичный потолок 12-14 tok/s (33% от bandwidth теоретического 28.5).
+
+**Per-section профилировка (PT_Q8_SOA=1, PT_PROFILE_LAYER=1, qwen3:4b TP-4, ms/token):**
+
+| Секция | ms | % | Что делает |
+|--------|---:|--:|------------|
+| ffn_down | 25.69 | 28.6% | q8_soa4_gemv 2560×9728/4 (k-slice) + SiLU+quant prep |
+| attn_phase | 20.39 | 22.7% | RMSNorm + triple QKV + biases + qk_norm + RoPE + KV cache + Q@K + softmax + V@scores |
+| output_proj | 17.47 | 19.4% | RMSNorm + Q8 SoA4 GEMV 152k×640 (k-slice 1/4) |
+| gate_up | 16.37 | 18.2% | RMSNorm + fused dual GEMV (gate+up на 9728×2560/4) |
+| attn_output | 4.73 | 5.3% | Q8 SoA4 GEMV 2560×4096/4 |
+| allreduce(ao) | 3.64 | 4.0% | SHM AllReduce на 2560 floats |
+| allreduce(fdown) | 1.61 | 1.8% | SHM AllReduce на 2560 floats |
+| **Total** | **89.96** | **100%** | = 11.12 tok/s aggregate |
+
+**Что осталось для +N tok/s:**
+- ffn_down + output_proj + gate_up + attn_output = **64.26 ms (71%)** — все Q8 SoA4
+  GEMVs. Чтобы их ускорить, нужно либо архитектурно (speculative decoding пропускает
+  большинство output_proj — потенциал -12 ms = +18%), либо квантизацией (Q4 → 2× DDR
+  bandwidth save но Q4 SoA4 на E2K провалился из-за плохой LCC SSE2→VLIW translation).
+- Speculative decode уже implemented для 1-proc (`spec_decode_step_cpu`), но НЕ для
+  TP path. Интеграция = ~1000 строк рефакторинга `forward_decode_cpu_tp_batched`.
+- LayerSkip (skip 6/36 lower layers when confidence high) — потенциал +1.5-2 tok/s,
+  lossy (acceptance rate ~50%, придётся verify).
+- Реалистичный потолок без архитектурных изменений ≈ 12-13 tok/s (per-section
+  профайл показывает что ThreadPool spawn + small ops = ~9% всего, остальное GEMV
+  compute, и compute-bound на e2k v5 без новых intrinsics не уменьшить).
 
 **Короче:**
 > Эльбрус 8C2 на qwen3:4b Q4_K_M даёт **9.4 tok/s** в TP-4 с нашим Q8 SoA4
