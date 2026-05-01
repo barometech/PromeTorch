@@ -274,7 +274,6 @@ private:
                 if (stop_.load(std::memory_order_acquire)) return;
                 const uint32_t g = gen_.load(std::memory_order_acquire);
                 if (g != observed_gen) { observed_gen = g; break; }
-                // Sleep на futex до wake
                 futex_wait(&gen_, observed_gen);
             }
 
