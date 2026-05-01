@@ -649,6 +649,15 @@ struct GGUFTPConfig {
     // PT_LAYER_SKIP применяется ТОЛЬКО когда in_decode_phase=true. Prefill всегда
     // прогоняет полные 36 слоёв (важно для accurate prompt KV cache).
     bool in_decode_phase = true;
+
+    // Round 5 Item 8: per-token reusable scratch (избегает std::vector<float>(total_seq)
+    // в hot loop attention math — 8 heads × 36 layers = 288 alloc/free per token).
+    std::vector<float> scores_buf;
+    // RoPE cos/sin cache — past_len одинаков для всех 36 слоёв в одном decode шаге,
+    // поэтому precompute один раз. (Sonnet 4.6 lateral finding.)
+    std::vector<float> rope_cos_cache;
+    std::vector<float> rope_sin_cache;
+    int64_t rope_cache_past_len = -1;  // invalidate marker
 };
 
 // ============================================================================
@@ -5149,11 +5158,22 @@ public:
             }
 
             // --- RoPE (uses current past_len position) ---
+            // Round 5 Item 8: cos/sin cached across all 36 layers within one decode
+            // step (past_len identical). Saves 35/36 × rope_precompute = ~0.5-1 ms/token.
             {
-                float rope_cos[256], rope_sin[256];
-                at::native::hot::rope_precompute(rope_cos, rope_sin,
-                    past_len, head_dim, config.rope_freq_base);
-                at::native::hot::rope_apply_fused(q_l, k_l, rope_cos, rope_sin,
+                int64_t hd_half = head_dim / 2;
+                if (tp_.rope_cache_past_len != past_len) {
+                    if ((int64_t)tp_.rope_cos_cache.size() < hd_half) {
+                        tp_.rope_cos_cache.resize(hd_half);
+                        tp_.rope_sin_cache.resize(hd_half);
+                    }
+                    at::native::hot::rope_precompute(
+                        tp_.rope_cos_cache.data(), tp_.rope_sin_cache.data(),
+                        past_len, head_dim, config.rope_freq_base);
+                    tp_.rope_cache_past_len = past_len;
+                }
+                at::native::hot::rope_apply_fused(q_l, k_l,
+                    tp_.rope_cos_cache.data(), tp_.rope_sin_cache.data(),
                     n_heads_l, n_kv_l, head_dim);
             }
 
@@ -5181,8 +5201,15 @@ public:
                     (void)global_h;
                     const float* q_head = q_l + hl * head_dim;
                     float* out_head = tp_.attn_full_buf.data() + q_off + hl * head_dim;
-                    std::vector<float> scores(total_seq);
-                    // Round 4: AVX2 Q@K (head_dim=128 → 16 iters of 8-fp32)
+                    // Round 5 Item 8: reuse persistent scores buffer (avoid 8 heads
+                    // × 36 layers = 288 std::vector alloc/free per token).
+                    if ((int64_t)tp_.scores_buf.size() < total_seq) {
+                        tp_.scores_buf.resize(total_seq);
+                    }
+                    float* scores = tp_.scores_buf.data();
+                    // Q@K dot product. AVX2 path для x86 dev/test, e2k v5 SIMD path
+                    // через qpfmuls+qpfadds (4 fp32 lanes per vector op) для Эльбруса —
+                    // даёт ~4× speedup vs scalar fallback. head_dim=128 = 32 итераций × 4 lanes.
                     for (int64_t t = 0; t < total_seq; ++t) {
                         const float* k_head = k_cache + t * tp_.kv_dim_local + kv_hl * head_dim;
 #if defined(__AVX2__)
@@ -5193,13 +5220,27 @@ public:
                             __m256 k = _mm256_loadu_ps(k_head + d);
                             acc = _mm256_fmadd_ps(q, k, acc);
                         }
-                        // horizontal sum 8 floats
                         __m128 lo = _mm256_castps256_ps128(acc);
                         __m128 hi = _mm256_extractf128_ps(acc, 1);
                         __m128 s = _mm_add_ps(lo, hi);
                         s = _mm_hadd_ps(s, s);
                         s = _mm_hadd_ps(s, s);
                         float dot = _mm_cvtss_f32(s);
+                        for (; d < head_dim; ++d) dot += q_head[d] * k_head[d];
+#elif defined(__e2k__)
+                        // 4-way fp32 SIMD через qpfmuls + qpfadds. q_head/k_head выровнены
+                        // на 16B (std::vector + posix_memalign в TP init). head_dim=128 → 32 шагов.
+                        typedef long long v2di __attribute__((vector_size(16)));
+                        v2di acc = {0, 0};
+                        int64_t d = 0;
+                        for (; d + 4 <= head_dim; d += 4) {
+                            v2di qv = *(const v2di*)(q_head + d);
+                            v2di kv = *(const v2di*)(k_head + d);
+                            v2di prod = __builtin_e2k_qpfmuls(qv, kv);
+                            acc = __builtin_e2k_qpfadds(acc, prod);
+                        }
+                        float lanes[4]; std::memcpy(lanes, &acc, 16);
+                        float dot = lanes[0] + lanes[1] + lanes[2] + lanes[3];
                         for (; d < head_dim; ++d) dot += q_head[d] * k_head[d];
 #else
                         float dot = 0.0f;
@@ -5217,7 +5258,7 @@ public:
                     float inv = 1.0f / (se + 1e-10f);
                     for (int64_t t = 0; t < total_seq; ++t) scores[t] *= inv;
                     std::fill(out_head, out_head + head_dim, 0.0f);
-                    // Round 4: AVX2 weighted-sum @V
+                    // V @ scores weighted sum. e2k SIMD path аналогично Q@K.
                     for (int64_t t = 0; t < total_seq; ++t) {
                         const float* v_head = v_cache + t * tp_.kv_dim_local + kv_hl * head_dim;
                         float w = scores[t];
@@ -5229,6 +5270,20 @@ public:
                             __m256 o = _mm256_loadu_ps(out_head + d);
                             o = _mm256_fmadd_ps(wv, v, o);
                             _mm256_storeu_ps(out_head + d, o);
+                        }
+                        for (; d < head_dim; ++d) out_head[d] += w * v_head[d];
+#elif defined(__e2k__)
+                        typedef long long v2di __attribute__((vector_size(16)));
+                        float warr[4] = {w, w, w, w};
+                        v2di wv;
+                        std::memcpy(&wv, warr, 16);
+                        int64_t d = 0;
+                        for (; d + 4 <= head_dim; d += 4) {
+                            v2di vv = *(const v2di*)(v_head + d);
+                            v2di ov = *(v2di*)(out_head + d);
+                            v2di prod = __builtin_e2k_qpfmuls(wv, vv);
+                            ov = __builtin_e2k_qpfadds(ov, prod);
+                            *(v2di*)(out_head + d) = ov;
                         }
                         for (; d < head_dim; ++d) out_head[d] += w * v_head[d];
 #else
