@@ -50,8 +50,10 @@ for rank in 0 1 2 3; do
     # vs 1 NUMA bottleneck.
     # NOTE: --membind and --preferred conflict on Elbrus numactl ("Conflicting
     # policies"). Use --membind alone for strict local allocation.
-    # OMP_NUM_THREADS=7 (not 8): same sweet-spot reason as 1-proc 24-vs-32 —
-    # leave 1 core per NUMA node free for OS daemons / IRQ handlers. Sweep:
+    # OMP_NUM_THREADS=8: после Round 4 Step 1 (persistent ThreadPool, commit
+    # a338ae6) sweet-spot сместился с 7t (mutex+CV pool, 8t крошился sync'ом)
+    # на 8t (full NUMA node utilization). Sweep 2026-05-01:
+    # 7t = 9.9 tok/s, 8t = 10.5 tok/s (+6%). Старая запись (mutex+CV):
     # 4t=2.1, 6t=3.0, 7t=3.4, 8t=2.9.
     # PT_PIN_THREADS is deliberately NOT set here. In TP mode each rank is
     # already numactl --cpunodebind'd to 8 contiguous cores, but the ThreadPool
@@ -65,8 +67,8 @@ for rank in 0 1 2 3; do
     # but it's "free" in the sense that memory is already membind'd and the
     # copy happens once at load. Keep it on.
     PT_NO_NUMA_POOL=1 \
-    OMP_NUM_THREADS=7 \
-    PT_NUMA_REPLICATE=1 \
+    OMP_NUM_THREADS=8 \
+    PT_NUMA_REPLICATE=0 \
     PT_DDP_SHM=1 \
     numactl --cpunodebind=$rank --membind=$rank \
         "$BIN" "$MODEL" \
