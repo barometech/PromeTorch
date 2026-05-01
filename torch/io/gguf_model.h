@@ -5347,12 +5347,12 @@ public:
                 cpu_quant::q8_soa4_quant_activation(x_normed.data(), H,
                     tp_.soa_act_b16.data(), tp_.soa_sum_a.data(),
                     &tp_.soa_scale_a);
-                cpu_quant::q8_soa4_gemv(&tl.q_ffn_gate.q8_soa,
+                // Round 4: fused gate+up — single parallel_for dispatch,
+                // shared activation reads per N-row group.
+                cpu_quant::q8_soa4_gemv_dual(
+                    &tl.q_ffn_gate.q8_soa, &tl.q_ffn_up.q8_soa,
                     tp_.soa_act_b16.data(), tp_.soa_sum_a.data(),
-                    tp_.soa_scale_a, gate_l);
-                cpu_quant::q8_soa4_gemv(&tl.q_ffn_up.q8_soa,
-                    tp_.soa_act_b16.data(), tp_.soa_sum_a.data(),
-                    tp_.soa_scale_a, up_l);
+                    tp_.soa_scale_a, gate_l, up_l);
             } else if (can_fuse_ffn) {
                 cpu_quant::cpu_fused_rmsnorm_gate_up_gemv(
                     x_cur, layer.ffn_norm.data_ptr<float>(), eps, add_one,
