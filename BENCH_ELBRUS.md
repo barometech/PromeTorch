@@ -204,7 +204,9 @@ Sweep measurements (30-tok greedy, qwen3:4b Q4_K_M, одинаковый prompt)
 - Эльбрус PromeTorch TP-4 + Q8 SoA4 + persistent ThreadPool (7t/rank) 9.9 tok/s
 - Эльбрус PromeTorch TP-4 + Q8 SoA4 + persistent ThreadPool (8t/rank) 10.6 tok/s
 - Эльбрус PromeTorch + fused gate+up Q8 SoA4 GEMV 10.8 tok/s
-- Эльбрус PromeTorch **+ AVX2 attention math + fused SiLU+Q8 quant + triple-fused QKV (commits `4365799`..`bf18c10`)** **11.4 tok/s** ★ (Round 4)
+- Эльбрус PromeTorch **+ AVX2 attention math + fused SiLU+Q8 quant + triple-fused QKV (commits `4365799`..`bf18c10`)** **11.4 tok/s** ★ (Round 4 lossless)
+- Эльбрус PromeTorch **+ PT_LAYER_SKIP="22,24,26,28,30,32" (Item 3, lossy)** **13.1 tok/s** (commit `5ba3b8b`)
+- Эльбрус PromeTorch **+ PT_LAYER_SKIP=15-26 contiguous (12 слоёв)** **15.1 tok/s** — но output деградирует
 - **Разрыв ×7.2** (A100 PromeTorch vs Эльбрус TP-4 best) — на CPU-only Russian
   VLIW мы достигли 13.8% от GPU PromeTorch. Q8 SoA4 — 4-row interleaved INT8
   layout под `qpmaddubsh` (VNNI-style INT8 MAD на e2k v5), репакуется при
