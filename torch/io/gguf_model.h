@@ -5686,7 +5686,22 @@ public:
         // computes partial logits over FULL vocab, AllReduce-sum to combine.
         // Eliminates the replicated-K-read that was costing ~131 MB/token
         // aggregate bandwidth. Per Round 2 agent_9 §4.2: +14% alone (~+0.7 tok/s).
-        if (tp_.q_output_weight_k_slice.q8_soa.valid) {
+        //
+        // BUG-12 fix: Q8 SoA4 quant_activation использует per-tensor AbsMax
+        // scale (max_a/127), что теряет точность когда residual stream
+        // имеет outliers. На cyrillic prompt-ах qwen3-4B Q4_K активация
+        // перед lm_head имеет outliers — scale_a становится большим, мелкие
+        // компоненты округляются в 0, argmax промахивается на high-vocab
+        // (русские) tokens. Bisect 2026-05-02: PT_Q8_SOA=0 → русский ОК
+        // (8.1 tok/s), PT_Q8_SOA=1 → русский калич (11.4 tok/s).
+        //
+        // PT_LM_HEAD_FP=1 — отключить Q8 SoA только для lm_head (1 GEMV
+        // per token). Сохраняет SoA для FFN/attention (большая часть
+        // compute), даёт precision на final argmax. Default OFF (legacy
+        // 11.4 tok/s, broken Russian); включить когда нужно cyrillic.
+        const char* lm_head_fp_env = std::getenv("PT_LM_HEAD_FP");
+        const bool lm_head_no_soa = lm_head_fp_env && lm_head_fp_env[0] == '1';
+        if (!lm_head_no_soa && tp_.q_output_weight_k_slice.q8_soa.valid) {
             // Round 3 SoA path: each rank's K-slice of output_weight on SoA4.
             int64_t elems_per_block = (tp_.q_output_weight_k_slice.quant_type == 8) ? 32 : 256;
             const float* x_local =
@@ -5768,7 +5783,8 @@ public:
     // (to keep collectives in lockstep).
     // ========================================================================
     std::string generate_tp(const std::string& prompt, int max_tokens = 128,
-                            float temperature = 0.0f) {
+                            float temperature = 0.0f,
+                            float repetition_penalty = 1.05f) {
         if (!tp_.enabled) {
             throw std::runtime_error("generate_tp: call init_tensor_parallel() first");
         }
@@ -5797,18 +5813,63 @@ public:
         }
         tp_.in_decode_phase = true;
 
+        // BUG-12 part 2: TP path раньше делал ТОЛЬКО greedy argmax (без
+        // repetition_penalty, без temperature sampling). Это значит при
+        // temp=0 модель легко застревала в loop на cyrillic context — argmax
+        // одного и того же hidden state давал тот же top-1 token. Добавили
+        // rep_penalty (default 1.05) + temperature sampling (если >0).
+        // Sampling overhead ~0.1ms на vocab=152k — pretty negligible vs 80ms
+        // forward, скорость 11.4 tok/s НЕ затронута.
+        const bool apply_rep_pen = (repetition_penalty > 1.0001f);
+        const bool sample_mode = (temperature > 1e-6f);
+        std::mt19937 sampling_rng(42);
+
         // Generation loop
         std::vector<int32_t> generated;
         auto t_start = std::chrono::high_resolution_clock::now();
         for (int step = 0; step < max_tokens; ++step) {
-            // Greedy argmax on identical replicated logits (all ranks agree)
-            int32_t best = 0;
-            const float* lbuf = logits.data_ptr<float>();
-            float best_val = lbuf[0];
-            for (int64_t j = 1; j < config.vocab_size; ++j) {
-                if (lbuf[j] > best_val) { best_val = lbuf[j]; best = static_cast<int32_t>(j); }
+            float* lbuf = logits.mutable_data_ptr<float>();
+            int64_t V = config.vocab_size;
+
+            // Repetition penalty: divide if logit > 0, multiply if < 0.
+            if (apply_rep_pen && !generated.empty()) {
+                const float inv_rp = 1.0f / repetition_penalty;
+                for (int32_t prev_token : generated) {
+                    if (prev_token >= 0 && prev_token < (int32_t)V) {
+                        lbuf[prev_token] = (lbuf[prev_token] > 0)
+                            ? lbuf[prev_token] * inv_rp
+                            : lbuf[prev_token] * repetition_penalty;
+                    }
+                }
             }
-            (void)temperature;  // only greedy supported in TP mode
+
+            int32_t best = 0;
+            if (!sample_mode) {
+                // Greedy argmax (replicated logits, all ranks agree).
+                float best_val = lbuf[0];
+                for (int64_t j = 1; j < V; ++j) {
+                    if (lbuf[j] > best_val) { best_val = lbuf[j]; best = (int32_t)j; }
+                }
+            } else {
+                // Temperature softmax + multinomial. ВСЕ ранки используют тот
+                // же seed → выдают тот же token (детерминистично между ranks).
+                std::vector<float> probs(V);
+                float max_v = lbuf[0];
+                for (int64_t j = 1; j < V; ++j) if (lbuf[j] > max_v) max_v = lbuf[j];
+                const float inv_t = 1.0f / temperature;
+                double sum = 0.0;
+                for (int64_t j = 0; j < V; ++j) {
+                    probs[j] = std::exp((lbuf[j] - max_v) * inv_t);
+                    sum += probs[j];
+                }
+                std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+                float r = dist(sampling_rng) * (float)sum;
+                float cum = 0.0f;
+                for (int64_t j = 0; j < V; ++j) {
+                    cum += probs[j];
+                    if (cum >= r) { best = (int32_t)j; break; }
+                }
+            }
 
             if (best == tokenizer.eos_id) break;
             if (is_stop_token(best)) break;
