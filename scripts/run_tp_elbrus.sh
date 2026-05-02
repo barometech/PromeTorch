@@ -21,10 +21,10 @@ if [ "${PT_PIN_THREADS:-}" = "1" ]; then
     exit 1
 fi
 
-MODEL="$HOME/gguf_models/qwen3-4b-Q4_K_M.gguf"
+MODEL="${PT_MODEL:-$HOME/gguf_models/qwen3-4b-Q4_K_M.gguf}"
 PROMPT="${2:-Write a short haiku about artificial intelligence}"
 MODE="${1:---greedy}"
-MAX_TOK=100
+MAX_TOK="${PT_MAX_TOK:-100}"
 
 BIN="./build_elbrus/examples/gguf/test_gguf_inference"
 if [ ! -x "$BIN" ]; then
@@ -66,6 +66,12 @@ for rank in 0 1 2 3; do
     # PT_NUMA_REPLICATE=1 gives a small, in-noise +0.2 tok/s on TP (5.3→5.5),
     # but it's "free" in the sense that memory is already membind'd and the
     # copy happens once at load. Keep it on.
+    # BUG-1 fix: --chat применяет apply_chat_template (qwen3/llama3/gemma3
+    # знают как обрабатывать <|im_start|>...<|im_end|>). Без него русские
+    # и короткие промпты выдают garbage. Можно отключить через PT_CHAT=0
+    # для raw completion mode (например legacy benchmark prompt continuation).
+    CHAT_FLAG=""
+    if [ "${PT_CHAT:-1}" = "1" ]; then CHAT_FLAG="--chat"; fi
     PT_NO_NUMA_POOL=1 \
     OMP_NUM_THREADS=8 \
     PT_NUMA_REPLICATE=0 \
@@ -75,7 +81,7 @@ for rank in 0 1 2 3; do
         "$BIN" "$MODEL" \
         --nprocs 4 --rank $rank \
         --master-addr 127.0.0.1 --master-port 29500 \
-        --max-tokens $MAX_TOK $MODE \
+        --max-tokens $MAX_TOK $MODE $CHAT_FLAG \
         "$PROMPT" \
         > run_logs/tp4_rank${rank}.log 2>&1 &
     echo "Rank $rank launched PID=$!"

@@ -301,20 +301,39 @@ private:
                 words.push_back(current);
             }
 
-            // BPE encode each word (convert spaces to Ġ for GPT-2 vocab)
+            // BPE encode each word (apply GPT-2 bytes_to_unicode forward map).
+            // BUG-10 fix: раньше обрабатывались только 3 spec-bytes (space/\n/\t).
+            // Из-за этого cyrillic bytes (0xD0, 0xD1, ...) проходили raw и
+            // вокаб не находил match — модель видела byte-fallback токены и
+            // переключалась на garbage / другие языки. Теперь полная
+            // 256-entry таблица: каждый byte 0-255 → unique unicode codepoint
+            // в UTF-8 form, согласно GPT-2 standard.
+            auto append_byte_encoded = [](std::string& dst, uint8_t b) {
+                int cp;
+                if ((b >= 33 && b <= 126) || (b >= 161 && b <= 172) || (b >= 174 && b <= 255)) {
+                    cp = b;  // printable bytes mapped to self
+                } else if (b <= 32) {
+                    cp = 0x100 + b;        // bytes 0..32 → U+0100..U+0120 (space=0x20→Ġ)
+                } else if (b >= 127 && b <= 160) {
+                    cp = 0x121 + (b - 127); // bytes 127..160 → U+0121..U+0142
+                } else {                    // b == 173
+                    cp = 0x143;
+                }
+                if (cp < 0x80) {
+                    dst += (char)cp;
+                } else if (cp < 0x800) {
+                    dst += (char)(0xC0 | (cp >> 6));
+                    dst += (char)(0x80 | (cp & 0x3F));
+                } else {
+                    dst += (char)(0xE0 | (cp >> 12));
+                    dst += (char)(0x80 | ((cp >> 6) & 0x3F));
+                    dst += (char)(0x80 | (cp & 0x3F));
+                }
+            };
             for (const auto& word : words) {
-                // GPT-2 uses Ġ (U+0120) to represent spaces in vocab
                 std::string gpt2_word;
-                for (char c : word) {
-                    if (c == ' ') {
-                        gpt2_word += "\xc4\xa0";  // Ġ in UTF-8
-                    } else if (c == '\n') {
-                        gpt2_word += "\xc4\x8a";  // Ċ in UTF-8
-                    } else if (c == '\t') {
-                        gpt2_word += "\xc4\x89";  // ĉ in UTF-8
-                    } else {
-                        gpt2_word += c;
-                    }
+                for (unsigned char c : word) {
+                    append_byte_encoded(gpt2_word, c);
                 }
                 // Try direct vocab lookup first
                 auto it = token_to_id.find(gpt2_word);
@@ -491,7 +510,59 @@ private:
             pos += 1;
         }
 
-        return result;
+        // BUG-7 fix: GPT-2 byte-to-unicode reverse mapping для cyrillic +
+        // других не-ASCII bytes. qwen3, llama3, mistral используют
+        // bytes_to_unicode() encoder где каждый byte 0-255 mapped в
+        // "printable" unicode codepoint. На decode нужна обратная операция,
+        // иначе русский (UTF-8 multi-byte) выходит как latin-1 garbage
+        // ("å¤ĸ è¯Ĩ" вместо "Привет").
+        std::string byte_decoded;
+        byte_decoded.reserve(result.size());
+        size_t bi = 0;
+        while (bi < result.size()) {
+            unsigned char c = (unsigned char)result[bi];
+            size_t clen = utf8_char_len(c);
+            if (clen == 1) {
+                byte_decoded += result[bi];
+                bi++;
+                continue;
+            }
+            if (bi + clen > result.size()) {
+                byte_decoded += result[bi];
+                bi++;
+                continue;
+            }
+            // Decode codepoint
+            uint32_t cp = 0;
+            if (clen == 2) {
+                cp = ((c & 0x1F) << 6) | ((unsigned char)result[bi+1] & 0x3F);
+            } else if (clen == 3) {
+                cp = ((c & 0x0F) << 12) |
+                     (((unsigned char)result[bi+1] & 0x3F) << 6) |
+                     ((unsigned char)result[bi+2] & 0x3F);
+            } else if (clen == 4) {
+                cp = ((c & 0x07) << 18) |
+                     (((unsigned char)result[bi+1] & 0x3F) << 12) |
+                     (((unsigned char)result[bi+2] & 0x3F) << 6) |
+                     ((unsigned char)result[bi+3] & 0x3F);
+            }
+            // Check if cp is in GPT-2 byte-level mapping range
+            bool mapped = false;
+            uint8_t raw = 0;
+            if (cp >= 161 && cp <= 172)        { mapped = true; raw = (uint8_t)cp; }
+            else if (cp >= 174 && cp <= 255)   { mapped = true; raw = (uint8_t)cp; }
+            else if (cp >= 0x100 && cp <= 0x120) { mapped = true; raw = (uint8_t)(cp - 0x100); }       // bytes 0-32
+            else if (cp >= 0x121 && cp <= 0x142) { mapped = true; raw = (uint8_t)(127 + (cp - 0x121)); } // bytes 127-160
+            else if (cp == 0x143)                { mapped = true; raw = 173; }
+            if (mapped) {
+                byte_decoded += (char)raw;
+            } else {
+                byte_decoded.append(result, bi, clen);
+            }
+            bi += clen;
+        }
+
+        return byte_decoded;
     }
 
     // ========================================================================
