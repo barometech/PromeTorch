@@ -241,13 +241,30 @@ int main(int argc, char* argv[]) {
             std::cout << "[Profile] GPU profiling enabled" << std::endl;
         }
 
+        // BUG-12 debug: dump первые 30 token IDs для encoded prompt
+        if (std::getenv("PT_DEBUG_TOKENS")) {
+            std::string actual = use_chat ? model.apply_chat_template(prompt) : prompt;
+            auto toks = model.tokenizer.encode(actual, true);
+            std::cerr << "[DEBUG_TOKENS] count=" << toks.size() << " ids=[";
+            for (size_t i = 0; i < std::min((size_t)30, toks.size()); ++i) {
+                if (i) std::cerr << ",";
+                std::cerr << toks[i];
+            }
+            std::cerr << (toks.size() > 30 ? ",...]" : "]") << std::endl;
+        }
+
         // Generate
         if (tp_mode) {
             if (tp_rank == 0) {
                 std::cout << "\n--- Generation (tensor-parallel, nprocs=" << tp_nprocs
                           << ") ---" << std::endl;
             }
-            std::string response = model.generate_tp(prompt, max_tokens, temperature);
+            // BUG-1 fix: apply chat template в TP path тоже. Без template
+            // современные chat-модели (qwen3, llama3, gemma3) выдают
+            // garbage на коротких/русских промптах потому что видят prompt
+            // как raw text continuation, а не assistant request.
+            std::string actual_prompt = use_chat ? model.apply_chat_template(prompt) : prompt;
+            std::string response = model.generate_tp(actual_prompt, max_tokens, temperature);
             if (tp_rank == 0) {
                 std::cout << "\n--- Full Response ---" << std::endl;
                 std::cout << response << std::endl;
