@@ -100,3 +100,9 @@ docs/elbrus/littlecc/
 docs/elbrus/elbrus-docs/
 docs/elbrus/habr_smartengines_optimization.html
 vliw_mission/round2/_inputs/
+
+# Personal AI assistant instruction files (kept local, not for public repo)
+CLAUDE.md
+AVOIDRECURSION.md
+.claude/
+.cursor/
