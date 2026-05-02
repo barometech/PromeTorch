@@ -3598,8 +3598,21 @@ public:
 
     std::string apply_chat_template(const std::string& prompt) const {
         if (config.architecture == "qwen3") {
-            // Qwen3 chat format with /no_think system message to disable thinking
-            return "<|im_start|>system\n/no_think<|im_end|>\n<|im_start|>user\n" + prompt + "<|im_end|>\n<|im_start|>assistant\n";
+            // Qwen3 chat format. BUG-12 fix iter 3: llama.cpp выдаёт
+            // 19 prompt_tokens на "Расскажи..." что соответствует БЕЗ
+            // system prompt. Default system от HuggingFace
+            // tokenizer_config.json llama.cpp применяет ТОЛЬКО когда есть
+            // explicit system message. Для plain user — без system.
+            //
+            // PT_NO_THINK=1 → /no_think system message (старое поведение).
+            const char* no_think_env = std::getenv("PT_NO_THINK");
+            bool no_think = no_think_env && no_think_env[0] == '1';
+            if (no_think) {
+                return "<|im_start|>system\n/no_think<|im_end|>\n<|im_start|>user\n"
+                       + prompt + "<|im_end|>\n<|im_start|>assistant\n";
+            }
+            return "<|im_start|>user\n" + prompt
+                   + "<|im_end|>\n<|im_start|>assistant\n";
         } else if (config.architecture == "gemma3" || config.architecture == "gemma2") {
             // Gemma chat format
             return "<start_of_turn>user\n" + prompt + "<end_of_turn>\n<start_of_turn>model\n";
@@ -4251,6 +4264,26 @@ public:
                     // General path: extract row, apply penalties, sample
                     int64_t last_pos = logits.size(0) - 1;
                     Tensor last_logits = get_row(logits, last_pos);
+
+                    // BUG-12 debug: top-5 logits BEFORE rep penalty (raw model output)
+                    if (std::getenv("PT_DEBUG_LOGITS")) {
+                        const float* lg = last_logits.data_ptr<float>();
+                        int64_t V = last_logits.size(0);
+                        std::vector<std::pair<float,int32_t>> top;
+                        top.reserve(V);
+                        for (int64_t j = 0; j < V; ++j) top.emplace_back(lg[j], (int32_t)j);
+                        std::partial_sort(top.begin(), top.begin() + 5, top.end(),
+                            [](const auto& a, const auto& b){ return a.first > b.first; });
+                        std::cerr << "[LOGITS step=" << generated.size() << "] top5:";
+                        for (int k = 0; k < 5; ++k) {
+                            std::string tok_str = tokenizer.decode_token(top[k].second);
+                            // sanitize tok_str (replace newlines for readability)
+                            for (auto& c : tok_str) if (c == '\n') c = '|';
+                            std::cerr << " (" << top[k].second << "=\"" << tok_str << "\":"
+                                      << top[k].first << ")";
+                        }
+                        std::cerr << std::endl;
+                    }
 
                     if (repetition_penalty > 1.0f && !generated.empty()) {
                         float* logit_data = last_logits.mutable_data_ptr<float>();
