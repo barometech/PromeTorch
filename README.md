@@ -180,6 +180,23 @@ PT_Q8_SOA=1 bash scripts/run_tp_elbrus.sh --greedy "Hello"
 Полный отчёт: [docs/elbrus_report/ELBRUS_REPORT_v2.md](docs/elbrus_report/ELBRUS_REPORT_v2.md).
 Анализ Эльбрус-16С с прогнозом ~30 tok/s: [docs/elbrus_report/elbrus16c_specs_dr.md](docs/elbrus_report/elbrus16c_specs_dr.md).
 
+#### Multi-step tool-call demo (2026-05-03)
+
+3 разные dense HTML страницы сгенерированы через **qwen3-4B TP-4** (10.9 tok/s)
+с tool-call loop'ом — модель эмитирует `<tool_call>{"name":"write_file",...}</tool_call>`,
+bash orchestrator + Python lenient extractor парсит JSON и сохраняет файлы.
+
+| Тема | Файл | Размер | Скриншот |
+|---|---|---:|---|
+| Москва | [moscow_v2.html](docs/elbrus_report/demo_html/moscow_v2.html) | 1996 B | [moscow_v2.png](docs/elbrus_report/demo_html/moscow_v2.png) |
+| Космос | [cosmos.html](docs/elbrus_report/demo_html/cosmos.html) | 1738 B | [cosmos.png](docs/elbrus_report/demo_html/cosmos.png) |
+| ИИ | [ai.html](docs/elbrus_report/demo_html/ai.html) | 3397 B | [ai.png](docs/elbrus_report/demo_html/ai.png) |
+
+Tool-call format универсальный (`<tool_call>{...}</tool_call>` стандарт OpenAI/
+Hermes/Qwen3) — работает на любой модели trained на tool-calling без модификаций
+chat template. Скрипты: [scripts/multi_html_v3.sh](scripts/multi_html_v3.sh) (генерация),
+[scripts/multi_html_v5.sh](scripts/multi_html_v5.sh) (extractor с lenient JSON parsing).
+
 **Запуск (lossless 11.4):**
 ```bash
 PT_Q8_SOA=1 ./scripts/run_tp_elbrus.sh --greedy "Hello"
