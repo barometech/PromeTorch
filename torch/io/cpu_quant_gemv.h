@@ -1563,6 +1563,64 @@ inline bool cpu_quant_gemv_k_slice_supported(uint32_t quant_type) {
 }
 
 // ============================================================================
+// Q5_0 scalar GEMV — 32 elements per block, 22 bytes:
+//   2 bytes fp16 d (scale)
+//   4 bytes qh (32 high bits, 1 bit per element)
+//   16 bytes qs (32 low 4-bit nibbles, 2 elements per byte)
+// Element value: ((qs[i/2] >> (4*(i%2))) & 0x0F) | (((qh >> i) & 1) << 4) - 16, then * d
+// ============================================================================
+inline void q5_0_gemv_scalar(const void* __restrict weight_data,
+                              const float* __restrict x,
+                              float* __restrict y,
+                              int64_t K, int64_t N,
+                              int64_t row_stride_bytes) {
+    constexpr int QK = 32;
+    const int64_t blocks_per_row = K / QK;  // K must be multiple of 32
+    const uint8_t* base = static_cast<const uint8_t*>(weight_data);
+    auto fp16_to_fp32 = [](uint16_t h) -> float {
+        // Standard IEEE 754 fp16 -> fp32 conversion.
+        uint32_t sign = (h & 0x8000) << 16;
+        uint32_t exp  = (h & 0x7C00) >> 10;
+        uint32_t mant = (h & 0x03FF);
+        uint32_t f;
+        if (exp == 0) {
+            if (mant == 0) f = sign;
+            else {
+                exp = 1;
+                while ((mant & 0x0400) == 0) { mant <<= 1; exp--; }
+                mant &= 0x03FF;
+                f = sign | ((exp + (127 - 15)) << 23) | (mant << 13);
+            }
+        } else if (exp == 31) {
+            f = sign | 0x7F800000 | (mant << 13);
+        } else {
+            f = sign | ((exp + (127 - 15)) << 23) | (mant << 13);
+        }
+        float r; std::memcpy(&r, &f, 4); return r;
+    };
+    for (int64_t row = 0; row < N; ++row) {
+        const uint8_t* rp = base + row * row_stride_bytes;
+        float acc = 0.0f;
+        for (int64_t b = 0; b < blocks_per_row; ++b) {
+            uint16_t d_h;
+            std::memcpy(&d_h, rp + b * 22, 2);
+            float d = fp16_to_fp32(d_h);
+            uint32_t qh;
+            std::memcpy(&qh, rp + b * 22 + 2, 4);
+            const uint8_t* qs = rp + b * 22 + 6;
+            const float* xp = x + b * QK;
+            for (int i = 0; i < QK; ++i) {
+                uint8_t low = (qs[i / 2] >> ((i % 2) * 4)) & 0x0F;
+                uint8_t high = (qh >> i) & 1;
+                int q = (int)(low | (high << 4)) - 16;  // signed -16..15
+                acc += d * static_cast<float>(q) * xp[i];
+            }
+        }
+        y[row] = acc;
+    }
+}
+
+// ============================================================================
 // Dispatch function: auto-selects AVX2 or scalar based on quant type
 // ============================================================================
 
@@ -1612,6 +1670,9 @@ inline void cpu_quant_gemv(uint32_t quant_type,
             q5k_gemv_scalar(weight_data, x, y, K, N, row_stride_bytes);
 #endif
             break;
+        case 6: // GGML_TYPE_Q5_0
+            q5_0_gemv_scalar(weight_data, x, y, K, N, row_stride_bytes);
+            break;
         default:
             // Unsupported quant type — caller should fall back to dequant+sgemv
             break;
@@ -1620,7 +1681,8 @@ inline void cpu_quant_gemv(uint32_t quant_type,
 
 // Check if a quant type is supported by cpu_quant_gemv
 inline bool cpu_quant_gemv_supported(uint32_t quant_type) {
-    return quant_type == 12 || quant_type == 8 || quant_type == 14 || quant_type == 13;
+    return quant_type == 12 || quant_type == 8 || quant_type == 14 ||
+           quant_type == 13 || quant_type == 6;
 }
 
 // ============================================================================
