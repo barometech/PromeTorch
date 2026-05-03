@@ -123,6 +123,28 @@ batched GEMM K=4 (0.42× регрессия — compute-bound proven), busy-spin
 (×2 регрессия — NUMA coherency). Полный технический отчёт:
 [report/REPORT_ELBRUS_LLM_INFERENCE_2026-05-02.pdf](report/REPORT_ELBRUS_LLM_INFERENCE_2026-05-02.pdf).
 
+#### BUG-12 fix: качество русского + fair llama.cpp baseline (2026-05-03)
+
+Per-block (32 elements) Q8 activation scale (как Q8_0 в llama.cpp) починил
+русский на 7B-моделях. Per-tensor `max(|x|)/127` scale теряет precision на
+outlier-каналах residual stream — argmax после lm_head промахивается на
+cyrillic vocab IDs. Активация — env `PT_PER_BLOCK_SCALE=1`.
+
+**Mistral-7B Q4_K_M, промпт «Расскажи про Москву одним предложением.»:**
+> Москва — столица России, культурный и политический центр страны с богатой
+> историей и впечатляющими архитектурными памятниками.
+
+**Скорости PromeTorch TP-4 vs llama.cpp 32t (numactl --interleave=all, fair):**
+
+| Модель | PromeTorch TP-4 | llama.cpp 32t | Speedup | Russian |
+|---|---:|---:|---:|:---:|
+| qwen3-1.7B | 17.3 | 2.71 | **×6.4** | частично |
+| qwen3-4B | 9.8 | 1.82 | **×5.4** | частично |
+| **mistral-7B** | **7.6** | 1.74 | **×4.4** | **✅ идеально** |
+
+Полный отчёт: [docs/elbrus_report/ELBRUS_REPORT_v2.md](docs/elbrus_report/ELBRUS_REPORT_v2.md).
+Анализ Эльбрус-16С с прогнозом ~30 tok/s: [docs/elbrus_report/elbrus16c_specs_dr.md](docs/elbrus_report/elbrus16c_specs_dr.md).
+
 **Запуск (lossless 11.4):**
 ```bash
 PT_Q8_SOA=1 ./scripts/run_tp_elbrus.sh --greedy "Hello"
