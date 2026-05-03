@@ -225,16 +225,34 @@ for (b = 0; b &lt; K/32; b++) {
 <h3>4.5. Результат после fix (с PT_PER_BLOCK_SCALE=1 + PT_LM_HEAD_FP=1)</h3>
 <ul>
 <li>mistral-7B / qwen2.5-7B / qwen3-8B → <strong>русский OK</strong> (full sentence генерация)</li>
-<li>qwen3-4B → <strong>частичный русский</strong> («Кон К ...») — нужен дальнейший анализ</li>
+<li>qwen3-4B → <strong>частичный русский</strong> («Кон К ...») — Massive Activations spec.</li>
 </ul>
-<p>  (возможно проблема в 36-layer architecture vs 28-layer 7B&#x27;ов)</p>
+<p>  для qwen3 family</p>
 <ul>
 <li>qwen3-1.7B / qwen3-0.6B → mojibake остаётся (модель слишком мала, deeper QKV</li>
 </ul>
 <p>  precision проблема)</p>
 
 <p>Скорость на per-block: <strong>9.8 tok/s vs 10.5 baseline на qwen3-4B (-7 %)</strong>.</p>
-<p>Trade-off: quality vs speed = разумный.</p>
+
+<h3>4.6. Финальный fallback — PT_NO_FFN_SOA=1 (для упрямых моделей)</h3>
+
+<p>Для qwen3 family (Massive Activations) добавлен env-флаг</p>
+<p><code>PT_NO_FFN_SOA=1</code> который <strong>полностью</strong> отключает Q8 SoA в FFN</p>
+<p>gate+up+down И в attention QKV+output. Forward идёт через <strong>Q4_K direct</strong></p>
+<p>(тот же путь что у llama.cpp). Скорость падает до 6-8 tok/s, но русский</p>
+<p>ответ должен стать как у llama.cpp.</p>
+
+<p>Полный набор флагов для надёжного русского на qwen3:</p>
+<pre>
+PT_Q8_SOA=1 PT_PER_BLOCK_SCALE=1 PT_LM_HEAD_FP=1 PT_NO_FFN_SOA=1 \
+    bash scripts/run_tp_elbrus.sh &quot;&quot; &quot;Расскажи про Москву...&quot;
+</pre>
+
+<p>Для скорости (без BUG-12 fixes, default lossless 11.4 на не-cyrillic):</p>
+<pre>
+PT_Q8_SOA=1 bash scripts/run_tp_elbrus.sh &quot;--greedy&quot; &quot;Hello&quot;
+</pre>
 
 <h2>5. PromeServe + Tool-call loop</h2>
 

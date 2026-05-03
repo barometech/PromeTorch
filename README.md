@@ -139,8 +139,22 @@ cyrillic vocab IDs. Активация — env `PT_PER_BLOCK_SCALE=1`.
 | Модель | PromeTorch TP-4 | llama.cpp 32t | Speedup | Russian |
 |---|---:|---:|---:|:---:|
 | qwen3-1.7B | 17.3 | 2.71 | **×6.4** | частично |
-| qwen3-4B | 9.8 | 1.82 | **×5.4** | частично |
+| qwen3-4B | 9.8 | 1.82 | **×5.4** | частично (см `PT_NO_FFN_SOA=1`) |
 | **mistral-7B** | **7.6** | 1.74 | **×4.4** | **✅ идеально** |
+| qwen2.5-7B | (OOM TP-4) | 1.71 | — | TBD |
+| llama3-8B | (OOM TP-4) | 1.65 | — | TBD |
+| qwen3-14B | (OOM TP-4) | 1.02 | — | TBD |
+
+**Запуск с надёжным русским на qwen3 family:**
+```bash
+PT_Q8_SOA=1 PT_PER_BLOCK_SCALE=1 PT_LM_HEAD_FP=1 PT_NO_FFN_SOA=1 \
+    bash scripts/run_tp_elbrus.sh "" "Расскажи про Москву одним предложением."
+```
+
+**Запуск default (lossless 11.4 tok/s, без BUG-12 fixes):**
+```bash
+PT_Q8_SOA=1 bash scripts/run_tp_elbrus.sh --greedy "Hello"
+```
 
 Полный отчёт: [docs/elbrus_report/ELBRUS_REPORT_v2.md](docs/elbrus_report/ELBRUS_REPORT_v2.md).
 Анализ Эльбрус-16С с прогнозом ~30 tok/s: [docs/elbrus_report/elbrus16c_specs_dr.md](docs/elbrus_report/elbrus16c_specs_dr.md).
