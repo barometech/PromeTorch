@@ -1021,12 +1021,26 @@ private:
             return;
         }
 
-        // Prefill
+        // Prefill. На CPU с quant weights — same fast per-token decode path
+        // как в /api/generate. Generic model->forward() runs dense-tensor
+        // path (~20× slower на quant). Task #60 — выровняли с generate_streaming.
         at::Tensor logits;
         auto t_prompt_start = std::chrono::high_resolution_clock::now();
         try {
-            std::vector<int64_t> tokens_i64(input_tokens.begin(), input_tokens.end());
-            logits = model->forward(tokens_i64, true);
+#ifdef PT_USE_CUDA
+            if (model->use_cuda_) {
+                std::vector<int64_t> tokens_i64(input_tokens.begin(), input_tokens.end());
+                logits = model->forward(tokens_i64, true);
+            } else
+#endif
+            if (model->use_quant_gemv_) {
+                for (int t : input_tokens) {
+                    logits = model->forward_decode_cpu(static_cast<int64_t>(t));
+                }
+            } else {
+                std::vector<int64_t> tokens_i64(input_tokens.begin(), input_tokens.end());
+                logits = model->forward(tokens_i64, true);
+            }
         } catch (const std::exception& e) {
             std::cerr << "[Chat] ERROR in prefill forward(): " << e.what() << std::endl;
             std::string err = "{\"model\":\"" + json_escape(model_name) + "\""
