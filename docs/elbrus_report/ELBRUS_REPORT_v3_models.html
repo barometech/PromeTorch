@@ -80,9 +80,9 @@
 <tr><td><b>gemma3-4B Q4_K_M</b></td>
     <td class="ok">✓ structured markdown</td>
     <td class="ok">✓ работает</td>
-    <td class="cell-num">4.6</td><td>—</td>
+    <td class="cell-num">4.6</td><td>n/a&nbsp;⁴</td>
     <td><code>neox</code> per-layer</td>
-    <td><span class="badge badge-ok">FIXED: per-layer SWA + post_attn_norm placement + GeGLU</span></td></tr>
+    <td><span class="badge badge-ok">FIXED single-proc: per-layer SWA + post_attn_norm placement + GeGLU. TP-4 throws — нужен gather/re-slice для post-norms (out of scope)</span></td></tr>
 
 <tr><td><b>phi3.5-mini Q4_K_M</b></td>
     <td class="fail">✗ <code>bom&lt;unk&gt;×60</code></td>
@@ -94,7 +94,8 @@
 
 <p style="font-size:13px"><b>¹</b> SP = single-process, OMP_NUM_THREADS=32. &nbsp;
 <b>²</b> TP-4 = 4 процесса, OMP_NUM_THREADS=8 каждый, NUMA-bound. &nbsp;
-<b>³</b> qwen2.5-7B на TP-4 потребляет &gt;20 ГБ виртуальной памяти, OOM на E8C2 в текущей конфигурации.</p>
+<b>³</b> qwen2.5-7B на TP-4 потребляет &gt;20 ГБ виртуальной памяти, OOM на E8C2 в текущей конфигурации. &nbsp;
+<b>⁴</b> gemma3 TP-4 throws: <code>post_attention_norm unsupported (Gemma3 not yet wired)</code>. RMSNorm применяется per-slice, что не эквивалентно RMSNorm на full hidden — нужен AllGather → norm → re-slice. Single-proc работает.</p>
 
 <h2>1. Что было сделано в этой сессии</h2>
 
