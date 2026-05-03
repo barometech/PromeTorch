@@ -256,10 +256,17 @@ inline JsonValue parse_value(const std::string& s, size_t& pos) {
         val.type = JsonValue::NUL;
         pos += 4;
     } else {
-        // Number
+        // Number — guard against malformed input (empty/non-numeric → throw).
+        // Без try/catch стороннее JSON с битыми числами роняет весь сервер.
         val.type = JsonValue::NUMBER;
         std::string num_str = parse_number(s, pos);
-        val.num_val = std::stod(num_str);
+        try {
+            val.num_val = std::stod(num_str);
+        } catch (const std::invalid_argument&) {
+            val.num_val = 0.0;  // graceful fallback
+        } catch (const std::out_of_range&) {
+            val.num_val = 0.0;
+        }
     }
     return val;
 }
