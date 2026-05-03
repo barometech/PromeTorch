@@ -1845,6 +1845,57 @@ public:
         for (int64_t i = 0; i < config.num_layers; ++i) {
             std::string prefix = "blk." + std::to_string(i) + ".";
             auto& layer = layers[i];
+
+            // ============ deepseek2 MLA + MoE branch (GigaChat3) ============
+            if (config.is_mla) {
+                map_quant_mmap(prefix + "attn_q.weight", layer.q_attn_q);
+                map_quant_mmap(prefix + "attn_kv_a_mqa.weight", layer.q_attn_kv_a_mqa);
+                if (reader.has_tensor(prefix + "attn_kv_a_norm.weight")) {
+                    layer.attn_kv_a_norm =
+                        reader.load_tensor(prefix + "attn_kv_a_norm.weight");
+                }
+                map_quant_mmap(prefix + "attn_k_b.weight", layer.q_attn_k_b);
+                map_quant_mmap(prefix + "attn_v_b.weight", layer.q_attn_v_b);
+                map_quant_mmap(prefix + "attn_output.weight", layer.q_attn_output);
+
+                if (i < config.leading_dense_block_count) {
+                    layer.is_moe_layer = false;
+                    map_quant_mmap(prefix + "ffn_gate.weight", layer.q_ffn_gate);
+                    map_quant_mmap(prefix + "ffn_up.weight",   layer.q_ffn_up);
+                    map_quant_mmap(prefix + "ffn_down.weight", layer.q_ffn_down);
+                } else {
+                    layer.is_moe_layer = true;
+                    map_quant_mmap(prefix + "ffn_gate_inp.weight",  layer.q_ffn_gate_inp);
+                    map_quant_mmap(prefix + "ffn_gate_exps.weight", layer.q_ffn_gate_exps);
+                    map_quant_mmap(prefix + "ffn_up_exps.weight",   layer.q_ffn_up_exps);
+                    map_quant_mmap(prefix + "ffn_down_exps.weight", layer.q_ffn_down_exps);
+                    if (config.expert_shared_count > 0) {
+                        map_quant_mmap(prefix + "ffn_gate_shexp.weight", layer.q_ffn_gate_shexp);
+                        map_quant_mmap(prefix + "ffn_up_shexp.weight",   layer.q_ffn_up_shexp);
+                        map_quant_mmap(prefix + "ffn_down_shexp.weight", layer.q_ffn_down_shexp);
+                    }
+                }
+
+                // Bytes accounting for deepseek2
+                auto add_bytes = [&](const QuantizedWeight& q) {
+                    if (q.valid) total_bytes_mapped += q.total_bytes;
+                };
+                add_bytes(layer.q_attn_q);
+                add_bytes(layer.q_attn_kv_a_mqa);
+                add_bytes(layer.q_attn_k_b);
+                add_bytes(layer.q_attn_v_b);
+                add_bytes(layer.q_attn_output);
+                add_bytes(layer.q_ffn_gate);     add_bytes(layer.q_ffn_up);
+                add_bytes(layer.q_ffn_down);
+                add_bytes(layer.q_ffn_gate_inp);
+                add_bytes(layer.q_ffn_gate_exps); add_bytes(layer.q_ffn_up_exps);
+                add_bytes(layer.q_ffn_down_exps);
+                add_bytes(layer.q_ffn_gate_shexp); add_bytes(layer.q_ffn_up_shexp);
+                add_bytes(layer.q_ffn_down_shexp);
+                continue;  // skip llama-family branch
+            }
+
+            // ============ standard llama-family path ============
             // Attention weights — prefer split tensors, fall back to merged.
             if (reader.has_tensor(prefix + "attn_q.weight")) {
                 map_quant_mmap(prefix + "attn_q.weight", layer.q_attn_q);
@@ -6645,6 +6696,28 @@ public:
             // Attention norm
             layer.attn_norm = reader.load_tensor(prefix + "attn_norm.weight");
 
+            // ============ deepseek2 (GigaChat3) FP32 path ============
+            // For MLA architectures FP32 attn_q/attn_k/attn_v don't exist.
+            // attn_q is loaded into `attn_q` (regular dense), but K/V are
+            // computed in MLA forward via attn_kv_a_mqa + attn_k_b/v_b
+            // (loaded as quantized only — no FP32 versions). Skip the
+            // standard Q/K/V FP32 loading path entirely.
+            if (config.is_mla) {
+                if (reader.has_tensor(prefix + "attn_q.weight")) {
+                    // Quantized Q4_K weights handled in load_quantized_mmap;
+                    // we only need attn_norm + attn_kv_a_norm in FP32.
+                }
+                layer.ffn_norm = reader.load_tensor(prefix + "ffn_norm.weight");
+                if (i + 1 == config.num_layers || (i + 1) % 5 == 0) {
+                    std::cout << "  Layer " << (i + 1) << "/" << config.num_layers
+                              << " (deepseek2 MLA"
+                              << (i < config.leading_dense_block_count ? "+dense" : "+MoE")
+                              << ")" << std::endl;
+                }
+                continue;
+            }
+
+            // ============ standard llama-family path ============
             // Attention weights — Phi-3 stores Q/K/V merged as `attn_qkv.weight`,
             // others as separate q/k/v.
             if (reader.has_tensor(prefix + "attn_q.weight")) {
