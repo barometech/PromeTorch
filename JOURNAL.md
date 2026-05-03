@@ -3,6 +3,29 @@
 Полная история разработки проекта. Актуальные инструкции — в `CLAUDE.md`.
 Полный аудит инфраструктуры — в `INFRASTRUCTURE_AUDIT.md`.
 
+## 2026-05-03 (поздний вечер, ИТОГ-3): deepseek rope.scale_linear + phi3 baseline
+
+**Commit `81a79bd`:** parser добавил legacy ключ `<arch>.rope.scale_linear`
+(deepseek-coder-7B хранит `rope.freq_base=100000`, `rope.scale_linear=4`
+вместо modern `rope.scaling.{type,factor}`). Без этого rope_scale
+оставался 1.0 → garbage output `# # # # ••• """`.
+
+**phi3.5-mini llama.cpp 32t baseline (`acade79`):**
+* llama.cpp 32t: 2.08 tok/s (numactl --interleave=all, tg64)
+* PromeTorch SP: 3.5 tok/s (×1.7)
+* PromeTorch TP-4: **6.4 tok/s** (×3.1)
+
+Final speedup table:
+
+| Модель | PT TP-4 | llama.cpp 32t | Speedup |
+|---|---:|---:|---:|
+| qwen3-1.7B | 17.1 | 2.71 | **×6.3** |
+| qwen3-4B | 10.9 | 1.82 | **×6.0** |
+| gemma3-4B | 6.7 | 1.30 | **×5.2** |
+| mistral-7B | 8.5 | 1.74 | **×4.9** |
+| phi3.5-mini | 6.4 | 2.08 | **×3.1** |
+| llama3-8B SP | 2.7 | 1.65 | ×1.6 |
+
 ## 2026-05-03 (поздний вечер, ИТОГ-2): 8 моделей verified, llama3-8B + qwen3-8B SP
 
 После gemma3 TP-4 fix (`0ba114a` rebuild18) запущены SP проверки на оставшихся
