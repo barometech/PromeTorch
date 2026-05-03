@@ -1,0 +1,99 @@
+============================================
+ PromeTorch GGUF Inference
+============================================
+Model: /home/paperclipdnb/gguf_models/qwen3-4b-Q4_K_M.gguf
+Prompt: "Привет"
+Max tokens: 5
+Temperature: 0
+Top-k: 40
+Top-p: 0.9
+Device: CPU
+Mode: Chat
+============================================
+[GGUF] Loaded: /home/paperclipdnb/gguf_models/qwen3-4b-Q4_K_M.gguf
+[GGUF] Version: 3, Tensors: 398, Metadata KVs: 32
+[GGUF] Data offset: 5957408 bytes
+[Tokenizer] Loaded: model=gpt2, vocab=151936, merges=151387, bos=1, eos=151645, special=32
+
+=== Model Config ===
+  Architecture: qwen3
+  Name: Qwen3-4B
+  Hidden size: 2560
+  Layers: 36
+  Heads: 32 (KV: 8)
+  Head dim: 128
+  Q dim: 4096, KV dim: 1024
+  FFN size: 9728
+  Vocab size: 151936
+  Context length: 40960
+  RoPE base: 1e+06
+  RMS norm eps: 1e-06
+  Gemma features: scale_emb=0 norm+1=0 qk_norm=1 post_norm=0
+
+[Model] Loading weights...
+  token_embd: [151936, 2560]
+  output: tied to token_embd
+  Layer 5/36 loaded
+  Layer 10/36 loaded
+  Layer 15/36 loaded
+  Layer 20/36 loaded
+  Layer 25/36 loaded
+  Layer 30/36 loaded
+  Layer 35/36 loaded
+  Layer 36/36 loaded
+[mmap] Memory-mapping quantized weights (zero-copy)...
+[mmap] Mapped 2381 MB
+[mmap] Mapped 2381 MB: /home/paperclipdnb/gguf_models/qwen3-4b-Q4_K_M.gguf
+[mmap] Locked 7 MB of critical weights in RAM
+[mmap] 2375 MB mapped in 4.3 ms (zero-copy)
+
+[Model] Loaded in 11.1 seconds
+
+--- Generation ---
+[Generate] Prompt tokens: 20
+[spec-init] spec_k=1 can_spec_verify=0 use_cuda=0 use_quant_gemv=1 temperature=0.000000 rep_pen=1.050000 use_spec_out=0
+<think>[CPUScratch] Allocated 747 KB decode buffers
+[HIDDEN emb_lookup] mean=1.93746e-05 std=0.00797711 min=-0.0844727 max=0.059082 first8=[0.00445461,0.0103941,0.0163336,0.0386066,0.0163336,-0.0148487,0.00296974,0.0267277]
+[HIDDEN after_L0] mean=-0.00500697 std=0.339155 min=-2.97485 max=2.20226 first8=[0.258131,-2.388,0.380307,0.933243,0.516602,-0.0409189,-2.20919,0.210729]
+[HIDDEN after_L1] mean=0.000493286 std=0.439552 min=-3.56705 max=3.27889 first8=[2.16371,-2.908,0.40224,1.19163,0.654789,0.110976,-3.37577,0.512627]
+[HIDDEN after_L5] mean=0.0188627 std=0.760851 min=-7.95236 max=21.7127 first8=[21.7127,-0.992116,-0.689134,2.78769,-0.0920294,2.25319,-7.95236,1.33497]
+[HIDDEN after_L17] mean=0.0118734 std=1.02723 min=-11.4653 max=16.6419 first8=[16.6419,1.9738,-7.72203,14.9624,8.06668,0.984449,-11.4653,-7.29104]
+[HIDDEN after_L35] mean=0.0368848 std=5.88006 min=-30.0653 max=52.3759 first8=[-14.7658,-1.12045,9.51114,12.5495,-24.6539,-9.69646,-18.4434,-1.71357]
+[HIDDEN after_final_norm] mean=0.0296457 std=3.23436 min=-36.6106 max=48.4329 first8=[-0.0137939,-0.419798,5.91395,3.05126,0.0926368,-2.38333,-6.19957,-1.63921]
+
+[HIDDEN emb_lookup] mean=-0.000268433 std=0.0219045 min=-0.09799 max=0.100342 first8=[-0.0535026,-0.0185201,0.0370402,-0.0596759,-0.0514448,0.049387,-0.0452714,-0.010289]
+[HIDDEN after_L0] mean=0.00131045 std=0.166243 min=-2.1917 max=5.40769 first8=[5.40769,-0.728674,1.83141,0.223237,0.174279,0.982707,-0.624118,0.246088]
+[HIDDEN after_L1] mean=0.00565998 std=0.4098 min=-7.03829 max=14.5217 first8=[14.5217,-2.89462,3.43149,0.625259,0.632869,0.950963,-1.68208,0.449046]
+[HIDDEN after_L5] mean=0.0152095 std=0.675295 min=-8.13332 max=29.718 first8=[29.718,-1.1649,3.91861,2.1035,0.00217527,2.50401,-2.36951,1.03955]
+[HIDDEN after_L17] mean=0.0234103 std=0.854747 min=-5.84988 max=25.1847 first8=[25.1847,3.91489,-1.65601,11.9962,16.5316,1.36112,0.584973,-5.84988]
+[HIDDEN after_L35] mean=-0.210686 std=10.3305 min=-99.7 max=106.608 first8=[-93.5879,0.0468824,6.82553,3.50111,-99.7,-6.98671,-0.621436,-42.4266]
+[HIDDEN after_final_norm] mean=-0.0486772 std=3.40574 min=-45.802 max=56.1019 first8=[-0.0497543,0.00999626,2.41524,0.484436,0.213193,-0.97729,-0.118876,-23.0966]
+</think>[HIDDEN emb_lookup] mean=-1.37171e-05 std=0.00788809 min=-0.0844727 max=0.0634766 first8=[0.00301099,0.0180659,0.0270989,0.0436593,0.0195714,-0.00903296,0.012044,0.0301099]
+[HIDDEN after_L0] mean=0.000621563 std=0.296322 min=-2.41974 max=1.94357 first8=[1.22855,-2.32034,0.545074,0.946236,0.561441,0.179587,-2.01395,0.17014]
+[HIDDEN after_L1] mean=0.00512833 std=0.335858 min=-2.81522 max=2.78365 first8=[2.78365,-2.44251,0.261648,1.2643,0.853011,0.426233,-2.73458,0.416117]
+[HIDDEN after_L5] mean=0.0206874 std=0.731882 min=-8.40193 max=21.3955 first8=[21.3955,-0.696538,-1.04338,2.8142,0.187433,2.71433,-8.40193,1.39524]
+[HIDDEN after_L17] mean=0.0179954 std=1.05396 min=-12.2846 max=18.2403 first8=[18.2403,2.79371,-8.33424,14.2648,9.76743,2.30421,-12.2846,-6.20573]
+[HIDDEN after_L35] mean=0.16182 std=5.29935 min=-24.7616 max=41.2611 first8=[3.93585,4.27554,4.99077,13.0596,1.78543,-2.9294,-16.8315,6.09023]
+[HIDDEN after_final_norm] mean=0.10167 std=3.20621 min=-35.0631 max=42.317 first8=[0.0040779,1.77666,3.44174,3.52165,-0.00744058,-0.798574,-6.27492,6.46147]
+
+
+[HIDDEN emb_lookup] mean=4.8485e-05 std=0.0218863 min=-0.0957432 max=0.117546 first8=[-0.0359037,0.00598395,0.0269278,-0.0269278,-0.0299197,0.0209438,-0.0957432,0.0179518]
+[HIDDEN after_L0] mean=0.00108825 std=0.157516 min=-2.19863 max=4.91766 first8=[4.91766,-0.580282,1.64536,0.329927,0.103743,0.944697,-0.707583,0.286273]
+[HIDDEN after_L1] mean=0.00291621 std=0.188159 min=-2.33411 max=5.78465 first8=[5.78465,-0.654289,1.9278,0.759595,0.291215,1.26653,-0.909913,0.457441]
+[HIDDEN after_L5] mean=0.011778 std=0.490579 min=-3.26844 max=20.2719 first8=[20.2719,1.43895,2.7736,2.32571,-0.0361119,3.04258,-1.87882,1.16429]
+[HIDDEN after_L17] mean=0.0145119 std=0.909176 min=-4.15727 max=24.3189 first8=[24.3189,4.36676,-1.14494,12.4948,20.2655,2.74119,0.270516,-4.15727]
+[HIDDEN after_L35] mean=-0.148863 std=9.34119 min=-80.5242 max=115.506 first8=[-80.5242,-3.6849,1.00999,18.789,-78.9188,9.38978,-4.55964,-20.4607]
+[HIDDEN after_final_norm] mean=-0.0534375 std=3.43542 min=-61.7013 max=67.2277 first8=[-0.0473469,-0.868976,0.395272,2.87533,0.186643,1.45265,-0.964682,-12.3193]
+</think>[HIDDEN emb_lookup] mean=-1.37171e-05 std=0.00788809 min=-0.0844727 max=0.0634766 first8=[0.00301099,0.0180659,0.0270989,0.0436593,0.0195714,-0.00903296,0.012044,0.0301099]
+[HIDDEN after_L0] mean=0.00120798 std=0.289363 min=-2.4283 max=1.92396 first8=[1.17174,-2.28859,0.489722,0.990732,0.510223,0.207227,-1.96017,0.134135]
+[HIDDEN after_L1] mean=0.00553207 std=0.322966 min=-2.81185 max=2.61508 first8=[2.55294,-2.37129,0.186308,1.30939,0.825295,0.447645,-2.61227,0.361703]
+[HIDDEN after_L5] mean=0.0211396 std=0.710325 min=-8.40305 max=19.9664 first8=[19.9664,-0.645593,-1.19935,3.01268,0.245478,2.47639,-8.40305,1.29871]
+[HIDDEN after_L17] mean=0.0169712 std=1.04754 min=-12.0173 max=17.5832 first8=[17.5832,2.50157,-8.7184,14.5304,9.84413,2.21817,-12.0173,-5.83757]
+[HIDDEN after_L35] mean=0.174402 std=5.12126 min=-22.949 max=37.639 first8=[11.25,3.89608,1.0464,13.3449,3.31107,-0.724934,-16.73,7.71975]
+[HIDDEN after_final_norm] mean=0.112568 std=3.21344 min=-41.3188 max=42.9023 first8=[0.01206,1.67509,0.746633,3.72329,-0.0142767,-0.204471,-6.45326,8.47417]
+
+
+[Generate] 5 tokens in 1.1s (4.4 tok/s)
+
+--- Full Response ---
+
