@@ -3402,24 +3402,43 @@ public:
 
             // -- act(gate) * up: in-place into gate_buf --
             // act = SiLU (LLaMA/qwen/mistral) или GELU tanh approx (Gemma family).
-            // Gemma3 в llama.cpp использует LLM_FFN_GELU; SiLU дал бы wrong
-            // нелинейность и broken output. ffn_gelu=true → tanh-approx GELU.
-            // Const sqrt(2/π) ≈ 0.7978845608. GELU(x) ≈ 0.5x(1 + tanh(c*(x+0.044715x^3))).
+            // Gemma3 в llama.cpp использует LLM_FFN_GELU. ffn_gelu=true → GELU.
+            // SiLU AVX2 fast path сохранён — это hot loop (inter=9728 × 36 layers).
             const bool use_gelu = config.ffn_gelu;
             c10::get_thread_pool().parallel_for(0, inter, [&](int64_t s, int64_t e) {
                 int64_t j = s;
-                for (; j < e; ++j) {
-                    float g = sp.gate_buf[j];
-                    float act;
-                    if (use_gelu) {
+                if (use_gelu) {
+                    // GELU tanh-approx (scalar — gemma3 не критичная скорость).
+                    for (; j < e; ++j) {
+                        float g = sp.gate_buf[j];
                         const float c = 0.7978845608028654f;  // sqrt(2/pi)
                         float x3 = g * g * g;
                         float t = std::tanh(c * (g + 0.044715f * x3));
-                        act = 0.5f * g * (1.0f + t);
-                    } else {
-                        act = g / (1.0f + std::exp(-g));  // SiLU
+                        sp.gate_buf[j] = 0.5f * g * (1.0f + t) * sp.up_buf[j];
                     }
-                    sp.gate_buf[j] = act * sp.up_buf[j];
+                } else {
+#ifdef __AVX2__
+                    __m256 one = _mm256_set1_ps(1.0f);
+                    for (; j + 7 < e; j += 8) {
+                        __m256 g = _mm256_loadu_ps(sp.gate_buf + j);
+                        __m256 u = _mm256_loadu_ps(sp.up_buf + j);
+                        __m256 neg_g = _mm256_sub_ps(_mm256_setzero_ps(), g);
+                        neg_g = _mm256_max_ps(neg_g, _mm256_set1_ps(-88.0f));
+                        neg_g = _mm256_min_ps(neg_g, _mm256_set1_ps(88.0f));
+                        float tmp[8];
+                        _mm256_storeu_ps(tmp, neg_g);
+                        __m256 exp_neg_g = _mm256_set_ps(
+                            std::exp(tmp[7]), std::exp(tmp[6]), std::exp(tmp[5]), std::exp(tmp[4]),
+                            std::exp(tmp[3]), std::exp(tmp[2]), std::exp(tmp[1]), std::exp(tmp[0]));
+                        __m256 sigmoid = _mm256_div_ps(one, _mm256_add_ps(one, exp_neg_g));
+                        __m256 silu = _mm256_mul_ps(g, sigmoid);
+                        _mm256_storeu_ps(sp.gate_buf + j, _mm256_mul_ps(silu, u));
+                    }
+#endif
+                    for (; j < e; ++j) {
+                        float g = sp.gate_buf[j];
+                        sp.gate_buf[j] = (g / (1.0f + std::exp(-g))) * sp.up_buf[j];
+                    }
                 }
             }, /*min_grain=*/256);
             if (sec_timers_.on) sec_timers_.silu_ms += _elapsed_ms();
