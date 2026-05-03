@@ -3275,12 +3275,6 @@ public:
             if (sec_timers_.on) sec_timers_.attn_ms += _elapsed_ms();
 
             // -- Output projection: attn_buf @ W_o -> h_buf --
-            // Post-attention norm (Gemma3): in-place on attn_buf
-            if (layer.post_attention_norm.defined()) {
-                cpu_quant::cpu_rmsnorm_inplace(sp.attn_buf, layer.post_attention_norm.data_ptr<float>(),
-                    eps, add_one, q_dim);
-            }
-
             if (use_quant_gemv_ && layer.q_attn_output.valid && layer.q_attn_output.cpu_data) {
                 cpu_quant::cpu_quant_gemv(layer.q_attn_output.quant_type, layer.q_attn_output.cpu_data,
                     sp.attn_buf, sp.h_buf, q_dim, layer.q_attn_output.rows, layer.q_attn_output.row_stride_bytes,
@@ -3294,6 +3288,15 @@ public:
                     for (int64_t k = 0; k < q_dim; ++k) dot += sp.attn_buf[k] * w[n * q_dim + k];
                     sp.h_buf[n] = dot;
                 }
+            }
+
+            // Gemma3 post-attention norm: applied AFTER output projection,
+            // BEFORE residual add. llama.cpp `gemma3.cpp` order:
+            //   build_attn (includes wo) → build_norm(cur, attn_post_norm) → +residual.
+            // h_buf size = hidden (output of W_o is hidden-dim).
+            if (layer.post_attention_norm.defined()) {
+                cpu_quant::cpu_rmsnorm_inplace(sp.h_buf, layer.post_attention_norm.data_ptr<float>(),
+                    eps, add_one, H);
             }
 
             // -- Residual add: x = x + attn_output (in-place into other x_buf) --
@@ -3701,11 +3704,12 @@ public:
             }
 
             // Output projection
-            if (layer.post_attention_norm.defined())
-                cpu_quant::cpu_rmsnorm_inplace(sp.attn_buf, layer.post_attention_norm.data_ptr<float>(), eps, add_one, q_dim);
             if (use_quant_gemv_ && layer.q_attn_output.valid && layer.q_attn_output.cpu_data)
                 cpu_quant::cpu_quant_gemv(layer.q_attn_output.quant_type, layer.q_attn_output.cpu_data,
                     sp.attn_buf, sp.h_buf, q_dim, layer.q_attn_output.rows, layer.q_attn_output.row_stride_bytes);
+            // Gemma3 post-attention norm: AFTER output projection, BEFORE residual.
+            if (layer.post_attention_norm.defined())
+                cpu_quant::cpu_rmsnorm_inplace(sp.h_buf, layer.post_attention_norm.data_ptr<float>(), eps, add_one, H);
 
             // Residual
             int next = 1 - cur;
