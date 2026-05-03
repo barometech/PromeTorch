@@ -5077,7 +5077,11 @@ public:
         for (int64_t i = 0; i < config.num_layers; ++i) {
             auto& full = layers[i];
             auto free_if_owned = [](QuantizedWeight& qw) {
-                if (qw.valid && qw.cpu_data && !qw.mmap_owned) {
+                // owns_cpu_data=false для phi3 split-views (q_attn_q/k/v →
+                // в буфер q_attn_qkv, q_ffn_gate/up → в q_ffn_gate_up). Без
+                // этой проверки free() для slice ломает glibc heap (double
+                // free / linked-list corruption).
+                if (qw.valid && qw.cpu_data && !qw.mmap_owned && qw.owns_cpu_data) {
                     std::free(qw.cpu_data);
                     qw.cpu_data = nullptr;
                     qw.valid = false;
@@ -5088,6 +5092,21 @@ public:
             free_if_owned(full.q_attn_v);
             free_if_owned(full.q_ffn_gate);
             free_if_owned(full.q_ffn_up);
+            // The merged owners must be freed AFTER repack consumed them.
+            // Otherwise their backing memory leaks (~30 MB per layer for
+            // attn_qkv on phi3.5-mini). After this point split-views'
+            // cpu_data become dangling — they MUST not be accessed again.
+            // TP path uses ReplicatedWeight or repacked TPSlicedWeight
+            // buffers, not the original cpu_data of q_attn_q.
+            auto free_owner = [](QuantizedWeight& qw) {
+                if (qw.valid && qw.cpu_data && !qw.mmap_owned) {
+                    std::free(qw.cpu_data);
+                    qw.cpu_data = nullptr;
+                    qw.valid = false;
+                }
+            };
+            free_owner(full.q_attn_qkv);
+            free_owner(full.q_ffn_gate_up);
         }
 
         return true;
