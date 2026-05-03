@@ -85,11 +85,11 @@
     <td><span class="badge badge-ok">FIXED: per-layer SWA + post_attn_norm placement + GeGLU</span></td></tr>
 
 <tr><td><b>phi3.5-mini Q4_K_M</b></td>
-    <td class="fail">✗ <code>&lt;unk&gt;&lt;unk&gt;…</code> + heap corruption</td>
-    <td class="fail">✗ same</td>
-    <td class="cell-num">5.8</td><td>—</td>
-    <td><code>neox</code></td>
-    <td><span class="badge badge-part">PARTIAL: loader split работает, attn computation даёт wrong logits</span></td></tr>
+    <td class="fail">✗ <code>bom&lt;unk&gt;×60</code></td>
+    <td class="fail">✗ <code>bom&lt;unk&gt;×60</code></td>
+    <td class="cell-num">6.2</td><td>—</td>
+    <td><code>neox</code> + LongRoPE + attn_factor</td>
+    <td><span class="badge badge-part">7 fix применены: split, chat tpl, owns_cpu_data, NEOX, LongRoPE rope_factors, attn_factor 1.19, heap fix. Bug в Q5_K layout или attention internals — нужен deeper debug</span></td></tr>
 </table>
 
 <p style="font-size:13px"><b>¹</b> SP = single-process, OMP_NUM_THREADS=32. &nbsp;
