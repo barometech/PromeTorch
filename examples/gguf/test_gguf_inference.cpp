@@ -10,7 +10,6 @@
 // ============================================================================
 
 #include "torch/io/gguf_model.h"
-#include "torch/io/deepseek2_forward.h"  // MLA + MoE forward kernels (GigaChat3)
 #include "torch/distributed/ddp.h"
 #include <iostream>
 #include <string>
