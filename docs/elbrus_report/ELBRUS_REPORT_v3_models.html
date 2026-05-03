@@ -87,15 +87,33 @@
 <tr><td><b>phi3.5-mini Q4_K_M</b></td>
     <td class="ok">✓ связный RU</td>
     <td class="ok">✓ связный EN</td>
-    <td class="cell-num">6.4 TP4 / 3.5 SP</td><td>—</td>
+    <td class="cell-num">6.4 TP4 / 3.5 SP</td><td class="cell-num">2.08</td>
     <td><code>neox</code> + LongRoPE + attn_factor</td>
-    <td><span class="badge badge-ok">FIXED 2026-05-03 (commit d9dce9e): load_quantized_mmap не обрабатывал phi3 merged tensors (attn_qkv, ffn_up rows=2*inter). split_from_mmap helper: malloc+memcpy слайсов из mmap region. SP: «Космос - это всеобъемлющая область пространства...». TP-4: «Космос - это всеобъемлющий, неограниченный пространственный контекст, включающий все галактики, звезды и другие астрономические объекты...» (1.8× speedup vs SP). EN: «Moscow, the capital city of Russia, is not only the political heart...»</span></td></tr>
+    <td><span class="badge badge-ok">FIXED 2026-05-03 (commit d9dce9e): load_quantized_mmap не обрабатывал phi3 merged tensors (attn_qkv, ffn_up rows=2*inter). split_from_mmap helper: malloc+memcpy слайсов из mmap region. SP: «Космос - это всеобъемлющая область пространства...». TP-4: «Космос - это всеобъемлющий, неограниченный пространственный контекст, включающий все галактики, звезды и другие астрономические объекты...» (×3.1 speedup vs llama.cpp 32t). EN: «Moscow, the capital city of Russia, is not only the political heart...»</span></td></tr>
+<tr><td><b>llama3-8B Q4_K_M</b></td>
+    <td class="ok">✓ связный RU</td>
+    <td class="ok">✓ связный EN</td>
+    <td class="cell-num">2.7 SP</td><td class="cell-num">1.65</td>
+    <td><code>norm</code> (llama)</td>
+    <td><span class="badge badge-ok">SP works ×1.6 vs llama.cpp. TP-4 OOM (SoA storage × 4 ranks). «Космос - это все, что находится за пределами Земли. Это включает в себя звезды, планеты, галактики и все остальное.»</span></td></tr>
+<tr><td><b>qwen3-8B Q4_K_M</b></td>
+    <td class="ok">✓ связный RU</td>
+    <td class="ok">CoT thinking</td>
+    <td class="cell-num">2.6 SP</td><td>—</td>
+    <td><code>neox</code></td>
+    <td><span class="badge badge-ok">SP CoT thinking works. TP-4 OOM. «&lt;think&gt;Хорошо, пользователь спрашивает: 'Что такое космос? Расскажи коротко.' Нужно дать краткий ответ»</span></td></tr>
+<tr><td><b>deepseek-coder-7B Q4_K_M</b></td>
+    <td class="part">⚠ pending verify</td>
+    <td>—</td>
+    <td>n/a</td><td>—</td>
+    <td><code>norm</code> (llama) + linear scale 4×</td>
+    <td><span class="badge badge-part">First test produced garbage (commit 81a79bd добавил legacy `rope.scale_linear` ключ в parser — deepseek хранит scaling в old формате). Pending rebuild19 + retest.</span></td></tr>
 </table>
 
 <p style="font-size:13px"><b>¹</b> SP = single-process, OMP_NUM_THREADS=32. &nbsp;
 <b>²</b> TP-4 = 4 процесса, OMP_NUM_THREADS=8 каждый, NUMA-bound. &nbsp;
-<b>³</b> qwen2.5-7B на TP-4 потребляет &gt;20 ГБ виртуальной памяти, OOM на E8C2 в текущей конфигурации. &nbsp;
-<b>⁴</b> gemma3 TP-4 throws: <code>post_attention_norm unsupported (Gemma3 not yet wired)</code>. RMSNorm применяется per-slice, что не эквивалентно RMSNorm на full hidden — нужен AllGather → norm → re-slice. Single-proc работает.</p>
+<b>³</b> qwen2.5-7B / llama3-8B / qwen3-8B / qwen3-14B на TP-4 потребляют &gt;20 ГБ виртуальной памяти, OOM на E8C2. SP path работает. &nbsp;
+<b>⁴</b> gemma3 TP-4 FIXED commit `0ba114a` (требует PT_TP_GATHER=1): post_attention_norm + post_ffw_norm применяются на full h_buf после output_proj/ffn_down — match SP path forward_decode_cpu.</p>
 
 <h2>1. Что было сделано в этой сессии</h2>
 
