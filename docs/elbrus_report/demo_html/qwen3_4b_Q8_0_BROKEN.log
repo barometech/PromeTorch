@@ -1,0 +1,117 @@
+============================================
+ PromeTorch GGUF Inference
+============================================
+Model: /home/paperclipdnb/gguf_models/qwen3-4b-Q8_0.gguf
+Prompt: "Расскажи про Москву одним предложением."
+Max tokens: 200
+Temperature: 0.5
+Top-k: 40
+Top-p: 0.9
+Device: CPU
+Mode: Chat
+============================================
+[GGUF] Loaded: /home/paperclipdnb/gguf_models/qwen3-4b-Q8_0.gguf
+[GGUF] Version: 3, Tensors: 398, Metadata KVs: 32
+[GGUF] Data offset: 5957408 bytes
+[Tokenizer] Loaded: model=gpt2, vocab=151936, merges=151387, bos=1, eos=151645, special=32
+
+=== Model Config ===
+  Architecture: qwen3
+  Name: Qwen3-4B
+  Hidden size: 2560
+  Layers: 36
+  Heads: 32 (KV: 8)
+  Head dim: 128
+  Q dim: 4096, KV dim: 1024
+  FFN size: 9728
+  Vocab size: 151936
+  Context length: 40960
+  RoPE base: 1e+06
+  RMS norm eps: 1e-06
+  Gemma features: scale_emb=0 norm+1=0 qk_norm=1 post_norm=0
+
+[Model] Loading weights...
+  token_embd: [151936, 2560]
+  output: tied to token_embd
+  Layer 5/36 loaded
+  Layer 10/36 loaded
+  Layer 15/36 loaded
+  Layer 20/36 loaded
+  Layer 25/36 loaded
+  Layer 30/36 loaded
+  Layer 35/36 loaded
+  Layer 36/36 loaded
+[mmap] Memory-mapping quantized weights (zero-copy)...
+[mmap] Mapped 4082 MB
+[mmap] Mapped 4082 MB: /home/paperclipdnb/gguf_models/qwen3-4b-Q8_0.gguf
+[mmap] Locked 5 MB of critical weights in RAM
+[mmap] 4075 MB mapped in 5.4 ms (zero-copy)
+
+[Model] Loaded in 46.6 seconds
+
+--- Generation ---
+[Generate] Prompt tokens: 29
+[spec-init] spec_k=1 can_spec_verify=0 use_cuda=0 use_quant_gemv=1 temperature=0.500000 rep_pen=1.050000 use_spec_out=0
+<think>[CPUScratch] Allocated 748 KB decode buffers
+
+
+</think>
+
+</think>
+
+Кон
+
+К
+
+**Мос**
+
+**Мос**
+
+**Мос**
+
+**Мос**
+
+**М**
+
+В**
+**  
+
+
+В
+
+С
+
+
+К
+ать
+у
+
+[Generate] 45 tokens in 40.6s (1.1 tok/s)
+
+--- Full Response ---
+Кон
+
+К
+
+**Мос**
+
+**Мос**
+
+**Мос**
+
+**Мос**
+
+**М**
+
+В**
+**  
+
+
+В
+
+С
+
+
+К
+ать
+у
