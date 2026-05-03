@@ -87,7 +87,7 @@ inline void futex_wake_all(std::atomic<uint32_t>* addr) {
               FUTEX_WAKE,
               INT_MAX, nullptr, nullptr, 0);
 #elif defined(_WIN32)
-    WakeByAddressAll(reinterpret_cast<volatile void*>(addr));
+    WakeByAddressAll(reinterpret_cast<void*>(addr));
 #else
     (void)addr;
 #endif
@@ -100,7 +100,7 @@ inline void futex_wake_one(std::atomic<uint32_t>* addr) {
               FUTEX_WAKE,
               1, nullptr, nullptr, 0);
 #elif defined(_WIN32)
-    WakeByAddressSingle(reinterpret_cast<volatile void*>(addr));
+    WakeByAddressSingle(reinterpret_cast<void*>(addr));
 #else
     (void)addr;
 #endif

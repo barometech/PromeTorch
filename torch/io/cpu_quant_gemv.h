@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cmath>
+#include <limits>
 #include <memory>
 #include "torch/io/gguf_dequant.h"
 #include "torch/io/numa_weight_replica.h"
@@ -1552,7 +1553,7 @@ inline void cpu_quant_gemv_k_slice(
         default:
             // Q5_K — unsupported k-slice fast path. Caller detects valid=false
             // and falls back to replicated GEMV + AllReduce.
-            for (int64_t i = 0; i < N; ++i) y[i] = 0.0f / 0.0f;
+            for (int64_t i = 0; i < N; ++i) y[i] = std::numeric_limits<float>::quiet_NaN();
             break;
     }
 }
