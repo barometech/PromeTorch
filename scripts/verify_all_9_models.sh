@@ -52,17 +52,21 @@ run_tp4() {
 }
 
 # 1. SP проверки (быстрее на Эльбрусе чем TP для маленьких моделей при наличии 32 cores)
-run_sp "phi3.5-mini-SP" "phi35-mini-Q4_K_M.gguf"
-run_sp "qwen3-1.7B-SP"  "qwen3-1.7b-Q4_K_M.gguf"
-run_sp "qwen3-4B-SP"    "qwen3-4b-Q4_K_M.gguf"
-run_sp "qwen2.5-7B-SP"  "qwen2.5-7b-Q4_K_M.gguf"
-run_sp "mistral-7B-SP"  "mistral-7b-Q4_K_M.gguf"
-run_sp "gemma3-4B-SP"   "gemma3-4b-Q4_K_M.gguf"
+run_sp "phi3.5-mini-SP"     "phi35-mini-Q4_K_M.gguf"
+run_sp "qwen3-1.7B-SP"      "qwen3-1.7b-Q4_K_M.gguf"
+run_sp "qwen3-4B-SP"        "qwen3-4b-Q4_K_M.gguf"
+run_sp "qwen2.5-7B-SP"      "qwen2.5-7b-Q4_K_M.gguf"
+run_sp "qwen3-8B-SP"        "qwen3-8b-Q4_K_M.gguf"
+run_sp "mistral-7B-SP"      "mistral-7b-Q4_K_M.gguf"
+run_sp "gemma3-4B-SP"       "gemma3-4b-Q4_K_M.gguf"
+run_sp "llama3-8B-SP"       "llama3-8b-Q4_K_M.gguf"
+run_sp "deepseek-coder-7B-SP" "deepseek-coder-7b-Q4_K_M.gguf"
 
-# 2. TP-4 проверки (на моделях которые в TP-4 работают)
-run_tp4 "phi3.5-mini"   "phi35-mini-Q4_K_M.gguf"
-run_tp4 "qwen3-1.7B"    "qwen3-1.7b-Q4_K_M.gguf"
-run_tp4 "qwen3-4B"      "qwen3-4b-Q4_K_M.gguf"
-run_tp4 "mistral-7B"    "mistral-7b-Q4_K_M.gguf"
+# 2. TP-4 проверки (модели которые работают в TP-4 без OOM)
+run_tp4 "phi3.5-mini" "phi35-mini-Q4_K_M.gguf"
+run_tp4 "qwen3-1.7B"  "qwen3-1.7b-Q4_K_M.gguf"
+run_tp4 "qwen3-4B"    "qwen3-4b-Q4_K_M.gguf"
+run_tp4 "mistral-7B"  "mistral-7b-Q4_K_M.gguf"
+# gemma3-4B TP-4 требует PT_TP_GATHER=1 — отдельный test_gemma3_tp4_with_gather.sh
 
-echo ALL_7_MODELS_DONE
+echo ALL_9_MODELS_DONE
