@@ -510,9 +510,8 @@ inline void dequantize_q3_k(const void* src, float* dst, int64_t n) {
             int is = j / 16;
             float dl = d * scales[is];
             for (int l = 0; l < 16; ++l) {
-                int shift = ((qi + l / 2) % 32 == qi + l / 2) ? (l & 1) * 2 : 0;
                 int byte_idx = qi + l / 2;
-                // 2-bit base from qs
+                // 2-bit base from qs (Q3_K stub — full unpack TBD)
                 uint8_t q2 = (qs[byte_idx % 64] >> (2 * (l % 4))) & 3;
                 // High bit from hmask
                 int h = (hmask[(j + l) % 32] & hm) ? 0 : 4;
