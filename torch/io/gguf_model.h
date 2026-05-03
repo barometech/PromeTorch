@@ -1427,12 +1427,17 @@ public:
         };
 
         // Splits a merged QKV (or gate+up) quantized tensor along its row axis
-        // into N independent QuantizedWeight slices that share the same backing
-        // buffer. Q4_K / Q5_K / Q6_K / Q8_0 are all row-major in GGUF (each row
-        // stored as `cols/group_size` blocks back-to-back), so the slice is
-        // just a pointer offset + row count adjustment. row_split_counts must
-        // sum to merged.rows. The ORIGINAL merged QuantizedWeight is left
-        // populated as the *owner* of cpu_data; the slices are non-owning views.
+        // into N independent QuantizedWeight slices. Each slice gets its OWN
+        // malloc'd cpu_data via memcpy of the relevant byte range — NOT a
+        // non-owning view. Reason: split-view path (offset into merged buffer)
+        // produced incoherent output for phi3.5-mini Q5_K attn_qkv, even
+        // though the byte ranges aligned correctly with Q5_K block boundaries
+        // (176 B/block × 12 blocks/row = 2112 B/row). Bisect with
+        // PT_NO_QUANT_GEMV=1 confirmed the FP fallback path produced coherent
+        // text while the split-view quant path produced `bom<unk>×40`.
+        // Owning copies cost +18.5 MB (attn_qkv) + 28 MB (gate+up) per layer
+        // worth of duplicated bytes, but eliminates split-view as a variable.
+        // The merged QuantizedWeight is freed after the splits are populated.
         auto split_quant_rows = [&](QuantizedWeight& merged,
                                     const std::vector<int64_t>& row_split_counts,
                                     const std::vector<QuantizedWeight*>& outs) {
@@ -1441,16 +1446,29 @@ public:
             for (size_t i = 0; i < outs.size(); ++i) {
                 int64_t n_rows = row_split_counts[i];
                 QuantizedWeight& slice = *outs[i];
-                slice.cpu_data = static_cast<char*>(merged.cpu_data)
-                                  + row_off * merged.row_stride_bytes;
                 slice.rows = n_rows;
                 slice.cols = merged.cols;
                 slice.row_stride_bytes = merged.row_stride_bytes;
                 slice.total_bytes = n_rows * merged.row_stride_bytes;
                 slice.quant_type = merged.quant_type;
                 slice.valid = true;
-                slice.owns_cpu_data = false;  // merged owns the buffer
+                slice.owns_cpu_data = true;  // own copy, not view
+                slice.cpu_data = std::malloc(slice.total_bytes);
+                if (!slice.cpu_data) {
+                    throw std::runtime_error("split_quant_rows: malloc failed");
+                }
+                std::memcpy(slice.cpu_data,
+                            static_cast<const char*>(merged.cpu_data)
+                              + row_off * merged.row_stride_bytes,
+                            slice.total_bytes);
                 row_off += n_rows;
+            }
+            // Merged buffer is no longer needed — its data is duplicated in
+            // the slices. Free now to avoid the +46 MB residual footprint.
+            if (merged.cpu_data && merged.owns_cpu_data && !merged.mmap_owned) {
+                std::free(merged.cpu_data);
+                merged.cpu_data = nullptr;
+                merged.valid = false;
             }
         };
 
@@ -1645,16 +1663,78 @@ public:
             qw.valid = (qw.cpu_data != nullptr);
         };
 
+        // Phi-3 / Phi-2 / StarCoder2 store Q/K/V merged as `attn_qkv.weight`
+        // and gate+up merged as `ffn_up.weight` (rows = 2*intermediate). The
+        // mmap path can't take a non-owning offset slice (the kernels expect
+        // independent QuantizedWeight objects with their own row counts), so
+        // we malloc + memcpy the relevant byte range out of the mmap region
+        // into separate Q/K/V (and gate/up) buffers. This is the same fix as
+        // split_quant_rows in load_quantized_to_cpu, but adapted for mmap
+        // sources (mmap_owned merged → owns_cpu_data slices).
+        const int64_t q_dim_total  = config.num_heads    * config.head_dim;
+        const int64_t kv_dim_total = config.num_kv_heads * config.head_dim;
+        auto split_from_mmap = [&](QuantizedWeight& merged,
+                                    const std::vector<int64_t>& row_split_counts,
+                                    const std::vector<QuantizedWeight*>& outs) {
+            if (!merged.valid) return;
+            int64_t row_off = 0;
+            for (size_t i = 0; i < outs.size(); ++i) {
+                int64_t n_rows = row_split_counts[i];
+                QuantizedWeight& slice = *outs[i];
+                slice.rows = n_rows;
+                slice.cols = merged.cols;
+                slice.row_stride_bytes = merged.row_stride_bytes;
+                slice.total_bytes = n_rows * merged.row_stride_bytes;
+                slice.quant_type = merged.quant_type;
+                slice.valid = true;
+                slice.owns_cpu_data = true;
+                slice.cpu_data = std::malloc(slice.total_bytes);
+                if (!slice.cpu_data) {
+                    throw std::runtime_error("split_from_mmap: malloc failed");
+                }
+                std::memcpy(slice.cpu_data,
+                            static_cast<const char*>(merged.cpu_data)
+                              + row_off * merged.row_stride_bytes,
+                            slice.total_bytes);
+                row_off += n_rows;
+            }
+            // Merged is mmap'd — leave the mmap slot itself alone; just clear
+            // the QuantizedWeight handle so nothing else uses it.
+            merged.cpu_data = nullptr;
+            merged.valid = false;
+        };
+
         int64_t total_bytes_mapped = 0;
         for (int64_t i = 0; i < config.num_layers; ++i) {
             std::string prefix = "blk." + std::to_string(i) + ".";
             auto& layer = layers[i];
-            map_quant_mmap(prefix + "attn_q.weight", layer.q_attn_q);
-            map_quant_mmap(prefix + "attn_k.weight", layer.q_attn_k);
-            map_quant_mmap(prefix + "attn_v.weight", layer.q_attn_v);
+            // Attention weights — prefer split tensors, fall back to merged.
+            if (reader.has_tensor(prefix + "attn_q.weight")) {
+                map_quant_mmap(prefix + "attn_q.weight", layer.q_attn_q);
+                map_quant_mmap(prefix + "attn_k.weight", layer.q_attn_k);
+                map_quant_mmap(prefix + "attn_v.weight", layer.q_attn_v);
+            } else if (reader.has_tensor(prefix + "attn_qkv.weight")) {
+                map_quant_mmap(prefix + "attn_qkv.weight", layer.q_attn_qkv);
+                split_from_mmap(layer.q_attn_qkv,
+                    {q_dim_total, kv_dim_total, kv_dim_total},
+                    {&layer.q_attn_q, &layer.q_attn_k, &layer.q_attn_v});
+            }
             map_quant_mmap(prefix + "attn_output.weight", layer.q_attn_output);
-            map_quant_mmap(prefix + "ffn_gate.weight", layer.q_ffn_gate);
-            map_quant_mmap(prefix + "ffn_up.weight", layer.q_ffn_up);
+            // FFN weights — prefer split, fall back to merged ffn_up [gate;up].
+            if (reader.has_tensor(prefix + "ffn_gate.weight")) {
+                map_quant_mmap(prefix + "ffn_gate.weight", layer.q_ffn_gate);
+                map_quant_mmap(prefix + "ffn_up.weight",   layer.q_ffn_up);
+            } else if (reader.has_tensor(prefix + "ffn_up.weight")) {
+                map_quant_mmap(prefix + "ffn_up.weight", layer.q_ffn_gate_up);
+                if (layer.q_ffn_gate_up.valid &&
+                    layer.q_ffn_gate_up.rows == 2 * config.intermediate_size) {
+                    split_from_mmap(layer.q_ffn_gate_up,
+                        {config.intermediate_size, config.intermediate_size},
+                        {&layer.q_ffn_gate, &layer.q_ffn_up});
+                } else {
+                    layer.q_ffn_up = std::move(layer.q_ffn_gate_up);
+                }
+            }
             map_quant_mmap(prefix + "ffn_down.weight", layer.q_ffn_down);
 
             // Sum up mapped bytes for reporting
