@@ -180,6 +180,12 @@ PT_Q8_SOA=1 bash scripts/run_tp_elbrus.sh --greedy "Hello"
 Полный отчёт: [docs/elbrus_report/ELBRUS_REPORT_v2.md](docs/elbrus_report/ELBRUS_REPORT_v2.md).
 Анализ Эльбрус-16С с прогнозом ~30 tok/s: [docs/elbrus_report/elbrus16c_specs_dr.md](docs/elbrus_report/elbrus16c_specs_dr.md).
 
+📄 **Финальная arXiv-style статья (2026-05-03):** [PROMETORCH_ELBRUS_ARTICLE.pdf](docs/elbrus_report/PROMETORCH_ELBRUS_ARTICLE.pdf)
+([HTML версия](docs/elbrus_report/PROMETORCH_ELBRUS_ARTICLE.html)) — детальный
+технический отчёт с сопоставлением с предшествующими работами на Эльбрус (llama.cpp-e2k,
+Smart Engines, NCNN+Vulkan), таблицами бенчмарков, описанием 3 root cause fixes и
+3 рендерами tool-call HTML projects.
+
 #### Multi-step tool-call demo (2026-05-03)
 
 3 разные dense HTML страницы сгенерированы через **qwen3-4B TP-4** (10.9 tok/s)
