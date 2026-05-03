@@ -233,18 +233,31 @@ attention. Pending: per-layer rope config.</p>
 <li>Chat template <code>&lt;|user|&gt;…&lt;|end|&gt;&lt;|assistant|&gt;</code>.</li>
 </ul>
 <p>Loader теперь грузит все 32 слоя, генерит 60 токенов
-со скоростью <b>5.8-6.1 tok/s</b>. Но output:</p>
-<pre>successful&lt;unk&gt;&lt;unk&gt;&lt;unk&gt;&lt;unk&gt;&lt;unk&gt;… (60×&lt;unk&gt;)
-corrupted double-linked list
+со скоростью <b>5.8-6.1 tok/s</b>. Но первый токен — случайный
+(«neighbor», «JAX», «ered»), потом всё <code>&lt;unk&gt;×60</code>.
+Heap corruption (<code>double free or corruption</code>) исправлен в
+<code>197d658</code> — добавлена проверка <code>owns_cpu_data</code> в
+<code>free_if_owned</code>.</p>
 
-neighbor&lt;unk&gt;&lt;unk&gt;&lt;unk&gt;… (60×&lt;unk&gt;)
-double free or corruption (!prev)</pre>
-<p>Все логиты схлопываются в token 0 (<code>&lt;unk&gt;</code>). Math
-сплита по строкам (rows × row_stride_bytes) корректна, но computation
-выдаёт uniform/garbage hidden state. Требуется глубже копнуть Q8_SOA repack
-на slice'ах — возможно репак ассумит, что cpu_data — независимый owner,
-и переписывает соседнюю слайсу. Heap corruption на exit подтверждает —
-gem где-то конфликт владения. Out of scope этой сессии.</p>
+<p>Bisect показал:</p>
+<ul>
+<li><code>PT_Q8_SOA=0</code> (Q4_K direct без SoA repack) — те же
+<code>&lt;unk&gt;</code>: значит SoA repack не виноват.</li>
+<li>Phi-3.5-mini <code>attn_qkv</code> = <b>Q5_K</b> (тип 13), не Q4_K.
+<code>q5k_gemv_avx2</code> в коде есть.</li>
+<li>Math split (rows × row_stride): для Q5_K row_stride=2112 byte
+(<code>3072/256 × 176</code>). Q rows [0..3072), K [3072..6144),
+V [6144..9216). Все aligned по 176-byte границе ✓.</li>
+<li>cpu_fused_rmsnorm_qkv_gemv для не-Q4_K делает 3 separate
+<code>cpu_quant_gemv</code> calls — каждый на свой slice.</li>
+</ul>
+
+<p>Тем не менее GEMV выдаёт логиты, у которых argmax = 0 = <code>&lt;unk&gt;</code>.
+Что-то ещё не так. Кандидаты: (a) Q5_K block layout у phi3 имеет другую
+permutation внутри блока, (b) phi3 LongRoPE с
+<code>rope_factors</code> per-frequency не реализован, (c) phi3 RMSNorm
+имеет иную convention. Out of scope сессии — требует side-by-side
+дамп активаций между нашим кодом и llama.cpp.</p>
 
 <h2>3. Скорость: 11.4 baseline и почему 8.0</h2>
 
