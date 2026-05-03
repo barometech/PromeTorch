@@ -81,6 +81,13 @@ struct TransformerConfig {
     bool gemma_norm_add_one = false;   // Gemma: RMSNorm weight += 1
     bool has_qk_norm = false;          // Gemma3: per-head Q/K normalization
     bool ffn_gelu = false;             // FFN gate activation: false=SiLU (LLaMA/Mistral/qwen), true=GELU tanh (Gemma family).
+    // Phi-3 LongRoPE per-frequency adjustment. inv_freq[d] /= factor[d].
+    // GGUF tensors `rope_factors_short.weight` (used when seq_len ≤ original_context)
+    // и `rope_factors_long.weight`. Если nullptr → стандартный rope. Для коротких
+    // промптов (<orig_ctx=4096) короткие факторы — большинство ≈1.0 но не все.
+    std::vector<float> rope_factors_short;
+    std::vector<float> rope_factors_long;
+    int64_t rope_orig_ctx = 0;          // 0 = LongRoPE disabled.
     bool has_post_norm = false;        // Gemma3: post-attention + post-FFN norms
     bool rope_neox = false;            // NeoX-style RoPE (qwen/gemma/phi3); else NORM (llama/mistral)
 
@@ -122,6 +129,8 @@ struct TransformerConfig {
         if (architecture == "gemma3" && swa_window > 0 && swa_pattern == 0) {
             swa_pattern = 6;
         }
+        // Phi-3 LongRoPE: original context length после которого long_factor.
+        rope_orig_ctx = reader.get_arch_int("rope.scaling.original_context_length", 0);
         rms_norm_eps = reader.get_arch_float("attention.layer_norm_rms_epsilon", 1e-6f);
 
         // Head dim: prefer explicit key_length, fallback to hidden/heads
@@ -180,6 +189,15 @@ struct TransformerConfig {
         }();
         if (force_global) return true;
         return ((layer_idx + 1) % swa_pattern) == 0;
+    }
+    // Phi-3 LongRoPE selector. seq_len ≤ original_context → short, иначе long.
+    // nullptr если LongRoPE не применяется для этой модели.
+    const float* rope_factors_for(int64_t seq_len) const {
+        if (rope_orig_ctx <= 0) return nullptr;
+        if (seq_len <= rope_orig_ctx) {
+            return rope_factors_short.empty() ? nullptr : rope_factors_short.data();
+        }
+        return rope_factors_long.empty() ? nullptr : rope_factors_long.data();
     }
     float layer_rope_freq_base(int64_t layer_idx) const {
         return layer_is_global(layer_idx) ? rope_freq_base : rope_swa_freq_base;
@@ -1986,6 +2004,26 @@ private:
             std::cout << "  output: tied to token_embd" << std::endl;
         }
 
+        // Phi-3 LongRoPE per-frequency factors. Tensors `rope_factors_short.weight`
+        // (используется при seq_len ≤ original_context) и `rope_factors_long.weight`
+        // (для длинных контекстов). Каждый — head_dim/2 элементов F32.
+        // inv_freq[d] = inv_freq[d] / factor[d].
+        {
+            Tensor t_short, t_long;
+            if (load_fp_named("rope_factors_short.weight", t_short)) {
+                int64_t n = t_short.numel();
+                config.rope_factors_short.assign(n, 1.0f);
+                std::memcpy(config.rope_factors_short.data(), t_short.data_ptr<float>(), n * sizeof(float));
+                std::cout << "  rope_factors_short: " << n << " elements" << std::endl;
+            }
+            if (load_fp_named("rope_factors_long.weight", t_long)) {
+                int64_t n = t_long.numel();
+                config.rope_factors_long.assign(n, 1.0f);
+                std::memcpy(config.rope_factors_long.data(), t_long.data_ptr<float>(), n * sizeof(float));
+                std::cout << "  rope_factors_long: " << n << " elements" << std::endl;
+            }
+        }
+
         layers.resize(config.num_layers);
         for (int64_t i = 0; i < config.num_layers; ++i) {
             std::string prefix = "blk." + std::to_string(i) + ".";
@@ -3101,7 +3139,8 @@ public:
                 at::native::hot::rope_precompute(rope_cos, rope_sin,
                     past_len, head_dim,
                     config.layer_rope_freq_base(i),
-                    config.layer_rope_scale(i));
+                    config.layer_rope_scale(i),
+                    config.rope_factors_for(past_len + 1));
                 if (config.rope_neox) {
                     at::native::hot::rope_apply_fused_neox(sp.q_buf, sp.k_buf,
                         rope_cos, rope_sin, n_heads, n_kv_heads, head_dim);
@@ -4008,7 +4047,8 @@ public:
                 at::native::hot::rope_precompute(rope_cos, rope_sin,
                     past_len_0 + k, head_dim,
                     config.layer_rope_freq_base(i),
-                    config.layer_rope_scale(i));
+                    config.layer_rope_scale(i),
+                    config.rope_factors_for(past_len_0 + k + 1));
                 if (config.rope_neox) {
                     at::native::hot::rope_apply_fused_neox(q, kk, rope_cos, rope_sin,
                         n_heads, n_kv_heads, head_dim);
@@ -5483,7 +5523,8 @@ public:
                     }
                     at::native::hot::rope_precompute(
                         tp_.rope_cos_cache.data(), tp_.rope_sin_cache.data(),
-                        past_len, head_dim, layer_freq_base, layer_rope_scale);
+                        past_len, head_dim, layer_freq_base, layer_rope_scale,
+                        config.rope_factors_for(past_len + 1));
                     tp_.rope_cache_past_len = past_len;
                     tp_.rope_cache_freq_base = layer_freq_base;
                     tp_.rope_cache_scale = layer_rope_scale;
