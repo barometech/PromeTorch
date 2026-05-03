@@ -1,0 +1,55 @@
+=== qwen3-4b-Q4_K_M.gguf ===
+| model                          |       size |     params | backend    | threads |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | ------: | --------------: | -------------------: |
+| qwen3 4B Q4_K - Medium         |   2.32 GiB |     4.02 B | CPU        |      32 |            pp32 |          5.82 ± 0.03 |
+| qwen3 4B Q4_K - Medium         |   2.32 GiB |     4.02 B | CPU        |      32 |            tg64 |          1.82 ± 0.00 |
+
+build: 81df3f7 (1)
+
+=== qwen3-1.7b-Q4_K_M.gguf ===
+| model                          |       size |     params | backend    | threads |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | ------: | --------------: | -------------------: |
+| qwen3 1.7B Q4_K - Medium       |   1.03 GiB |     1.72 B | CPU        |      32 |            pp32 |         14.27 ± 0.03 |
+| qwen3 1.7B Q4_K - Medium       |   1.03 GiB |     1.72 B | CPU        |      32 |            tg64 |          2.71 ± 0.00 |
+
+build: 81df3f7 (1)
+
+=== mistral-7b-Q4_K_M.gguf ===
+| model                          |       size |     params | backend    | threads |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | ------: | --------------: | -------------------: |
+| llama 7B Q4_K - Medium         |   4.07 GiB |     7.25 B | CPU        |      32 |            pp32 |          3.90 ± 0.01 |
+| llama 7B Q4_K - Medium         |   4.07 GiB |     7.25 B | CPU        |      32 |            tg64 |          1.74 ± 0.01 |
+
+build: 81df3f7 (1)
+
+=== qwen2.5-7b-Q4_K_M.gguf ===
+| model                          |       size |     params | backend    | threads |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | ------: | --------------: | -------------------: |
+| qwen2 7B Q4_K - Medium         |   4.36 GiB |     7.62 B | CPU        |      32 |            pp32 |          4.09 ± 0.02 |
+| qwen2 7B Q4_K - Medium         |   4.36 GiB |     7.62 B | CPU        |      32 |            tg64 |          1.71 ± 0.00 |
+
+build: 81df3f7 (1)
+
+=== llama3-8b-Q4_K_M.gguf ===
+| model                          |       size |     params | backend    | threads |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | ------: | --------------: | -------------------: |
+| llama 8B Q4_K - Medium         |   4.58 GiB |     8.03 B | CPU        |      32 |            pp32 |          3.85 ± 0.01 |
+| llama 8B Q4_K - Medium         |   4.58 GiB |     8.03 B | CPU        |      32 |            tg64 |          1.65 ± 0.00 |
+
+build: 81df3f7 (1)
+
+=== qwen3-14b-Q4_K_M.gguf ===
+| model                          |       size |     params | backend    | threads |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | ------: | --------------: | -------------------: |
+| qwen3 14B Q4_K - Medium        |   8.38 GiB |    14.77 B | CPU        |      32 |            pp32 |          2.12 ± 0.00 |
+| qwen3 14B Q4_K - Medium        |   8.38 GiB |    14.77 B | CPU        |      32 |            tg64 |          1.02 ± 0.00 |
+
+build: 81df3f7 (1)
+
+ model                          |       size |     params | backend    | threads |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | ------: | --------------: | -------------------: |
+| qwen3 14B Q4_K - Medium        |   8.38 GiB |    14.77 B | CPU        |      32 |            pp32 |          2.12 ± 0.00 |
+| qwen3 14B Q4_K - Medium        |   8.38 GiB |    14.77 B | CPU        |      32 |            tg64 |          1.02 ± 0.00 |
+
+build: 81df3f7 (1)
+
