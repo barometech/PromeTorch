@@ -85,11 +85,11 @@
     <td><span class="badge badge-fail">требует per-layer alternating RoPE + SWA</span></td></tr>
 
 <tr><td><b>phi3.5-mini Q4_K_M</b></td>
-    <td class="fail">✗ <code>blk.0.attn_q.weight</code> not found</td>
+    <td class="fail">✗ <code>&lt;unk&gt;&lt;unk&gt;…</code> + heap corruption</td>
     <td class="fail">✗ same</td>
-    <td>n/a</td><td>—</td>
+    <td class="cell-num">5.8</td><td>—</td>
     <td><code>neox</code></td>
-    <td><span class="badge badge-part">PARTIAL: добавлен loader split но требует rebuild verify</span></td></tr>
+    <td><span class="badge badge-part">PARTIAL: loader split работает, attn computation даёт wrong logits</span></td></tr>
 </table>
 
 <p style="font-size:13px"><b>¹</b> SP = single-process, OMP_NUM_THREADS=32. &nbsp;
@@ -220,20 +220,31 @@ global с <code>freq_base=1e6, scale=8.0</code>. Без per-layer infrastructure
 один глобальный <code>rope_freq_base + rope_scale</code> ломает половину
 attention. Pending: per-layer rope config.</p>
 
-<h3>2.9. phi3.5-mini — pending verify (loader rebuild)</h3>
+<h3>2.9. phi3.5-mini — partial fix, computation broken</h3>
 <p>Phi-3 GGUF хранит Q/K/V в одном тензоре <code>attn_qkv.weight</code>
 (<code>shape=[q_dim+2*kv_dim, hidden]</code>) и gate+up в одном
 <code>ffn_up.weight</code>. Loader на этом крашился с
-<code>Tensor not found: blk.0.attn_q.weight</code>. В коммите
-<code>445dee4</code>:</p>
+<code>Tensor not found: blk.0.attn_q.weight</code>. В коммитах
+<code>445dee4</code> + <code>2b317c4</code> добавлено:</p>
 <ul>
 <li>Quant path: <code>split_quant_rows()</code> создаёт non-owning views.</li>
-<li>FP path (<code>load_weights</code>): split через
-<code>tensor.narrow(0, ...)</code>.</li>
-<li><code>QuantizedWeight::owns_cpu_data</code> предотвращает double-free.</li>
+<li>FP path (<code>load_weights</code>): split через <code>tensor.narrow(0, ...)</code>.</li>
+<li><code>QuantizedWeight::owns_cpu_data</code> для предотвращения double-free.</li>
 <li>Chat template <code>&lt;|user|&gt;…&lt;|end|&gt;&lt;|assistant|&gt;</code>.</li>
 </ul>
-<p>Текущий rebuild4 в процессе на Эльбрусе, verify pending.</p>
+<p>Loader теперь грузит все 32 слоя, генерит 60 токенов
+со скоростью <b>5.8-6.1 tok/s</b>. Но output:</p>
+<pre>successful&lt;unk&gt;&lt;unk&gt;&lt;unk&gt;&lt;unk&gt;&lt;unk&gt;… (60×&lt;unk&gt;)
+corrupted double-linked list
+
+neighbor&lt;unk&gt;&lt;unk&gt;&lt;unk&gt;… (60×&lt;unk&gt;)
+double free or corruption (!prev)</pre>
+<p>Все логиты схлопываются в token 0 (<code>&lt;unk&gt;</code>). Math
+сплита по строкам (rows × row_stride_bytes) корректна, но computation
+выдаёт uniform/garbage hidden state. Требуется глубже копнуть Q8_SOA repack
+на slice'ах — возможно репак ассумит, что cpu_data — независимый owner,
+и переписывает соседнюю слайсу. Heap corruption на exit подтверждает —
+gem где-то конфликт владения. Out of scope этой сессии.</p>
 
 <h2>3. Скорость: 11.4 baseline и почему 8.0</h2>
 
