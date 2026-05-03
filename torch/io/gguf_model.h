@@ -414,6 +414,24 @@ struct TransformerLayer {
     // q_ffn_gate/up are then non-owning row-slice views into them.
     QuantizedWeight q_attn_qkv;
     QuantizedWeight q_ffn_gate_up;
+
+    // ====== deepseek2 (GigaChat3) MLA + MoE per-layer weights ======
+    // MLA attention (replaces q_attn_k/v):
+    Tensor          attn_kv_a_norm;  // [kv_lora_rank] RMSNorm на latent KV
+    QuantizedWeight q_attn_kv_a_mqa; // [hidden, kv_lora_rank + rope_dim] KV down-proj
+    QuantizedWeight q_attn_k_b;      // 3D [n_heads, key_length_mla, kv_lora_rank] K up-proj
+    QuantizedWeight q_attn_v_b;      // 3D [n_heads, value_length_mla, kv_lora_rank] V up-proj
+
+    // MoE FFN (replaces q_ffn_gate/up/down for layers ≥ leading_dense_block_count):
+    bool is_moe_layer = false;
+    QuantizedWeight q_ffn_gate_inp;     // [hidden, n_experts] router scores
+    QuantizedWeight q_ffn_gate_exps;    // 3D [n_experts, expert_FF, hidden]
+    QuantizedWeight q_ffn_up_exps;      // 3D [n_experts, expert_FF, hidden]
+    QuantizedWeight q_ffn_down_exps;    // 3D [n_experts, hidden, expert_FF]
+    // Shared expert (always applied alongside top-k experts):
+    QuantizedWeight q_ffn_gate_shexp;
+    QuantizedWeight q_ffn_up_shexp;
+    QuantizedWeight q_ffn_down_shexp;
 };
 
 // ============================================================================

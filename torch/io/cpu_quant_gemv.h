@@ -1624,6 +1624,40 @@ inline bool cpu_quant_gemv_supported(uint32_t quant_type) {
 }
 
 // ============================================================================
+// 3D-indexed quantized GEMV — for MoE experts and DeepSeek-V2 MLA up-projs
+// ============================================================================
+//
+// GigaChat3 / DeepSeek-V2 use 3D quantized tensors:
+//   ffn_gate_exps   [hidden_dim, expert_intermediate, num_experts]
+//   ffn_up_exps     [hidden_dim, expert_intermediate, num_experts]
+//   ffn_down_exps   [expert_intermediate, hidden_dim, num_experts]
+//   attn_k_b        [no_rope_per_head, kv_lora_rank, n_heads]
+//   attn_v_b        [kv_lora_rank, value_per_head, n_heads]
+//
+// Each "slice" along dim 2 is a self-contained 2D Q4_K/Q5_K/etc matrix.
+// Slice `i` stride = N * row_stride_bytes  (where N = output dim, K = input dim).
+//
+// This wrapper picks the slice and calls the existing 2D GEMV. No new kernel
+// math required — Q4_K/Q6_K/Q5_K/Q8_0 super-block layouts are bit-identical
+// between 2D and 3D weights; only the byte offset to the chosen slice differs.
+inline void cpu_quant_gemv_3d_indexed(
+    uint32_t quant_type,
+    const void* __restrict weight_data_3d,
+    const float* __restrict x,
+    float* __restrict y,
+    int64_t K, int64_t N, int64_t /*num_experts*/,
+    int64_t expert_idx,
+    int64_t row_stride_bytes,
+    const torch::io::ReplicatedWeight* numa = nullptr) {
+    const uint8_t* base = static_cast<const uint8_t*>(weight_data_3d);
+    // 3D GGUF layout (matches llama.cpp ggml_tensor->nb[2]):
+    //   slice_stride = N * row_stride_bytes  (rows of one expert × bytes-per-row)
+    const int64_t slice_stride = N * row_stride_bytes;
+    const void* slice = base + expert_idx * slice_stride;
+    cpu_quant_gemv(quant_type, slice, x, y, K, N, row_stride_bytes, numa);
+}
+
+// ============================================================================
 // Batched Q4_K GEMV over N rows × 2 x vectors.
 // Core primitive for speculative decoding: when we have 2 query tokens
 // sharing the same weight matrix, read W once and dot against both x's.
