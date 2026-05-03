@@ -146,7 +146,7 @@ cyrillic vocab IDs. Активация — env `PT_PER_BLOCK_SCALE=1`.
 | **phi3.5-mini** | **6.4** | **2.08** | **×3.1** | **✅ связный RU+EN** SP+TP-4 ³ |
 | qwen3-8B | OOM TP-4 / 2.6 SP | — | — | **✅ CoT RU** SP |
 | llama3-8B | OOM TP-4 / 2.7 SP | 1.65 | — | **✅ связный RU** SP |
-| qwen3-14B | OOM TP-4 | 1.02 | — | (SP TBD — slow load) |
+| qwen3-14B | OOM TP-4 / **1.5 SP** | 1.02 | — | **✅ CoT RU** SP |
 | **deepseek-coder-7B** | OOM TP-4 / **3.0 SP** | — | — | **✅ Python code** SP (после `81a79bd` rope.scale_linear fix) |
 
 > **¹** После NEOX RoPE fix (2026-05-03 commit `b144db2`). Архитектуры qwen/qwen2/
