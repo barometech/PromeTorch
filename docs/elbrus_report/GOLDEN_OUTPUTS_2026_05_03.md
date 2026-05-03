@@ -82,6 +82,16 @@ def fibonacci(n):
 ```
 40 tokens / 14.0s = **2.9 tok/s**.
 
+### qwen3-14B Q4_K_M (SP)
+**RU:** «Что такое космос? Расскажи коротко.»
+```
+<think>
+Хорошо, пользователь спрашивает, что такое космос, и хочет короткий
+ответ. Нач
+```
+30 tokens / 20.3s = **1.5 tok/s**. Load 142.3 sec для 8 GB модели. CoT
+thinking начало. TP-4 OOM (как и другие 7B+ модели — SoA storage × 4 ranks).
+
 ### mistral-7B Q4_K_M
 **RU:** «Что такое космос? Расскажи коротко.» (без чат-шаблона):
 ```
@@ -159,5 +169,28 @@ correctly on full h_buf после output_proj). Требует `PT_TP_GATHER=1`
 
 * **qwen3-0.6B** — `!!!!!` output. Не RoPE, не tokenizer. Capacity
   issue (модель слишком маленькая для chat instruct).
-* **qwen3-14B / llama3-8B / qwen2.5-7B** — OOM в TP-4 при PT_Q8_SOA=1
-  (1958 MB SoA storage × 4 ranks = 8 GB). SP path работает.
+* **qwen3-14B / qwen3-8B / llama3-8B / qwen2.5-7B / deepseek-coder-7B** —
+  OOM в TP-4 при PT_Q8_SOA=1 (1958 MB SoA storage × 4 ranks для 7B,
+  пропорционально больше для 14B). SP path работает для всех.
+
+## Финальная speedup-таблица 2026-05-03
+
+После всех fix'ов (`b144db2..6818c9c`):
+
+| Модель | PT TP-4 | llama.cpp 32t | Speedup | Russian quality |
+|---|---:|---:|---:|---|
+| qwen3-1.7B | 17.1 | 2.71 | **×6.3** | ✅ |
+| qwen3-4B | 10.9 | 1.82 | **×6.0** | ✅ + CoT |
+| gemma3-4B | 6.7 | 1.30 | **×5.2** | ✅ markdown |
+| mistral-7B | 8.5 | 1.74 | **×4.9** | ✅ |
+| phi3.5-mini | 6.4 | 2.08 | **×3.1** | ✅ RU+EN |
+
+SP-only (TP-4 OOM):
+
+| Модель | PT SP | llama.cpp 32t | Speedup | Russian |
+|---|---:|---:|---:|---|
+| qwen3-8B | 2.6 | n/a | (SP) | ✅ + CoT |
+| qwen2.5-7B | 2.9 | 1.71 | ×1.7 | ✅ |
+| llama3-8B | 2.7 | 1.65 | ×1.6 | ✅ |
+| deepseek-coder-7B | 3.0 | n/a | (SP) | ✅ Python code |
+| qwen3-14B | 1.5 | 1.02 | ×1.5 | ✅ + CoT |
