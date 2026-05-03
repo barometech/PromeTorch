@@ -3,6 +3,37 @@
 Полная история разработки проекта. Актуальные инструкции — в `CLAUDE.md`.
 Полный аудит инфраструктуры — в `INFRASTRUCTURE_AUDIT.md`.
 
+## 2026-05-03 (поздний вечер, ИТОГ-4): deepseek-coder VERIFIED FIXED — 9 моделей работает
+
+**Commit `81a79bd` + rebuild19 + retest `aef1d7f`:** deepseek-coder-7B
+больше не выдаёт garbage. Python code completion работает:
+
+```
+def fibonacci(n):
+    if n == 0:
+        return 0
+    elif n == 1:
+        return 1
+    else:
+        fib_sequence = [0, 1] # start with the first two numbers in the sequence
+```
+
+50 tokens / 16.4s = **3.0 tok/s** SP. Chat instruct тоже:
+«Sure, here is a simple Python function to compute Fibonacci numbers:
+```python def fibonacci(n): if n <= 0: # base» 40 tokens / 14.0s = 2.9 tok/s.
+
+**9 моделей verified working** на Эльбрусе:
+mistral-7B, qwen3-1.7B/4B/8B, qwen2.5-7B, gemma3-4B, phi3.5-mini,
+llama3-8B, **deepseek-coder-7B**.
+
+Не работает: qwen3-0.6B (capacity), qwen3-14B SP (slow, pending).
+
+Session metrics финальные:
+* 43+ commits в одной session: `b144db2..aef1d7f`
+* 3 root cause fixes: `d9dce9e` (phi3 mmap), `0ba114a` (gemma3 TP-4),
+  `81a79bd` (deepseek rope.scale_linear)
+* 0 регрессий на работающих моделях
+
 ## 2026-05-03 (поздний вечер, ИТОГ-3): deepseek rope.scale_linear + phi3 baseline
 
 **Commit `81a79bd`:** parser добавил legacy ключ `<arch>.rope.scale_linear`
