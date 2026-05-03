@@ -3600,27 +3600,31 @@ public:
     // ========================================================================
 
     std::string apply_chat_template(const std::string& prompt) const {
-        if (config.architecture == "qwen3") {
-            // Qwen3 chat format. BUG-12 fix iter 3: llama.cpp выдаёт
-            // 19 prompt_tokens на "Расскажи..." что соответствует БЕЗ
-            // system prompt. Default system от HuggingFace
-            // tokenizer_config.json llama.cpp применяет ТОЛЬКО когда есть
-            // explicit system message. Для plain user — без system.
-            //
-            // PT_NO_THINK=1 → /no_think system message (старое поведение).
+        // BUG-12 part: qwen2 / qwen2.5 используют ChatML (тот же что qwen3).
+        // Раньше qwen2 fallthrough на raw prompt → модель срывалась после
+        // первого предложения.
+        if (config.architecture == "qwen3" || config.architecture == "qwen2") {
             const char* no_think_env = std::getenv("PT_NO_THINK");
             bool no_think = no_think_env && no_think_env[0] == '1';
-            if (no_think) {
+            if (no_think && config.architecture == "qwen3") {
                 return "<|im_start|>system\n/no_think<|im_end|>\n<|im_start|>user\n"
                        + prompt + "<|im_end|>\n<|im_start|>assistant\n";
             }
             return "<|im_start|>user\n" + prompt
                    + "<|im_end|>\n<|im_start|>assistant\n";
         } else if (config.architecture == "gemma3" || config.architecture == "gemma2") {
-            // Gemma chat format
             return "<start_of_turn>user\n" + prompt + "<end_of_turn>\n<start_of_turn>model\n";
         } else if (config.architecture == "llama") {
-            // Llama 3 chat format
+            // Llama-3 chat format (использует Mistral-7B-Instruct тоже принимает,
+            // но честнее — отдельная ветка для mistral по name).
+            std::string lname = config.model_name;
+            for (auto& c : lname) {
+                if (c >= 'A' && c <= 'Z') c = (char)(c + 32);
+            }
+            if (lname.find("mistral") != std::string::npos) {
+                // Mistral [INST]...[/INST] format
+                return "<s>[INST] " + prompt + " [/INST]";
+            }
             return "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n"
                    + prompt + "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n";
         }
