@@ -5195,9 +5195,13 @@ public:
             }
 
             // --- QK-norm (per-head) ---
-            // BUG-12 диагностика: PT_NO_QK_NORM=1 пробовали — output ХУЖЕ
-            // (китайский+мусор) → qk_norm правильно работает, проблема глубже.
-            if (layer.attn_q_norm.defined()) {
+            // BUG-12 Step 2: PT_QK_AFTER_ROPE=1 — переставить qk_norm ПОСЛЕ RoPE
+            // (некоторые qwen3 implementations делают это).
+            static const bool qk_after_rope = []{
+                const char* e = std::getenv("PT_QK_AFTER_ROPE");
+                return e && e[0] == '1';
+            }();
+            if (!qk_after_rope && layer.attn_q_norm.defined()) {
                 const float* qn_w = layer.attn_q_norm.data_ptr<float>();
                 const float* kn_w = layer.attn_k_norm.data_ptr<float>();
                 for (int64_t h = 0; h < n_heads_l; ++h)
@@ -5224,6 +5228,16 @@ public:
                 at::native::hot::rope_apply_fused(q_l, k_l,
                     tp_.rope_cos_cache.data(), tp_.rope_sin_cache.data(),
                     n_heads_l, n_kv_l, head_dim);
+            }
+
+            // --- QK-norm AFTER RoPE (PT_QK_AFTER_ROPE=1) ---
+            if (qk_after_rope && layer.attn_q_norm.defined()) {
+                const float* qn_w = layer.attn_q_norm.data_ptr<float>();
+                const float* kn_w = layer.attn_k_norm.data_ptr<float>();
+                for (int64_t h = 0; h < n_heads_l; ++h)
+                    cpu_quant::cpu_rmsnorm_inplace(q_l + h * head_dim, qn_w, eps, add_one, head_dim);
+                for (int64_t h = 0; h < n_kv_l; ++h)
+                    cpu_quant::cpu_rmsnorm_inplace(k_l + h * head_dim, kn_w, eps, add_one, head_dim);
             }
 
             // --- KV cache append (local) ---
