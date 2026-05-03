@@ -118,6 +118,15 @@ if(PT_USE_TUDA)
         add_compile_definitions(TUDA_E2K)
     elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|x86")
         message(STATUS "TUDA: x86_64 detected — AVX2 path will be used")
+        if(MSVC)
+            # MSVC doesn't define __AVX2__/__FMA__ unless /arch:AVX2 is passed.
+            # Required for TUDA_AVX2 path (TudaConfig.h:41) to activate.
+            add_compile_options(/arch:AVX2)
+            add_compile_definitions(__AVX2__ __FMA__)
+            # NOMINMAX prevents <windows.h> from defining min/max as macros,
+            # which breaks std::min/std::max calls in headers.
+            add_compile_definitions(NOMINMAX)
+        endif()
     else()
         message(STATUS "TUDA: Unknown arch '${CMAKE_SYSTEM_PROCESSOR}' — Scalar fallback")
     endif()
@@ -1375,6 +1384,9 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/CMakeLists.txt")
 endif()
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/promeserve/CMakeLists.txt")
     add_subdirectory(promeserve)
+endif()
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/CMakeLists.txt")
+    add_subdirectory(tools)
 endif()
 
 # ============================================================================

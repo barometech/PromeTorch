@@ -1,5 +1,10 @@
 #pragma once
 
+#if defined(_MSC_VER) && !defined(__builtin_prefetch)
+#include <xmmintrin.h>
+#define __builtin_prefetch(addr, rw, locality) _mm_prefetch((const char*)(addr), _MM_HINT_T0)
+#endif
+
 #include "torch/io/gguf_loader.h"
 #include "torch/io/gguf_dequant.h"
 #include "torch/io/cpu_quant_gemv.h"
@@ -91,6 +96,28 @@ struct TransformerConfig {
     float rope_attn_factor = 1.0f;      // Phi-3 yarn mscale: cos/sin * factor.
     bool has_post_norm = false;        // Gemma3: post-attention + post-FFN norms
     bool rope_neox = false;            // NeoX-style RoPE (qwen/gemma/phi3); else NORM (llama/mistral)
+
+    // ====== deepseek2 (GigaChat3 / DeepSeek-V2/V3): MLA + MoE + YaRN ======
+    bool   is_mla = false;             // Multi-head Latent Attention (deepseek2)
+    int64_t kv_lora_rank = 0;          // attention.kv_lora_rank (e.g. 512)
+    int64_t key_length_mla = 0;        // attention.key_length_mla (e.g. 192 per-head no-rope)
+    int64_t value_length_mla = 0;      // attention.value_length_mla
+    int64_t key_length_rope = 0;       // = key_length - kv_lora_rank (rope half), e.g. 64
+
+    bool   is_moe = false;             // model has MoE layers (any layer ≥ leading_dense_block_count)
+    int64_t expert_count = 0;          // total experts (e.g. 64)
+    int64_t expert_used_count = 0;     // top-k selected (e.g. 4)
+    int64_t expert_shared_count = 0;   // always-applied shared experts (e.g. 1)
+    int64_t leading_dense_block_count = 0; // first N blocks are dense (e.g. 1)
+    int64_t expert_feed_forward_length = 0; // per-expert intermediate size
+
+    // YaRN RoPE (deepseek2): theta scaling with corrected attention factor
+    bool   rope_yarn = false;          // rope.scaling.type == "yarn"
+    float  yarn_factor = 1.0f;         // rope.scaling.factor
+    float  yarn_beta_fast = 32.0f;
+    float  yarn_beta_slow = 1.0f;
+    float  yarn_log_multiplier = 0.0f; // mscale = 1 + log_mul * log(factor)
+    int64_t yarn_orig_ctx = 0;         // rope.scaling.original_context_length
 
     void parse(const gguf::GGUFReader& reader) {
         architecture = reader.architecture();
@@ -186,7 +213,48 @@ struct TransformerConfig {
             architecture == "phi2"   || architecture == "phi3"   ||
             architecture == "phimoe" ||
             architecture == "stablelm" || architecture == "starcoder2" ||
-            architecture == "falcon" || architecture == "gptneox";
+            architecture == "falcon" || architecture == "gptneox" ||
+            architecture == "deepseek2";
+
+        // ====== deepseek2 MLA + MoE + YaRN (GigaChat3, DeepSeek-V2/V3) ======
+        if (architecture == "deepseek2") {
+            is_mla = true;
+            kv_lora_rank      = reader.get_arch_int("attention.kv_lora_rank", 0);
+            key_length_mla    = reader.get_arch_int("attention.key_length_mla", 0);
+            value_length_mla  = reader.get_arch_int("attention.value_length_mla", 0);
+            // attention.key_length для deepseek2 = kv_lora_rank + rope_dim
+            // (e.g. 512 + 64 = 576). Rope half = key_length - kv_lora_rank.
+            key_length_rope = (key_length > 0 && kv_lora_rank > 0)
+                                ? (key_length - kv_lora_rank) : 0;
+
+            // MoE layout
+            expert_count               = reader.get_arch_int("expert_count", 0);
+            expert_used_count          = reader.get_arch_int("expert_used_count", 0);
+            expert_shared_count        = reader.get_arch_int("expert_shared_count", 0);
+            leading_dense_block_count  = reader.get_arch_int("leading_dense_block_count", 0);
+            expert_feed_forward_length = reader.get_arch_int("expert_feed_forward_length", 0);
+            is_moe = expert_count > 0;
+
+            // YaRN parameters
+            std::string scale_type = reader.get_string(architecture + ".rope.scaling.type", "");
+            if (scale_type == "yarn") {
+                rope_yarn        = true;
+                yarn_factor      = reader.get_arch_float("rope.scaling.factor", 1.0f);
+                yarn_beta_fast   = reader.get_arch_float("rope.scaling.yarn_beta_fast", 32.0f);
+                yarn_beta_slow   = reader.get_arch_float("rope.scaling.yarn_beta_slow", 1.0f);
+                yarn_log_multiplier =
+                    reader.get_arch_float("rope.scaling.yarn_log_multiplier", 0.0f);
+                yarn_orig_ctx    = reader.get_arch_int(
+                    "rope.scaling.original_context_length", 0);
+            }
+
+            // For MLA the head_dim that the attention loop sees is the
+            // concatenated [no-rope (key_length_mla) || rope (key_length_rope)]
+            // length per head. Override the generic head_dim to that.
+            if (key_length_mla > 0 && key_length_rope > 0) {
+                head_dim = key_length_mla + key_length_rope;
+            }
+        }
     }
 
     // Gemma3-style alternating SWA: every `swa_pattern`-th layer is "global"
