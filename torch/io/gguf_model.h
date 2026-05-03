@@ -640,7 +640,10 @@ struct GGUFTPConfig {
     // 4 bytes per input element; sum_a is 4 bytes per 32-element block.
     std::vector<uint8_t> soa_act_b16;   // up to K_max*4 bytes
     std::vector<int32_t> soa_sum_a;     // up to K_max/32 ints
-    float                soa_scale_a = 1.0f;
+    // BUG-12: support per-block scale_a (PT_PER_BLOCK_SCALE=1).
+    // Buffer holds [bpr_max] floats. В per-tensor режиме используется только [0].
+    std::vector<float>   soa_scale_a_buf;  // up to K_max/32 + 1 floats
+    float                soa_scale_a = 1.0f;  // legacy alias (соответствует soa_scale_a_buf[0])
 
     // Round 4 Step 9: per-layer scratch (избегает 36 vec alloc/dealloc per token)
     std::vector<float> x_normed_buf;    // [H] для RMSNorm output в attention
@@ -4802,6 +4805,8 @@ public:
                                                 (int64_t)config.vocab_size});
         tp_.soa_act_b16.assign(K_act_max * 4, 0);
         tp_.soa_sum_a.assign(K_act_max / 32 + 1, 0);
+        // BUG-12: per-block scale buffer. Size = max bpr + 1 (для совместимости).
+        tp_.soa_scale_a_buf.assign(K_act_max / 32 + 1, 1.0f);
         // Round 4 Step 9: persistent per-layer scratch
         tp_.x_normed_buf.assign(H, 0.0f);
         tp_.silu_scratch_buf.assign(tp_.inter_local, 0.0f);
@@ -5136,14 +5141,14 @@ public:
                     layer.attn_norm.data_ptr<float>(), eps, add_one, H);
                 cpu_quant::q8_soa4_quant_activation(x_normed.data(), H,
                     tp_.soa_act_b16.data(), tp_.soa_sum_a.data(),
-                    &tp_.soa_scale_a);
+                    tp_.soa_scale_a_buf.data());
                 // Triple-fused: 1 parallel_for dispatch вместо 3, shared
                 // activation reads, shared pool wakeup. Save ~3×200μs ×
                 // 36 layers ≈ 20 ms/token overhead.
                 cpu_quant::q8_soa4_gemv_triple(
                     &tl.q_attn_q.q8_soa, &tl.q_attn_k.q8_soa, &tl.q_attn_v.q8_soa,
                     tp_.soa_act_b16.data(), tp_.soa_sum_a.data(),
-                    tp_.soa_scale_a, q_l, k_l, v_l);
+                    tp_.soa_scale_a_buf.data(), q_l, k_l, v_l);
             } else if (can_fuse_qkv) {
                 cpu_quant::cpu_fused_rmsnorm_qkv_gemv(
                     x_ptr, layer.attn_norm.data_ptr<float>(), eps, add_one,
@@ -5436,10 +5441,10 @@ public:
                     cpu_quant::q8_soa4_quant_activation(input_slice,
                         tp_.q_dim_local,
                         tp_.soa_act_b16.data(), tp_.soa_sum_a.data(),
-                        &tp_.soa_scale_a);
+                        tp_.soa_scale_a_buf.data());
                     cpu_quant::q8_soa4_gemv(&tl.q_attn_output.q8_soa,
                         tp_.soa_act_b16.data(), tp_.soa_sum_a.data(),
-                        tp_.soa_scale_a, h_buf);
+                        tp_.soa_scale_a_buf.data(), h_buf);
                 } else if (tl.q_attn_output.valid && tl.q_attn_output.cpu_data) {
                     const float* input_slice = tp_.attn_full_buf.data() + (tp_.rank * tp_.q_dim_local);
                     int64_t local_blocks = tl.attn_output_k_end - tl.attn_output_k_start;
@@ -5495,13 +5500,13 @@ public:
                     layer.ffn_norm.data_ptr<float>(), eps, add_one, H);
                 cpu_quant::q8_soa4_quant_activation(x_normed.data(), H,
                     tp_.soa_act_b16.data(), tp_.soa_sum_a.data(),
-                    &tp_.soa_scale_a);
+                    tp_.soa_scale_a_buf.data());
                 // Round 4: fused gate+up — single parallel_for dispatch,
                 // shared activation reads per N-row group.
                 cpu_quant::q8_soa4_gemv_dual(
                     &tl.q_ffn_gate.q8_soa, &tl.q_ffn_up.q8_soa,
                     tp_.soa_act_b16.data(), tp_.soa_sum_a.data(),
-                    tp_.soa_scale_a, gate_l, up_l);
+                    tp_.soa_scale_a_buf.data(), gate_l, up_l);
             } else if (can_fuse_ffn) {
                 cpu_quant::cpu_fused_rmsnorm_gate_up_gemv(
                     x_cur, layer.ffn_norm.data_ptr<float>(), eps, add_one,
@@ -5624,10 +5629,10 @@ public:
                         gate_l, up_l,
                         tp_.inter_local, silu_local.data(),
                         tp_.soa_act_b16.data(), tp_.soa_sum_a.data(),
-                        &tp_.soa_scale_a);
+                        tp_.soa_scale_a_buf.data());
                     cpu_quant::q8_soa4_gemv(&tl.q_ffn_down.q8_soa,
                         tp_.soa_act_b16.data(), tp_.soa_sum_a.data(),
-                        tp_.soa_scale_a, h_buf);
+                        tp_.soa_scale_a_buf.data(), h_buf);
                 } else if (tl.q_ffn_down.valid && tl.q_ffn_down.cpu_data) {
                     std::vector<float>& silu_local = tp_.silu_scratch_buf;
                     for (int64_t j = 0; j < tp_.inter_local; ++j) {
@@ -5710,10 +5715,10 @@ public:
             cpu_quant::q8_soa4_quant_activation(x_local,
                 local_K,
                 tp_.soa_act_b16.data(), tp_.soa_sum_a.data(),
-                &tp_.soa_scale_a);
+                tp_.soa_scale_a_buf.data());
             cpu_quant::q8_soa4_gemv(&tp_.q_output_weight_k_slice.q8_soa,
                 tp_.soa_act_b16.data(), tp_.soa_sum_a.data(),
-                tp_.soa_scale_a, tp_.logits_buf.data());
+                tp_.soa_scale_a_buf.data(), tp_.logits_buf.data());
             torch::distributed::all_reduce_inplace(tp_.logits_buf.data(), V);
         } else if (use_quant_gemv_ && tp_.q_output_weight_k_slice.valid &&
             tp_.q_output_weight_k_slice.cpu_data) {
