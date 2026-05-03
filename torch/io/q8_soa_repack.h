@@ -58,14 +58,24 @@ struct Q8SoA4 {
     Q8SoA4(Q8SoA4&& o) noexcept { *this = std::move(o); }
     Q8SoA4& operator=(Q8SoA4&& o) noexcept {
         if (this != &o) {
+#ifdef _MSC_VER
+            if (mem) _aligned_free(mem);
+#else
             if (mem) std::free(mem);
+#endif
             mem = o.mem; N = o.N; K = o.K;
             group_stride = o.group_stride; valid = o.valid;
             o.mem = nullptr; o.valid = false;
         }
         return *this;
     }
-    ~Q8SoA4() { if (mem) std::free(mem); }
+    ~Q8SoA4() {
+#ifdef _MSC_VER
+        if (mem) _aligned_free(mem);
+#else
+        if (mem) std::free(mem);
+#endif
+    }
 };
 
 // Allocate Q8SoA4 storage. N must be divisible by 4, K by 32.
@@ -77,7 +87,12 @@ inline bool q8_soa4_alloc(Q8SoA4* w, int64_t N, int64_t K) {
     w->K = K;
     w->group_stride = bpr * SOA4_GROUP_BYTES;
     void* p = nullptr;
+#ifdef _MSC_VER
+    p = _aligned_malloc(static_cast<size_t>(gpr * w->group_stride), 64);
+    if (!p) return false;
+#else
     if (posix_memalign(&p, 64, gpr * w->group_stride) != 0) return false;
+#endif
     w->mem = static_cast<uint8_t*>(p);
     w->valid = true;
     return true;
