@@ -197,7 +197,13 @@ struct TransformerConfig {
     }
     // Phi-3 LongRoPE selector. seq_len ≤ original_context → short, иначе long.
     // nullptr если LongRoPE не применяется для этой модели.
+    // PT_NO_LONGROPE=1 — bisect helper: вернуть nullptr независимо от config.
     const float* rope_factors_for(int64_t seq_len) const {
+        static const bool disable = []{
+            const char* e = std::getenv("PT_NO_LONGROPE");
+            return e && e[0] == '1';
+        }();
+        if (disable) return nullptr;
         if (rope_orig_ctx <= 0) return nullptr;
         if (seq_len <= rope_orig_ctx) {
             return rope_factors_short.empty() ? nullptr : rope_factors_short.data();
