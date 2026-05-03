@@ -187,6 +187,37 @@ Lm_head (выходная projection в vocab) — самая чувствите
 
 Скорость на per-block: **9.8 tok/s vs 10.5 baseline на qwen3-4B (-7 %)**.
 
+### 4.7. Hidden state bisect для qwen3-4B (Step 1 plan)
+
+Добавлен env `PT_DUMP_HIDDEN=1` который печатает stats hidden state
+(mean, std, min, max, first 8 floats) после embedding и каждого ключевого
+слоя. Empirical comparison qwen3-4B (broken) vs mistral-7B (working):
+
+```
+qwen3-4B Q4_K_M (broken output «Кон К»):
+  emb:        std=0.008  max=0.06
+  L0:         std=0.339  max=2.97
+  L5:         std=0.76   max=21.7
+  L17:        std=1.03   max=16.6
+  L35:        std=5.88   max=52.4
+  final_norm: std=3.23   max=48.4
+
+Mistral-7B Q4_K_M (working idealный русский):
+  emb:        std=0.0016 max=0.015
+  L0:         std=0.0045 max=0.07
+  L1:         std=2.81   max=81.9   ← резкий рост
+  L5:         std=2.82   max=81.99
+  L17:        std=3.17   max=83.1
+  final_norm: std=5.99   max=151.9
+```
+
+Forward вычислительно работает (нет NaN, нет explosion). Magnitudes
+даже **меньше** чем у working mistral. Bug в **direction** (specific
+tensor values), не в magnitude.
+
+Полные логи: `docs/elbrus_report/demo_html/qwen3_hidden.log`,
+`mistral_hidden.log`.
+
 ### 4.6. Финальный fallback — PT_NO_FFN_SOA=1 (для упрямых моделей)
 
 Для qwen3 family (Massive Activations) добавлен env-флаг
