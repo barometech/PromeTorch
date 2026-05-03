@@ -2759,6 +2759,29 @@ public:
 #endif
         }
 
+        // BUG-12 Step 1: PT_DUMP_HIDDEN=1 — dump hidden state stats для bisect
+        static const bool dump_hidden_sp = []{
+            const char* e = std::getenv("PT_DUMP_HIDDEN");
+            return e && e[0] == '1';
+        }();
+        auto dump_stats_sp = [&](const char* tag, const float* p, int64_t n) {
+            if (!dump_hidden_sp) return;
+            double sum = 0, sq = 0; float mn = p[0], mx = p[0];
+            for (int64_t j = 0; j < n; ++j) {
+                sum += p[j]; sq += (double)p[j] * p[j];
+                if (p[j] < mn) mn = p[j];
+                if (p[j] > mx) mx = p[j];
+            }
+            double mean = sum / n;
+            double std_v = std::sqrt(std::max(0.0, sq/n - mean*mean));
+            std::cerr << "[HIDDEN " << tag << "] mean=" << mean
+                      << " std=" << std_v << " min=" << mn << " max=" << mx
+                      << " first8=[" << p[0] << "," << p[1] << "," << p[2] << ","
+                      << p[3] << "," << p[4] << "," << p[5] << "," << p[6] << "," << p[7] << "]"
+                      << std::endl;
+        };
+        dump_stats_sp("emb_lookup", sp.x_buf[cur], H);
+
         // 2. Transformer layers
         for (int64_t i = 0; i < config.num_layers; ++i) {
             auto& layer = layers[i];
@@ -3240,11 +3263,19 @@ public:
 #endif
             cur = next;
             if (sec_timers_.on) sec_timers_.fdown_ms += _elapsed_ms();
+
+            // BUG-12 Step 1: dump hidden state на ключевых слоях
+            if (i == 0 || i == 1 || i == 5 || i == 17 || i == 35) {
+                char tag[32];
+                std::snprintf(tag, sizeof(tag), "after_L%lld", (long long)i);
+                dump_stats_sp(tag, sp.x_buf[cur], H);
+            }
         }  // end layer loop
         if (sec_timers_.on) sec_timers_.tokens++;
 
         // 3. Final RMS norm (in-place)
         cpu_quant::cpu_rmsnorm_inplace(sp.x_buf[cur], output_norm.data_ptr<float>(), eps, add_one, H);
+        dump_stats_sp("after_final_norm", sp.x_buf[cur], H);
 
         // 4. Output projection -> logits (into scratch logits_buf)
         //    Use sparse GEMV for output projection if available
@@ -5068,6 +5099,30 @@ public:
             for (int64_t j = 0; j < H; ++j) tp_.x_buf[cur][j] *= scale;
         }
 
+        // BUG-12 Step 1: PT_DUMP_HIDDEN=1 — dump hidden state stats после
+        // embedding и каждого слоя для side-by-side bisect vs llama.cpp.
+        static const bool dump_hidden = []{
+            const char* e = std::getenv("PT_DUMP_HIDDEN");
+            return e && e[0] == '1';
+        }();
+        auto dump_stats = [&](const char* tag, const float* p, int64_t n) {
+            if (!dump_hidden || tp_.rank != 0) return;
+            double sum = 0, sq = 0; float mn = p[0], mx = p[0];
+            for (int64_t j = 0; j < n; ++j) {
+                sum += p[j]; sq += (double)p[j] * p[j];
+                if (p[j] < mn) mn = p[j];
+                if (p[j] > mx) mx = p[j];
+            }
+            double mean = sum / n;
+            double std = std::sqrt(std::max(0.0, sq/n - mean*mean));
+            std::cerr << "[HIDDEN " << tag << "] mean=" << mean
+                      << " std=" << std << " min=" << mn << " max=" << mx
+                      << " first8=[" << p[0] << "," << p[1] << "," << p[2] << ","
+                      << p[3] << "," << p[4] << "," << p[5] << "," << p[6] << "," << p[7] << "]"
+                      << std::endl;
+        };
+        dump_stats("emb_lookup", tp_.x_buf[cur].data(), H);
+
         // 2. Transformer layers
         auto _tp_t = std::chrono::high_resolution_clock::now();
         auto _tp_elapsed = [&_tp_t]() {
@@ -5711,12 +5766,20 @@ public:
             next = 1 - cur;
             for (int64_t j = 0; j < H; ++j) tp_.x_buf[next][j] = tp_.x_buf[cur][j] + h_buf[j];
             cur = next;
+
+            // BUG-12 Step 1: dump hidden state stats после selected слоев
+            if (i == 0 || i == 1 || i == 5 || i == 17 || i == 35) {
+                char tag[32];
+                std::snprintf(tag, sizeof(tag), "after_L%lld", (long long)i);
+                dump_stats(tag, tp_.x_buf[cur].data(), H);
+            }
         }  // end layer loop
         if (tp_sec_timers_.on) _tp_elapsed();  // reset — tail measured below
 
         // 3. Final RMSNorm (in-place, replicated)
         cpu_quant::cpu_rmsnorm_inplace(tp_.x_buf[cur].data(),
             output_norm.data_ptr<float>(), eps, add_one, H);
+        dump_stats("after_final_norm", tp_.x_buf[cur].data(), H);
 
         // 4. Output projection — split across ranks and AllReduce.
         // Each rank computes a disjoint row-range of the vocab; zero-pads the
