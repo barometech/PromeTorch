@@ -1918,6 +1918,40 @@ void rope_apply_fused(float* q, float* k,
 #endif
 }
 
+// NeoX-style RoPE: pairs are (d, d + half_dim) instead of (2d, 2d+1).
+// Used by qwen / qwen2 / qwen3 / gemma / gemma2 / gemma3 / phi-2 / phi-3 /
+// stablelm / falcon / gpt-neox in llama.cpp's `llama_model_rope_type`.
+// Without this, the rotation indexes the wrong dimensions and Q/K vectors
+// are rotated against weights that were trained for the half-split layout —
+// hidden state magnitudes look fine but the *direction* is wrong.
+void rope_apply_fused_neox(float* q, float* k,
+                           const float* cos_table, const float* sin_table,
+                           int64_t n_heads, int64_t n_kv_heads, int64_t head_dim) {
+    int64_t half_dim = head_dim / 2;
+    for (int64_t h = 0; h < n_heads; ++h) {
+        float* hd = q + h * head_dim;
+        for (int64_t d = 0; d < half_dim; ++d) {
+            float c = cos_table[d];
+            float s = sin_table[d];
+            float x0 = hd[d];
+            float x1 = hd[d + half_dim];
+            hd[d]            = x0 * c - x1 * s;
+            hd[d + half_dim] = x0 * s + x1 * c;
+        }
+    }
+    for (int64_t h = 0; h < n_kv_heads; ++h) {
+        float* hd = k + h * head_dim;
+        for (int64_t d = 0; d < half_dim; ++d) {
+            float c = cos_table[d];
+            float s = sin_table[d];
+            float x0 = hd[d];
+            float x1 = hd[d + half_dim];
+            hd[d]            = x0 * c - x1 * s;
+            hd[d + half_dim] = x0 * s + x1 * c;
+        }
+    }
+}
+
 } // namespace hot
 } // namespace native
 } // namespace at

@@ -71,6 +71,7 @@ struct TransformerConfig {
     bool gemma_norm_add_one = false;   // Gemma: RMSNorm weight += 1
     bool has_qk_norm = false;          // Gemma3: per-head Q/K normalization
     bool has_post_norm = false;        // Gemma3: post-attention + post-FFN norms
+    bool rope_neox = false;            // NeoX-style RoPE (qwen/gemma/phi3); else NORM (llama/mistral)
 
     void parse(const gguf::GGUFReader& reader) {
         architecture = reader.architecture();
@@ -106,6 +107,21 @@ struct TransformerConfig {
         if (architecture == "qwen3") {
             has_qk_norm = true;
         }
+
+        // RoPE convention. llama.cpp's `llama_model_rope_type` puts these
+        // architectures in the NEOX bucket (pairs offset by head_dim/2).
+        // Everything else falls back to LLAMA_ROPE_TYPE_NORM (interleaved
+        // pairs (2d, 2d+1)) — already what the unsuffixed kernel does.
+        rope_neox =
+            architecture == "qwen"   || architecture == "qwen2"  ||
+            architecture == "qwen3"  || architecture == "qwen2moe" ||
+            architecture == "qwen3moe" ||
+            architecture == "gemma"  || architecture == "gemma2" ||
+            architecture == "gemma3" || architecture == "gemma3n" ||
+            architecture == "phi2"   || architecture == "phi3"   ||
+            architecture == "phimoe" ||
+            architecture == "stablelm" || architecture == "starcoder2" ||
+            architecture == "falcon" || architecture == "gptneox";
     }
 
     void print() const {
@@ -124,6 +140,7 @@ struct TransformerConfig {
         std::cout << "  RMS norm eps: " << rms_norm_eps << std::endl;
         std::cout << "  Gemma features: scale_emb=" << scale_embeddings
                   << " norm+1=" << gemma_norm_add_one
+                  << " rope=" << (rope_neox ? "neox" : "norm")
                   << " qk_norm=" << has_qk_norm
                   << " post_norm=" << has_post_norm << std::endl;
     }
@@ -2951,8 +2968,13 @@ public:
                 float rope_cos[256], rope_sin[256];  // head_dim/2 <= 256 for all models
                 at::native::hot::rope_precompute(rope_cos, rope_sin,
                     past_len, head_dim, config.rope_freq_base);
-                at::native::hot::rope_apply_fused(sp.q_buf, sp.k_buf,
-                    rope_cos, rope_sin, n_heads, n_kv_heads, head_dim);
+                if (config.rope_neox) {
+                    at::native::hot::rope_apply_fused_neox(sp.q_buf, sp.k_buf,
+                        rope_cos, rope_sin, n_heads, n_kv_heads, head_dim);
+                } else {
+                    at::native::hot::rope_apply_fused(sp.q_buf, sp.k_buf,
+                        rope_cos, rope_sin, n_heads, n_kv_heads, head_dim);
+                }
             }
 
             // -- KV cache append (zero-copy: write directly into cache) --
@@ -3837,8 +3859,13 @@ public:
                 float rope_cos[256], rope_sin[256];
                 at::native::hot::rope_precompute(rope_cos, rope_sin,
                     past_len_0 + k, head_dim, config.rope_freq_base);
-                at::native::hot::rope_apply_fused(q, kk, rope_cos, rope_sin,
-                    n_heads, n_kv_heads, head_dim);
+                if (config.rope_neox) {
+                    at::native::hot::rope_apply_fused_neox(q, kk, rope_cos, rope_sin,
+                        n_heads, n_kv_heads, head_dim);
+                } else {
+                    at::native::hot::rope_apply_fused(q, kk, rope_cos, rope_sin,
+                        n_heads, n_kv_heads, head_dim);
+                }
                 std::memcpy(k_cache + (past_len_0 + k) * kv_dim, kk, kv_dim * sizeof(float));
                 std::memcpy(v_cache + (past_len_0 + k) * kv_dim, vv, kv_dim * sizeof(float));
             }
@@ -5280,9 +5307,15 @@ public:
                         past_len, head_dim, config.rope_freq_base);
                     tp_.rope_cache_past_len = past_len;
                 }
-                at::native::hot::rope_apply_fused(q_l, k_l,
-                    tp_.rope_cos_cache.data(), tp_.rope_sin_cache.data(),
-                    n_heads_l, n_kv_l, head_dim);
+                if (config.rope_neox) {
+                    at::native::hot::rope_apply_fused_neox(q_l, k_l,
+                        tp_.rope_cos_cache.data(), tp_.rope_sin_cache.data(),
+                        n_heads_l, n_kv_l, head_dim);
+                } else {
+                    at::native::hot::rope_apply_fused(q_l, k_l,
+                        tp_.rope_cos_cache.data(), tp_.rope_sin_cache.data(),
+                        n_heads_l, n_kv_l, head_dim);
+                }
             }
 
             // --- QK-norm AFTER RoPE (PT_QK_AFTER_ROPE=1) ---
@@ -6741,19 +6774,28 @@ public:
         int64_t seq_len = x.size(0);
         float* data = x.mutable_data_ptr<float>();
         float freq_base = config.rope_freq_base;
+        const bool neox = config.rope_neox;
+        const int64_t half_dim = head_dim / 2;
         for (int64_t s = 0; s < seq_len; ++s) {
             int64_t pos = position_offset + s;
             for (int64_t h = 0; h < n_heads; ++h) {
                 float* head_data = data + s * (n_heads * head_dim) + h * head_dim;
-                for (int64_t d = 0; d < head_dim / 2; ++d) {
+                for (int64_t d = 0; d < half_dim; ++d) {
                     float freq = 1.0f / std::pow(freq_base, 2.0f * d / head_dim);
                     float theta = pos * freq;
                     float cos_theta = std::cos(theta);
                     float sin_theta = std::sin(theta);
-                    float x0 = head_data[2 * d];
-                    float x1 = head_data[2 * d + 1];
-                    head_data[2 * d]     = x0 * cos_theta - x1 * sin_theta;
-                    head_data[2 * d + 1] = x0 * sin_theta + x1 * cos_theta;
+                    if (neox) {
+                        float x0 = head_data[d];
+                        float x1 = head_data[d + half_dim];
+                        head_data[d]            = x0 * cos_theta - x1 * sin_theta;
+                        head_data[d + half_dim] = x0 * sin_theta + x1 * cos_theta;
+                    } else {
+                        float x0 = head_data[2 * d];
+                        float x1 = head_data[2 * d + 1];
+                        head_data[2 * d]     = x0 * cos_theta - x1 * sin_theta;
+                        head_data[2 * d + 1] = x0 * sin_theta + x1 * cos_theta;
+                    }
                 }
             }
         }
