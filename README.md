@@ -139,7 +139,7 @@ cyrillic vocab IDs. Активация — env `PT_PER_BLOCK_SCALE=1`.
 | Модель | PromeTorch TP-4 | llama.cpp 32t | Speedup | Russian |
 |---|---:|---:|---:|:---:|
 | qwen3-1.7B | 17.1 | 2.71 | **×6.3** | **✅ идеально** ¹ |
-| qwen3-4B | 8.0 | 1.82 | **×4.4** | **✅ идеально** ¹ |
+| qwen3-4B | **10.9** | 1.82 | **×6.0** | **✅ идеально** ¹ |
 | **mistral-7B** | **8.5** | 1.74 | **×4.9** | **✅ идеально** |
 | qwen2.5-7B | (OOM TP-4) | 1.71 | — | **✅ идеально** SP ¹ |
 | **gemma3-4B** | n/a ² | 1.30 | — | **✅ structured markdown** SP ¹ |
