@@ -96,8 +96,16 @@ With its rich history that dates back to 1...
 TP-4: **17.1 tok/s** (verified prior session).
 
 ### gemma3-4B Q4_K_M (TP-4)
-After commit `0ba114a` (post_attention_norm + post_ffw_norm wired):
-TBD — pending rebuild18 + verify.
+After commit `0ba114a` (post_attention_norm + post_ffw_norm wired
+correctly on full h_buf после output_proj). Требует `PT_TP_GATHER=1`.
+**RU:** «Что такое космос? Расскажи коротко.»
+```
+Космос – это всё, что существует за пределами нашей Земли. Это огромная,
+бесконечная область, включающая в себя:
+*   **Вселенная:**  Все известные объекты, включая звезды, планеты, галактики
+```
+50 tokens / 7.5s = **6.7 tok/s** (1.4× speedup vs SP, structured markdown
+сохранён, ×5.2 vs llama.cpp 32t baseline 1.30 tok/s).
 
 ## Speedups vs llama.cpp 32-thread (numactl --interleave=all)
 
