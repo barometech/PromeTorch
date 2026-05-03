@@ -1489,7 +1489,14 @@ public:
             upload_quant_cpu("token_embd.weight", q_output_weight);
         }
 
-        use_quant_gemv_ = true;
+        // PT_NO_QUANT_GEMV=1 — bisect helper. Forces FP fallback path (slow).
+        // Полезно для diagnostic phi3-style моделей где Q5_K kernel
+        // даёт garbage output — если FP path работает, bug в Q5_K split.
+        static const bool no_quant = []{
+            const char* e = std::getenv("PT_NO_QUANT_GEMV");
+            return e && e[0] == '1';
+        }();
+        use_quant_gemv_ = !no_quant;
 
         // === Initialize algorithmic accelerations ===
         init_cpu_accelerations();
