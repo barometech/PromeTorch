@@ -1508,6 +1508,7 @@ public:
             else if (type == gguf::GGML_TYPE_Q6_K) block_bytes = 210;
             else if (type == gguf::GGML_TYPE_Q5_K) block_bytes = 176;
             else if (type == gguf::GGML_TYPE_Q8_0) { block_bytes = 34; group_size = 32; }
+            else if (type == gguf::GGML_TYPE_Q5_0) { block_bytes = 22; group_size = 32; }
             else return;
 
             auto raw = reader.load_raw_tensor(name);
@@ -1770,6 +1771,7 @@ public:
             else if (type == gguf::GGML_TYPE_Q6_K) block_bytes = 210;
             else if (type == gguf::GGML_TYPE_Q5_K) block_bytes = 176;
             else if (type == gguf::GGML_TYPE_Q8_0) { block_bytes = 34; group_size = 32; }
+            else if (type == gguf::GGML_TYPE_Q5_0) { block_bytes = 22; group_size = 32; }
             else if (type == gguf::GGML_TYPE_F16) {
                 // FP16 weight — upload raw bytes to GPU for cuBLAS HGEMV
                 auto shape = info.shape();
