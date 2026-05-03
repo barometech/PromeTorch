@@ -1575,6 +1575,46 @@ public:
         for (int64_t i = 0; i < config.num_layers; ++i) {
             std::string prefix = "blk." + std::to_string(i) + ".";
             auto& layer = layers[i];
+
+            // ============ deepseek2 MLA + MoE branch (GigaChat3) ============
+            if (config.is_mla) {
+                // Q proj is a regular dense projection.
+                upload_quant_cpu(prefix + "attn_q.weight", layer.q_attn_q);
+                // KV down + RoPE half merged: rows = kv_lora_rank + rope_dim.
+                upload_quant_cpu(prefix + "attn_kv_a_mqa.weight", layer.q_attn_kv_a_mqa);
+                // RMSNorm on the latent KV (size = kv_lora_rank).
+                if (reader.has_tensor(prefix + "attn_kv_a_norm.weight")) {
+                    layer.attn_kv_a_norm =
+                        reader.load_tensor(prefix + "attn_kv_a_norm.weight");
+                }
+                // K/V up-projections — 3D tensors per head.
+                upload_quant_cpu(prefix + "attn_k_b.weight", layer.q_attn_k_b);
+                upload_quant_cpu(prefix + "attn_v_b.weight", layer.q_attn_v_b);
+                upload_quant_cpu(prefix + "attn_output.weight", layer.q_attn_output);
+
+                // MoE vs dense FFN: first `leading_dense_block_count` layers are
+                // dense (regular ffn_gate/up/down); subsequent layers are MoE.
+                if (i < config.leading_dense_block_count) {
+                    layer.is_moe_layer = false;
+                    upload_quant_cpu(prefix + "ffn_gate.weight", layer.q_ffn_gate);
+                    upload_quant_cpu(prefix + "ffn_up.weight",   layer.q_ffn_up);
+                    upload_quant_cpu(prefix + "ffn_down.weight", layer.q_ffn_down);
+                } else {
+                    layer.is_moe_layer = true;
+                    upload_quant_cpu(prefix + "ffn_gate_inp.weight", layer.q_ffn_gate_inp);
+                    upload_quant_cpu(prefix + "ffn_gate_exps.weight", layer.q_ffn_gate_exps);
+                    upload_quant_cpu(prefix + "ffn_up_exps.weight",   layer.q_ffn_up_exps);
+                    upload_quant_cpu(prefix + "ffn_down_exps.weight", layer.q_ffn_down_exps);
+                    if (config.expert_shared_count > 0) {
+                        upload_quant_cpu(prefix + "ffn_gate_shexp.weight", layer.q_ffn_gate_shexp);
+                        upload_quant_cpu(prefix + "ffn_up_shexp.weight",   layer.q_ffn_up_shexp);
+                        upload_quant_cpu(prefix + "ffn_down_shexp.weight", layer.q_ffn_down_shexp);
+                    }
+                }
+                continue;  // skip the standard llama-family branch below
+            }
+
+            // ============ standard llama-family path ============
             // Phi-3 / Phi-2 / StarCoder2 store Q/K/V merged as `attn_qkv.weight`
             // with rows = q_dim + 2*kv_dim. If split tensors are present we
             // prefer them; otherwise split the merged one into views.
