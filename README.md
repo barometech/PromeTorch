@@ -144,8 +144,8 @@ cyrillic vocab IDs. Активация — env `PT_PER_BLOCK_SCALE=1`.
 | qwen2.5-7B | (OOM TP-4) | 1.71 | — | **✅ идеально** SP ¹ |
 | **gemma3-4B** | **6.7** ² | 1.30 | **×5.2** | **✅ structured markdown** SP+TP-4 ¹ |
 | **phi3.5-mini** | **6.4** | 3.5 SP | — | **✅ связный RU+EN** SP+TP-4 ³ |
-| llama3-8B | (OOM TP-4) | 1.65 | — | TBD |
-| qwen3-14B | (OOM TP-4) | 1.02 | — | TBD |
+| llama3-8B | OOM TP-4 / 2.7 SP | 1.65 | — | **✅ связный RU** SP |
+| qwen3-14B | OOM TP-4 | 1.02 | — | (SP TBD — slow load) |
 
 > **¹** После NEOX RoPE fix (2026-05-03 commit `b144db2`). Архитектуры qwen/qwen2/
 > qwen3/gemma3/phi3 требуют LongRoPE-style half-split rotation `(d, d+head_dim/2)`
