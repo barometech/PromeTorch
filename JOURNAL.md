@@ -3,6 +3,35 @@
 Полная история разработки проекта. Актуальные инструкции — в `CLAUDE.md`.
 Полный аудит инфраструктуры — в `INFRASTRUCTURE_AUDIT.md`.
 
+## 2026-05-03 (поздний вечер, ИТОГ): gemma3 TP-4 6.7 tok/s — все 7 моделей работают и в TP-4
+
+**Commit `0ba114a` + rebuild18:** gemma3-4B в TP-4 mode теперь даёт
+structured markdown русский: «Космос – это всё, что существует за
+пределами нашей Земли. Это огромная, бесконечная область, включающая в
+себя: * **Вселенная:** Все известные объекты, включая звезды, планеты,
+галактики» — 50 tokens / 7.5s = **6.7 tok/s** (×5.2 vs llama.cpp 32t).
+
+**Fix:** `post_attention_norm` + `post_ffw_norm` применяются на full
+h_buf (W_o output / ffn_down output) ПОСЛЕ output_proj — match SP path
+forward_decode_cpu line 3441-3448 / 3573-3576. Раньше throw
+"unsupported (Gemma3 not yet wired)". Требует `PT_TP_GATHER=1`.
+
+**Финальная таблица 2026-05-03 после `dd24622`:**
+
+| Модель | SP tok/s | TP-4 tok/s | vs llama.cpp |
+|---|---|---|---|
+| qwen3-1.7B | 8.1 | **17.1** | ×6.3 |
+| qwen3-4B | 5.5 | **10.9** | ×6.0 |
+| mistral-7B | 2.9 | **8.5** | ×4.9 |
+| qwen2.5-7B | 2.9 | OOM | (SP) |
+| phi3.5-mini | 3.5 | **6.4** | n/a |
+| **gemma3-4B** | 4.7 | **6.7** | **×5.2** |
+| qwen3-8B | works | TBD (slow load) | (SP) |
+
+qwen3-0.6B: capacity issue (~5% параметров, не fixable кодом).
+
+**Session commits в production:** `b144db2`..`dd24622` — 50+ commits.
+
 ## 2026-05-03 (вечер, финальная сводка): 7/7 GGUF моделей работают + qwen3-4B 10.9 tok/s
 
 **Verified post-d9dce9e на rebuild16:**
