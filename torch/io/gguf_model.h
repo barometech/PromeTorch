@@ -80,6 +80,7 @@ struct TransformerConfig {
     bool scale_embeddings = false;     // Gemma: multiply embeddings by sqrt(hidden)
     bool gemma_norm_add_one = false;   // Gemma: RMSNorm weight += 1
     bool has_qk_norm = false;          // Gemma3: per-head Q/K normalization
+    bool ffn_gelu = false;             // FFN gate activation: false=SiLU (LLaMA/Mistral/qwen), true=GELU tanh (Gemma family).
     bool has_post_norm = false;        // Gemma3: post-attention + post-FFN norms
     bool rope_neox = false;            // NeoX-style RoPE (qwen/gemma/phi3); else NORM (llama/mistral)
 
@@ -134,6 +135,9 @@ struct TransformerConfig {
             // Note: GGUF converter already bakes in the +1 (layernorm1p)
             // so we do NOT add 1 again during inference
             gemma_norm_add_one = false;
+            // Gemma family использует GeGLU (gated GELU), не SwiGLU. См.
+            // llama.cpp/src/models/gemma3.cpp build_ffn(LLM_FFN_GELU, ...).
+            ffn_gelu = true;
         }
         if (architecture == "gemma3") {
             has_qk_norm = true;
@@ -3357,34 +3361,26 @@ public:
 
             if (sec_timers_.on) sec_timers_.gateup_ms += _elapsed_ms();
 
-            // -- SiLU(gate) * up: in-place into gate_buf --
-            // Parallelized: std::exp on E2K libm is scalar software, ~200ns/call.
-            // Per layer inter=9728 × 8 exps per AVX2 iter (prev scalar fallback)
-            // = ~10K exps/layer × 36 = 350K/token = ~70 ms serial. Fan-out across
-            // 24 threads cuts this to single-digit ms.
+            // -- act(gate) * up: in-place into gate_buf --
+            // act = SiLU (LLaMA/qwen/mistral) или GELU tanh approx (Gemma family).
+            // Gemma3 в llama.cpp использует LLM_FFN_GELU; SiLU дал бы wrong
+            // нелинейность и broken output. ffn_gelu=true → tanh-approx GELU.
+            // Const sqrt(2/π) ≈ 0.7978845608. GELU(x) ≈ 0.5x(1 + tanh(c*(x+0.044715x^3))).
+            const bool use_gelu = config.ffn_gelu;
             c10::get_thread_pool().parallel_for(0, inter, [&](int64_t s, int64_t e) {
                 int64_t j = s;
-#ifdef __AVX2__
-                __m256 one = _mm256_set1_ps(1.0f);
-                for (; j + 7 < e; j += 8) {
-                    __m256 g = _mm256_loadu_ps(sp.gate_buf + j);
-                    __m256 u = _mm256_loadu_ps(sp.up_buf + j);
-                    __m256 neg_g = _mm256_sub_ps(_mm256_setzero_ps(), g);
-                    neg_g = _mm256_max_ps(neg_g, _mm256_set1_ps(-88.0f));
-                    neg_g = _mm256_min_ps(neg_g, _mm256_set1_ps(88.0f));
-                    float tmp[8];
-                    _mm256_storeu_ps(tmp, neg_g);
-                    __m256 exp_neg_g = _mm256_set_ps(
-                        std::exp(tmp[7]), std::exp(tmp[6]), std::exp(tmp[5]), std::exp(tmp[4]),
-                        std::exp(tmp[3]), std::exp(tmp[2]), std::exp(tmp[1]), std::exp(tmp[0]));
-                    __m256 sigmoid = _mm256_div_ps(one, _mm256_add_ps(one, exp_neg_g));
-                    __m256 silu = _mm256_mul_ps(g, sigmoid);
-                    _mm256_storeu_ps(sp.gate_buf + j, _mm256_mul_ps(silu, u));
-                }
-#endif
                 for (; j < e; ++j) {
                     float g = sp.gate_buf[j];
-                    sp.gate_buf[j] = (g / (1.0f + std::exp(-g))) * sp.up_buf[j];
+                    float act;
+                    if (use_gelu) {
+                        const float c = 0.7978845608028654f;  // sqrt(2/pi)
+                        float x3 = g * g * g;
+                        float t = std::tanh(c * (g + 0.044715f * x3));
+                        act = 0.5f * g * (1.0f + t);
+                    } else {
+                        act = g / (1.0f + std::exp(-g));  // SiLU
+                    }
+                    sp.gate_buf[j] = act * sp.up_buf[j];
                 }
             }, /*min_grain=*/256);
             if (sec_timers_.on) sec_timers_.silu_ms += _elapsed_ms();
