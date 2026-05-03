@@ -63,6 +63,8 @@ struct TransformerConfig {
     int64_t context_length = 0;
 
     float rope_freq_base = 10000.0f;
+    float rope_scale = 1.0f;           // Linear RoPE scaling: theta = pos/scale * freq.
+                                       // Gemma3=8.0, Llama-3.1 long-context, Phi-3.5.
     float rms_norm_eps = 1e-6f;
 
     // Architecture-specific
@@ -85,6 +87,17 @@ struct TransformerConfig {
         context_length = reader.get_arch_int("context_length", 8192);
 
         rope_freq_base = reader.get_arch_float("rope.freq_base", 10000.0f);
+        // Linear RoPE scaling — applied as theta = pos / scale_factor * freq.
+        // Gemma3 has factor=8.0 in metadata. llama.cpp checks scaling.type to
+        // decide whether to apply (linear vs yarn vs none). Other types
+        // (longrope, yarn) are not supported here yet.
+        {
+            std::string scale_type = reader.get_string(architecture + ".rope.scaling.type", "");
+            float scale_factor = reader.get_arch_float("rope.scaling.factor", 0.0f);
+            if (scale_type == "linear" && scale_factor > 1.0f) {
+                rope_scale = scale_factor;
+            }
+        }
         rms_norm_eps = reader.get_arch_float("attention.layer_norm_rms_epsilon", 1e-6f);
 
         // Head dim: prefer explicit key_length, fallback to hidden/heads
@@ -136,7 +149,8 @@ struct TransformerConfig {
         std::cout << "  FFN size: " << intermediate_size << std::endl;
         std::cout << "  Vocab size: " << vocab_size << std::endl;
         std::cout << "  Context length: " << context_length << std::endl;
-        std::cout << "  RoPE base: " << rope_freq_base << std::endl;
+        std::cout << "  RoPE base: " << rope_freq_base
+                  << " scale: " << rope_scale << std::endl;
         std::cout << "  RMS norm eps: " << rms_norm_eps << std::endl;
         std::cout << "  Gemma features: scale_emb=" << scale_embeddings
                   << " norm+1=" << gemma_norm_add_one
@@ -173,6 +187,7 @@ struct QuantizedWeight {
     bool is_q8_0() const { return quant_type == 8; }  // GGML_TYPE_Q8_0
 
     bool mmap_owned = false;  // true if cpu_data points into mmap region (don't free!)
+    bool owns_cpu_data = true; // false for split-views into a parent QuantizedWeight (Phi-3 attn_qkv → q/k/v).
 
     // Optional: per-NUMA-node local copies of cpu_data, built lazily when
     // PT_NUMA_REPLICATE=1. When populated, GEMV can pick `replica.get(node)`
@@ -185,7 +200,7 @@ struct QuantizedWeight {
     }
 
     void free_cpu() {
-        if (cpu_data && !mmap_owned) {
+        if (cpu_data && !mmap_owned && owns_cpu_data) {
             std::free(cpu_data);
         }
         cpu_data = nullptr;
@@ -235,6 +250,11 @@ struct TransformerLayer {
     // Quantized weights (GPU, Q4_K_M) — used for decode GEMV
     QuantizedWeight q_attn_q, q_attn_k, q_attn_v, q_attn_output;
     QuantizedWeight q_ffn_gate, q_ffn_up, q_ffn_down;
+    // Phi-3 / StarCoder2: GGUF stores Q/K/V merged as `attn_qkv` and gate+up
+    // merged as `ffn_up`. These hold the BACKING storage; q_attn_q/k/v and
+    // q_ffn_gate/up are then non-owning row-slice views into them.
+    QuantizedWeight q_attn_qkv;
+    QuantizedWeight q_ffn_gate_up;
 };
 
 // ============================================================================
@@ -1310,15 +1330,72 @@ public:
             qw.valid = true;
         };
 
+        // Splits a merged QKV (or gate+up) quantized tensor along its row axis
+        // into N independent QuantizedWeight slices that share the same backing
+        // buffer. Q4_K / Q5_K / Q6_K / Q8_0 are all row-major in GGUF (each row
+        // stored as `cols/group_size` blocks back-to-back), so the slice is
+        // just a pointer offset + row count adjustment. row_split_counts must
+        // sum to merged.rows. The ORIGINAL merged QuantizedWeight is left
+        // populated as the *owner* of cpu_data; the slices are non-owning views.
+        auto split_quant_rows = [&](QuantizedWeight& merged,
+                                    const std::vector<int64_t>& row_split_counts,
+                                    const std::vector<QuantizedWeight*>& outs) {
+            if (!merged.valid) return;
+            int64_t row_off = 0;
+            for (size_t i = 0; i < outs.size(); ++i) {
+                int64_t n_rows = row_split_counts[i];
+                QuantizedWeight& slice = *outs[i];
+                slice.cpu_data = static_cast<char*>(merged.cpu_data)
+                                  + row_off * merged.row_stride_bytes;
+                slice.rows = n_rows;
+                slice.cols = merged.cols;
+                slice.row_stride_bytes = merged.row_stride_bytes;
+                slice.total_bytes = n_rows * merged.row_stride_bytes;
+                slice.quant_type = merged.quant_type;
+                slice.valid = true;
+                slice.owns_cpu_data = false;  // merged owns the buffer
+                row_off += n_rows;
+            }
+        };
+
+        const int64_t q_dim_total  = config.num_heads * config.head_dim;
+        const int64_t kv_dim_total = config.num_kv_heads * config.head_dim;
+
         for (int64_t i = 0; i < config.num_layers; ++i) {
             std::string prefix = "blk." + std::to_string(i) + ".";
             auto& layer = layers[i];
-            upload_quant_cpu(prefix + "attn_q.weight", layer.q_attn_q);
-            upload_quant_cpu(prefix + "attn_k.weight", layer.q_attn_k);
-            upload_quant_cpu(prefix + "attn_v.weight", layer.q_attn_v);
+            // Phi-3 / Phi-2 / StarCoder2 store Q/K/V merged as `attn_qkv.weight`
+            // with rows = q_dim + 2*kv_dim. If split tensors are present we
+            // prefer them; otherwise split the merged one into views.
+            if (reader.has_tensor(prefix + "attn_q.weight")) {
+                upload_quant_cpu(prefix + "attn_q.weight", layer.q_attn_q);
+                upload_quant_cpu(prefix + "attn_k.weight", layer.q_attn_k);
+                upload_quant_cpu(prefix + "attn_v.weight", layer.q_attn_v);
+            } else if (reader.has_tensor(prefix + "attn_qkv.weight")) {
+                upload_quant_cpu(prefix + "attn_qkv.weight", layer.q_attn_qkv);
+                split_quant_rows(layer.q_attn_qkv,
+                    {q_dim_total, kv_dim_total, kv_dim_total},
+                    {&layer.q_attn_q, &layer.q_attn_k, &layer.q_attn_v});
+            }
             upload_quant_cpu(prefix + "attn_output.weight", layer.q_attn_output);
-            upload_quant_cpu(prefix + "ffn_gate.weight", layer.q_ffn_gate);
-            upload_quant_cpu(prefix + "ffn_up.weight", layer.q_ffn_up);
+            // Phi-3 / Phi-3.5 store gate+up merged as `ffn_up.weight` with rows
+            // = 2 * intermediate (gate first half, up second half).
+            if (reader.has_tensor(prefix + "ffn_gate.weight")) {
+                upload_quant_cpu(prefix + "ffn_gate.weight", layer.q_ffn_gate);
+                upload_quant_cpu(prefix + "ffn_up.weight",   layer.q_ffn_up);
+            } else if (reader.has_tensor(prefix + "ffn_up.weight")) {
+                // Phi-3 case: only ffn_up exists in GGUF and contains [gate; up].
+                upload_quant_cpu(prefix + "ffn_up.weight", layer.q_ffn_gate_up);
+                if (layer.q_ffn_gate_up.valid &&
+                    layer.q_ffn_gate_up.rows == 2 * config.intermediate_size) {
+                    split_quant_rows(layer.q_ffn_gate_up,
+                        {config.intermediate_size, config.intermediate_size},
+                        {&layer.q_ffn_gate, &layer.q_ffn_up});
+                } else {
+                    // Plain ffn_up only (no gating, e.g. some BERT-likes).
+                    layer.q_ffn_up = std::move(layer.q_ffn_gate_up);
+                }
+            }
             upload_quant_cpu(prefix + "ffn_down.weight", layer.q_ffn_down);
         }
 
@@ -2967,7 +3044,7 @@ public:
             {
                 float rope_cos[256], rope_sin[256];  // head_dim/2 <= 256 for all models
                 at::native::hot::rope_precompute(rope_cos, rope_sin,
-                    past_len, head_dim, config.rope_freq_base);
+                    past_len, head_dim, config.rope_freq_base, config.rope_scale);
                 if (config.rope_neox) {
                     at::native::hot::rope_apply_fused_neox(sp.q_buf, sp.k_buf,
                         rope_cos, rope_sin, n_heads, n_kv_heads, head_dim);
@@ -3665,6 +3742,9 @@ public:
             }
             return "<|im_start|>user\n" + prompt
                    + "<|im_end|>\n<|im_start|>assistant\n";
+        } else if (config.architecture == "phi3" || config.architecture == "phi2") {
+            // Phi-3 / Phi-3.5 instruct format
+            return "<|user|>\n" + prompt + "<|end|>\n<|assistant|>\n";
         } else if (config.architecture == "gemma3" || config.architecture == "gemma2") {
             return "<start_of_turn>user\n" + prompt + "<end_of_turn>\n<start_of_turn>model\n";
         } else if (config.architecture == "llama") {
@@ -3858,7 +3938,8 @@ public:
                 }
                 float rope_cos[256], rope_sin[256];
                 at::native::hot::rope_precompute(rope_cos, rope_sin,
-                    past_len_0 + k, head_dim, config.rope_freq_base);
+                    past_len_0 + k, head_dim, config.rope_freq_base,
+                    config.rope_scale);
                 if (config.rope_neox) {
                     at::native::hot::rope_apply_fused_neox(q, kk, rope_cos, rope_sin,
                         n_heads, n_kv_heads, head_dim);
@@ -5304,7 +5385,8 @@ public:
                     }
                     at::native::hot::rope_precompute(
                         tp_.rope_cos_cache.data(), tp_.rope_sin_cache.data(),
-                        past_len, head_dim, config.rope_freq_base);
+                        past_len, head_dim, config.rope_freq_base,
+                        config.rope_scale);
                     tp_.rope_cache_past_len = past_len;
                 }
                 if (config.rope_neox) {
@@ -6774,15 +6856,19 @@ public:
         int64_t seq_len = x.size(0);
         float* data = x.mutable_data_ptr<float>();
         float freq_base = config.rope_freq_base;
+        float rope_scale = config.rope_scale;
         const bool neox = config.rope_neox;
         const int64_t half_dim = head_dim / 2;
         for (int64_t s = 0; s < seq_len; ++s) {
             int64_t pos = position_offset + s;
+            float scaled_pos = (rope_scale > 0.0f && rope_scale != 1.0f)
+                                ? (static_cast<float>(pos) / rope_scale)
+                                : static_cast<float>(pos);
             for (int64_t h = 0; h < n_heads; ++h) {
                 float* head_data = data + s * (n_heads * head_dim) + h * head_dim;
                 for (int64_t d = 0; d < half_dim; ++d) {
                     float freq = 1.0f / std::pow(freq_base, 2.0f * d / head_dim);
-                    float theta = pos * freq;
+                    float theta = scaled_pos * freq;
                     float cos_theta = std::cos(theta);
                     float sin_theta = std::sin(theta);
                     if (neox) {
