@@ -5792,18 +5792,11 @@ public:
                 }
             }
 
-            // --- Post-attention norm (Gemma3): RMSNorm on FULL attention output
-            // before output projection. RMSNorm of a slice ≠ RMSNorm of full
-            // vector (mean/variance differ), so we MUST have the full vector.
-            // Supported only in use_gather mode (PT_TP_GATHER=1) — К-slice path
-            // can't do this without reshuffling K-partition. Throw if user
-            // tried K-slice with gemma3.
-            if (layer.post_attention_norm.defined() && !use_gather) {
-                throw std::runtime_error(
-                    "TP: post_attention_norm requires PT_TP_GATHER=1 "
-                    "(K-slice cannot gather attention output before output_proj). "
-                    "Set PT_TP_GATHER=1 to enable gemma3 TP-4.");
-            }
+            // Gemma3 post_attention_norm применяется на full h_buf ПОСЛЕ
+            // output_proj, см. SP path в forward_decode_cpu (комментарий ссылается
+            // на llama.cpp gemma3.cpp: build_attn(включая W_o) → build_norm(cur,
+            // attn_post_norm) → +residual). h_buf становится full после
+            // all_gather_wait (use_gather) или all_reduce_inplace (K-slice).
 
             if (tp_sec_timers_.on) tp_sec_timers_.attn_ms += _tp_elapsed();
             // qkv+attention combined into attn_ms for now; we split by also
@@ -5852,17 +5845,6 @@ public:
                 }
                 torch::distributed::all_gather_wait();
                 if (tp_sec_timers_.on) tp_sec_timers_.allreduce_ao_ms += _tp_elapsed();
-
-                // Gemma3: apply post_attention_norm on full attention output
-                // BEFORE output projection. After all_gather_wait, attn_full_buf
-                // holds the full q_dim vector (per-rank slices concatenated).
-                // Now safe to apply RMSNorm correctly.
-                if (layer.post_attention_norm.defined()) {
-                    cpu_quant::cpu_rmsnorm_inplace(
-                        tp_.attn_full_buf.data(),
-                        layer.post_attention_norm.data_ptr<float>(),
-                        eps, add_one, q_dim);
-                }
 
                 // N-slice GEMV on full replicated attn_output weight.
                 if (w_ao_slice) {
@@ -5952,6 +5934,15 @@ public:
 
                 torch::distributed::all_reduce_inplace(h_buf, H);
                 if (tp_sec_timers_.on) tp_sec_timers_.allreduce_ao_ms += _tp_elapsed();
+            }
+
+            // Gemma3 post_attention_norm: применяется на full h_buf (W_o output)
+            // ПОСЛЕ output_proj, до residual add. h_buf полный после use_gather
+            // или AllReduce. Match SP path in forward_decode_cpu.
+            if (layer.post_attention_norm.defined()) {
+                cpu_quant::cpu_rmsnorm_inplace(
+                    h_buf, layer.post_attention_norm.data_ptr<float>(),
+                    eps, add_one, H);
             }
 
             // --- Residual add: x_next = x + h ---
