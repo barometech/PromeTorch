@@ -2,91 +2,198 @@
 <html lang="ru">
 <head>
 <meta charset="utf-8">
-<title>PromeTorch на Эльбрус 8C2: инференс современных LLM на отечественной VLIW-архитектуре</title>
+<title>PromeTorch на Эльбрус 8C2 — инференс современных LLM на отечественной VLIW-архитектуре</title>
 <style>
-@page { size: A4; margin: 18mm; }
-html { background: #fff; color: #000; }
+@page {
+    size: A4;
+    margin: 18mm 16mm 20mm 16mm;
+    @bottom-center { content: counter(page); }
+}
+* { box-sizing: border-box; }
+html { background: #fff; }
 body {
-    font-family: "Times New Roman", "Liberation Serif", serif;
-    font-size: 11pt;
-    line-height: 1.45;
+    font-family: "Times New Roman", "Liberation Serif", "DejaVu Serif", serif;
+    font-size: 10.5pt;
+    line-height: 1.42;
     color: #000;
     background: #fff;
-    max-width: 760px;
-    margin: 0 auto;
-    padding: 24px;
+    margin: 0;
+    padding: 0;
 }
-h1 { font-size: 19pt; text-align: center; margin: 0 0 4px 0; line-height: 1.25; }
-h2 { font-size: 14pt; margin-top: 22px; border-bottom: 1px solid #000; padding-bottom: 2px; }
-h3 { font-size: 12pt; margin-top: 14px; }
-.authors { text-align: center; font-size: 10pt; margin: 0 0 4px 0; }
-.affiliation { text-align: center; font-size: 9.5pt; font-style: italic; margin-bottom: 10px; }
-.abstract {
+h1 {
+    font-size: 18pt;
+    text-align: center;
+    margin: 0 0 6px 0;
+    line-height: 1.2;
+    font-weight: bold;
+}
+h2 {
+    font-size: 13pt;
+    margin-top: 18pt;
+    margin-bottom: 6pt;
+    border-bottom: 1.5px solid #000;
+    padding-bottom: 2pt;
+    page-break-after: avoid;
+}
+h3 {
+    font-size: 11.5pt;
+    margin-top: 12pt;
+    margin-bottom: 4pt;
+    page-break-after: avoid;
+}
+.byline {
+    text-align: center;
     font-size: 10pt;
-    margin: 14px 30px;
-    border-left: 2px solid #000;
-    padding: 6px 12px;
+    margin: 0 0 4px 0;
 }
-.abstract b { font-style: normal; }
+.affil {
+    text-align: center;
+    font-size: 9.5pt;
+    font-style: italic;
+    margin-bottom: 14px;
+    color: #333;
+}
+.affil a { color: #0033aa; }
+
+.abstract {
+    margin: 14px 26pt;
+    padding: 8pt 12pt;
+    border-left: 3px solid #000;
+    background: #fafafa;
+    font-size: 10pt;
+    line-height: 1.4;
+}
+.abstract::before {
+    content: "Аннотация. ";
+    font-weight: bold;
+}
+
+p { margin: 6pt 0; text-align: justify; }
+
 table {
     border-collapse: collapse;
     width: 100%;
-    font-size: 9.5pt;
-    margin: 8px 0 14px 0;
+    margin: 8pt 0 14pt 0;
+    font-size: 9pt;
+    page-break-inside: avoid;
 }
 table th, table td {
-    border: 1px solid #000;
-    padding: 4px 6px;
+    border: 0.8pt solid #000;
+    padding: 3pt 5pt;
     text-align: left;
     vertical-align: top;
 }
-table th { background: #f0f0f0; font-weight: bold; }
-table td.num { text-align: right; }
-code { font-family: "Courier New", monospace; font-size: 9.5pt; background: #f4f4f4; padding: 0 2px; }
+table th {
+    background: #d8d8d8;
+    font-weight: bold;
+    text-align: center;
+}
+table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+table td.center { text-align: center; }
+table.zebra tr:nth-child(even) td { background: #f5f5f5; }
+table.zebra tr.hilite td { background: #e8e8e8; font-weight: bold; }
+
+.caption {
+    font-size: 8.5pt;
+    font-style: italic;
+    text-align: center;
+    margin: -8pt 0 12pt 0;
+    color: #333;
+}
+
+.figure {
+    margin: 12pt 0;
+    text-align: center;
+    page-break-inside: avoid;
+}
+.figure img {
+    max-width: 100%;
+    border: 0.5pt solid #999;
+    background: #fff;
+}
+.figure-half img { max-width: 70%; }
+.figure-third img { max-width: 48%; margin: 4px; }
+
+code {
+    font-family: "Courier New", "DejaVu Sans Mono", monospace;
+    font-size: 9pt;
+    background: #f0f0f0;
+    padding: 0 2pt;
+    border-radius: 2pt;
+}
 pre {
-    font-family: "Courier New", monospace;
+    font-family: "Courier New", "DejaVu Sans Mono", monospace;
     font-size: 9pt;
     background: #f4f4f4;
-    border: 1px solid #999;
-    padding: 6px 8px;
-    overflow-x: auto;
+    border: 0.8pt solid #888;
+    padding: 6pt 8pt;
+    overflow-x: hidden;
     white-space: pre-wrap;
     word-wrap: break-word;
+    page-break-inside: avoid;
 }
-.caption { font-size: 9pt; font-style: italic; margin: -6px 0 12px 0; text-align: center; }
-.figure { margin: 12px 0; text-align: center; }
-.figure img { max-width: 100%; border: 1px solid #999; }
-.refs { font-size: 9.5pt; }
-.refs li { margin-bottom: 4px; }
-.dropcap { font-size: 16pt; font-weight: bold; }
-hr { border: 0; border-top: 1px solid #000; }
+
+a { color: #0033aa; text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+ol.refs { font-size: 9pt; padding-left: 20pt; }
+ol.refs li { margin-bottom: 3pt; }
+
+hr.thin { border: 0; border-top: 0.5pt solid #000; margin: 14pt 0; }
+.footnote-meta {
+    font-size: 8.5pt;
+    text-align: center;
+    color: #444;
+    margin-top: 14pt;
+    border-top: 0.5pt solid #000;
+    padding-top: 6pt;
+}
+
+.box-fact {
+    border: 0.8pt solid #000;
+    padding: 6pt 10pt;
+    margin: 8pt 0;
+    background: #f8f8f0;
+    font-size: 10pt;
+    page-break-inside: avoid;
+}
+.box-fact b { display: block; margin-bottom: 2pt; }
 </style>
 </head>
 <body>
 
-<h1>PromeTorch на Эльбрус 8C2: инференс современных LLM на отечественной VLIW-архитектуре</h1>
-<div class="authors">PromeTorch (открытый источник)</div>
-<div class="affiliation">Эксперимент 2026-04 .. 2026-05, репозиторий <code>github.com/barometech/PromeTorch</code></div>
+<h1>PromeTorch на Эльбрус 8C2:<br>инференс современных языковых моделей<br>на отечественной VLIW-архитектуре</h1>
+<div class="byline"><b>PromeTorch</b> — открытый проект, май 2026</div>
+<div class="affil">
+Репозиторий:
+<a href="https://github.com/barometech/PromeTorch">github.com/barometech/PromeTorch</a>
+&nbsp; · &nbsp;
+Лицензия: открытый исходный код
+&nbsp; · &nbsp;
+Тестовая платформа: Эльбрус-8С2, 8 ядер, 1.5 ГГц, 4×NUMA, 125 ГБ DDR4
+</div>
 
 <div class="abstract">
-<b>Аннотация.</b> Описывается реализация инференса 10 современных
-квантизованных трансформерных моделей (qwen3 1.7B/4B/8B/14B, qwen2.5-7B,
-mistral-7B, gemma3-4B, phi3.5-mini, llama3-8B, deepseek-coder-7B) на
-8-ядерном VLIW-процессоре Эльбрус-8С2 (1.5 ГГц, 4 NUMA-узла, 125 ГБ
-DDR4) без использования сторонних backend-библиотек. На референсной
+Описывается реализация инференса 10 квантизованных языковых моделей
+(<b>qwen3</b> 1.7B / 4B / 8B / 14B, <b>qwen2.5-7B</b>, <b>mistral-7B</b>,
+<b>gemma3-4B</b>, <b>phi3.5-mini</b>, <b>llama3-8B</b>,
+<b>deepseek-coder-7B</b>) на 8-ядерном VLIW-процессоре Эльбрус-8С2 без
+сторонних backend-библиотек, кроме проприетарной EML МЦСТ. На референсной
 4-процессной тензорно-параллельной (TP-4) конфигурации зафиксировано
-17.1 ток/с для qwen3-1.7B, 10.9 ток/с для qwen3-4B (≈ исходный baseline
-11.4 ток/с при сохранении правильного русского), 8.5 ток/с для
-mistral-7B Q4_K_M, 6.7 ток/с для gemma3-4B и 6.4 ток/с для phi3.5-mini.
-Single-process путь работает на всех 10 моделях, включая qwen3-14B
-(1.5 ток/с). Сопоставление с llama.cpp v3 32-thread (numactl
-<code>--interleave=all</code>) даёт прирост ×3.1 .. ×6.3. Выявлены и
-устранены три глубоких дефекта корректности (phi3 merged-tensor mmap
-load, gemma3 TP-4 post-norms placement, deepseek legacy
-<code>rope.scale_linear</code> ключ); код opensource. Результаты
-сравниваются с тремя предшествующими работами для архитектуры e2k:
-llama.cpp-e2k (порт legacy LLaMA-1), Smart Engines (CV-инференс) и
-ggml-NCNN-демо.
+17.1 токенов/с для qwen3-1.7B, 10.9 токенов/с для qwen3-4B (≈ исходный
+baseline 11.4 при сохранении правильного русского языка), 8.5 токенов/с
+для mistral-7B Q4_K_M, 6.7 токенов/с для gemma3-4B и 6.4 токенов/с для
+phi3.5-mini. Single-process путь работает на всех 10 моделях, включая
+qwen3-14B (1.5 токенов/с). Сопоставление с llama.cpp&nbsp;v3 в режиме
+32&nbsp;потока и <code>numactl --interleave=all</code> даёт прирост
+×3.1&nbsp;..&nbsp;×6.3. Выявлены и устранены три глубоких дефекта
+корректности (phi3 merged-tensor mmap load, gemma3 TP-4 post-norms
+placement, deepseek legacy <code>rope.scale_linear</code> ключ
+парсера&nbsp;GGUF). Результаты сопоставлены с тремя предшествующими
+работами для архитектуры&nbsp;e2k: llama.cpp-e2k (порт legacy LLaMA-1),
+Smart Engines (CV-инференс) и ggml-NCNN-демо. Демонстрируется
+multi-step tool-call пайплайн (<code>write_file</code> через
+<code>&lt;tool_call&gt;</code>) для генерации трёх HTML-страниц.
 </div>
 
 <h2>1. Введение</h2>
@@ -94,134 +201,178 @@ ggml-NCNN-демо.
 <p>VLIW-архитектура Эльбрус (e2k) разрабатывается АО «МЦСТ» с конца
 1990-х; модель 8C2 (изд. 2018) имеет 8 ядер по 1.5 ГГц, 6 ALU на ядро,
 SIMD-расширения 64/128 бит, 4 канала DDR4 разнесённых по 4 NUMA-узлам.
-Компилятор LCC (≥ 1.29) — программный планировщик инструкций; rcps
-intrinsics (например <code>__builtin_e2k_qpfmuls/qpfadds</code>) дают
-4-lane fp32 SIMD без AVX2. Современные LLM (qwen3, gemma3, phi3 — выпуск
-2024–2025 гг.) на этой платформе ранее не запускались публично.</p>
+Компилятор LCC (≥&nbsp;1.29) — программный планировщик инструкций;
+встроенные функции (<code>__builtin_e2k_qpfmuls</code>,
+<code>qpfadds</code>, <code>qpmaddubsh</code>) дают 4-lane fp32 SIMD без
+AVX2. Современные языковые модели (qwen3, gemma3, phi3 — выпуска
+2024–2025) на этой платформе ранее не запускались публично.</p>
 
-<p>PromeTorch — header-only C++17 inference-библиотека (≈ 95 000 строк),
-реализующая дисковый путь GGUF Q4_K/Q5_K/Q6_K/Q8_0, in-memory mmap,
-dequantize, GEMV, вращение позиций (RoPE NORM/NeoX), KV-cache,
-attention (включая GQA и SWA), все нормы (RMS, post-norm), 4-процессное
-тензор-параллельное распределение через POSIX shared memory AllReduce
-и speculative decode. Единственная внешняя зависимость для CPU-инференса —
-EML (BLAS, проприетарная библиотека МЦСТ).</p>
+<p><b>PromeTorch</b> — header-only C++17 inference-библиотека (≈&nbsp;95&nbsp;000
+строк), реализующая дисковый путь GGUF&nbsp;Q4_K/Q5_K/Q6_K/Q8_0,
+zero-copy mmap, dequantize, GEMV, вращение позиций (RoPE NORM/NeoX),
+KV-cache, attention (включая GQA и SWA), все нормы (RMSNorm,
+post_attn_norm, post_ffw_norm), 4-процессное тензорно-параллельное
+распределение через POSIX&nbsp;shared&nbsp;memory AllReduce и
+speculative decode. Единственная внешняя зависимость для CPU-инференса
+— EML (BLAS, проприетарная библиотека МЦСТ).</p>
 
-<h2>2. Сопутствующие работы для Эльбрус</h2>
+<div class="box-fact">
+<b>Ключевые достижения (по результатам этого эксперимента):</b>
+<ul style="margin: 4pt 0 0 16pt; padding: 0;">
+<li>10 LLM с выпуском 2024–2025 запущены на e2k (ранее не было публично).</li>
+<li>qwen3-4B TP-4: 10.9 ток/с с правильным русским — близко к 11.4 baseline.</li>
+<li>×3.1 .. ×6.3 ускорение vs llama.cpp&nbsp;v3 32-thread на той же платформе.</li>
+<li>Open source, без проприетарных backend (только EML).</li>
+</ul>
+</div>
+
+<h2>2. Положение PromeTorch среди публичных работ для Эльбрус</h2>
+
+<div class="figure">
+<img src="figs/fig1_quadrant.png" alt="Сопоставление работ по машинному обучению на Эльбрус">
+<div class="caption">Рис.&nbsp;1. Положение PromeTorch относительно других публичных проектов
+машинного обучения на платформе Эльбрус. По оси X — поддержка
+современных LLM-архитектур, по Y — лучшая фиксированная скорость
+инференса (токенов/сек) на 8C2/8SV для 7B-класса или ниже.</div>
+</div>
+
+<p>Ниже описаны четыре известных автору проекта по машинному обучению
+для архитектуры e2k.</p>
 
 <h3>2.1. llama.cpp-e2k (alexmihalyk23, 2023–)</h3>
-<p>Порт <code>llama.cpp</code> на e2k. Поддерживает legacy
-архитектуры LLaMA-1, Alpaca, Koala, GPT4All, Vicuna, Pygmalion-7B (все
-выпуска ≤ 2023). Заявленные показатели для 7B Q4_0:</p>
-<ul>
-<li>4 потока: 50 мс/токен ≈ 20 ток/с</li>
-<li>8 потоков: 44 мс/токен ≈ 22.7 ток/с</li>
-<li>FP16 8 потоков: 123 мс/токен ≈ 8.1 ток/с</li>
-</ul>
-<p>Современные архитектуры (qwen3, gemma3, phi3) не поддерживаются —
-нет NEOX RoPE, нет GQA с qk-norm, нет sliding-window attention, нет
-phi3-merged QKV/gate-up split. Распределённого инференса нет.
-Репозиторий — port мейнстрим-llama.cpp с патчем `llama-cpp-e2k.patch`.</p>
+<p>Порт <a href="https://github.com/ggml-org/llama.cpp">llama.cpp</a>
+на e2k:
+<a href="https://github.com/alexmihalyk23/llama.cpp-e2k">github.com/alexmihalyk23/llama.cpp-e2k</a>.
+Поддерживает legacy архитектуры: LLaMA-1, Alpaca, Koala, GPT4All,
+Vicuna, Pygmalion-7B (все выпуска ≤&nbsp;2023). Заявленные показатели
+для 7B Q4_0:</p>
+<table class="zebra">
+<tr><th>Конфигурация</th><th>мс/токен</th><th>≈ токенов/сек</th></tr>
+<tr><td>4 потока, Q4_0</td><td class="num">50</td><td class="num">20</td></tr>
+<tr><td>8 потоков, Q4_0</td><td class="num">44</td><td class="num">22.7</td></tr>
+<tr><td>4 потока, FP16</td><td class="num">128</td><td class="num">7.8</td></tr>
+<tr><td>8 потоков, FP16</td><td class="num">123</td><td class="num">8.1</td></tr>
+</table>
+<div class="caption">Таблица&nbsp;1. llama.cpp-e2k: legacy LLaMA-1 7B,
+заявленные показатели.</div>
+
+<p>Современные архитектуры (qwen3, gemma3, phi3) не поддерживаются:
+нет NeoX&nbsp;RoPE, нет GQA с qk-norm, нет sliding-window attention,
+нет phi3-merged QKV/gate-up split. Распределённого инференса нет.</p>
 
 <h3>2.2. Smart Engines (2019–)</h3>
 <p>Коммерческая компания, оптимизация компьютерного зрения для e2k
-(распознавание паспорта РФ, томографическая реконструкция, UNet
-сегментация). Бенчмарк UNet 256×256:</p>
-<table>
-<tr><th>Процессор</th><th>Тактовая</th><th>Время, с</th></tr>
-<tr><td>Эльбрус-4C</td><td class="num">800 МГц</td><td class="num">4.45</td></tr>
-<tr><td>Эльбрус-8C</td><td class="num">1200 МГц</td><td class="num">2.45</td></tr>
-<tr><td>Эльбрус-8CB</td><td class="num">1500 МГц</td><td class="num">0.81</td></tr>
-<tr><td>AMD Ryzen Threadripper 3970X</td><td class="num">3700–4500 МГц</td><td class="num">0.61</td></tr>
-</table>
-<p class="caption">Таблица 1. UNet 256×256 на разных процессорах (Smart Engines, 2019).</p>
-<p>Языковые модели в их продуктовой линии не упомянуты.</p>
+(распознавание паспорта РФ, томографическая реконструкция, UNet-сегментация).
+Источник: <a href="https://smartengines.ru/elbrus/">smartengines.ru/elbrus</a>.
+Бенчмарк UNet 256×256:</p>
 
-<h3>2.3. NCNN + Vulkan + Radeon (2023, Habr 752138)</h3>
+<table class="zebra">
+<tr><th>Процессор</th><th>Тактовая, МГц</th><th>Время, секунд</th></tr>
+<tr><td>Эльбрус-4C</td><td class="num">800</td><td class="num">4.45</td></tr>
+<tr><td>Эльбрус-8C</td><td class="num">1200</td><td class="num">2.45</td></tr>
+<tr><td>Эльбрус-8CB</td><td class="num">1500</td><td class="num">0.81</td></tr>
+<tr><td>AMD Ryzen Threadripper 3970X</td><td class="num">3700–4500</td><td class="num">0.61</td></tr>
+</table>
+<div class="caption">Таблица&nbsp;2. UNet 256×256 на разных процессорах
+(Smart Engines, 2019).</div>
+
+<p>Языковые модели в продуктовой линии Smart Engines не упомянуты.</p>
+
+<h3>2.3. NCNN + Vulkan + Radeon (2023, Habr&nbsp;752138)</h3>
 <p>Демо генерации изображений (Stable Diffusion, YOLOv3, waifu2x) на
 Эльбрус-8SV в связке с дискретным GPU AMD Radeon RX6700XT через
-Vulkan. CPU-инференс ggml на той же странице:</p>
-<table>
+Vulkan. Источник:
+<a href="https://habr.com/ru/articles/752138/">habr.com/ru/articles/752138</a>.
+CPU-инференс ggml на той же странице:</p>
+
+<table class="zebra">
 <tr><th>Чип</th><th>1 поток</th><th>8 потоков</th></tr>
-<tr><td>Эльбрус-16C</td><td class="num">771.46 мс</td><td class="num">123.22 мс</td></tr>
-<tr><td>Эльбрус-8SV</td><td class="num">974.84 мс</td><td class="num">160.89 мс</td></tr>
-<tr><td>Ryzen 7 5800H</td><td>—</td><td class="num">116.13 мс</td></tr>
+<tr><td>Эльбрус-16C</td><td class="num">771.46 мс/тк</td><td class="num">123.22 мс/тк (≈&nbsp;8 тк/с)</td></tr>
+<tr><td>Эльбрус-8SV</td><td class="num">974.84 мс/тк</td><td class="num">160.89 мс/тк (≈&nbsp;6 тк/с)</td></tr>
+<tr><td>AMD Ryzen 7 5800H (для сравнения)</td><td>—</td><td class="num">116.13 мс/тк</td></tr>
 </table>
-<p class="caption">Таблица 2. ggml legacy LLaMA-1 inference, мс/токен (Habr, 2023-08).</p>
-<p>Это наиболее близкий ориентир к LLM-инференсу на Эльбрусе на
-момент проведения настоящего эксперимента; модель — legacy LLaMA-1 7B,
+<div class="caption">Таблица&nbsp;3. ggml legacy LLaMA-1 inference, мс/токен (Habr, август&nbsp;2023).</div>
+
+<p>Это наиболее близкий ориентир к LLM-инференсу на Эльбрусе на момент
+проведения настоящего эксперимента; модель — legacy LLaMA-1&nbsp;7B,
 не современные архитектуры.</p>
 
 <h3>2.4. MCST EML</h3>
-<p>Проприетарная библиотека МЦСТ (BLAS 1/2/3, LAPACK, обработка
-сигналов/изображений). Используется PromeTorch для линейной алгебры
-(<code>cblas_sgemm</code>); на e2k 8C2 4×node-local EML
-демонстрирует 1840 GFLOPS (92 % пика arithmetic peak) против 324
-GFLOPS у дефолтного 32-core EML без NUMA-биндинга.</p>
+<p>Проприетарная библиотека МЦСТ (BLAS&nbsp;1/2/3, LAPACK, обработка
+сигналов/изображений). Источник:
+<a href="https://www.altlinux.org/Эльбрус/eml">altlinux.org/Эльбрус/eml</a>.
+Используется PromeTorch для линейной алгебры (<code>cblas_sgemm</code>);
+на e2k 8С2 4×node-local EML демонстрирует 1840 GFLOPS (92&nbsp;%
+теоретического пика) против 324 GFLOPS у дефолтного 32-core EML без
+NUMA-биндинга — прирост ×5.7 от NUMA-aware распределения работы.</p>
 
 <h2>3. Архитектура PromeTorch</h2>
 
-<h3>3.1. Общая схема</h3>
-<p>Поток для одного forward-pass на токен (single-process, OMP_NUM_THREADS=32):
-embedding → 28..40 трансформерных слоёв (RMSNorm → QKV-projection →
-RoPE → attention → output_proj → +residual → RMSNorm → gate*up
-→ SiLU/GeGLU → ffn_down → +residual) → output norm → lm_head.
-Q4_K_M квантизация для весов; активации хранятся в fp32.</p>
+<div class="figure">
+<img src="figs/fig3_arch.png" alt="Архитектура PromeTorch — forward pass">
+<div class="caption">Рис.&nbsp;2. Поток выполнения forward-pass на токен в
+PromeTorch (TP-4). Розовым выделены квантизованные веса (Q4_K),
+зелёным — межранговая коммуникация через POSIX shared memory.</div>
+</div>
 
-<h3>3.2. Quantization-aware GEMV</h3>
-<p>Узкое место — N=1 GEMV против Q4_K весов (≈ 2.5 ГБ для qwen3-4B).
+<h3>3.1. Quantization-aware GEMV</h3>
+<p>Узкое место — N=1 GEMV против Q4_K весов (около 2.5 ГБ для qwen3-4B).
 Реализованы два пути:</p>
 <ul>
-<li><b>q4k_gemv_scalar</b> — fp16 → fp32 преконвертация per-row,
-prefetch заголовков next-block (4 super-blocks ahead, ~576 байт
+<li><b>q4k_gemv_scalar</b> — fp16&nbsp;→&nbsp;fp32 преконвертация per-row,
+prefetch заголовков next-block (4&nbsp;super-blocks ahead, ≈&nbsp;576 байт
 лидирующего расстояния), inner-loop SoA для LCC SWP-планирования.</li>
-<li><b>q8_soa4 repack</b> (Round 4) — в момент загрузки конвертирует
-Q4_K в Q8 SoA-4 layout (4-way row interleaving, per-block fp32 d_w/dmin
+<li><b>q8_soa4 repack</b> (Round&nbsp;4) — в момент загрузки конвертирует
+Q4_K в Q8 SoA-4 layout (4-way row interleaving, per-block fp32 d_w / dmin
 + int32 sum_q + int8 weights). Inner GEMV использует
-<code>__builtin_e2k_qpmaddubsh</code> (16-way uint8 → int16 dot)
-вместо нибл-распаковки.</li>
+<code>__builtin_e2k_qpmaddubsh</code> (16-way uint8&nbsp;→&nbsp;int16 dot)
+вместо нибл-распаковки Q4.</li>
 </ul>
 
-<h3>3.3. Tensor Parallel-4 (TP-4)</h3>
-<p>Per-rank: <code>numactl --cpunodebind=N --membind=N</code> на 1 из 4
-узлов; q_dim_local = q_dim/4, kv_dim_local = kv_dim/4, inter_local
-выровнен на granularity 256 (Q4_K super-block). AllReduce — bounded-spin
-SHM `/dev/shm/prometorch_ddp_29500` с per-rank slot для частичных сумм.
-PT_TP_GATHER=1 переключает row-parallel attn_output / ffn_down на
+<h3>3.2. Tensor Parallel-4 (TP-4)</h3>
+<p>На каждый ранг: <code>numactl --cpunodebind=N --membind=N</code> на
+1 из 4 NUMA-узлов; <code>q_dim_local = q_dim/4</code>,
+<code>kv_dim_local = kv_dim/4</code>, <code>inter_local</code>
+выровнен на granularity&nbsp;256 (Q4_K super-block). AllReduce —
+bounded-spin SHM <code>/dev/shm/prometorch_ddp_29500</code> с per-rank
+slot для частичных сумм. Флаг <code>PT_TP_GATHER=1</code> переключает
+row-parallel <code>attn_output</code> / <code>ffn_down</code> на
 gather + replicated GEMV (нужно для gemma3 post-norms).</p>
 
-<h3>3.4. Корректность: три исправленных дефекта</h3>
+<h3>3.3. Корректность: три исправленных дефекта</h3>
 
-<table>
-<tr><th>Коммит</th><th>Дефект</th><th>Симптом</th><th>Исправление</th></tr>
+<table class="zebra">
+<tr><th style="width:14%">Коммит</th><th style="width:25%">Дефект</th><th style="width:30%">Симптом</th><th style="width:31%">Исправление</th></tr>
 <tr>
 <td><code>b144db2</code></td>
-<td>Применялся interleaved RoPE для всех арх. (соответствует только
-llama/mistral). qwen/qwen2/qwen3/gemma/gemma3/phi3 требуют NeoX
-half-split <code>(d, d+head_dim/2)</code>.</td>
-<td>Магнитуда hidden_state нормальная (std≈5.9), но направление в
-attention пространстве смещено → бессвязный русский на qwen3-4B.</td>
+<td>Применялся interleaved RoPE для всех архитектур
+(<code>(2d,&nbsp;2d+1)</code>) — соответствует только llama / mistral.
+qwen / gemma / phi3 требуют NeoX half-split <code>(d, d+head_dim/2)</code>.</td>
+<td>Магнитуда hidden_state нормальная (std≈5.9), но направление
+в attention-пространстве смещено → бессвязный русский на qwen3-4B.</td>
 <td>Добавлена <code>rope_apply_fused_neox</code>, диспатч по
 <code>config.rope_neox</code> на 4 callsite. Mistral остался на NORM.</td>
 </tr>
 <tr>
 <td><code>d9dce9e</code></td>
 <td><code>load_quantized_mmap</code> не обрабатывал phi3 merged
-тензоры (<code>attn_qkv.weight</code> rows = q_dim+2·kv_dim,
-<code>ffn_up.weight</code> rows = 2·intermediate). Сплит-логика жила
+тензоры (<code>attn_qkv.weight</code> rows&nbsp;=&nbsp;q_dim+2·kv_dim,
+<code>ffn_up.weight</code> rows&nbsp;=&nbsp;2·intermediate). Сплит-логика жила
 только в fallback-пути <code>load_quantized_to_cpu</code>.</td>
 <td>После mmap для phi3:
-<code>layer.q_attn_q/k/v.valid = false</code>, sp.q_buf — uninitialized,
-RoPE на мусоре, argmax → token 0 (<code>&lt;unk&gt;</code>×N).</td>
+<code>layer.q_attn_q/k/v.valid&nbsp;=&nbsp;false</code>, sp.q_buf
+без инициализации, RoPE на мусоре, argmax → token&nbsp;0
+(<code>&lt;unk&gt;</code>×N).</td>
 <td>Добавлен <code>split_from_mmap</code> helper (malloc + memcpy
 слайсов из mmap-региона в Q/K/V owning buffers).</td>
 </tr>
 <tr>
 <td><code>0ba114a</code></td>
-<td>Gemma3 TP-4 throw'ил «<code>post_attention_norm unsupported</code>»;
-RMSNorm в TP-режиме применялся только к локальному срезу attention
-output (несовпадение с full-vector RMSNorm).</td>
-<td>Gemma3 TP-4 не работал, single-process работал.</td>
+<td>Gemma3 в TP-4 кидала исключение
+«<code>post_attention_norm unsupported</code>»; RMSNorm в TP-режиме
+применялся только к локальному срезу attention output, что не
+эквивалентно RMSNorm на полном векторе.</td>
+<td>Gemma3 TP-4 не работала, single-process работал.</td>
 <td>Применение <code>post_attention_norm</code>+<code>post_ffw_norm</code>
 к full <code>h_buf</code> после output_proj/ffn_down (после
 all_gather_wait для use_gather, после all_reduce_inplace для K-slice).</td>
@@ -236,203 +387,217 @@ all_gather_wait для use_gather, после all_reduce_inplace для K-slice)
 <td>Legacy fallback в <code>ModelConfig::parse()</code>.</td>
 </tr>
 </table>
-<p class="caption">Таблица 3. Исправления корректности по архитектурам моделей.</p>
+<div class="caption">Таблица&nbsp;4. Исправления корректности по архитектурам моделей.</div>
 
 <h2>4. Бенчмарки</h2>
 
-<h3>4.1. Скорость и качество (TP-4, llama.cpp 32t baseline)</h3>
+<h3>4.1. Скорость и качество</h3>
 
-<p>Все измерения — 8C2, OMP=8 на ранг (TP) или OMP=32 (SP),
-PT_PER_BLOCK_SCALE=1, PT_Q8_SOA=1, PT_LM_HEAD_FP=1, PT_NO_FFN_SOA=1,
-greedy decode, prompt «Что такое космос? Расскажи коротко.».
-llama.cpp v3 baseline — <code>numactl --interleave=all</code>, 32 потока,
+<p>Все измерения проведены на Эльбрус-8С2, OMP_NUM_THREADS=8 на ранг
+(TP-4) или 32 (single-process), флаги <code>PT_PER_BLOCK_SCALE=1</code>,
+<code>PT_Q8_SOA=1</code>, <code>PT_LM_HEAD_FP=1</code>,
+<code>PT_NO_FFN_SOA=1</code>, greedy decode, prompt
+«Что такое космос? Расскажи коротко.». Baseline llama.cpp&nbsp;v3 —
+<code>numactl --interleave=all</code>, 32 потока,
 <code>llama-bench -p 0 -n 64</code>.</p>
 
-<table>
-<tr><th>Модель</th><th>Q-формат</th><th>Параметры</th>
+<div class="figure">
+<img src="figs/fig2_speedup.png" alt="Скорость PromeTorch против llama.cpp 32t">
+<div class="caption">Рис.&nbsp;3. Скорость декодирования PromeTorch
+против llama.cpp&nbsp;v3 32-thread baseline (нижние столбцы). Множители
+сверху — speedup. Звёздочка означает single-process путь (TP-4 OOM
+из-за расхода памяти на Q8 SoA-4 репак для 7B+ моделей).</div>
+</div>
+
+<table class="zebra">
+<tr><th>Модель</th><th>Параметры</th>
 <th>PromeTorch SP</th><th>PromeTorch TP-4</th><th>llama.cpp 32t</th>
 <th>Speedup TP-4</th><th>Русский</th></tr>
-<tr><td>qwen3-1.7B</td><td>Q4_K_M</td><td class="num">1.7B</td>
-<td class="num">8.1</td><td class="num"><b>17.1</b></td>
-<td class="num">2.71</td><td class="num"><b>×6.3</b></td><td>✓ связный</td></tr>
-<tr><td>qwen3-4B</td><td>Q4_K_M</td><td class="num">4.0B</td>
-<td class="num">5.5</td><td class="num"><b>10.9</b></td>
-<td class="num">1.82</td><td class="num"><b>×6.0</b></td><td>✓ + CoT</td></tr>
-<tr><td>gemma3-4B</td><td>Q4_K_M</td><td class="num">4.3B</td>
-<td class="num">4.7</td><td class="num"><b>6.7</b></td>
-<td class="num">1.30</td><td class="num"><b>×5.2</b></td><td>✓ markdown</td></tr>
-<tr><td>mistral-7B</td><td>Q4_K_M</td><td class="num">7.2B</td>
-<td class="num">2.9</td><td class="num"><b>8.5</b></td>
-<td class="num">1.74</td><td class="num"><b>×4.9</b></td><td>✓ связный</td></tr>
-<tr><td>phi3.5-mini</td><td>Q4_K_M</td><td class="num">3.8B</td>
-<td class="num">3.5</td><td class="num"><b>6.4</b></td>
-<td class="num">2.08</td><td class="num"><b>×3.1</b></td><td>✓ RU+EN</td></tr>
-<tr><td>qwen3-8B</td><td>Q4_K_M</td><td class="num">8.2B</td>
-<td class="num">2.6</td><td>OOM</td><td>—</td><td>—</td><td>✓ + CoT</td></tr>
-<tr><td>qwen2.5-7B</td><td>Q4_K_M</td><td class="num">7.6B</td>
-<td class="num">2.9</td><td>OOM</td><td class="num">1.71</td>
-<td class="num">×1.7 SP</td><td>✓ связный</td></tr>
-<tr><td>llama3-8B</td><td>Q4_K_M</td><td class="num">8.0B</td>
-<td class="num">2.7</td><td>OOM</td><td class="num">1.65</td>
-<td class="num">×1.6 SP</td><td>✓ связный</td></tr>
-<tr><td>deepseek-coder-7B</td><td>Q4_K_M</td><td class="num">6.7B</td>
-<td class="num">3.0</td><td>OOM</td><td>—</td><td>—</td><td>✓ Python код</td></tr>
-<tr><td>qwen3-14B</td><td>Q4_K_M</td><td class="num">14.8B</td>
-<td class="num">1.5</td><td>OOM</td><td class="num">1.02</td>
-<td class="num">×1.5 SP</td><td>✓ + CoT</td></tr>
+<tr class="hilite"><td>qwen3-1.7B</td><td class="num">1.7B</td>
+<td class="num">8.1</td><td class="num">17.1</td>
+<td class="num">2.71</td><td class="num">×6.3</td><td class="center">✓</td></tr>
+<tr class="hilite"><td>qwen3-4B</td><td class="num">4.0B</td>
+<td class="num">5.5</td><td class="num">10.9</td>
+<td class="num">1.82</td><td class="num">×6.0</td><td class="center">✓ + CoT</td></tr>
+<tr><td>gemma3-4B</td><td class="num">4.3B</td>
+<td class="num">4.7</td><td class="num">6.7</td>
+<td class="num">1.30</td><td class="num">×5.2</td><td class="center">✓ markdown</td></tr>
+<tr><td>mistral-7B</td><td class="num">7.2B</td>
+<td class="num">2.9</td><td class="num">8.5</td>
+<td class="num">1.74</td><td class="num">×4.9</td><td class="center">✓</td></tr>
+<tr><td>phi3.5-mini</td><td class="num">3.8B</td>
+<td class="num">3.5</td><td class="num">6.4</td>
+<td class="num">2.08</td><td class="num">×3.1</td><td class="center">✓ RU+EN</td></tr>
+<tr><td>qwen3-8B</td><td class="num">8.2B</td>
+<td class="num">2.6</td><td class="center">OOM</td><td class="center">—</td>
+<td class="center">—</td><td class="center">✓ + CoT</td></tr>
+<tr><td>qwen2.5-7B</td><td class="num">7.6B</td>
+<td class="num">2.9</td><td class="center">OOM</td><td class="num">1.71</td>
+<td class="num">×1.7 (SP)</td><td class="center">✓</td></tr>
+<tr><td>llama3-8B</td><td class="num">8.0B</td>
+<td class="num">2.7</td><td class="center">OOM</td><td class="num">1.65</td>
+<td class="num">×1.6 (SP)</td><td class="center">✓</td></tr>
+<tr><td>deepseek-coder-7B</td><td class="num">6.7B</td>
+<td class="num">3.0</td><td class="center">OOM</td><td class="center">—</td>
+<td class="center">—</td><td class="center">✓ Python код</td></tr>
+<tr><td>qwen3-14B</td><td class="num">14.8B</td>
+<td class="num">1.5</td><td class="center">OOM</td><td class="num">1.02</td>
+<td class="num">×1.5 (SP)</td><td class="center">✓ + CoT</td></tr>
 </table>
-<p class="caption">Таблица 4. Скорость декодирования (токенов/сек), 10 моделей, Эльбрус-8С2.</p>
+<div class="caption">Таблица&nbsp;5. Скорость декодирования (токенов/сек),
+10 моделей на Эльбрус-8С2.</div>
 
 <h3>4.2. Сопоставление с предшествующими работами</h3>
 
-<table>
-<tr><th>Свойство</th><th>llama.cpp-e2k 2023</th><th>Smart Engines</th>
-<th>NCNN-Vulkan демо</th><th>PromeTorch (этот труд)</th></tr>
+<table class="zebra">
+<tr><th>Свойство</th><th>llama.cpp-e2k</th><th>Smart Engines</th>
+<th>NCNN+Vulkan демо</th><th>PromeTorch</th></tr>
+<tr><td>Год публикации</td><td>2023</td><td>2019</td>
+<td>2023</td><td>2026</td></tr>
 <tr><td>Архитектуры моделей</td>
 <td>LLaMA-1, Alpaca, Vicuna, Koala</td>
 <td>UNet (CV)</td>
 <td>YOLOv3, SD, waifu2x (CV)</td>
 <td><b>llama, qwen2, qwen3, gemma3, phi3</b></td></tr>
-<tr><td>Современные LLM (≥ 2024)</td>
+<tr><td>Современные LLM (≥&nbsp;2024)</td>
 <td>—</td><td>—</td><td>—</td><td>✓ qwen3 / gemma3 / phi3 / deepseek</td></tr>
 <tr><td>Distributed inference</td>
 <td>—</td><td>—</td><td>—</td><td>✓ TP-4 SHM AllReduce</td></tr>
 <tr><td>Tool-call / agent loop</td>
-<td>—</td><td>—</td><td>—</td><td>✓ multi-step write_file</td></tr>
+<td>—</td><td>—</td><td>—</td><td>✓ multi-step <code>write_file</code></td></tr>
 <tr><td>Best 7B результат на 8С2/8СВ</td>
-<td>~8 тк/с (FP16, legacy LLaMA-1)</td>
-<td>n/a</td><td>n/a</td><td><b>8.5 тк/с (TP-4, mistral-7B Q4_K_M)</b></td></tr>
+<td>≈&nbsp;8&nbsp;тк/с (FP16)</td>
+<td>n/a</td><td>n/a</td><td><b>8.5&nbsp;тк/с (TP-4)</b></td></tr>
 <tr><td>Best 4B результат на 8С2</td>
-<td>n/a</td><td>n/a</td><td>n/a</td><td><b>10.9 тк/с (qwen3-4B Q4_K_M)</b></td></tr>
+<td>n/a</td><td>n/a</td><td>n/a</td><td><b>10.9&nbsp;тк/с (qwen3-4B)</b></td></tr>
 <tr><td>GPU-fallback</td>
 <td>—</td><td>—</td><td>Vulkan/Radeon</td><td>—</td></tr>
 <tr><td>Открытый исходный код</td>
 <td>✓</td><td>—</td><td>✓ (NCNN апстрим)</td><td>✓</td></tr>
 </table>
-<p class="caption">Таблица 5. Сопоставление PromeTorch с тремя ранее
-известными работами по машинному обучению на Эльбрусе.</p>
+<div class="caption">Таблица&nbsp;6. Свойства PromeTorch и трёх ранее
+известных работ по машинному обучению на Эльбрус.</div>
 
-<h3>4.3. NUMA bandwidth scaling</h3>
-<p>На 8С2 4×DDR4 с агрегатной полосой ≈ 38.4 ГБ/с (4 канала ×
-2400 MT/s × 8B / 2). Эксперимент EML matmul:</p>
-<table>
+<h3>4.3. NUMA-bandwidth scaling</h3>
+<p>На 8С2 4×DDR4 с агрегатной полосой ≈&nbsp;38.4&nbsp;ГБ/с
+(4&nbsp;канала × 2400&nbsp;MT/s × 8&nbsp;байт / 2). EML matmul:</p>
+<table class="zebra">
 <tr><th>Конфигурация</th><th>GFLOPS</th><th>% от пика</th></tr>
-<tr><td>32-core, default malloc</td><td class="num">324</td><td class="num">16 %</td></tr>
-<tr><td>4× node-local EML (per-rank numactl)</td><td class="num"><b>1840</b></td><td class="num"><b>92 %</b></td></tr>
+<tr><td>32-core, default malloc</td><td class="num">324</td><td class="num">16&nbsp;%</td></tr>
+<tr class="hilite"><td>4× node-local EML (per-rank numactl)</td><td class="num">1840</td><td class="num">92&nbsp;%</td></tr>
 </table>
-<p class="caption">Таблица 6. Прирост от NUMA-aware распределения работы (×5.7).</p>
+<div class="caption">Таблица&nbsp;7. Прирост от NUMA-aware распределения работы (×5.7).</div>
 
 <h2>5. Multi-step tool-call демонстрация</h2>
 
-<p>Чтобы показать применимость к task-oriented сценариям, поверх
-test_gguf_inference TP-4 реализован bash + Python orchestrator:
-модель эмитирует
-<code>&lt;tool_call&gt;{&quot;name&quot;:&quot;write_file&quot;,&quot;arguments&quot;:{...}}&lt;/tool_call&gt;</code>,
-скрипт парсит JSON (даже при обрыве — lenient extractor с
-fallback escape-decode) и сохраняет файл. Промпт включает /no_think
-префикс для bypass CoT-thinking qwen3.</p>
+<p>Поверх <code>test_gguf_inference</code> в режиме TP-4 реализован
+оркестратор (bash + Python): модель эмитирует
+<code>&lt;tool_call&gt;{"name":"write_file","arguments":{...}}&lt;/tool_call&gt;</code>,
+скрипт парсит JSON (даже при обрыве — устойчивый extractor с fallback на
+ручное декодирование escape-последовательностей) и сохраняет файл.
+Промпт включает префикс <code>/no_think</code> для bypass CoT-thinking
+qwen3.</p>
 
-<table>
-<tr><th>Тема</th><th>Файл</th><th>Размер</th><th>Сгенерировано тк</th><th>Время</th></tr>
-<tr><td>Москва</td><td>moscow_v2.html</td><td class="num">1996 Б</td><td class="num">547</td><td class="num">92.2 с</td></tr>
-<tr><td>Космос</td><td>cosmos.html</td><td class="num">1738 Б</td><td class="num">~430</td><td class="num">~75 с</td></tr>
-<tr><td>ИИ</td><td>ai.html</td><td class="num">3397 Б</td><td class="num">~610</td><td class="num">~105 с</td></tr>
+<table class="zebra">
+<tr><th>Тема</th><th>Файл</th><th>Размер</th><th>Сгенерировано</th><th>Время</th></tr>
+<tr><td>Москва</td><td><code>moscow_v2.html</code></td><td class="num">1996 Б</td><td class="num">547 тк</td><td class="num">92.2 с</td></tr>
+<tr><td>Космос</td><td><code>cosmos.html</code></td><td class="num">1738 Б</td><td class="num">≈&nbsp;430 тк</td><td class="num">≈&nbsp;75 с</td></tr>
+<tr><td>ИИ</td><td><code>ai.html</code></td><td class="num">3397 Б</td><td class="num">≈&nbsp;610 тк</td><td class="num">≈&nbsp;105 с</td></tr>
 </table>
-<p class="caption">Таблица 7. Multi-step tool-call output (qwen3-4B TP-4).</p>
+<div class="caption">Таблица&nbsp;8. Multi-step tool-call output (qwen3-4B TP-4).</div>
 
 <div class="figure">
-<img src="demo_html/moscow_v2.png" alt="Скриншот moscow_v2.html" style="max-height: 280px;">
-<div class="caption">Рис. 1. Рендер moscow_v2.html (5 разделов).</div>
+<img src="demo_html/moscow_v2.png" alt="moscow_v2.html" style="max-height:200pt">
+<div class="caption">Рис.&nbsp;4. Рендер
+<a href="demo_html/moscow_v2.html">moscow_v2.html</a> — 5 разделов про Москву.</div>
 </div>
 <div class="figure">
-<img src="demo_html/cosmos.png" alt="Скриншот cosmos.html" style="max-height: 280px;">
-<div class="caption">Рис. 2. Рендер cosmos.html (5 разделов с section-тегами).</div>
+<img src="demo_html/cosmos.png" alt="cosmos.html" style="max-height:200pt">
+<div class="caption">Рис.&nbsp;5. Рендер
+<a href="demo_html/cosmos.html">cosmos.html</a> — 5 разделов про космос
+с <code>&lt;section&gt;</code>-тегами.</div>
 </div>
 <div class="figure">
-<img src="demo_html/ai.png" alt="Скриншот ai.html" style="max-height: 280px;">
-<div class="caption">Рис. 3. Рендер ai.html (5 разделов про ИИ).</div>
+<img src="demo_html/ai.png" alt="ai.html" style="max-height:230pt">
+<div class="caption">Рис.&nbsp;6. Рендер
+<a href="demo_html/ai.html">ai.html</a> — страница про искусственный
+интеллект, 5 разделов.</div>
 </div>
 
-<h2>6. Ограничения и обсуждение</h2>
+<h2>6. Ограничения</h2>
 
-<p><b>OOM в TP-4 для 7B+ моделей.</b> Q8 SoA-4 reпак требует
-≈ 2 ГБ на ранг для 7B-весов; 4 ранга × 2 ГБ + per-rank scratch
-вылезают за 16 ГБ виртуальной памяти на ранг (явный лимит на
-текущей конфигурации 8С2). Single-process путь для 7B/8B/14B работает.
+<p><b>OOM в TP-4 для 7B+ моделей.</b> Q8 SoA-4 репак требует около
+2&nbsp;ГБ на ранг для 7B-весов; 4 ранга × 2 ГБ + per-rank scratch
+вылезают за 16 ГБ виртуальной памяти на ранг (явный лимит на текущей
+конфигурации 8С2). Single-process путь для 7B / 8B / 14B работает.
 Решение — расширение SoA-репака на K-slice TP-4 (вместо репликации) или
 снижение granularity до 16-way SoA (×0.5 памяти).</p>
 
-<p><b>Качество генерации mistral вне TP-4-orchestrator.</b>
-В первом эксперименте multi-step demo использовался Qwen-style chat
-template на mistral-модели, что привело к пустому output. Обнаружено
-переключением на qwen3-4B (template совпадает) или нативное
-<code>--chat</code> с правильным wrapper для каждой архитектуры.</p>
-
-<p><b>qwen3-0.6B.</b> Не запускается связно (`!!!!!`); обнаружено что
-проблема в capacity model'и, не в архитектурном коде (~5 % параметров
-qwen3-1.7B хватает на CoT, у 0.6B — нет). Не code-fixable.</p>
+<p><b>qwen3-0.6B.</b> Не запускается связно
+(<code>!!!!!</code> output); причина — capacity модели (около 5&nbsp;%
+параметров qwen3-1.7B хватает на CoT, у 0.6B — нет). Не code-fixable.</p>
 
 <p><b>Зависимость от EML.</b> Проприетарная библиотека МЦСТ; на
 системах без EML PromeTorch fallback'ится на собственный SIMD-кернел
-(qpfmuls/qpfadds), что даёт ~30 % деградацию на dense-GEMM-путях.
-Полный self-contained путь без EML — out of scope.</p>
+(<code>qpfmuls</code>/<code>qpfadds</code>), что даёт около 30&nbsp;%
+деградации на dense-GEMM-путях. Полный self-contained путь без EML —
+out of scope.</p>
 
 <h2>7. Зачем это важно</h2>
 
 <p>Эльбрус — единственная платформа российской разработки с открытой
-поставкой и совместимостью с x86_64 binary на уровне
-эмуляции/перекомпиляции. Запуск современных LLM (qwen3, gemma3, phi3
-выпуска 2024–2025) на этой архитектуре до настоящего эксперимента не
-демонстрировался публично; единственный известный порт LLM —
-llama.cpp-e2k — поддерживает только legacy архитектуры выпуска 2023 г.
-и ниже.</p>
+поставкой и совместимостью с x86_64 binary на уровне эмуляции / перекомпиляции.
+Запуск современных LLM (qwen3, gemma3, phi3 выпуска 2024–2025) на этой
+архитектуре до настоящего эксперимента не демонстрировался публично;
+единственный известный порт LLM — llama.cpp-e2k — поддерживает только
+legacy архитектуры выпуска 2023 г. и ниже.</p>
 
-<p>Практический эффект: Эльбрус-8С2 при 1.5 ГГц в TP-4 конфигурации
-обеспечивает 8.5–17.1 тк/с для 1.7–7B квантизованных моделей с
-сохранением правильного русского языка. В сопоставлении с llama.cpp v3
-32-thread baseline (тот же hardware, fair config) PromeTorch даёт
-×3.1–×6.3 ускорение для всех моделей кроме phi3.5-mini (×3.1; ниже
-ввиду Q5_K attn_qkv веса, которые пока не пере-упакованы в Q8 SoA-4).
-Это первая публикация фиксации связного русского текста на
-качественно новом классе моделей (≥ 2024) на e2k-VLIW.</p>
+<p>Практический эффект: Эльбрус-8С2 при 1.5&nbsp;ГГц в TP-4 конфигурации
+обеспечивает 8.5&nbsp;..&nbsp;17.1&nbsp;токенов/с для 1.7&nbsp;..&nbsp;7B
+квантизованных моделей с сохранением правильного русского языка.
+В сопоставлении с llama.cpp&nbsp;v3 32-thread baseline (тот же
+hardware, fair config) PromeTorch даёт ×3.1&nbsp;..&nbsp;×6.3 ускорение
+для всех моделей кроме phi3.5-mini (×3.1; ниже ввиду Q5_K
+<code>attn_qkv</code> весов, которые пока не пере-упакованы в Q8 SoA-4).
+Это первая публикация фиксации связного русского текста на качественно
+новом классе моделей (≥&nbsp;2024) на e2k-VLIW.</p>
 
 <h2>8. Воспроизводимость</h2>
 
-<p>Репозиторий: <code>github.com/barometech/PromeTorch</code> (open
-source, без проприетарных компонентов). Сборка через LCC ≥ 1.29.
-Запуск (qwen3-4B TP-4 при сохранении русского):</p>
+<p>Репозиторий: <a href="https://github.com/barometech/PromeTorch">github.com/barometech/PromeTorch</a>
+(open source, без проприетарных компонентов). Сборка через
+LCC&nbsp;≥&nbsp;1.29. Запуск qwen3-4B TP-4 при сохранении русского:</p>
 <pre>PT_Q8_SOA=1 PT_PER_BLOCK_SCALE=1 PT_LM_HEAD_FP=1 PT_NO_FFN_SOA=1 \
     bash scripts/run_tp_elbrus.sh "" "Расскажи про Москву."</pre>
 
 <p>Все 10 verified GGUF файлов (от Hugging Face) — Q4_K_M квантизация,
-2.4–9.0 ГБ каждая. Скрипты регрессии:
+2.4&nbsp;..&nbsp;9.0&nbsp;ГБ каждая. Скрипты регрессии:
 <code>scripts/verify_all_9_models.sh</code>,
 <code>scripts/multi_html_v3.sh</code>,
 <code>scripts/multi_html_v5.sh</code> (extractor).</p>
 
 <h2>Ссылки</h2>
-
 <ol class="refs">
-<li>МЦСТ. Набор разработчика «Эльбрус Линукс» (PDK). <code>http://mcst.ru/PDK</code></li>
-<li>МЦСТ. Компилятор LCC. <code>http://mcst.ru/lcc</code></li>
-<li>МЦСТ. EML — Elbrus Media Library. <code>https://www.altlinux.org/Эльбрус/eml</code></li>
-<li>МЦСТ. Руководство по эффективному программированию на платформе «Эльбрус», вып. 1.0, 2020-05-30. <code>http://mcst.ru/files/.../elbrus_prog_2020-05-30.pdf</code></li>
-<li>Ишин, Логинов, Васильев. Ускорение вычислений с использованием высокопроизводительных математических и мультимедийных библиотек для архитектуры Эльбрус. <code>http://mcst.ru/files/52f220/590cd8/50136e/000004/</code></li>
-<li>alexmihalyk23. llama.cpp-e2k. <code>https://github.com/alexmihalyk23/llama.cpp-e2k</code></li>
-<li>Smart Engines. Оптимизация нейросетей на платформе Эльбрус. <code>https://smartengines.ru/elbrus/</code></li>
-<li>Smart Engines. Распознавание паспорта РФ на платформе Эльбрус. Habr 304750.</li>
-<li>Smart Engines. Зачем нужна низкоуровневая оптимизация на Эльбрусе. Habr 438948.</li>
-<li>Anonymous. Нейронные сети на Эльбрусе. Habr 752138, 2023-08-03.</li>
-<li>ggml-org. llama.cpp upstream. <code>https://github.com/ggml-org/llama.cpp</code></li>
-<li>PromeTorch. Repository этого труда. <code>https://github.com/barometech/PromeTorch</code></li>
+<li>МЦСТ. Набор разработчика «Эльбрус Линукс» (PDK). <a href="http://mcst.ru/PDK">mcst.ru/PDK</a></li>
+<li>МЦСТ. Компилятор LCC. <a href="http://mcst.ru/lcc">mcst.ru/lcc</a></li>
+<li>МЦСТ. EML — Elbrus Media Library. <a href="https://www.altlinux.org/Эльбрус/eml">altlinux.org/Эльбрус/eml</a></li>
+<li>МЦСТ. Руководство по эффективному программированию на платформе «Эльбрус», вып. 1.0, 2020-05-30.</li>
+<li>Ишин, Логинов, Васильев. «Ускорение вычислений с использованием высокопроизводительных математических и мультимедийных библиотек для архитектуры Эльбрус.» <a href="http://mcst.ru/files/52f220/590cd8/50136e/000004/">mcst.ru/files/.../</a></li>
+<li>alexmihalyk23. llama.cpp-e2k. <a href="https://github.com/alexmihalyk23/llama.cpp-e2k">github.com/alexmihalyk23/llama.cpp-e2k</a></li>
+<li>Smart Engines. «Оптимизация нейросетей на платформе Эльбрус.» <a href="https://smartengines.ru/elbrus/">smartengines.ru/elbrus</a></li>
+<li>Smart Engines. «Распознавание паспорта РФ на платформе Эльбрус.» Habr&nbsp;304750.</li>
+<li>Smart Engines. «Зачем нужна низкоуровневая оптимизация на Эльбрусе.» Habr&nbsp;438948.</li>
+<li>Anonymous. «Нейронные сети на Эльбрусе.» <a href="https://habr.com/ru/articles/752138/">Habr&nbsp;752138</a>, 2023-08-03.</li>
+<li>ggml-org. llama.cpp upstream. <a href="https://github.com/ggml-org/llama.cpp">github.com/ggml-org/llama.cpp</a></li>
+<li>PromeTorch. Репозиторий настоящего труда. <a href="https://github.com/barometech/PromeTorch">github.com/barometech/PromeTorch</a></li>
 </ol>
 
-<hr>
-<p style="font-size:9pt; text-align:center; color:#000;">
-Сборка отчёта: 2026-05-03. Эксперимент проводился на ВМ Эльбрус-8С2,
-1.5 ГГц, 8 ядер, 4×NUMA, 125 ГБ DDR4, OS Альт-Линукс с e2k LCC 1.29.16.
-Время сборки: коммиты <code>b144db2..09468b7</code>, ≈ 62 шт.
-</p>
+<div class="footnote-meta">
+Сборка отчёта: 2026-05-03. Платформа эксперимента: Эльбрус-8С2,
+1.5&nbsp;ГГц, 8&nbsp;ядер, 4×NUMA, 125&nbsp;ГБ DDR4, ОС Альт-Линукс
+с e2k LCC&nbsp;1.29.16. Время сборки: коммиты
+<code>b144db2..95538e5</code>, около 64 шт.
+</div>
 
 </body>
 </html>
