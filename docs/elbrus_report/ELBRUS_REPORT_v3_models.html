@@ -103,11 +103,11 @@
     <td><code>neox</code></td>
     <td><span class="badge badge-ok">SP CoT thinking works. TP-4 OOM. «&lt;think&gt;Хорошо, пользователь спрашивает: 'Что такое космос? Расскажи коротко.' Нужно дать краткий ответ»</span></td></tr>
 <tr><td><b>deepseek-coder-7B Q4_K_M</b></td>
-    <td class="part">⚠ pending verify</td>
-    <td>—</td>
-    <td>n/a</td><td>—</td>
+    <td class="ok">✓ Python code</td>
+    <td class="ok">✓ chat instruct</td>
+    <td class="cell-num">3.0 SP / 2.9 chat</td><td>—</td>
     <td><code>norm</code> (llama) + linear scale 4×</td>
-    <td><span class="badge badge-part">First test produced garbage (commit 81a79bd добавил legacy `rope.scale_linear` ключ в parser — deepseek хранит scaling в old формате). Pending rebuild19 + retest.</span></td></tr>
+    <td><span class="badge badge-ok">FIXED 2026-05-03 (commit 81a79bd): legacy `&lt;arch&gt;.rope.scale_linear` ключ был не parsed (modern формат `rope.scaling.{type,factor}` ожидался). Без этого rope_scale=1.0 → garbage. Output после fix: «def fibonacci(n): if n == 0: return 0 elif n == 1: return 1 else: fib_sequence = [0, 1] # start with the first two numbers in the sequence». Chat: «Sure, here is a simple Python function to compute Fibonacci numbers: ```python def fibonacci(n): if n &lt;= 0: # base»</span></td></tr>
 </table>
 
 <p style="font-size:13px"><b>¹</b> SP = single-process, OMP_NUM_THREADS=32. &nbsp;
