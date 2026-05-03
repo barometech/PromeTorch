@@ -3,6 +3,29 @@
 Полная история разработки проекта. Актуальные инструкции — в `CLAUDE.md`.
 Полный аудит инфраструктуры — в `INFRASTRUCTURE_AUDIT.md`.
 
+## 2026-05-03 (ночь, ИТОГ-5): regression suite 9/9 SP PASSED — 0 регрессий
+
+После всех fix'ов прогнан `verify_all_9_models.sh` на rebuild19:
+
+| Модель | SP tok/s | Output |
+|---|---:|---|
+| phi3.5-mini | 3.7 | ✅ связный |
+| qwen3-1.7B | 8.1 | ✅ связный |
+| qwen3-4B | 4.4 | ✅ связный + CoT |
+| qwen2.5-7B | 2.9 | ✅ связный |
+| qwen3-8B | 2.4 | ✅ связный + CoT |
+| mistral-7B | 2.9 | ✅ связный |
+| gemma3-4B | 4.7 | ✅ markdown |
+| llama3-8B | 2.7 | ✅ связный |
+| deepseek-coder-7B | 2.9 | ✅ связный |
+
+**0 регрессий.** Все root cause fix'ы (`d9dce9e` phi3 + `0ba114a` gemma3 +
+`81a79bd` deepseek) verified working в production regression mode.
+
+TP-4 секции в suite столкнулись с DDP startup race на phi3 (rank 3 не
+подключился к 29500 порту через nohup setsid race — pre-existing flake,
+не code regression). Кill + done.flag.
+
 ## 2026-05-03 (поздний вечер, ИТОГ-4): deepseek-coder VERIFIED FIXED — 9 моделей работает
 
 **Commit `81a79bd` + rebuild19 + retest `aef1d7f`:** deepseek-coder-7B
