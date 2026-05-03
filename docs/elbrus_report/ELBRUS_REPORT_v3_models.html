@@ -87,9 +87,9 @@
 <tr><td><b>phi3.5-mini Q4_K_M</b></td>
     <td class="ok">✓ связный RU</td>
     <td class="ok">✓ связный EN</td>
-    <td class="cell-num">3.5 SP</td><td>—</td>
+    <td class="cell-num">6.4 TP4 / 3.5 SP</td><td>—</td>
     <td><code>neox</code> + LongRoPE + attn_factor</td>
-    <td><span class="badge badge-ok">FIXED 2026-05-03 (commit d9dce9e): load_quantized_mmap не обрабатывал phi3 merged tensors (attn_qkv, ffn_up rows=2*inter). split_from_mmap helper: malloc+memcpy слайсов из mmap region. RU: «Космос - это всеобъемлющая область пространства...», EN: «Moscow, the capital city of Russia, is not only the political heart...»</span></td></tr>
+    <td><span class="badge badge-ok">FIXED 2026-05-03 (commit d9dce9e): load_quantized_mmap не обрабатывал phi3 merged tensors (attn_qkv, ffn_up rows=2*inter). split_from_mmap helper: malloc+memcpy слайсов из mmap region. SP: «Космос - это всеобъемлющая область пространства...». TP-4: «Космос - это всеобъемлющий, неограниченный пространственный контекст, включающий все галактики, звезды и другие астрономические объекты...» (1.8× speedup vs SP). EN: «Moscow, the capital city of Russia, is not only the political heart...»</span></td></tr>
 </table>
 
 <p style="font-size:13px"><b>¹</b> SP = single-process, OMP_NUM_THREADS=32. &nbsp;
