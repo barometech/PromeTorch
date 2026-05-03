@@ -471,9 +471,8 @@ inline Tensor contiguous(const Tensor& self) {
         return self;
     }
 
-    bool is_cuda = self.is_cuda();
-
 #ifdef PT_USE_CUDA
+    bool is_cuda = self.is_cuda();
     // Fast path for CUDA transposed 2D tensors - use GPU transpose kernel
     if (is_cuda && self.dim() == 2 &&
         self.stride(0) == 1 && self.stride(1) == self.size(0)) {
