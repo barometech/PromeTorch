@@ -1609,11 +1609,19 @@ inline void q5_0_gemv_scalar(const void* __restrict weight_data,
             std::memcpy(&qh, rp + b * 22 + 2, 4);
             const uint8_t* qs = rp + b * 22 + 6;
             const float* xp = x + b * QK;
-            for (int i = 0; i < QK; ++i) {
-                uint8_t low = (qs[i / 2] >> ((i % 2) * 4)) & 0x0F;
-                uint8_t high = (qh >> i) & 1;
-                int q = (int)(low | (high << 4)) - 16;  // signed -16..15
-                acc += d * static_cast<float>(q) * xp[i];
+            // GGML Q5_0 packing: qs[j] holds elements (j, j+16), qh has 32 bits.
+            //   elem j      = (qs[j] & 0x0F) | (((qh >> j) & 1) << 4)        for j in 0..15
+            //   elem j+16   = (qs[j] >> 4)   | (((qh >> (j+16)) & 1) << 4)
+            //   then signed: q -= 16
+            for (int j = 0; j < 16; ++j) {
+                int low0 = qs[j] & 0x0F;
+                int low1 = qs[j] >> 4;
+                int high0 = (qh >> j) & 1;
+                int high1 = (qh >> (j + 16)) & 1;
+                int q0 = (low0 | (high0 << 4)) - 16;
+                int q1 = (low1 | (high1 << 4)) - 16;
+                acc += d * static_cast<float>(q0) * xp[j];
+                acc += d * static_cast<float>(q1) * xp[j + 16];
             }
         }
         y[row] = acc;
