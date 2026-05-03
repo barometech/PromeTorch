@@ -167,6 +167,14 @@ struct TransformerConfig {
     // (i + 1) % swa_pattern == 0 are global. swa_window=0 → all layers global.
     bool layer_is_global(int64_t layer_idx) const {
         if (swa_window <= 0 || swa_pattern <= 0) return true;
+        // PT_FORCE_ALL_GLOBAL=1 — bisect helper для gemma3: forces all layers
+        // global (rope_freq_base + rope_scale, full attention). Если результат
+        // тот же что и per-layer — bug не в SWA infrastructure, а в чём-то ещё.
+        static const bool force_global = []{
+            const char* e = std::getenv("PT_FORCE_ALL_GLOBAL");
+            return e && e[0] == '1';
+        }();
+        if (force_global) return true;
         return ((layer_idx + 1) % swa_pattern) == 0;
     }
     float layer_rope_freq_base(int64_t layer_idx) const {
