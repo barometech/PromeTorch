@@ -248,8 +248,34 @@ for (b = 0; b &lt; K/32; b++) {
 <li>Loop max 5 итераций, потом финальный ответ</li>
 </ul>
 
-<blockquote>**Demo результаты с скриншотами и переписками — будут добавлены ниже после</blockquote>
-<blockquote>завершения N4 (HTML генерация на mistral-7b).**</blockquote>
+<p><strong>Реализация:</strong> <code>promeserve/api_handlers.h::handle_chat_with_tools</code> (~150 строк),</p>
+<p><code>promeserve/tool_call.h::ToolRegistry</code> (write_file, read_file, list_dir, bash_safe</p>
+<p>с whitelist, sandbox /tmp/promeserve/).</p>
+
+<p><strong>Build status:</strong> PromeServe пересобран на Эльбрусе с per-block scale +</p>
+<p>tool_call интеграцией (<code>/tmp/pbuild.done</code>).</p>
+
+<p><strong>Demo status (этап N4, pending):</strong> запуск PromeServe в background через</p>
+<p>nohup/setsid/tmux на Эльбрусе оказался ненадёжным — server успешно стартует</p>
+<p>один раз (verified <code>/api/version</code> 200 ok), но падает после первого</p>
+<p>HTTP-запроса. Корень — взаимодействие plink ssh sessions с systemd-logind</p>
+<p>sigterm на disconnect. Workaround <code>loginctl enable-linger</code> помогает</p>
+<p>частично. Stable demo требует:</p>
+<ul>
+<li>Server-side wrapper-script с явным <code>exec</code> (не bash subshell)</li>
+<li>Отдельной ssh session не закрытой во время demo</li>
+<li>ИЛИ migration на TP-4 worker mode (4 ranks × 1 server)</li>
+</ul>
+
+<p>Скрипты для demo готовы и закоммичены:</p>
+<ul>
+<li><code>scripts/test_promeserve_tools.sh</code> — Ollama API client с 4 tasks</li>
+<li><code>scripts/test_html_demo.sh</code> — простой curl loop для HTML генерации</li>
+<li><code>scripts/start_promeserve_bg.sh</code> — robust nohup wrapper с health-check</li>
+<li><code>scripts/screenshot_html.bat</code> — Windows Chrome headless 720×1280 portrait</li>
+<li><code>scripts/tp4_tool_orchestrator.sh</code> — bash orchestrator на TP-4 binary</li>
+</ul>
+<p>  (альтернатива: 11.4 tok/s skip PromeServe overhead)</p>
 
 <h2>6. Перспективы — Эльбрус-16С</h2>
 
