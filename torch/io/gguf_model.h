@@ -807,6 +807,18 @@ public:
     // Device
     bool use_cuda_ = false;
     bool use_quant_gemv_ = false;  // Q4_K_M decode acceleration
+
+    // PT_NO_QUANT_GEMV=1 — bisect helper. Forces FP fallback path для всех
+    // load callsites use_quant_gemv_=true. Полезно для diagnostics phi3-style
+    // моделей где Q5_K kernel даёт garbage output. Static cache → один env
+    // read на process.
+    static bool pt_no_quant_gemv_env_() {
+        static const bool v = []{
+            const char* e = std::getenv("PT_NO_QUANT_GEMV");
+            return e && e[0] == '1';
+        }();
+        return v;
+    }
     bool use_fp16_weights_ = false;  // Dequant-at-load FP16 weights + cuBLAS HGEMV decode path
     bool use_llama_gemv_ = false;  // Route Q4_K GEMV through launch_q4km_persistent_gemv_v2 (llama.cpp-style)
     size_t fp16_weights_bytes_ = 0;  // Total FP16 weight VRAM (for reporting)
@@ -1177,7 +1189,7 @@ public:
             upload_quant("token_embd.weight", q_output_weight);
         }
 
-        use_quant_gemv_ = true;
+        use_quant_gemv_ = !pt_no_quant_gemv_env_();
 
         // Handle output_weight
         if (q_output_weight.valid) {
@@ -1489,14 +1501,8 @@ public:
             upload_quant_cpu("token_embd.weight", q_output_weight);
         }
 
-        // PT_NO_QUANT_GEMV=1 — bisect helper. Forces FP fallback path (slow).
-        // Полезно для diagnostic phi3-style моделей где Q5_K kernel
-        // даёт garbage output — если FP path работает, bug в Q5_K split.
-        static const bool no_quant = []{
-            const char* e = std::getenv("PT_NO_QUANT_GEMV");
-            return e && e[0] == '1';
-        }();
-        use_quant_gemv_ = !no_quant;
+        // PT_NO_QUANT_GEMV bisect helper — see pt_no_quant_gemv_env_().
+        use_quant_gemv_ = !pt_no_quant_gemv_env_();
 
         // === Initialize algorithmic accelerations ===
         init_cpu_accelerations();
@@ -1673,7 +1679,7 @@ public:
             if (q_output_weight.valid) total_bytes_mapped += q_output_weight.total_bytes;
         }
 
-        use_quant_gemv_ = true;
+        use_quant_gemv_ = !pt_no_quant_gemv_env_();
         use_mmap_ = true;
 
         // Lock critical weights in RAM: output projection + first/last layer norms
@@ -1919,7 +1925,7 @@ public:
         // ====================================================================
         load_pt8_quant_weights_();
 
-        use_quant_gemv_ = true;
+        use_quant_gemv_ = !pt_no_quant_gemv_env_();
         use_mmap_ = true;
 
         // NUMA replication mirrors the GGUF path. For PT8_TYPE_Q8_0_SOA4 the
