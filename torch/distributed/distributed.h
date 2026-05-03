@@ -274,10 +274,24 @@ public:
             throw std::runtime_error("NCCLBackend: communicator not initialized");
         }
 
-        ncclDataType_t nccl_dtype = ncclFloat;  // TODO: support more dtypes
+        // Multi-dtype dispatch (BF16/FP16/FP32/FP64/INT32/INT64).
+        ncclDataType_t nccl_dtype;
+        switch (tensor.scalar_type()) {
+            case c10::ScalarType::Half:    nccl_dtype = ncclHalf;     break;
+            case c10::ScalarType::BFloat16: nccl_dtype = ncclBfloat16; break;
+            case c10::ScalarType::Float:   nccl_dtype = ncclFloat;    break;
+            case c10::ScalarType::Double:  nccl_dtype = ncclDouble;   break;
+            case c10::ScalarType::Int:     nccl_dtype = ncclInt32;    break;
+            case c10::ScalarType::Long:    nccl_dtype = ncclInt64;    break;
+            case c10::ScalarType::Char:    nccl_dtype = ncclInt8;     break;
+            case c10::ScalarType::Byte:    nccl_dtype = ncclUint8;    break;
+            default:
+                throw std::runtime_error("NCCLBackend::all_reduce: unsupported dtype "
+                                          + std::to_string((int)tensor.scalar_type()));
+        }
         ncclRedOp_t nccl_op = to_nccl_op(op);
         int64_t count = tensor.numel();
-        void* data = tensor.mutable_data_ptr<float>();
+        void* data = tensor.mutable_data_ptr();  // generic, no template
 
         // In-place allreduce
         NCCL_CHECK(ncclAllReduce(data, data, count, nccl_dtype, nccl_op,

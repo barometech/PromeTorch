@@ -5125,7 +5125,12 @@ public:
             // Q8_SoA4 path (PT_Q8_SOA=1): if SoA4 builds exist for Q/K/V,
             // use the 4-row interleaved kernel. Otherwise fall back to
             // existing fused/scalar Q4_K kernel.
-            bool use_soa_qkv = tl.q_attn_q.q8_soa.valid &&
+            // BUG-12: PT_NO_FFN_SOA=1 — forces Q4_K direct QKV (skips Q8 SoA outlier corruption)
+            static const bool no_ffn_soa_qkv_local = []{
+                const char* e = std::getenv("PT_NO_FFN_SOA");
+                return e && e[0] == '1';
+            }();
+            bool use_soa_qkv = !no_ffn_soa_qkv_local && tl.q_attn_q.q8_soa.valid &&
                                tl.q_attn_k.q8_soa.valid &&
                                tl.q_attn_v.q8_soa.valid;
             bool can_fuse_qkv = tl.q_attn_q.valid && tl.q_attn_k.valid && tl.q_attn_v.valid &&
@@ -5490,7 +5495,12 @@ public:
             float* x_cur = tp_.x_buf[cur].data();
             float* gate_l = tp_.gate_local_buf.data();
             float* up_l   = tp_.up_local_buf.data();
-            bool use_soa_ffn = tl.q_ffn_gate.q8_soa.valid && tl.q_ffn_up.q8_soa.valid;
+            // BUG-12: PT_NO_FFN_SOA=1 — forces Q4_K direct gate+up (skips Q8 SoA outlier corruption)
+            static const bool no_ffn_soa_ffn_local = []{
+                const char* e = std::getenv("PT_NO_FFN_SOA");
+                return e && e[0] == '1';
+            }();
+            bool use_soa_ffn = !no_ffn_soa_ffn_local && tl.q_ffn_gate.q8_soa.valid && tl.q_ffn_up.q8_soa.valid;
             bool can_fuse_ffn = tl.q_ffn_gate.valid && tl.q_ffn_up.valid &&
                 cpu_quant::cpu_quant_gemv_supported(tl.q_ffn_gate.quant_type) &&
                 cpu_quant::cpu_quant_gemv_supported(tl.q_ffn_up.quant_type);
@@ -5619,7 +5629,15 @@ public:
                 if (tp_sec_timers_.on) tp_sec_timers_.allreduce_fdown_ms += _tp_elapsed();
             } else {
                 // Legacy path: K-slice ffn_down + AllReduce-sum.
-                if (tl.q_ffn_down.q8_soa.valid) {
+                // BUG-12 fallback: PT_NO_FFN_SOA=1 → forces Q4_K direct
+                // (skip Q8 SoA quant_activation outlier issue для qwen3 Massive
+                // Activations). Скорость падает до ~7 tok/s, но русский на
+                // qwen3-4B/1.7B становится надёжным как у llama.cpp.
+                static const bool ffn_no_soa = []{
+                    const char* e = std::getenv("PT_NO_FFN_SOA");
+                    return e && e[0] == '1';
+                }();
+                if (!ffn_no_soa && tl.q_ffn_down.q8_soa.valid) {
                     // Round 4 Item 2: fused SiLU + Q8 SoA4 quant in
                     // q8_soa_repack.h (out-of-line so LCC can optimize it).
                     // 2 passes vs old 5 + per-call vector<uint8_t>(K) alloc.
