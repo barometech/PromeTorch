@@ -3,6 +3,32 @@
 Полная история разработки проекта. Актуальные инструкции — в `CLAUDE.md`.
 Полный аудит инфраструктуры — в `INFRASTRUCTURE_AUDIT.md`.
 
+## 2026-05-03 (поздний вечер, ИТОГ-2): 8 моделей verified, llama3-8B + qwen3-8B SP
+
+После gemma3 TP-4 fix (`0ba114a` rebuild18) запущены SP проверки на оставшихся
+моделях. Verified working на Эльбрусе:
+
+| # | Модель | SP tok/s | TP-4 tok/s | Качество |
+|---|---|---:|---:|---|
+| 1 | mistral-7B | 2.9 | **8.5** | RU |
+| 2 | qwen3-1.7B | 8.1 | **17.1** | RU |
+| 3 | qwen3-4B | 5.5 | **10.9** | RU + CoT |
+| 4 | qwen3-8B | **2.6** | (OOM) | RU + CoT |
+| 5 | qwen2.5-7B | 2.9 | (OOM) | RU |
+| 6 | gemma3-4B | 4.7 | **6.7** | markdown RU |
+| 7 | phi3.5-mini | 3.5 | **6.4** | RU + EN |
+| 8 | **llama3-8B** | **2.7** | (OOM) | RU |
+
+Не работает:
+* qwen3-0.6B — capacity issue (~5% параметров, не code-fixable)
+* qwen3-14B SP — pending verify (slow load)
+* deepseek-coder-7B — pending verify
+
+TP-4 OOM для всех 7B+/8B+ моделей: SoA storage × 4 ranks превышает RAM.
+Эта проблема предсуществующая (не регрессия), out of scope сессии.
+
+Session commits: `b144db2..56e9c65` (~60+ commits в одной session day).
+
 ## 2026-05-03 (поздний вечер, ИТОГ): gemma3 TP-4 6.7 tok/s — все 7 моделей работают и в TP-4
 
 **Commit `0ba114a` + rebuild18:** gemma3-4B в TP-4 mode теперь даёт
