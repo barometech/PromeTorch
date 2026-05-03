@@ -110,10 +110,21 @@ struct TransformerConfig {
         //  каждый 6-й слой — global freq_base=1e6 scale=8.0). Per-layer config
         // ниже подхватывает оба варианта.
         {
+            // Modern format (llama3/llama4/qwen2): rope.scaling.type + factor
             std::string scale_type = reader.get_string(architecture + ".rope.scaling.type", "");
             float scale_factor = reader.get_arch_float("rope.scaling.factor", 0.0f);
             if (scale_type == "linear" && scale_factor > 1.0f) {
                 rope_scale = scale_factor;
+            }
+            // Legacy format (deepseek-coder, older llama-based base models):
+            // `<arch>.rope.scale_linear` без отдельного type. Читаем как
+            // линейный фактор. Если modern формат уже задал rope_scale —
+            // пропускаем.
+            if (rope_scale == 1.0f) {
+                float legacy_linear = reader.get_arch_float("rope.scale_linear", 0.0f);
+                if (legacy_linear > 1.0f) {
+                    rope_scale = legacy_linear;
+                }
             }
         }
         // SWA + alternating rope. llama.cpp's gemma3 uses swa_period=6 with the
