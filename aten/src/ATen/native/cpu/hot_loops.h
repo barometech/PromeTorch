@@ -354,9 +354,17 @@ void fused_zero_grad_multi(GradBufPack* bufs, int num_bufs);
 // Fusion 7: Fused RoPE (precomputed sin/cos table, AVX2)
 // Current code computes pow() + sin() + cos() per dimension per token
 // Precompute table once, then apply with FMA
+//
+// LLaMA convention (NORM): pairs (2d, 2d+1) — used by llama / mistral arches.
+// NeoX convention (NEOX):  pairs (d, d + head_dim/2) — used by qwen2 / qwen3 /
+// gemma / phi3 / stablelm / falcon. Picked per architecture by ModelConfig.
 void rope_apply_fused(float* q, float* k,
                       const float* cos_table, const float* sin_table,
                       int64_t n_heads, int64_t n_kv_heads, int64_t head_dim);
+
+void rope_apply_fused_neox(float* q, float* k,
+                           const float* cos_table, const float* sin_table,
+                           int64_t n_heads, int64_t n_kv_heads, int64_t head_dim);
 
 // Precompute RoPE table for a given position
 void rope_precompute(float* cos_out, float* sin_out,
