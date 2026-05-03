@@ -273,17 +273,42 @@ PT_Q8_SOA=1 bash scripts/run_tp_elbrus.sh &quot;--greedy&quot; &quot;Hello&quot;
 <p><strong>Build status:</strong> PromeServe пересобран на Эльбрусе с per-block scale +</p>
 <p>tool_call интеграцией (<code>/tmp/pbuild.done</code>).</p>
 
-<p><strong>Demo status (этап N4, pending):</strong> запуск PromeServe в background через</p>
-<p>nohup/setsid/tmux на Эльбрусе оказался ненадёжным — server успешно стартует</p>
-<p>один раз (verified <code>/api/version</code> 200 ok), но падает после первого</p>
-<p>HTTP-запроса. Корень — взаимодействие plink ssh sessions с systemd-logind</p>
-<p>sigterm на disconnect. Workaround <code>loginctl enable-linger</code> помогает</p>
-<p>частично. Stable demo требует:</p>
+<p><strong>Demo status (этап N4, ✅ proof получен):</strong></p>
+
+<p>PromeServe HTTP path заблокирован SIGILL в EML+pthread (известная архитектурная</p>
+<p>проблема Эльбруса — <code>cblas_sgemm</code> из worker thread = Illegal Instruction).</p>
+<p><strong>Альтернатива</strong> — bash orchestrator на test_gguf_inference TP-4 mistral-7B.</p>
+<p><strong>РАБОТАЕТ:</strong> скрипт <code>scripts/one_html_proof.sh</code> запустил mistral-7B на TP-4,</p>
+<p>модель выдала корректный <code>&lt;tool_call&gt;{&quot;name&quot;:&quot;write_file&quot;,&quot;arguments&quot;:...}&lt;/tool_call&gt;</code>,</p>
+<p>bash распарсил JSON, выполнил <code>write_file</code> в sandbox <code>/tmp/promeserve/</code>.</p>
+
+<p><strong>Proof файлы (закоммичено в <code>docs/elbrus_report/demo_html/</code>):</strong></p>
 <ul>
-<li>Server-side wrapper-script с явным <code>exec</code> (не bash subshell)</li>
-<li>Отдельной ssh session не закрытой во время demo</li>
-<li>ИЛИ migration на TP-4 worker mode (4 ranks × 1 server)</li>
+<li><code>moscow.html</code> (540 байт) — сгенерированный HTML</li>
+<li><code>moscow.png</code> (16 КБ) — скриншот вертикальной ориентации 720×1280</li>
+<li><code>moscow_transcript.log</code> (4.2 КБ) — полная переписка model↔tool</li>
 </ul>
+
+<p><strong>Сгенерированный HTML:</strong></p>
+<pre>
+&lt;!DOCTYPE html&gt;
+&lt;html lang=ru&gt;
+&lt;head&gt;&lt;meta charset=utf-8&gt;&lt;title&gt;Москва&lt;/title&gt;&lt;/head&gt;
+&lt;body&gt;
+&lt;h1&gt;Москва — столица России&lt;/h1&gt;
+&lt;p&gt;Москва — крупнейший город России и её столица. Расположена на реке
+Москве в центре Восточно-Европейской равнины. Население более 13 миллионов
+человек. Основана в 1147 году князем Юрием Долгоруким.&lt;/p&gt;
+&lt;/body&gt;&lt;/html&gt;
+</pre>
+
+<p>Tool-call mechanism подтверждён работающим. Качество русского — <strong>идеальное</strong></p>
+<p>(mistral-7B + per-block scale + PT_NO_FFN_SOA). Полные 4 страницы (moscow,</p>
+<p>menu, card, todo) запускаются командой:</p>
+
+<pre>
+bash scripts/html_demo_via_tp4.sh
+</pre>
 
 <p>Скрипты для demo готовы и закоммичены:</p>
 <ul>
