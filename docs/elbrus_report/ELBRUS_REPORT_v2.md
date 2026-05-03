@@ -198,8 +198,30 @@ PromeServe — собственный Ollama-compatible inference HTTP server.
 - Append'ит `<tool_response>{result}</tool_response>` в prompt
 - Loop max 5 итераций, потом финальный ответ
 
-> **Demo результаты с скриншотами и переписками — будут добавлены ниже после
-> завершения N4 (HTML генерация на mistral-7b).**
+**Реализация:** `promeserve/api_handlers.h::handle_chat_with_tools` (~150 строк),
+`promeserve/tool_call.h::ToolRegistry` (write_file, read_file, list_dir, bash_safe
+с whitelist, sandbox /tmp/promeserve/).
+
+**Build status:** PromeServe пересобран на Эльбрусе с per-block scale +
+tool_call интеграцией (`/tmp/pbuild.done`).
+
+**Demo status (этап N4, pending):** запуск PromeServe в background через
+nohup/setsid/tmux на Эльбрусе оказался ненадёжным — server успешно стартует
+один раз (verified `/api/version` 200 ok), но падает после первого
+HTTP-запроса. Корень — взаимодействие plink ssh sessions с systemd-logind
+sigterm на disconnect. Workaround `loginctl enable-linger` помогает
+частично. Stable demo требует:
+1. Server-side wrapper-script с явным `exec` (не bash subshell)
+2. Отдельной ssh session не закрытой во время demo
+3. ИЛИ migration на TP-4 worker mode (4 ranks × 1 server)
+
+Скрипты для demo готовы и закоммичены:
+- `scripts/test_promeserve_tools.sh` — Ollama API client с 4 tasks
+- `scripts/test_html_demo.sh` — простой curl loop для HTML генерации
+- `scripts/start_promeserve_bg.sh` — robust nohup wrapper с health-check
+- `scripts/screenshot_html.bat` — Windows Chrome headless 720×1280 portrait
+- `scripts/tp4_tool_orchestrator.sh` — bash orchestrator на TP-4 binary
+  (альтернатива: 11.4 tok/s skip PromeServe overhead)
 
 ## 6. Перспективы — Эльбрус-16С
 
