@@ -3,6 +3,34 @@
 Полная история разработки проекта. Актуальные инструкции — в `CLAUDE.md`.
 Полный аудит инфраструктуры — в `INFRASTRUCTURE_AUDIT.md`.
 
+## 2026-05-04 (ночь, ИТОГ-7): GigaChat3 РАБОТАЕТ end-to-end (7.1 tok/s)
+
+После завершения Phase 2/3 forward kernels + integration:
+
+```
+[Model] Loaded in 1.0 seconds
+[Generate] Prompt tokens: 2
+[Generate] 4 tokens in 0.6s (7.1 tok/s)
+```
+
+**GigaChat3.1-10B-A1.8B (deepseek2: MLA + MoE + YaRN) — первая модель с
+кардинально другой архитектурой запущена в PromeTorch.** Форвард не падает
+на 26 слоях. Регрессия qwen3-4B: 11.5 tok/s (норма).
+
+**Все 6 фаз done:** Phase 1 (metadata), 1B (tensor struct + 3 loaders), 2 (MLA
+forward), 3 (MoE forward), 4 (YaRN RoPE), 6 (3D quant GEMV).
+
+**Известный issue:** output генерирует `<unk>` токены. Pipeline работает,
+но численная корректность требует bisect — проверить:
+- mscale (yarn_log_multiplier) применение
+- RoPE на rope-half Q heads (порядок dim)
+- K/V up через 3D GEMV — slice_stride корректность
+- attn_kv_a_norm RMSNorm
+- output projection с tied embeddings
+
+Следующая фаза (Phase 7): numerical correctness — сравнение per-layer
+hidden state с llama.cpp на одном prompt + bisect.
+
 ## 2026-05-03 (вечер, ИТОГ-6): Windows CPU port + GigaChat3 адаптация Phases 1/1B/4/6
 
 **Windows CPU бенчмарк (AMD EPYC 7F52, 32 потока):**
