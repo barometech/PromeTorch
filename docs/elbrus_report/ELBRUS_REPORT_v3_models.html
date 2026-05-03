@@ -85,11 +85,11 @@
     <td><span class="badge badge-ok">FIXED single-proc: per-layer SWA + post_attn_norm placement + GeGLU. TP-4 throws — нужен gather/re-slice для post-norms (out of scope)</span></td></tr>
 
 <tr><td><b>phi3.5-mini Q4_K_M</b></td>
-    <td class="fail">✗ <code>bom&lt;unk&gt;×60</code></td>
-    <td class="fail">✗ <code>bom&lt;unk&gt;×60</code></td>
-    <td class="cell-num">6.2</td><td>—</td>
+    <td class="ok">✓ связный RU</td>
+    <td class="ok">✓ связный EN</td>
+    <td class="cell-num">3.5 SP</td><td>—</td>
     <td><code>neox</code> + LongRoPE + attn_factor</td>
-    <td><span class="badge badge-part">7 fix применены, PT_NO_LONGROPE bisect показал rope_factors НЕ виноваты. Bug в Q5_K kernel split или per-head attn_qkv permutation — нужен activation dump vs llama.cpp</span></td></tr>
+    <td><span class="badge badge-ok">FIXED 2026-05-03 (commit d9dce9e): load_quantized_mmap не обрабатывал phi3 merged tensors (attn_qkv, ffn_up rows=2*inter). split_from_mmap helper: malloc+memcpy слайсов из mmap region. RU: «Космос - это всеобъемлющая область пространства...», EN: «Moscow, the capital city of Russia, is not only the political heart...»</span></td></tr>
 </table>
 
 <p style="font-size:13px"><b>¹</b> SP = single-process, OMP_NUM_THREADS=32. &nbsp;
@@ -221,44 +221,54 @@ global с <code>freq_base=1e6, scale=8.0</code>. Без per-layer infrastructure
 один глобальный <code>rope_freq_base + rope_scale</code> ломает половину
 attention. Pending: per-layer rope config.</p>
 
-<h3>2.9. phi3.5-mini — partial fix, computation broken</h3>
-<p>Phi-3 GGUF хранит Q/K/V в одном тензоре <code>attn_qkv.weight</code>
-(<code>shape=[q_dim+2*kv_dim, hidden]</code>) и gate+up в одном
-<code>ffn_up.weight</code>. Loader на этом крашился с
-<code>Tensor not found: blk.0.attn_q.weight</code>. В коммитах
-<code>445dee4</code> + <code>2b317c4</code> добавлено:</p>
+<h3>2.9. phi3.5-mini — FIXED 2026-05-03 (commit <code>d9dce9e</code>)</h3>
+<p>Bisect через <code>PT_NO_QUANT_GEMV=1</code> (FP fallback path) дал
+решающий результат:</p>
 <ul>
-<li>Quant path: <code>split_quant_rows()</code> создаёт non-owning views.</li>
-<li>FP path (<code>load_weights</code>): split через <code>tensor.narrow(0, ...)</code>.</li>
-<li><code>QuantizedWeight::owns_cpu_data</code> для предотвращения double-free.</li>
-<li>Chat template <code>&lt;|user|&gt;…&lt;|end|&gt;&lt;|assistant|&gt;</code>.</li>
+<li><b>DEFAULT (quant_gemv):</b> <code>bom&lt;unk&gt;×40</code> мусор, 6.3 tok/s.</li>
+<li><b>PT_NO_QUANT_GEMV=1 (FP path):</b> «Moscow, the capital city of
+Russia, is a sprawling metropolis with a rich history and vibrant
+culture. It's known for its iconic landmarks like the Kreml» —
+связный английский, 0.2 tok/s (FP fallback ~30× slower).</li>
 </ul>
-<p>Loader теперь грузит все 32 слоя, генерит 60 токенов
-со скоростью <b>5.8-6.1 tok/s</b>. Но первый токен — случайный
-(«neighbor», «JAX», «ered»), потом всё <code>&lt;unk&gt;×60</code>.
-Heap corruption (<code>double free or corruption</code>) исправлен в
-<code>197d658</code> — добавлена проверка <code>owns_cpu_data</code> в
-<code>free_if_owned</code>.</p>
-
-<p>Bisect показал:</p>
+<p><b>Корень:</b> <code>load_quantized_mmap()</code> (default load path)
+не обрабатывал phi3 merged tensors (<code>attn_qkv.weight</code> и
+<code>ffn_up.weight</code> rows=2*intermediate). split_quant_rows жил
+только в <code>load_quantized_to_cpu</code> (fallback path). После mmap
+для phi3:</p>
 <ul>
-<li><code>PT_Q8_SOA=0</code> (Q4_K direct без SoA repack) — те же
-<code>&lt;unk&gt;</code>: значит SoA repack не виноват.</li>
-<li>Phi-3.5-mini <code>attn_qkv</code> = <b>Q5_K</b> (тип 13), не Q4_K.
-<code>q5k_gemv_avx2</code> в коде есть.</li>
-<li>Math split (rows × row_stride): для Q5_K row_stride=2112 byte
-(<code>3072/256 × 176</code>). Q rows [0..3072), K [3072..6144),
-V [6144..9216). Все aligned по 176-byte границе ✓.</li>
-<li>cpu_fused_rmsnorm_qkv_gemv для не-Q4_K делает 3 separate
-<code>cpu_quant_gemv</code> calls — каждый на свой slice.</li>
+<li><code>layer.q_attn_q.valid = false</code> (нет <code>attn_q.weight</code>
+в GGUF)</li>
+<li><code>layer.q_attn_k.valid = false</code>, <code>q_attn_v.valid = false</code></li>
+<li><code>layer.q_ffn_gate.valid = false</code></li>
+<li><code>layer.q_ffn_up.rows = 16384</code> (вместо 8192) — это merged
+[gate; up] в одной матрице</li>
 </ul>
-
-<p>Тем не менее GEMV выдаёт логиты, у которых argmax = 0 = <code>&lt;unk&gt;</code>.
-Что-то ещё не так. Кандидаты: (a) Q5_K block layout у phi3 имеет другую
-permutation внутри блока, (b) phi3 LongRoPE с
-<code>rope_factors</code> per-frequency не реализован, (c) phi3 RMSNorm
-имеет иную convention. Out of scope сессии — требует side-by-side
-дамп активаций между нашим кодом и llama.cpp.</p>
+<p><code>forward_decode_cpu</code> else-branch:</p>
+<pre>if (layer.q_attn_q.valid &amp;&amp; layer.q_attn_q.cpu_data) {
+    cpu_quant::cpu_quant_gemv(...);  // ← НЕ вызывается → sp.q_buf garbage
+}</pre>
+<p><code>sp.q_buf</code>, <code>sp.k_buf</code>, <code>sp.v_buf</code>
+оставались uninitialized memory → RoPE на мусоре → softmax NaN-like →
+argmax всегда падал в token 0 (<code>&lt;unk&gt;</code>).</p>
+<p><b>Fix:</b> <code>split_from_mmap</code> helper в
+<code>load_quantized_mmap</code>. Когда <code>attn_q.weight</code>
+отсутствует но <code>attn_qkv.weight</code> есть — malloc + memcpy
+слайсов из mmap region в Q/K/V owning buffers. Аналогично для
+<code>ffn_up.weight</code> rows=2*intermediate → split на gate+up.</p>
+<p><b>Verified output 2026-05-03 18:32 МСК:</b></p>
+<ul>
+<li>RU: «Космос - это всеобъемлющая область пространства, включающая
+все газопылевые объекты и их окружения. Он охватывает все извест...»
+(40 tokens / 11.5s = 3.5 tok/s)</li>
+<li>EN: «Moscow, the capital city of Russia, is not only the political
+heart of the country but also a vibrant cultural and economic center.
+With its rich history that dates back to 1...» (40 / 11.4s = 3.5 tok/s)</li>
+</ul>
+<p>Sanity на mistral-7B RU и qwen3-4B RU без регрессии (2.9 / 5.5 tok/s).
+Урок bisect истории: проверял 13+ гипотез про forward kernel прежде чем
+выяснилось что веса вообще не загружены. Bisect через PT_NO_QUANT_GEMV=1
+дал ясный сигнал — FP работает значит данные ок, бага в quant load.</p>
 
 <h2>3. Скорость: 11.4 baseline и почему 8.0</h2>
 
@@ -288,10 +298,8 @@ sliding_window</code> per слой.</p>
 <p>Объём: ~150 LoC в <code>gguf_model.h</code> + ~50 LoC dispatch в
 forward path.</p>
 
-<h3>4.2. phi3.5 — verify после rebuild4</h3>
-<p>Loader split реализован. Pending: дождаться rebuild и протестировать.
-Возможно потребуется ещё один маленький fix (chat template, EOS токен,
-pre-attn residual).</p>
+<h3>4.2. phi3.5 — DONE</h3>
+<p>FIXED 2026-05-03 commit <code>d9dce9e</code>. См §2.9.</p>
 
 <h3>4.3. Per-layer rope для qwen3-VL / qwen3.5</h3>
 <p>llama.cpp добавил <code>LLM_ARCH_QWEN35 → LLAMA_ROPE_TYPE_IMROPE</code>
