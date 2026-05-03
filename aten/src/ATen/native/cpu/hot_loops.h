@@ -372,10 +372,14 @@ void rope_apply_fused_neox(float* q, float* k,
 //
 // `rope_factors` is an optional per-frequency divisor (Phi-3 LongRoPE):
 // `inv_freq[d] = (1/base^(2d/dim)) / factor[d]`. nullptr → no factor.
+//
+// `attn_factor` multiplies cos и sin (yarn `mscale`) — Phi-3.5 mini имеет 1.19
+// (sqrt(1+log(scale)/log(orig_ctx))). Default 1.0 = без эффекта.
 void rope_precompute(float* cos_out, float* sin_out,
                      int64_t pos, int64_t head_dim, float freq_base,
                      float scale = 1.0f,
-                     const float* rope_factors = nullptr);
+                     const float* rope_factors = nullptr,
+                     float attn_factor = 1.0f);
 
 } // namespace hot
 } // namespace native
