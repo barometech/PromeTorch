@@ -180,13 +180,31 @@ Lm_head (выходная projection в vocab) — самая чувствите
 
 ### 4.5. Результат после fix (с PT_PER_BLOCK_SCALE=1 + PT_LM_HEAD_FP=1)
 - mistral-7B / qwen2.5-7B / qwen3-8B → **русский OK** (full sentence генерация)
-- qwen3-4B → **частичный русский** («Кон К ...») — нужен дальнейший анализ
-  (возможно проблема в 36-layer architecture vs 28-layer 7B'ов)
+- qwen3-4B → **частичный русский** («Кон К ...») — Massive Activations spec.
+  для qwen3 family
 - qwen3-1.7B / qwen3-0.6B → mojibake остаётся (модель слишком мала, deeper QKV
   precision проблема)
 
 Скорость на per-block: **9.8 tok/s vs 10.5 baseline на qwen3-4B (-7 %)**.
-Trade-off: quality vs speed = разумный.
+
+### 4.6. Финальный fallback — PT_NO_FFN_SOA=1 (для упрямых моделей)
+
+Для qwen3 family (Massive Activations) добавлен env-флаг
+`PT_NO_FFN_SOA=1` который **полностью** отключает Q8 SoA в FFN
+gate+up+down И в attention QKV+output. Forward идёт через **Q4_K direct**
+(тот же путь что у llama.cpp). Скорость падает до 6-8 tok/s, но русский
+ответ должен стать как у llama.cpp.
+
+Полный набор флагов для надёжного русского на qwen3:
+```bash
+PT_Q8_SOA=1 PT_PER_BLOCK_SCALE=1 PT_LM_HEAD_FP=1 PT_NO_FFN_SOA=1 \
+    bash scripts/run_tp_elbrus.sh "" "Расскажи про Москву..."
+```
+
+Для скорости (без BUG-12 fixes, default lossless 11.4 на не-cyrillic):
+```bash
+PT_Q8_SOA=1 bash scripts/run_tp_elbrus.sh "--greedy" "Hello"
+```
 
 ## 5. PromeServe + Tool-call loop
 
