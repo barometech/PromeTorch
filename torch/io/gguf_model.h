@@ -3195,7 +3195,18 @@ public:
         }
     } sec_timers_;
 
+    // =====================================================================
+    // forward_decode_cpu_deepseek2 — single-token decode for GigaChat3
+    // architecture (deepseek2: MLA attention + MoE FFN).
+    // Bypasses the standard llama-family forward_decode_cpu (which assumes
+    // GQA shapes incompatible with MLA's per-head no-rope+rope split).
+    // =====================================================================
+    Tensor forward_decode_cpu_deepseek2(int64_t token_id);
+
     Tensor forward_decode_cpu(int64_t token_id) {
+        if (config.is_mla) {
+            return forward_decode_cpu_deepseek2(token_id);
+        }
         sec_timers_.init();
         int64_t H = config.hidden_size;
         int64_t q_dim = config.num_heads * config.head_dim;
@@ -4698,7 +4709,16 @@ public:
 
         // Process prompt (prefill)
         std::vector<int64_t> tokens_i64(input_tokens.begin(), input_tokens.end());
-        Tensor logits = forward(tokens_i64, true);
+        Tensor logits;
+        if (config.is_mla) {
+            // deepseek2 has no batched FP32 forward yet — prefill token by token
+            // through forward_decode_cpu (which dispatches to deepseek2 path).
+            for (size_t i = 0; i < tokens_i64.size(); ++i) {
+                logits = forward_decode_cpu(tokens_i64[i]);
+            }
+        } else {
+            logits = forward(tokens_i64, true);
+        }
 
         // Get last token logits
         std::vector<int32_t> generated;
@@ -7643,6 +7663,137 @@ public:
         return static_cast<int32_t>(vocab - 1);
     }
 };
+
+// ============================================================================
+// deepseek2 (GigaChat3) — single-token decode forward.
+// Defined out-of-line because it depends on torch/io/deepseek2_forward.h
+// (which itself includes gguf_model.h).
+// ============================================================================
+}  // namespace io
+}  // namespace torch
+
+#include "torch/io/deepseek2_forward.h"
+
+namespace torch {
+namespace io {
+
+inline Tensor GGUFModel::forward_decode_cpu_deepseek2(int64_t token_id) {
+    const int64_t H        = config.hidden_size;
+    const int64_t n_heads  = config.num_heads;
+    const int64_t head_full = config.head_dim;          // 256 = no_rope+rope
+    const int64_t v_dim    = config.value_length_mla;   // 192
+    const int64_t E_FF     = config.expert_feed_forward_length;
+    const int64_t INTER    = config.intermediate_size;
+    const int64_t past_len = kv_cache.seq_len;
+    const float   eps      = config.rms_norm_eps;
+
+    // Allocate KV cache lazily — MLA layout: K=[T, n_heads*256], V=[T, n_heads*192].
+    // Pick the larger of the two so a single Tensor pair fits both.
+    if (!kv_cache.allocated) {
+        const int64_t kv_dim_max = std::max(n_heads * head_full,
+                                             n_heads * v_dim);
+        const int64_t max_total_seq = config.context_length > 0
+            ? std::min<int64_t>(config.context_length, 8192) : 8192;
+        kv_cache.allocate(config.num_layers, max_total_seq, kv_dim_max,
+                          /*use_cuda*/false);
+    }
+
+    // Persistent scratch buffer (resized once on first call).
+    static thread_local std::vector<float> scratch;
+    static thread_local std::vector<float> x_resid;
+    static thread_local std::vector<float> x_norm_buf;
+    static thread_local std::vector<float> attn_out_buf;
+    static thread_local std::vector<float> ffn_out_buf;
+    // MLA scratch: q_full + kv_compr + k_nope_all + v_all + attn_out
+    const size_t mla_scratch =
+        n_heads * head_full + (config.kv_lora_rank + config.key_length_rope) +
+        n_heads * config.key_length_mla + n_heads * v_dim +
+        n_heads * v_dim;
+    // MoE scratch: router(E) + gate(E_FF) + up(E_FF) + acc(H) + sh_buf(E_FF) + sh_out(H)
+    const size_t moe_scratch =
+        config.expert_count + 3 * E_FF + 2 * H + INTER /*for dense path*/;
+    const size_t need = std::max(mla_scratch, moe_scratch);
+    if (scratch.size() < need)        scratch.resize(need);
+    if (x_resid.size()   < (size_t)H) x_resid.resize(H);
+    if (x_norm_buf.size()< (size_t)H) x_norm_buf.resize(H);
+    if (attn_out_buf.size()< (size_t)H) attn_out_buf.resize(H);
+    if (ffn_out_buf.size() < (size_t)H) ffn_out_buf.resize(H);
+
+    // 1. Token embedding lookup → x_resid
+    const float* emb = token_embedding.data_ptr<float>();
+    std::memcpy(x_resid.data(), emb + token_id * H, H * sizeof(float));
+
+    // 2. Layer loop
+    for (int64_t i = 0; i < config.num_layers; ++i) {
+        auto& layer = layers[i];
+
+        // RMSNorm(x) → x_norm
+        {
+            const float* gamma = layer.attn_norm.data_ptr<float>();
+            double ss = 0;
+            for (int64_t j = 0; j < H; ++j) ss += (double)x_resid[j] * x_resid[j];
+            float rms = 1.0f / std::sqrt((float)(ss / H) + eps);
+            for (int64_t j = 0; j < H; ++j) x_norm_buf[j] = x_resid[j] * rms * gamma[j];
+        }
+
+        // MLA attention
+        float* K_layer = kv_cache.key_cache[i].data_ptr<float>();
+        float* V_layer = kv_cache.value_cache[i].data_ptr<float>();
+        mla_attention_forward_decode(
+            x_norm_buf.data(), layer, config,
+            K_layer, V_layer, past_len,
+            attn_out_buf.data(), scratch.data());
+
+        // Residual: x += attn_out
+        for (int64_t j = 0; j < H; ++j) x_resid[j] += attn_out_buf[j];
+
+        // RMSNorm(x) → x_norm
+        {
+            const float* gamma = layer.ffn_norm.data_ptr<float>();
+            double ss = 0;
+            for (int64_t j = 0; j < H; ++j) ss += (double)x_resid[j] * x_resid[j];
+            float rms = 1.0f / std::sqrt((float)(ss / H) + eps);
+            for (int64_t j = 0; j < H; ++j) x_norm_buf[j] = x_resid[j] * rms * gamma[j];
+        }
+
+        // FFN: MoE for layers ≥ leading_dense_block_count, else dense
+        if (layer.is_moe_layer) {
+            moe_ffn_forward_decode(x_norm_buf.data(), layer, config,
+                                    ffn_out_buf.data(), scratch.data());
+        } else {
+            dense_ffn_forward_decode(x_norm_buf.data(), layer, config,
+                                      ffn_out_buf.data(), scratch.data());
+        }
+
+        // Residual: x += ffn_out
+        for (int64_t j = 0; j < H; ++j) x_resid[j] += ffn_out_buf[j];
+    }
+
+    // 3. Output norm
+    {
+        const float* gamma = output_norm.data_ptr<float>();
+        double ss = 0;
+        for (int64_t j = 0; j < H; ++j) ss += (double)x_resid[j] * x_resid[j];
+        float rms = 1.0f / std::sqrt((float)(ss / H) + eps);
+        for (int64_t j = 0; j < H; ++j) x_norm_buf[j] = x_resid[j] * rms * gamma[j];
+    }
+
+    // 4. LM head: logits[V] = output_weight @ x_norm
+    //    GigaChat3 uses tied embeddings → q_output_weight points at quantized
+    //    token_embd; the loader sets this in load_quantized_mmap when
+    //    config.tie_word_embeddings is true.
+    Tensor logits = at::empty({1, config.vocab_size});
+    cpu_quant::cpu_quant_gemv(
+        q_output_weight.quant_type,
+        q_output_weight.cpu_data,
+        x_norm_buf.data(), logits.data_ptr<float>(),
+        H, config.vocab_size,
+        q_output_weight.row_stride_bytes, nullptr);
+
+    // Advance KV cache
+    kv_cache.seq_len = past_len + 1;
+    return logits;
+}
 
 // ============================================================================
 // Convenience functions
