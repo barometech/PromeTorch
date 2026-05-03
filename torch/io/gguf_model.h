@@ -88,6 +88,7 @@ struct TransformerConfig {
     std::vector<float> rope_factors_short;
     std::vector<float> rope_factors_long;
     int64_t rope_orig_ctx = 0;          // 0 = LongRoPE disabled.
+    float rope_attn_factor = 1.0f;      // Phi-3 yarn mscale: cos/sin * factor.
     bool has_post_norm = false;        // Gemma3: post-attention + post-FFN norms
     bool rope_neox = false;            // NeoX-style RoPE (qwen/gemma/phi3); else NORM (llama/mistral)
 
@@ -131,6 +132,10 @@ struct TransformerConfig {
         }
         // Phi-3 LongRoPE: original context length после которого long_factor.
         rope_orig_ctx = reader.get_arch_int("rope.scaling.original_context_length", 0);
+        // YaRN/LongRoPE attn_factor (mscale) — multiplies cos/sin (≡ scales Q/K
+        // post-rotation by attn_factor → scales attention scores by ~af²).
+        // Phi-3.5-mini имеет 1.190238 (=sqrt(1+log(32)/log(4096))).
+        rope_attn_factor = reader.get_arch_float("rope.scaling.attn_factor", 1.0f);
         rms_norm_eps = reader.get_arch_float("attention.layer_norm_rms_epsilon", 1e-6f);
 
         // Head dim: prefer explicit key_length, fallback to hidden/heads
@@ -3140,7 +3145,8 @@ public:
                     past_len, head_dim,
                     config.layer_rope_freq_base(i),
                     config.layer_rope_scale(i),
-                    config.rope_factors_for(past_len + 1));
+                    config.rope_factors_for(past_len + 1),
+                    config.rope_attn_factor);
                 if (config.rope_neox) {
                     at::native::hot::rope_apply_fused_neox(sp.q_buf, sp.k_buf,
                         rope_cos, rope_sin, n_heads, n_kv_heads, head_dim);
@@ -4067,7 +4073,8 @@ public:
                     past_len_0 + k, head_dim,
                     config.layer_rope_freq_base(i),
                     config.layer_rope_scale(i),
-                    config.rope_factors_for(past_len_0 + k + 1));
+                    config.rope_factors_for(past_len_0 + k + 1),
+                    config.rope_attn_factor);
                 if (config.rope_neox) {
                     at::native::hot::rope_apply_fused_neox(q, kk, rope_cos, rope_sin,
                         n_heads, n_kv_heads, head_dim);
@@ -5543,7 +5550,8 @@ public:
                     at::native::hot::rope_precompute(
                         tp_.rope_cos_cache.data(), tp_.rope_sin_cache.data(),
                         past_len, head_dim, layer_freq_base, layer_rope_scale,
-                        config.rope_factors_for(past_len + 1));
+                        config.rope_factors_for(past_len + 1),
+                        config.rope_attn_factor);
                     tp_.rope_cache_past_len = past_len;
                     tp_.rope_cache_freq_base = layer_freq_base;
                     tp_.rope_cache_scale = layer_rope_scale;

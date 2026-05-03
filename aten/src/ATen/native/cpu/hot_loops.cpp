@@ -1848,18 +1848,25 @@ void fused_zero_grad_multi(GradBufPack* bufs, int num_bufs) {
 void rope_precompute(float* cos_out, float* sin_out,
                      int64_t pos, int64_t head_dim, float freq_base,
                      float scale,
-                     const float* rope_factors) {
+                     const float* rope_factors,
+                     float attn_factor) {
     float scaled_pos = (scale > 0.0f && scale != 1.0f)
                         ? (static_cast<float>(pos) / scale)
                         : static_cast<float>(pos);
+    bool apply_af = (attn_factor > 0.0f && attn_factor != 1.0f);
     for (int64_t d = 0; d < head_dim / 2; ++d) {
         float freq = 1.0f / std::pow(freq_base, 2.0f * d / head_dim);
         // Phi-3 LongRoPE: `inv_freq[d] /= factor[d]`. factor[d] обычно ≥1.0,
         // т.е. эффективная частота уменьшается → угол пропорционально меньше.
         if (rope_factors) freq /= rope_factors[d];
         float theta = scaled_pos * freq;
-        cos_out[d] = std::cos(theta);
-        sin_out[d] = std::sin(theta);
+        float c = std::cos(theta);
+        float s = std::sin(theta);
+        // YaRN/LongRoPE attn_factor (mscale): cos/sin scaled by mscale → effectively
+        // rotates AND scales Q/K vector by attn_factor → attention scores by af².
+        if (apply_af) { c *= attn_factor; s *= attn_factor; }
+        cos_out[d] = c;
+        sin_out[d] = s;
     }
 }
 
