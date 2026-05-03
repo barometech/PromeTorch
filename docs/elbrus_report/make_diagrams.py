@@ -20,30 +20,22 @@ plt.rcParams['font.size'] = 10
 fig, ax = plt.subplots(figsize=(8, 6))
 
 # Точки: (x=поддержка современных LLM 0..10, y=скорость на ELBRUS-8C2 в tok/s)
-# Размещаем по диагонали чтобы лейблы не перекрывались
-# y = реальная скорость в tok/s (или 0 если не LLM)
+# Размещаем без перекрытий: lookups правее точек, далеко от quadrant подсказок
 projects = [
     # name, x, y, size, color, label_dx, label_dy
-    ("llama.cpp-e2k\n(LLaMA-1 7B Q4_0,\n8SV 8 потоков)",
-                                     3.0, 6.2,  280, "#888888",  10,   8),
-    ("Smart Engines\n(только CV: UNet, OCR)",
-                                     0.5, 2.5,  240, "#888888",  10, -28),
-    ("NCNN + Vulkan демо\n(на GPU Radeon, не CPU)",
-                                     2.0, 1.0,  240, "#888888",  10,   8),
-    ("MCST EML\n(BLAS, не LLM)",
-                                     0.5, 0.5,  220, "#888888",  10, -22),
-    ("PromeTorch\n(qwen3-1.7B TP-4)",
-                                     9.0, 17.1, 380, "#000000", -110,  -12),
-    ("PromeTorch\n(qwen3-4B TP-4)",
-                                     9.0, 10.9, 320, "#000000", -110,  -12),
-    ("PromeTorch\n(mistral-7B TP-4)",
-                                     9.0, 8.5,  300, "#000000",  10,    8),
+    ("llama.cpp-e2k\n(LLaMA-1 7B Q4_0)",       3.0,  6.2, 280, "#888888",  14,    8),
+    ("Smart Engines\n(только CV)",             1.0,  3.5, 240, "#888888",  14,  -10),
+    ("NCNN+Vulkan\n(на GPU Radeon)",           2.0,  2.0, 240, "#888888",  14,  -10),
+    ("MCST EML\n(только BLAS)",                0.5,  0.7, 220, "#888888",  14,   -8),
+    ("PromeTorch\nqwen3-1.7B TP-4",            9.0, 17.1, 380, "#000000", -120,  -10),
+    ("PromeTorch\nqwen3-4B TP-4",              9.0, 10.9, 320, "#000000", -120,  -10),
+    ("PromeTorch\nmistral-7B TP-4",            9.0,  8.5, 300, "#000000",  14,   10),
 ]
 for name, x, y, s, c, dx, dy in projects:
     ax.scatter(x, y, s=s, c=c, zorder=3, edgecolors='black', linewidths=1.5)
     ax.annotate(name, (x, y), xytext=(dx, dy), textcoords="offset points",
                 fontsize=9, fontweight='bold' if 'PromeTorch' in name else 'normal',
-                color='black' if 'PromeTorch' in name else '#444')
+                color='black' if 'PromeTorch' in name else '#333')
 
 ax.set_xlim(-0.5, 11)
 ax.set_ylim(-1, 20)
@@ -54,11 +46,9 @@ ax.grid(True, alpha=0.3, zorder=0)
 ax.axhline(y=10, color='gray', linewidth=0.5, linestyle='--', alpha=0.5)
 ax.axvline(x=5, color='gray', linewidth=0.5, linestyle='--', alpha=0.5)
 
-# Quadrant labels
-ax.text(2.5, 18, "↖ старые LLM,\nвысокая скорость", fontsize=9, color='gray', ha='center')
-ax.text(8, 18, "↗ современные LLM,\nвысокая скорость", fontsize=9, color='black', ha='center', fontweight='bold')
-ax.text(2.5, 1, "↙ старые LLM,\nнизкая скорость", fontsize=9, color='gray', ha='center')
-ax.text(8, 1, "↘ современные LLM,\nнизкая скорость", fontsize=9, color='gray', ha='center')
+# Quadrant labels — только верхние, чтобы не перекрывались с data points
+ax.text(2.5, 19, "← старые LLM, высокая скорость", fontsize=9, color='gray', ha='center')
+ax.text(7.5, 19, "современные LLM, высокая скорость →", fontsize=9.5, color='black', ha='center', fontweight='bold')
 
 plt.tight_layout()
 plt.savefig(f"{OUT}/fig1_quadrant.png", dpi=150, bbox_inches='tight')
