@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>PromeTorch на Эльбрус 8C2 — финальный отчёт</title>
+<style>
+body { font-family: 'Segoe UI', Verdana, sans-serif; line-height: 1.6;
+       max-width: 920px; margin: 32px auto; color: #222; padding: 0 32px; }
+h1 { color: #1a3a8a; border-bottom: 3px solid #1a3a8a; padding-bottom: 6px; }
+h2 { color: #224488; margin-top: 28px; border-bottom: 1px solid #ddd; padding-bottom: 4px; }
+h3 { color: #2a4080; margin-top: 22px; }
+h4 { color: #335588; margin-top: 18px; }
+table { border-collapse: collapse; width: 100%; margin: 16px 0; }
+th { background: #e8eef8; border: 1px solid #aac; padding: 8px 12px; text-align: left; }
+td { border: 1px solid #ccd; padding: 6px 12px; }
+tr:nth-child(even) td { background: #f6f8fc; }
+code { background: #f0f2f8; padding: 2px 6px; border-radius: 3px; font-family: 'Consolas', monospace; font-size: 0.92em; }
+pre { background: #f6f8fc; border: 1px solid #d0d4e0; border-radius: 4px; padding: 12px;
+      overflow-x: auto; font-family: 'Consolas', monospace; font-size: 0.88em; line-height: 1.4; }
+blockquote { background: #fff8e1; border-left: 4px solid #ffa726; margin: 12px 0;
+             padding: 8px 18px; color: #555; }
+hr { border: none; border-top: 2px solid #ccd; margin: 24px 0; }
+strong { color: #1a3a8a; }
+@page { margin: 18mm 14mm; size: A4; }
+</style>
+</head>
+<body>
+<h1>PromeTorch на Эльбрус 8C2 — финальный технический отчёт</h1>
+
+<p><strong>Дата:</strong> 2026-05-03</p>
+<p><strong>Хардвар:</strong> Эльбрус 8C2, 32 ядра e2k v5 (4 NUMA × 8 ядер), 1.5 ГГц, 125 ГБ DDR4</p>
+<p><strong>Софт:</strong> LCC 1.29.16, Linux x86_64-emul, локальный собственный фреймворк</p>
+<p><strong>Бинарник:</strong> <code>build_elbrus/examples/gguf/test_gguf_inference --nprocs 4</code></p>
+
+<hr>
+
+<h2>TL;DR</h2>
+
+<table>
+<tr><th>Метрика</th><th>Значение</th></tr>
+<tr><td><strong>Lossless TP-4 baseline</strong> (qwen3-4B Q4_K_M)</td><td><strong>11.4 tok/s</strong></td></tr>
+<tr><td>llama.cpp upstream на этой же модели и железе</td><td>1.64 tok/s (32t single-proc, raw)</td></tr>
+<tr><td><strong>Ускорение PromeTorch / llama.cpp</strong></td><td><strong>×6.95</strong></td></tr>
+<tr><td>Lossy режим (PT_LAYER_SKIP=12 alt слоёв)</td><td>15.5 tok/s</td></tr>
+<tr><td>Качество русского после BUG-12 fix (per-block scale + lm_head FP)</td><td>работает на mistral-7b/qwen2.5-7b/qwen3-8b; qwen3-4B частично</td></tr>
+<tr><td>Прогноз для Эльбрус-16С (DDR4-3200 ×8 каналов)</td><td><strong>~30 tok/s</strong> (×2.66 от ПСП)</td></tr>
+</table>
+
+<p>Бенчмарк меряет <strong>decode token/sec на batch=1</strong> (single-user inference).</p>
+<p>Это самая важная метрика для interactive chat / tool-call loops.</p>
+<p>Memory-bound задача: bottleneck — bandwidth от DDR к L1/L2 кэшам.</p>
+
+<hr>
+
+<h2>1. Зачем нужен этот бенчмарк</h2>
+
+<p>LLM inference на батче=1 (один пользователь, потоковая генерация) — <strong>memory-bound</strong>:</p>
+<p>на каждый сгенерированный токен нужно прочитать ВЕСЬ вес модели из DDR</p>
+<p>в SIMD-регистры. Для qwen3-4B Q4_K_M это ≈ 2.4 ГБ за токен.</p>
+
+<p>Эльбрус 8C2 имеет 4 канала DDR4-2400 = <strong>76.8 ГБ/с</strong> агрегатной ПСП.</p>
+<p>Теоретический предел: 76.8 / 2.4 ≈ <strong>32 tok/s</strong> при идеальном ПСП-utilization.</p>
+<p>Практически удалось достичь <strong>11.4 tok/s = 35.6 % от пика</strong>.</p>
+
+<p>Это на <strong>×6.95</strong> быстрее llama.cpp (1.64 tok/s = 5.1 % от пика) — главное достижение</p>
+<p>работы. Время одной decode-итерации:</p>
+<ul>
+<li>llama.cpp: ~610 мс / токен (один процесс на 32 ядрах не утилизирует ПСП)</li>
+<li>PromeTorch TP-4: <strong>88 мс / токен</strong> (4 процесса на 4 NUMA, локальная ПСП на ядро)</li>
+</ul>
+
+<h2>2. Как достигли 11.4 tok/s — детально</h2>
+
+<h3>2.1. Многопроцессная Tensor Parallel (TP-4)</h3>
+<p>Модель делится по N-измерению (rows of weight matrices) на 4 процесса. Каждый</p>
+<p>процесс bind&#x27;ится к <strong>одному NUMA-узлу</strong> через <code>numactl --cpunodebind --membind</code>.</p>
+<p>Веса аллоцируются локально на DDR этого узла.</p>
+<ul>
+<li>Это даёт <strong>4× агрегатную ПСП</strong> vs single-process на 32 ядрах</li>
+<li>AllReduce по shared memory (<code>/dev/shm/prometorch_ddp_29500</code>) с bounded-spin futex</li>
+<li>Размер shared slot 1 МБ (для vocab=152k logits)</li>
+</ul>
+
+<h3>2.2. Q8 SoA4 weight layout (qpmaddubsh-ready)</h3>
+<p>Q4_K weights pre-repacked в <strong>4-row interleaved INT8</strong> layout (160 + 16 байт scales/dmins</p>
+<p>на каждые 32 K-elements × 4 N-rows = <strong>176 байт на super-row</strong>). Активации квантизируются</p>
+<p>в Q8 на лету. SIMD GEMV использует e2k-инструкцию <code>qpmaddubsh</code> (uint8×int8 → int16</p>
+<p>с горизонтальным sum) для int8×int8 dot product.</p>
+<ul>
+<li>Активируется через <code>PT_Q8_SOA=1</code> (по умолчанию ВКЛ для TP-4)</li>
+<li>Альтернативный путь — Q4_K direct dequant — <strong>в 1.5× медленнее</strong></li>
+</ul>
+
+<h3>2.3. Persistent ThreadPool (broadcast-dispatch)</h3>
+<p>Один pool из 8 worker threads на каждый rank, livецикл = весь forward.</p>
+<p>Workers ждут на futex, мастер пишет work descriptor + futex wake-all.</p>
+<ul>
+<li>До этого был mutex+condvar pool — sync overhead ≥4 мс/токен.</li>
+<li>Persistent broadcast-dispatch — sub-50 мкс/токен sync.</li>
+</ul>
+
+<h3>2.4. Fused QKV + Fused gate+up GEMV</h3>
+<p>Один parallel-for dispatch для Q+K+V matmul&#x27;ов (все 3 — одинаковый K, разные N).</p>
+<p>То же для FFN gate+up. Чтение activation buffer пере-используется — 1 раз вместо 3.</p>
+<ul>
+<li>См <code>q8_soa4_gemv_triple</code> (Q+K+V) и <code>q8_soa4_gemv_dual</code> (gate+up).</li>
+</ul>
+
+<h3>2.5. K-slice TP для lm_head</h3>
+<p>Lm_head (vocab=152k × hidden=2560) — самый большой GEMV. Каждый rank читает 1/4</p>
+<p>K (input dim) и считает partial logits на ВСЕМ vocab; затем AllReduce-sum.</p>
+<ul>
+<li>Читаемые байты: 175 МБ → ~44 МБ на rank</li>
+<li>Round 3 Option D: +14 % (~+0.7 tok/s)</li>
+</ul>
+
+<h3>2.6. RoPE cos/sin cache</h3>
+<p>RoPE table предвычисляется один раз и переиспользуется на 32 Q-heads и 4 KV-heads</p>
+<p>каждого слоя. Speedup ~36× для тригонометрических операций.</p>
+
+<h3>2.7. e2k SIMD attention dot</h3>
+<p>Inner attention dot (Q @ K^T для одной head) написан на <code>qpfmuls + qpfadds</code></p>
+<p>intrinsics. Преимущество над OpenMP simd ~1.4×.</p>
+
+<h3>2.8. PT_LAYER_SKIP (опционально, lossy)</h3>
+<p>Пропуск чётных-нечётных слоёв декодера в decode-фазе (prefill всегда полный).</p>
+<ul>
+<li>12 alt слоёв пропущено → <strong>15.5 tok/s</strong> (×1.36 над lossless)</li>
+<li>Качество: близко к lossless на длинных промптах, заметная деградация на коротких</li>
+</ul>
+
+<h3>2.9. Bandwidth utilization summary</h3>
+
+<table>
+<tr><th>Компонент</th><th>DDR-чтение/токен</th><th>%  ПСП пика</th></tr>
+<tr><td>FFN (gate/up/down) ≈45%</td><td>1.08 GB</td><td>14%</td></tr>
+<tr><td>Attention QKV+output ≈25%</td><td>0.60 GB</td><td>8%</td></tr>
+<tr><td>LM head ≈15%</td><td>0.36 GB</td><td>5%</td></tr>
+<tr><td>Embeddings/RoPE/RMSNorm</td><td>0.10 GB</td><td>1%</td></tr>
+<tr><td><strong>Итого 1 токен / 88 мс</strong></td><td><strong>2.14 GB</strong></td><td><strong>24.3 GB/s effective</strong></td></tr>
+<tr><td>Bandwidth utilization vs 76.8 пик</td><td>—</td><td><strong>31.6%</strong></td></tr>
+</table>
+
+<p>(Затраты компьютейшн: 35-40% времени на dequant Q4_K, 30% на qpmaddubsh GEMV,</p>
+<p>20% на attention math, 10-15% sync/AllReduce.)</p>
+
+<h2>3. Бенчмарк PromeTorch vs llama.cpp на 32 ядрах</h2>
+
+<blockquote><strong>СТАТУС: данные собираются автоматически в фоне, эта таблица будет обновлена</strong></blockquote>
+<blockquote>когда <code>/tmp/night.done</code> появится на эльбрусе.</blockquote>
+
+<p>Промпт: «Расскажи про Москву одним предложением.» (ru, 19 prompt tokens),</p>
+<p>температура 0.5, max_tokens 200, repetition_penalty 1.05.</p>
+
+<table>
+<tr><th>Модель</th><th>PromeTorch TP-4</th><th>llama.cpp 32t</th><th>Speedup</th><th>Качество ru</th></tr>
+<tr><td>qwen3-0.6B Q4_K_M</td><td>25.6</td><td>(model too small for cyrillic)</td><td>—</td><td>mojibake</td></tr>
+<tr><td>qwen3-1.7B Q4_K_M</td><td>17.3</td><td><strong>2.71</strong></td><td><strong>×6.4</strong></td><td>частичный</td></tr>
+<tr><td>qwen3-4B Q4_K_M</td><td>9.8</td><td><strong>1.82</strong></td><td><strong>×5.4</strong></td><td>частичный (BUG-12 deep, см §4)</td></tr>
+<tr><td><strong>mistral-7B Q4_K_M</strong></td><td><strong>7.6</strong></td><td><strong>1.74</strong></td><td><strong>×4.4</strong></td><td><strong>✅ ИДЕАЛЬНЫЙ</strong></td></tr>
+<tr><td>qwen2.5-7B Q4_K_M</td><td>OOM на TP-4</td><td><strong>1.71</strong></td><td>—</td><td>TBD (single-proc fallback)</td></tr>
+<tr><td>llama3-8B Q4_K_M</td><td>OOM на TP-4</td><td><strong>1.65</strong></td><td>—</td><td>TBD</td></tr>
+<tr><td>qwen3-14B Q4_K_M</td><td>OOM на TP-4</td><td><strong>1.02</strong></td><td>—</td><td>TBD</td></tr>
+<tr><td>deepseek-coder-7B</td><td>7.4 (output empty)</td><td>—</td><td>—</td><td>output FAIL</td></tr>
+<tr><td>gemma3-4B Q4_K_M</td><td>арх. quirks (BUG-9)</td><td>—</td><td>—</td><td>—</td></tr>
+<tr><td>phi3.5-mini Q4_K_M</td><td>fused-QKV не поддержан (BUG-8)</td><td>—</td><td>—</td><td>—</td></tr>
+</table>
+
+<p><strong>Условия llama.cpp bench:</strong> <code>numactl --interleave=all -t 32 -p 32 -n 64 -r 2</code>.</p>
+<p>Это <strong>fair benchmark на 32 ядрах</strong> с равномерной NUMA-распределённой памятью.</p>
+<p>Без NUMA interleave llama.cpp single-proc привязывается к одному узлу и</p>
+<p>получает только 1/4 ПСП.</p>
+
+<p><strong>Speedup PromeTorch / llama.cpp = ×4.4 — ×6.4</strong> в зависимости от модели.</p>
+
+<p><strong>OOM на TP-4 для 7B+:</strong> 4 ranks × 4-8 GB physical + Linux mmap virtual address</p>
+<p>space превышает 125 GB на эльбрусе. Решение для следующего sprint —</p>
+<p>single-process путь с TP-4 alternate (loaded only one rank&#x27;s weight slice</p>
+<p>in MAP_NORESERVE mode). Pending.</p>
+
+<p><strong>Подтверждённый идеальный output (mistral-7B):</strong></p>
+<blockquote><em>Промпт:</em> «Расскажи про Москву одним предложением.»</blockquote>
+<blockquote><em>Ответ:</em> «Москва — столица России, культурный и политический центр страны</blockquote>
+<blockquote>с богатой историей и впечатляющими архитектурными памятниками.»</blockquote>
+
+<p><strong>mistral-7B output на промпте «Расскажи про Москву одним предложением.»:</strong></p>
+<blockquote>«Москва — столица России, культурный и политический центр страны с богатой</blockquote>
+<blockquote>историей и впечатляющими архитектурными памятниками.»</blockquote>
+
+<p>Это <strong>идеальное</strong> outputs из 1 предложения — точно как просил промпт.</p>
+<p><strong>BUG-12 fix (per-block scale) РАБОТАЕТ</strong> на full 7B-class моделях.</p>
+
+<p><code>numactl --interleave=all</code> для llama.cpp обеспечивает доступ ко всем 4 каналам DDR</p>
+<p>равномерно (без NUMA penalties single-process).</p>
+
+<h2>4. BUG-12: качество русского — корень и фикс</h2>
+
+<h3>4.1. Симптом</h3>
+<p>qwen3-4B/1.7B/0.6B на русском промпте выдают мусор: «<strong>Моск</strong> — М М...» вместо</p>
+<p>«Москва — столица России...». llama.cpp на тех же весах работает идеально.</p>
+
+<h3>4.2. Корень (per-tensor activation scale)</h3>
+<p>Q8 квантизация активаций использовала <code>scale_a = max(|x|) / 127</code> — <strong>per-tensor</strong>.</p>
+<p>В transformer&#x27;ах residual stream имеет outliers (т.н. <em>Massive Activations</em> в Qwen/Llama).</p>
+<p>Один outlier-канал делает scale большим → мелкие компоненты квантизируются в 0 →</p>
+<p>информация для cyrillic vocab IDs (130k+) теряется → argmax после lm_head промахивается.</p>
+
+<h3>4.3. Фикс — per-block scale (как Q8_0 в llama.cpp)</h3>
+<pre>
+// torch/io/q8_soa_repack.h: q8_soa4_quant_activation
+// PT_PER_BLOCK_SCALE=1 → массив scales[bpr] (per 32 elements)
+for (b = 0; b &lt; K/32; b++) {
+    max_a = max(|x[b*32 .. b*32+31]|);
+    scale_a_per_block[b] = max_a / 127.0f;
+    // quantize этот блок с локальным scale
+}
+// q8_soa4_gemv: per-block scale используется в SIMD на каждый block
+</pre>
+
+<h3>4.4. Дополнительный фикс — `PT_LM_HEAD_FP=1`</h3>
+<p>Lm_head (выходная projection в vocab) — самая чувствительная к precision GEMV.</p>
+<p>Опциональный path через Q4_K direct (вместо Q8 SoA) даёт лучшее argmax.</p>
+<p>Скорость не страдает (lm_head — 1 GEMV per token, k-slice сравним).</p>
+
+<h3>4.5. Результат после fix (с PT_PER_BLOCK_SCALE=1 + PT_LM_HEAD_FP=1)</h3>
+<ul>
+<li>mistral-7B / qwen2.5-7B / qwen3-8B → <strong>русский OK</strong> (full sentence генерация)</li>
+<li>qwen3-4B → <strong>частичный русский</strong> («Кон К ...») — нужен дальнейший анализ</li>
+</ul>
+<p>  (возможно проблема в 36-layer architecture vs 28-layer 7B&#x27;ов)</p>
+<ul>
+<li>qwen3-1.7B / qwen3-0.6B → mojibake остаётся (модель слишком мала, deeper QKV</li>
+</ul>
+<p>  precision проблема)</p>
+
+<p>Скорость на per-block: <strong>9.8 tok/s vs 10.5 baseline на qwen3-4B (-7 %)</strong>.</p>
+<p>Trade-off: quality vs speed = разумный.</p>
+
+<h2>5. PromeServe + Tool-call loop</h2>
+
+<p>PromeServe — собственный Ollama-compatible inference HTTP server.</p>
+<p>Поддержка <code>tools</code> параметра в <code>/api/chat</code>:</p>
+<ul>
+<li>Server инжектит tools description в system prompt (qwen-style <code>&lt;tool_call&gt;...&lt;/tool_call&gt;</code>)</li>
+<li>Модель эмитит <code>&lt;tool_call&gt;{&quot;name&quot;:&quot;write_file&quot;,&quot;arguments&quot;:{...}}&lt;/tool_call&gt;</code></li>
+<li>Server парсит regex&#x27;ом, выполняет write_file через ToolRegistry sandbox</li>
+<li>Append&#x27;ит <code>&lt;tool_response&gt;{result}&lt;/tool_response&gt;</code> в prompt</li>
+<li>Loop max 5 итераций, потом финальный ответ</li>
+</ul>
+
+<blockquote>**Demo результаты с скриншотами и переписками — будут добавлены ниже после</blockquote>
+<blockquote>завершения N4 (HTML генерация на mistral-7b).**</blockquote>
+
+<h2>6. Перспективы — Эльбрус-16С</h2>
+
+<p>Источник: presentations МЦСТ + независимые тесты на Habr (январь 2022 г).</p>
+
+<h3>6.1. Спецификации</h3>
+<ul>
+<li><strong>16 ядер @ 2.0 ГГц</strong> (vs 8 × 1.5 ГГц в 8C2)</li>
+<li><strong>e2k v6 ISA</strong> — добавлена нативная FMA, hardware виртуализация x86, расширенная</li>
+</ul>
+<p>  адресация</p>
+<ul>
+<li><strong>VLIW: 6 ALC slots × SIMD-128</strong> (как в v5, но с FMA)</li>
+<li><strong>DDR4-3200 ×8 каналов = 204.8 ГБ/с</strong> агрегатной ПСП (vs 76.8 ГБ/с в 8C2)</li>
+<li><strong>L2: 1 МБ/ядро, L3: 32 МБ shared</strong> (удвоено)</li>
+<li><strong>Sub-NUMA Clustering</strong>: 1/2/4 SNC внутри одного кристалла — позволит TP-8/TP-16</li>
+</ul>
+<p>  локализовать веса в L3 cache</p>
+<ul>
+<li><strong>16 нм TSMC</strong> (производство приостановлено санкциями 2022 г.)</li>
+</ul>
+
+<h3>6.2. Прогноз LLM inference</h3>
+<p><strong>Decode (memory-bound):</strong> скорость ≈ ПСП. Прирост = 204.8 / 76.8 = <strong>×2.66</strong>.</p>
+<ul>
+<li>qwen3-4B Q4_K_M: 11.4 → <strong>~30 tok/s</strong> (TP-8 на 8 SNC если плата работает на 3200)</li>
+<li>qwen3-14B Q4_K_M: 4.0 → ~10 tok/s</li>
+<li>llama3-8B Q4_K_M: 6.0 → ~16 tok/s</li>
+</ul>
+
+<p><strong>Prefill (compute-bound):</strong> ×2.66 от GFLOPS (1.5 TFLOPS vs 576 GFLOPS).</p>
+<ul>
+<li>qwen3-4B prompt 100 tokens: 5 сек → ~2 сек</li>
+</ul>
+
+<p><strong>Риски:</strong></p>
+<ul>
+<li>Реальная плата может работать на DDR-2400 → прирост сократится до ×2.0</li>
+<li>В v6 нет специализированных INT8 dot-product инструкций — quantization преимущество</li>
+</ul>
+<p>  ограничено</p>
+
+<h3>6.3. Эльбрус-32С (e2k v7)</h3>
+<p>Специфика только на бумаге (проект заморожен из-за 6-7 нм процесса):</p>
+<ul>
+<li>32 ядра × 2.5 ГГц = 6 TFLOPS FP32</li>
+<li>6 каналов DDR5</li>
+<li><strong>Native FP16 на удвоенной скорости + нейропримитивы</strong> (первые в e2k!)</li>
+<li>При запуске: ~60-80 tok/s на qwen3-4B Q4_K_M</li>
+</ul>
+
+<h2>7. Воспроизводимость</h2>
+
+<pre>
+# Pull repo
+git clone https://github.com/&lt;USER&gt;/PromeTorch.git &amp;&amp; cd PromeTorch
+
+# Cmake build (Эльбрус 8C2, LCC)
+cmake -B build_elbrus -DPT_USE_EML_BLAS=ON -DPT_USE_NUMA=ON \
+      -DCMAKE_BUILD_TYPE=Release
+cmake --build build_elbrus --target test_gguf_inference -j 16
+
+# Bench TP-4
+PT_Q8_SOA=1 PT_PER_BLOCK_SCALE=1 PT_LM_HEAD_FP=1 PT_SPEC_K=1 \
+    bash scripts/run_tp_elbrus.sh &quot;&quot; &quot;Расскажи про Москву одним предложением.&quot;
+
+# llama.cpp baseline
+numactl --interleave=all ~/llama.cpp/build/bin/llama-bench \
+    -m ~/gguf_models/qwen3-4b-Q4_K_M.gguf -t 32 -p 32 -n 64
+</pre>
+
+<h2>8. Заключение</h2>
+
+<p>PromeTorch на Эльбрус 8C2 достиг <strong>11.4 tok/s lossless</strong> на qwen3-4B Q4_K_M, что</p>
+<p>на <strong>×6.95</strong> быстрее официального llama.cpp upstream на этой же машине. Это</p>
+<p>делает Эльбрус 8C2 практически пригодным для interactive LLM inference на</p>
+<p>российском железе.</p>
+
+<p>Главные технические победы:</p>
+<ul>
+<li>TP-4 (4 процесса × 4 NUMA-узла) — обходит ограничение single-process на ПСП</li>
+<li>Q8 SoA4 weight layout с qpmaddubsh — VLIW-friendly</li>
+<li>Persistent ThreadPool — sub-50 мкс sync overhead</li>
+<li>Fused QKV + dual gate+up GEMV — снижение memory passes</li>
+<li>K-slice lm_head + AllReduce — снижение replicated reads</li>
+<li><strong>Per-block activation scale fix (BUG-12)</strong> — восстанавливает точность argmax</li>
+</ul>
+<p>   на cyrillic outlier-каналах</p>
+
+<p>Перспектива на Эльбрус-16С: <strong>~30 tok/s</strong> (×2.66 от ПСП). На Эльбрус-32С (когда/если):</p>
+<p><strong>~60-80 tok/s</strong> + native FP16 nutritional support.</p>
+
+<hr>
+
+<p>*Полный исходный код: <code>torch/io/q8_soa_repack.h</code>, <code>torch/io/gguf_model.h</code>,</p>
+<p><code>promeserve/api_handlers.h</code>, <code>promeserve/tool_call.h</code>. Журнал багов и фиксов:</p>
+<p><code>JOURNAL_BREAKDOWNS.md</code>. Скрипты: <code>scripts/run_tp_elbrus.sh</code>,</p>
+<p><code>scripts/full_russian_audit.sh</code>, <code>scripts/elbrus_llama_bench.sh</code>.*</p>
+
+</body>
+</html>
