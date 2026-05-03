@@ -1787,8 +1787,17 @@ public:
             else return;
 
             auto shape = info.shape();
-            qw.rows = shape[0];
-            qw.cols = shape[1];
+            // shape() returns reversed dims: GGUF [ne0, ne1, ne2] -> [ne2, ne1, ne0].
+            // 2D tensor: shape = [rows, cols] (output, input).
+            // 3D tensor: shape = [n_slices, rows_per_slice, cols_per_slice].
+            //   rows = ne[1] = output dim per slice; cols = ne[0] = input dim.
+            if (shape.size() >= 3) {
+                qw.rows = shape[1];     // output dim per slice
+                qw.cols = shape[2];     // input dim per slice (innermost, contiguous)
+            } else {
+                qw.rows = shape[0];
+                qw.cols = shape[1];
+            }
             qw.row_stride_bytes = (qw.cols / group_size) * block_bytes;
             qw.total_bytes = info.data_bytes();
             qw.quant_type = type;
@@ -6723,9 +6732,11 @@ public:
             // (loaded as quantized only — no FP32 versions). Skip the
             // standard Q/K/V FP32 loading path entirely.
             if (config.is_mla) {
-                if (reader.has_tensor(prefix + "attn_q.weight")) {
-                    // Quantized Q4_K weights handled in load_quantized_mmap;
-                    // we only need attn_norm + attn_kv_a_norm in FP32.
+                // FP32 norms: attn_norm (already loaded above), ffn_norm,
+                // and attn_kv_a_norm (deepseek2-specific, applied to latent KV).
+                if (reader.has_tensor(prefix + "attn_kv_a_norm.weight")) {
+                    layer.attn_kv_a_norm =
+                        reader.load_tensor(prefix + "attn_kv_a_norm.weight");
                 }
                 layer.ffn_norm = reader.load_tensor(prefix + "ffn_norm.weight");
                 if (i + 1 == config.num_layers || (i + 1) % 5 == 0) {
