@@ -114,3 +114,4 @@ promeserve/TOOL_CALL_PLAN.md
 scripts/_build_cpu_gan.bat
 scripts/run_cifar.bat
 scripts/run_cifar_smoke.bat
+.tmp_*
