@@ -138,12 +138,23 @@ cyrillic vocab IDs. Активация — env `PT_PER_BLOCK_SCALE=1`.
 
 | Модель | PromeTorch TP-4 | llama.cpp 32t | Speedup | Russian |
 |---|---:|---:|---:|:---:|
-| qwen3-1.7B | 17.3 | 2.71 | **×6.4** | частично |
-| qwen3-4B | 9.8 | 1.82 | **×5.4** | частично (см `PT_NO_FFN_SOA=1`) |
-| **mistral-7B** | **7.6** | 1.74 | **×4.4** | **✅ идеально** |
-| qwen2.5-7B | (OOM TP-4) | 1.71 | — | TBD |
+| qwen3-1.7B | 17.1 | 2.71 | **×6.3** | **✅ идеально** ¹ |
+| qwen3-4B | 8.0 | 1.82 | **×4.4** | **✅ идеально** ¹ |
+| **mistral-7B** | **5.1** | 1.74 | **×2.9** | **✅ идеально** |
+| qwen2.5-7B | (OOM TP-4) | 1.71 | — | **✅ идеально** SP ¹ |
+| **gemma3-4B** | n/a ² | 1.30 | — | **✅ structured markdown** SP ¹ |
 | llama3-8B | (OOM TP-4) | 1.65 | — | TBD |
 | qwen3-14B | (OOM TP-4) | 1.02 | — | TBD |
+| phi3.5-mini | broken ³ | 1.45 | — | TBD ³ |
+
+> **¹** После NEOX RoPE fix (2026-05-03 commit `b144db2`). Архитектуры qwen/qwen2/
+> qwen3/gemma3/phi3 требуют LongRoPE-style half-split rotation `(d, d+head_dim/2)`
+> вместо interleaved `(2d, 2d+1)`. Mistral arch=`llama` остался на NORM, регрессии нет. &nbsp;
+> **²** gemma3 TP-4 нужен gather/re-slice для `post_attention_norm` — single-proc
+> работает идеально. &nbsp;
+> **³** phi3.5-mini требует deeper Q5_K layout debug — все 7 fix'ов (LongRoPE,
+> attn_factor, merged QKV split, chat template, owns_cpu_data, NEOX, post_norm)
+> применены, но output остаётся `<unk>×60`.
 
 **Запуск с надёжным русским на qwen3 family:**
 ```bash
