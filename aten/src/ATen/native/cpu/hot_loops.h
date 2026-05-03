@@ -381,6 +381,15 @@ void rope_precompute(float* cos_out, float* sin_out,
                      const float* rope_factors = nullptr,
                      float attn_factor = 1.0f);
 
+// YaRN RoPE precompute (DeepSeek-V2/V3, GigaChat3 deepseek2).
+// See implementation in hot_loops.cpp for full formula and parameter docs.
+void rope_precompute_yarn(float* cos_out, float* sin_out,
+                          int64_t pos, int64_t head_dim,
+                          float base, float factor,
+                          float beta_fast, float beta_slow,
+                          int64_t orig_ctx,
+                          float log_multiplier);
+
 } // namespace hot
 } // namespace native
 } // namespace at
