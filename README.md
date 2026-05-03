@@ -143,18 +143,21 @@ cyrillic vocab IDs. Активация — env `PT_PER_BLOCK_SCALE=1`.
 | **mistral-7B** | **5.1** | 1.74 | **×2.9** | **✅ идеально** |
 | qwen2.5-7B | (OOM TP-4) | 1.71 | — | **✅ идеально** SP ¹ |
 | **gemma3-4B** | n/a ² | 1.30 | — | **✅ structured markdown** SP ¹ |
+| **phi3.5-mini** | TBD | 3.5 SP | — | **✅ связный RU+EN** SP ³ |
 | llama3-8B | (OOM TP-4) | 1.65 | — | TBD |
 | qwen3-14B | (OOM TP-4) | 1.02 | — | TBD |
-| phi3.5-mini | broken ³ | 1.45 | — | TBD ³ |
 
 > **¹** После NEOX RoPE fix (2026-05-03 commit `b144db2`). Архитектуры qwen/qwen2/
 > qwen3/gemma3/phi3 требуют LongRoPE-style half-split rotation `(d, d+head_dim/2)`
 > вместо interleaved `(2d, 2d+1)`. Mistral arch=`llama` остался на NORM, регрессии нет. &nbsp;
 > **²** gemma3 TP-4 нужен gather/re-slice для `post_attention_norm` — single-proc
 > работает идеально. &nbsp;
-> **³** phi3.5-mini требует deeper Q5_K layout debug — все 7 fix'ов (LongRoPE,
-> attn_factor, merged QKV split, chat template, owns_cpu_data, NEOX, post_norm)
-> применены, но output остаётся `<unk>×60`.
+> **³** phi3.5-mini FIXED 2026-05-03 (commit `d9dce9e`): `load_quantized_mmap` не
+> обрабатывал phi3 merged tensors (`attn_qkv.weight`, `ffn_up.weight`
+> rows=2×inter). После split_from_mmap helper — связный текст RU («Космос - это
+> всеобъемлющая область пространства...») и EN («Moscow, the capital city of
+> Russia, is not only the political heart of the country but also a vibrant
+> cultural and economic center...»).
 
 **Запуск с надёжным русским на qwen3 family:**
 ```bash
