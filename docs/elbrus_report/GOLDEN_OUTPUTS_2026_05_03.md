@@ -194,3 +194,18 @@ SP-only (TP-4 OOM):
 | llama3-8B | 2.7 | 1.65 | ×1.6 | ✅ |
 | deepseek-coder-7B | 3.0 | n/a | (SP) | ✅ Python code |
 | qwen3-14B | 1.5 | 1.02 | ×1.5 | ✅ + CoT |
+
+## Multi-step tool-call demo
+
+3 разных dense HTML проекта сгенерированы через qwen3-4B TP-4 + tool-call loop:
+
+| Тема | HTML | PNG screenshot | Размер |
+|---|---|---|---:|
+| Москва | `demo_html/moscow_v2.html` | `demo_html/moscow_v2.png` | 1996 B |
+| Космос | `demo_html/cosmos.html` | `demo_html/cosmos.png` | 1738 B |
+| ИИ | `demo_html/ai.html` | `demo_html/ai.png` | 3397 B |
+
+Каждый проект: model emits `<tool_call>{"name":"write_file",...}</tool_call>`,
+bash + python lenient extractor парсит и сохраняет файл. Generation
+average: 547 tokens / 92.2s = 5.9 tok/s effective (TP-4 setup overhead +
+qwen3 native chat template + /no_think prefix для bypass CoT thinking).
