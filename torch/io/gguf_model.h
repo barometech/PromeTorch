@@ -5195,6 +5195,8 @@ public:
             }
 
             // --- QK-norm (per-head) ---
+            // BUG-12 диагностика: PT_NO_QK_NORM=1 пробовали — output ХУЖЕ
+            // (китайский+мусор) → qk_norm правильно работает, проблема глубже.
             if (layer.attn_q_norm.defined()) {
                 const float* qn_w = layer.attn_q_norm.data_ptr<float>();
                 const float* kn_w = layer.attn_k_norm.data_ptr<float>();
