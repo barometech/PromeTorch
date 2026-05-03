@@ -78,11 +78,11 @@
     <td><span class="badge badge-part">capacity issue, не RoPE</span></td></tr>
 
 <tr><td><b>gemma3-4B Q4_K_M</b></td>
-    <td class="fail">✗ Unicode garbage</td>
-    <td class="fail">✗ Unicode garbage</td>
+    <td class="partial">⚠ «Привет» + Unicode</td>
+    <td class="fail">✗ «Okay» + Unicode</td>
     <td class="cell-num">4.6</td><td>—</td>
-    <td><code>neox</code></td>
-    <td><span class="badge badge-fail">требует per-layer alternating RoPE + SWA</span></td></tr>
+    <td><code>neox</code> per-layer</td>
+    <td><span class="badge badge-part">PROGRESS: per-layer SWA infrastructure (`91a6df4`) даёт responsive 1-й токен; нужен ещё bisect</span></td></tr>
 
 <tr><td><b>phi3.5-mini Q4_K_M</b></td>
     <td class="fail">✗ <code>&lt;unk&gt;&lt;unk&gt;…</code> + heap corruption</td>
