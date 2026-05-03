@@ -3,6 +3,36 @@
 Полная история разработки проекта. Актуальные инструкции — в `CLAUDE.md`.
 Полный аудит инфраструктуры — в `INFRASTRUCTURE_AUDIT.md`.
 
+## 2026-05-03 (вечер): phi3.5-mini ROOT CAUSE — load_quantized_mmap не обрабатывал merged tensors
+
+После 7+ предыдущих гипотез (LongRoPE, Q5_K kernel, attn_qkv permutation,
+quant_gemv path) **bisect через PT_NO_QUANT_GEMV=1** дал решающий результат:
+
+* **DEFAULT (quant path):** `bom<unk><unk>×40` — мусор, 6.3 tok/s
+* **PT_NO_QUANT_GEMV=1 (FP path):** «Moscow, the capital city of Russia,
+  is a sprawling metropolis with a rich history and vibrant culture.
+  It's known for its iconic landmarks like the Kreml» — связный английский,
+  0.2 tok/s (FP fallback ~30× slower)
+
+**Root cause** (commit `d9dce9e`): `load_quantized_mmap()` — default path
+в `load()` — НЕ ОБРАБАТЫВАЕТ merged tensors phi3 (`attn_qkv.weight` +
+`ffn_up.weight` rows=2*intermediate). split_quant_rows жил только в
+`load_quantized_to_cpu` (fallback path). После mmap для phi3:
+`layer.q_attn_q/k/v.valid = false`, `q_ffn_gate.valid = false`,
+`q_ffn_up.rows = 16384` вместо 8192. forward_decode_cpu пропускал
+cpu_quant_gemv (не выполнялся) → sp.q_buf оставался garbage memory →
+RoPE на мусоре → softmax NaN → argmax → token 0 (`<unk>`).
+
+**Fix:** `split_from_mmap` helper — malloc + memcpy слайсов из mmap region.
+Cost: ~1.5 GB extra при загрузке phi3, acceptable. Backward-compat OK
+(mistral/qwen3/llama3/gemma3 имеют separate tensors → first branch).
+
+**Урок bisect истории:** проверял 13+ гипотез про phi3 (LongRoPE
+rope_factors, Q5_K kernel, AVX2 vs scalar, chat template, owns_cpu_data
+heap corruption и т.д.). Корень оказался в **load path**, не в forward
+kernel. Урок: проверять что данные вообще загружены ПЕРЕД погружением
+в kernels.
+
 ## 2026-05-03 (PM): Multi-model fix marathon — qwen3/gemma3 РАБОТАЮТ; phi3 в работе
 
 Расширили session за пределы ночной N1-N8 работы (которая закрыта давно).
