@@ -3,6 +3,79 @@
 Полная история разработки проекта. Актуальные инструкции — в `CLAUDE.md`.
 Полный аудит инфраструктуры — в `INFRASTRUCTURE_AUDIT.md`.
 
+## 2026-05-03 (PM): Multi-model fix marathon — qwen3/gemma3 РАБОТАЮТ; phi3 в работе
+
+Расширили session за пределы ночной N1-N8 работы (которая закрыта давно).
+Найдены и пофикшены ROOT CAUSES для нескольких архитектур:
+
+### qwen3 family — NEOX RoPE convention (commit `b144db2`)
+Корень: llama.cpp `LLM_ARCH_QWEN3` → `LLAMA_ROPE_TYPE_NEOX` (half-split
+`(d, d+head_dim/2)`). Наш код применял interleaved `(2d, 2d+1)` — это
+`LLAMA_ROPE_TYPE_NORM`, корректный только для llama/mistral. Для qwen/gemma/
+phi3 нужен NeoX. Magnitude hidden state совпадал с mistral, но direction
+сдвинут — Q/K вращали не те координаты.
+
+Fix: добавлены `rope_apply_fused_neox` функция, `ModelConfig::rope_neox`
+детектится по architecture, dispatch во всех 4 CPU callsites RoPE.
+
+* qwen3-4B/1.7B Russian + English связный текст
+* mistral-7B (arch=`llama`) — `rope=norm` сохранён, регрессии нет
+* qwen2.5-7B + qwen3-8B — работают
+
+### gemma3-4B — per-layer alternating SWA + post_attn_norm placement + GeGLU
+Три fix'а сразу (commits `91a6df4`, `01d9e59`, `007d924`):
+1. Per-layer alternating: каждые 5 из 6 слоёв — local SWA (window=1024,
+   freq_base=10000, scale=1.0); 6-й — global (freq_base=1e6, scale=8.0).
+2. post_attention_norm применяется ПОСЛЕ output_proj (мы делали ДО).
+3. GeGLU вместо SwiGLU — Gemma family использует `LLM_FFN_GELU`.
+
+Result: «Космос – это всё, что находится за пределами Земли. Это огромная,
+почти бесконечная пустота, заполненная звездами, планетами, галактиками
+и другими невероятными объектами. **Вот основные моменты:** * **Звезды:**
+Огром...» — STRUCTURED markdown русский!
+
+### phi3.5-mini — pending (rebuild12 на ходу)
+- ✅ Merged QKV/gate+up split в loader (commit `445dee4`)
+- ✅ Phi-3 chat template `<|user|>...<|end|><|assistant|>`
+- ✅ `owns_cpu_data` flag fix для double-free corruption (`197d658`)
+- ✅ LongRoPE `rope_factors_short/long` per-frequency divisor (`5e3d1a0`)
+- 🔧 YaRN `attn_factor=1.190238` (mscale) — multiplies cos/sin (`a8c7efc`)
+- Текущий output: первый случайный токен ("bom","successful","ered") + `<unk>×60`
+
+### Performance / non-regression
+* Mistral/qwen3/qwen2.5: rope=norm/neox per arch, регрессии нет.
+* gemma3-4B: 4.6 tok/s SP с GELU.
+* qwen3-4B: 5.4 tok/s SP / 8.0 TP-4 (per-block scale + correct Russian, vs
+  прежний 11.4 + broken Russian — quality > speed выбор юзера).
+* AVX2 SiLU fast path сохранён через if/else — qwen3 baseline не упал.
+
+### Infrastructure добавлена
+* `ModelConfig` расширен: `rope_neox`, `rope_scale`, `rope_swa_freq_base`,
+  `rope_swa_scale`, `swa_window`, `swa_pattern`, `ffn_gelu`,
+  `rope_factors_short/long`, `rope_orig_ctx`, `rope_attn_factor`.
+* `layer_is_global(i)`, `layer_rope_freq_base(i)`, `layer_rope_scale(i)`,
+  `rope_factors_for(seq_len)` helpers.
+* `hot_loops.h::rope_precompute` принимает `scale, rope_factors, attn_factor`.
+* `QuantizedWeight::owns_cpu_data` — для split-views без double-free.
+* `split_quant_rows()` для phi3 merged QKV / gate+up.
+* SWA mask в attention loop: `attn_start = max(0, total_seq - swa_window)`,
+  positions [0, attn_start) получают score=-INFINITY.
+
+### Memory rules added (для будущих сессий)
+* `feedback_never_idle.md` — никогда не сидеть, всегда Monitor + Wakeup.
+* `project_qwen3_rope_neox_root_cause.md` — полный bisect path.
+
+### Tooling
+* `dump_gguf_meta.py` — minimal GGUF metadata reader без зависимостей.
+* `test_rope_neox_fix.sh`, `test_rope_neox_tp4.sh`,
+  `test_q34b_baseline_check.sh`, `test_q34b_tp4_spec.sh`,
+  `test_after_phi3_gemma3_fixes.sh`, `test_phi3_no_soa.sh`,
+  `test_phi3_longrope.sh`, `test_gemma3_bisect.sh`, `test_gemma3_full.sh`.
+
+Commits: `b144db2`..`934f734` (~25 commits).
+
+---
+
 ## 2026-04-21 (late PM): TP split output_proj — TP **5.5 tok/s**, overtakes 1-proc (commit `feb4c6a`)
 
 **Контекст:** user настоял что 20 tok/s достижимо без "недель работы". Пробил
