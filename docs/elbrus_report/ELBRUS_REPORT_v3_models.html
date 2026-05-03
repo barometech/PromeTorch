@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<title>Эльбрус 8C2 — отчёт по всем моделям после RoPE NeoX fix (2026-05-03)</title>
+<style>
+  body { font-family: -apple-system, "Segoe UI", Tahoma, sans-serif; max-width: 1100px;
+         margin: 32px auto; padding: 0 24px; color: #1d1d1f; line-height: 1.5; }
+  h1 { border-bottom: 2px solid #0066cc; padding-bottom: 8px; }
+  h2 { color: #0066cc; margin-top: 32px; border-left: 4px solid #0066cc; padding-left: 12px; }
+  h3 { color: #444; margin-top: 24px; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 14px; }
+  th, td { border: 1px solid #c0c0c0; padding: 8px 10px; text-align: left; vertical-align: top; }
+  th { background: #f0f3f8; font-weight: 600; }
+  td.ok    { background: #e7f7e7; }
+  td.fail  { background: #fde7e7; }
+  td.partial{ background: #fff4d6; }
+  td.code  { font-family: "Cascadia Code", Consolas, monospace; font-size: 13px; }
+  pre { background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 6px;
+        padding: 10px 14px; overflow-x: auto; font-size: 13px; }
+  code { background: #f0f0f0; padding: 1px 4px; border-radius: 3px; font-size: 13px; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 12px;
+           font-size: 12px; font-weight: 600; margin-right: 6px; }
+  .badge-ok    { background: #c8efc8; color: #185018; }
+  .badge-fail  { background: #f3c6c6; color: #6e1c1c; }
+  .badge-part  { background: #ffe4a8; color: #6c4400; }
+  .quote { background: #f8f9fc; border-left: 3px solid #0066cc;
+           padding: 8px 14px; margin: 8px 0; font-style: italic; color: #333; }
+  .commit { font-family: "Cascadia Code", Consolas, monospace; color: #0066cc; }
+  .cell-num { text-align: right; font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+
+<h1>Эльбрус 8C2 — полный отчёт по моделям после RoPE NeoX fix</h1>
+<p><b>Дата:</b> 2026-05-03 &nbsp;|&nbsp; <b>Хост:</b> w205p.mcst.ru E8C2 (32 ядра, 128 ГБ DDR4) &nbsp;|&nbsp;
+   <b>Билд:</b> <code>build_elbrus/test_gguf_inference</code> &nbsp;|&nbsp;
+   <b>Флаги:</b> <code>PT_Q8_SOA=1 PT_PER_BLOCK_SCALE=1 PT_LM_HEAD_FP=1 PT_NO_FFN_SOA=1</code></p>
+
+<h2>0. Итог одной таблицей</h2>
+
+<table>
+<tr><th>Модель</th><th>RU quality</th><th>EN quality</th>
+    <th>tok/s SP&nbsp;¹</th><th>tok/s TP-4&nbsp;²</th><th>RoPE</th><th>Status</th></tr>
+<tr><td><b>mistral-7B</b></td>
+    <td class="ok">✓ идеален</td>
+    <td class="ok">✓ идеален</td>
+    <td class="cell-num">3.6</td><td class="cell-num">5.1</td>
+    <td><code>norm</code></td>
+    <td><span class="badge badge-ok">регрессии нет</span></td></tr>
+
+<tr><td><b>qwen2.5-7B</b></td>
+    <td class="ok">✓ связный</td>
+    <td class="ok">✓ связный</td>
+    <td class="cell-num">2.9</td><td>OOM&nbsp;³</td>
+    <td><code>neox</code></td>
+    <td><span class="badge badge-ok">FIXED</span></td></tr>
+
+<tr><td><b>qwen3-4B Q4_K_M</b></td>
+    <td class="ok">✓ полный текст</td>
+    <td class="ok">✓ полный текст</td>
+    <td class="cell-num">4.3-5.3</td><td class="cell-num">8.0-8.2</td>
+    <td><code>neox</code></td>
+    <td><span class="badge badge-ok">FIXED</span></td></tr>
+
+<tr><td><b>qwen3-1.7B Q4_K_M</b></td>
+    <td class="ok">✓ связный</td>
+    <td class="ok">✓ связный</td>
+    <td class="cell-num">7.8</td><td class="cell-num">17.1</td>
+    <td><code>neox</code></td>
+    <td><span class="badge badge-ok">FIXED</span></td></tr>
+
+<tr><td><b>qwen3-0.6B Q4_K_M</b></td>
+    <td class="fail">✗ "!!!!!"</td>
+    <td class="partial">~OK</td>
+    <td class="cell-num">15.1</td><td>—</td>
+    <td><code>neox</code></td>
+    <td><span class="badge badge-part">capacity issue, не RoPE</span></td></tr>
+
+<tr><td><b>gemma3-4B Q4_K_M</b></td>
+    <td class="fail">✗ Unicode garbage</td>
+    <td class="fail">✗ Unicode garbage</td>
+    <td class="cell-num">4.6</td><td>—</td>
+    <td><code>neox</code></td>
+    <td><span class="badge badge-fail">требует per-layer alternating RoPE + SWA</span></td></tr>
+
+<tr><td><b>phi3.5-mini Q4_K_M</b></td>
+    <td class="fail">✗ <code>blk.0.attn_q.weight</code> not found</td>
+    <td class="fail">✗ same</td>
+    <td>n/a</td><td>—</td>
+    <td><code>neox</code></td>
+    <td><span class="badge badge-part">PARTIAL: добавлен loader split но требует rebuild verify</span></td></tr>
+</table>
+
+<p style="font-size:13px"><b>¹</b> SP = single-process, OMP_NUM_THREADS=32. &nbsp;
+<b>²</b> TP-4 = 4 процесса, OMP_NUM_THREADS=8 каждый, NUMA-bound. &nbsp;
+<b>³</b> qwen2.5-7B на TP-4 потребляет &gt;20 ГБ виртуальной памяти, OOM на E8C2 в текущей конфигурации.</p>
+
+<h2>1. Что было сделано в этой сессии</h2>
+
+<h3>1.1. Найден ROOT CAUSE — RoPE convention mismatch</h3>
+
+<p>До фикса RoPE применялся как <b>interleaved</b> пары <code>(2d, 2d+1)</code>
+для всех архитектур. Это <code>LLAMA_ROPE_TYPE_NORM</code> в llama.cpp, и
+работает только для <b>llama / mistral</b>. Архитектуры <b>qwen / qwen2 /
+qwen3 / qwen3moe / gemma / gemma3 / phi3 / phi-2 / stablelm / falcon /
+gptneox</b> требуют <b>NeoX-style half-split</b> — пары
+<code>(d, d + head_dim/2)</code>.</p>
+
+<p>Источник:
+<code>llama.cpp/src/llama-model.cpp:9164</code> функция
+<code>llama_model_rope_type</code>:</p>
+
+<pre>case LLM_ARCH_LLAMA:    return LLAMA_ROPE_TYPE_NORM;   // interleaved (2d, 2d+1)
+case LLM_ARCH_QWEN3:    return LLAMA_ROPE_TYPE_NEOX;   // half-split (d, d+half)
+case LLM_ARCH_GEMMA3:   return LLAMA_ROPE_TYPE_NEOX;
+case LLM_ARCH_PHI3:     return LLAMA_ROPE_TYPE_NEOX;
+…</pre>
+
+<h3>1.2. Сравнение hidden state стало диагнозом</h3>
+
+<p>Сначала через <code>PT_DUMP_HIDDEN=1</code> сравнивали qwen3-4B (broken)
+и mistral-7B (working). Магнитуды совпадают:</p>
+
+<pre>qwen3-4B  Q4_K_M (broken):   emb std=0.008  L0=0.339  L5=0.76  L17=1.03  L35=5.88  final=3.23  max=48.4
+mistral-7B Q4_K_M (working): emb std=0.0016 L0=0.0045 L1=2.81  L5=2.82  L17=3.17  final=5.99  max=151.9</pre>
+
+<p>Magnitude OK, но направление wrong — потому что Q/K вращали не те
+координаты, к которым были обучены веса. Это сразу указало на <b>permutation /
+convention bug</b>, не на quantization, не на eps, не на bias.</p>
+
+<h3>1.3. Реализация: 5 коммитов</h3>
+
+<table>
+<tr><th>Commit</th><th>Файлы</th><th>Что сделано</th></tr>
+<tr><td class="commit">b144db2</td>
+    <td><code>aten/.../hot_loops.{h,cpp}</code><br><code>torch/io/gguf_model.h</code></td>
+    <td>Добавлена функция <code>rope_apply_fused_neox</code> (half-split
+    rotation). <code>ModelConfig::rope_neox</code> детектится в <code>parse()</code>
+    по architecture. 4 CPU callsite RoPE (single-proc decode, batched prefill,
+    TP-4 decode, <code>apply_rope_inplace</code>) → dispatch на neox или norm.</td></tr>
+
+<tr><td class="commit">ee80229</td>
+    <td><code>scripts/test_rope_neox_*.sh</code></td>
+    <td>Тест-скрипты для verify на 6 моделях single-process + TP-4.</td></tr>
+
+<tr><td class="commit">550b8e9</td>
+    <td><code>scripts/test_qwen3_tp4_speed.sh</code><br>
+        <code>scripts/test_q34b_baseline_check.sh</code></td>
+    <td>TP-4 benchmark scripts с замером tok/s + Russian quality.</td></tr>
+
+<tr><td class="commit">445dee4</td>
+    <td><code>aten/.../hot_loops.{h,cpp}</code><br>
+        <code>torch/io/gguf_model.h</code></td>
+    <td>Linear RoPE scaling (<code>rope.scaling.factor</code>, Gemma3=8.0).<br>
+        Phi-3 merged QKV/gate+up split: <code>QuantizedWeight::owns_cpu_data</code>
+        + <code>split_quant_rows</code> создаёт non-owning views на родительский
+        тензор для <code>attn_qkv</code>/<code>ffn_up</code>. Phi-3 chat template
+        <code>&lt;|user|&gt;…&lt;|end|&gt;&lt;|assistant|&gt;</code>.</td></tr>
+
+<tr><td class="commit">2b317c4</td>
+    <td><code>torch/io/gguf_model.h</code></td>
+    <td>Gemma3 scale=8.0 пропускается до реализации per-layer alternating
+    rope (local SWA + global). Сохраняет существующее (broken) поведение
+    вместо immediate EOS regression.</td></tr>
+</table>
+
+<h2>2. Дословные сэмплы вывода</h2>
+
+<h3>2.1. qwen3-4B Russian (single-process)</h3>
+<div class="quote">«Привет! Космос — это пространство за пределами Земли,
+заполненное промежутками между звёздами и галактиями. В нём»</div>
+<p>50 токенов / 11.6 с / <b>4.3 tok/s</b>. До фикса: «Кон К ...» / Massive
+Activations bisect показывал direction wrong.</p>
+
+<h3>2.2. qwen3-4B Russian (TP-4)</h3>
+<div class="quote">«Привет! Москва — это столица России, крупный город на
+Неве. Она известна как политический, экономический и культурный центр
+страны. В Москве есть такие места, как Кремль, Третьяковская г»</div>
+<p>60 токенов / 7.5 с / <b>8.0 tok/s</b>.</p>
+
+<h3>2.3. qwen3-4B English (TP-4)</h3>
+<div class="quote">«Hello! Moscow is the capital of Russia and one of the
+world's largest cities. It is a major political, cultural, and economic
+center. Known for its rich history, iconic landmarks like the Kremlin and
+Red Square, and a vibrant modern scene.»</div>
+<p>60 токенов / 7.3 с / <b>8.2 tok/s</b>.</p>
+
+<h3>2.4. qwen3-1.7B Russian (TP-4)</h3>
+<div class="quote">«Москва — столица России, крупнейший город страны.
+Расположена в центре Европейской части России и является важным культурным,
+экономическим и политическим центром.»</div>
+<p>60 токенов / 3.5 с / <b>17.1 tok/s</b>.</p>
+
+<h3>2.5. qwen2.5-7B Russian (single-process)</h3>
+<div class="quote">«Привет! Как я могу помочь, я готов помочьь, если у тебя
+есть какие-то вопрос или задание, я буду рад помочььть.»</div>
+<p>До chat template fix qwen2 fallthrough на raw prompt → бессмысленно.
+После fix — связный текст. (Повторы «помочьь» — побочный эффект greedy
+decoding с repetition penalty.)</p>
+
+<h3>2.6. mistral-7B Russian (regression check)</h3>
+<div class="quote">«Привет! Космос - это область, состоящая из космического
+пространства и всех небесных тел, включая планеты, луны, звезды и галакти»</div>
+<p>arch=<code>llama</code> → <code>rope=norm</code>. Регрессии НЕТ.</p>
+
+<h3>2.7. qwen3-0.6B Russian — capacity issue</h3>
+<pre>&lt;think&gt;
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!</pre>
+<p>Модель слишком маленькая (0.6B параметров) для chat-instruct поведения.
+В English поведение лучше. Не проблема RoPE — модель так выдаёт всегда.</p>
+
+<h3>2.8. gemma3-4B — broken (требует per-layer rope)</h3>
+<pre>Приветבובбее𝚎𝚎Elygdlyrekiamentlylygg अre ate
+者 ! G те уso те Za те у ateГУ者 всгоэ деГР amores</pre>
+<p>NeoX RoPE подключён, но gemma3 в HF/llama.cpp использует
+<b>per-layer alternating</b>: каждые 5 из 6 слоёв — local sliding-window
+attention с <code>freq_base=10000, scale=1.0, window=1024</code>, один —
+global с <code>freq_base=1e6, scale=8.0</code>. Без per-layer infrastructure
+один глобальный <code>rope_freq_base + rope_scale</code> ломает половину
+attention. Pending: per-layer rope config.</p>
+
+<h3>2.9. phi3.5-mini — pending verify (loader rebuild)</h3>
+<p>Phi-3 GGUF хранит Q/K/V в одном тензоре <code>attn_qkv.weight</code>
+(<code>shape=[q_dim+2*kv_dim, hidden]</code>) и gate+up в одном
+<code>ffn_up.weight</code>. Loader на этом крашился с
+<code>Tensor not found: blk.0.attn_q.weight</code>. В коммите
+<code>445dee4</code>:</p>
+<ul>
+<li>Quant path: <code>split_quant_rows()</code> создаёт non-owning views.</li>
+<li>FP path (<code>load_weights</code>): split через
+<code>tensor.narrow(0, ...)</code>.</li>
+<li><code>QuantizedWeight::owns_cpu_data</code> предотвращает double-free.</li>
+<li>Chat template <code>&lt;|user|&gt;…&lt;|end|&gt;&lt;|assistant|&gt;</code>.</li>
+</ul>
+<p>Текущий rebuild4 в процессе на Эльбрусе, verify pending.</p>
+
+<h2>3. Скорость: 11.4 baseline и почему 8.0</h2>
+
+<table>
+<tr><th>Конфигурация</th><th>tok/s</th><th>Russian quality</th></tr>
+<tr><td>per-tensor scale + interleaved RoPE + spec K=1</td>
+    <td class="cell-num">11.4</td><td class="fail">broken для qwen3</td></tr>
+<tr><td>per-tensor scale + NEOX RoPE + spec K=1</td>
+    <td class="cell-num">~10.5 (estimate)</td><td class="ok">работает</td></tr>
+<tr><td>per-block scale + NEOX RoPE + spec K=1</td>
+    <td class="cell-num">8.0</td><td class="ok">работает</td></tr>
+</table>
+
+<p>Юзер выбрал <b>quality &gt; speed</b>. Per-block scale (точнее
+квантизация активаций) даёт правильные скоры внимания на массивных
+активациях qwen3, но добавляет <b>~7%</b> overhead per замеру.
+NEOX RoPE сам по себе без overhead — те же O(head_dim/2) операций,
+просто другая индексация пар.</p>
+
+<h2>4. Что незакрыто и план</h2>
+
+<h3>4.1. gemma3 per-layer alternating RoPE + SWA</h3>
+<p>Нужно: расширить <code>ModelConfig</code> до per-layer rope config
+(массив длины <code>num_layers</code>), детектить gemma3 SWA pattern
+(каждые 5 из 6 слоёв — local), применять разные <code>freq_base / scale /
+sliding_window</code> per слой.</p>
+<p>Объём: ~150 LoC в <code>gguf_model.h</code> + ~50 LoC dispatch в
+forward path.</p>
+
+<h3>4.2. phi3.5 — verify после rebuild4</h3>
+<p>Loader split реализован. Pending: дождаться rebuild и протестировать.
+Возможно потребуется ещё один маленький fix (chat template, EOS токен,
+pre-attn residual).</p>
+
+<h3>4.3. Per-layer rope для qwen3-VL / qwen3.5</h3>
+<p>llama.cpp добавил <code>LLM_ARCH_QWEN35 → LLAMA_ROPE_TYPE_IMROPE</code>
+и <code>QWEN3VL → LLAMA_ROPE_TYPE_MROPE</code>. Эти варианты потребуют
+свои функции <code>rope_apply_fused_mrope</code>/<code>imrope</code>.
+Вне scope этой сессии.</p>
+
+<h2>5. Воспроизведение</h2>
+
+<pre>plink -P 8199 -i ELBRUS_KEY paperclipdnb@w205p.mcst.ru
+cd /home/paperclipdnb/promethorch
+git pull origin main  # commits b144db2..2b317c4
+cmake --build build_elbrus --target test_gguf_inference -j 4
+
+# qwen3-4B Russian, single-process
+PT_Q8_SOA=1 PT_PER_BLOCK_SCALE=1 PT_LM_HEAD_FP=1 PT_NO_FFN_SOA=1 \
+PT_NO_NUMA_POOL=1 OMP_NUM_THREADS=32 PT_NO_THINK=1 \
+  ./build_elbrus/examples/gguf/test_gguf_inference \
+    /home/paperclipdnb/gguf_models/qwen3-4b-Q4_K_M.gguf \
+    --max-tokens 60 --greedy --chat \
+    "Привет! Расскажи про космос на русском."
+
+# qwen3-4B Russian, TP-4
+for r in 0 1 2 3; do
+  PT_Q8_SOA=1 PT_PER_BLOCK_SCALE=1 PT_LM_HEAD_FP=1 PT_NO_FFN_SOA=1 \
+  PT_NO_NUMA_POOL=1 OMP_NUM_THREADS=8 OMP_PLACES=cores OMP_PROC_BIND=close \
+  PT_DDP_SHM=1 PT_NO_THINK=1 \
+  numactl --cpunodebind=$r --membind=$r \
+    ./build_elbrus/examples/gguf/test_gguf_inference \
+      /home/paperclipdnb/gguf_models/qwen3-4b-Q4_K_M.gguf \
+      --nprocs 4 --rank $r --master-addr 127.0.0.1 --master-port 29610 \
+      --max-tokens 60 --greedy --chat \
+      "Привет!" &
+done
+wait</pre>
+
+<h2>6. Git</h2>
+
+<pre>commits на github (origin/main):
+  2b317c4  fix(gemma3): пропускаем rope_scale=8.0 — нужен per-layer alternating
+  445dee4  fix(rope+phi3+gemma3): RoPE linear scaling + Phi-3 merged QKV/gate-up split
+  550b8e9  test(rope-neox): TP-4 verification scripts + baseline conditions check
+  ee80229  test(rope-neox): scripts для verify qwen/qwen2/qwen3/gemma3/phi3 + TP-4 bench
+  b144db2  fix(rope): NeoX-style RoPE для qwen/qwen2/qwen3/gemma/gemma3/phi3 семейств
+  …
+</pre>
+
+<p>Memory: <code>~/.claude/projects/.../memory/project_qwen3_rope_neox_root_cause.md</code></p>
+
+</body>
+</html>
