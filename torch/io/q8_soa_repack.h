@@ -217,24 +217,70 @@ inline void q8_soa4_quant_activation(const float* x, int64_t K,
                                       uint8_t* a_b16,
                                       int32_t* sum_a_per_block,
                                       float* out_scale_a) {
-    float max_a = 0;
-    for (int64_t i = 0; i < K; i++) {
-        float v = std::fabs(x[i]);
-        if (v > max_a) max_a = v;
-    }
-    float scale_a = max_a > 0 ? max_a / 127.0f : 1.0f;
-    *out_scale_a = scale_a;
-    float inv_a = 1.0f / scale_a;
+    // BUG-12 final fix: per-block (32 elements) AbsMax scale вместо
+    // per-tensor. Q8_0 llama.cpp подход. Защищает мелкие компоненты от
+    // outlier-driven scale на cyrillic activations. PT_PER_BLOCK_SCALE=1
+    // → массив scales[bpr] записан после первого scalar в out_scale_a
+    // (вызывающий код выделяет out_scale_a как float[bpr+1] если хочет
+    // per-block. Если он выделил float[1] — pass per-tensor fallback).
+    //
+    // Контракт: gguf_model.h TPParallelState теперь выделяет вектор
+    // scale_a_per_block[bpr]; out_scale_a указывает на его data().
+    // Совместимость со старым per-tensor API: если PT_PER_BLOCK_SCALE=0
+    // (default) → пишем ОДИН scalar в out_scale_a[0] (старое поведение).
+    static const bool per_block = []{
+        const char* e = std::getenv("PT_PER_BLOCK_SCALE");
+        return e && e[0] == '1';
+    }();
 
-    // First pass: produce a_u8[K] in scratch buffer.
-    // Reuse a_b16 first K bytes as scratch (will overwrite during broadcast).
+    int64_t bpr = K / 32;
     std::vector<uint8_t> a_u8(K);
-    for (int64_t i = 0; i < K; i++) {
-        int v = (int)std::lrint(x[i] * inv_a);
-        if (v > 127) v = 127; else if (v < -127) v = -127;
-        a_u8[i] = static_cast<uint8_t>(v + 128);
+
+    if (per_block) {
+        // PER-BLOCK path: каждый 32-block имеет свой scale.
+        for (int64_t b = 0; b < bpr; b++) {
+            float max_a = 0.0f;
+            int64_t base = b * 32;
+            for (int k = 0; k < 32; k++) {
+                float v = std::fabs(x[base + k]);
+                if (v > max_a) max_a = v;
+            }
+            float scale_a_b = max_a > 0.0f ? max_a / 127.0f : 1.0f;
+            out_scale_a[b] = scale_a_b;
+            float inv_a = 1.0f / scale_a_b;
+            int sb_sum = 0;
+            for (int k = 0; k < 32; k++) {
+                int v = (int)std::lrint(x[base + k] * inv_a);
+                if (v > 127) v = 127; else if (v < -127) v = -127;
+                a_u8[base + k] = static_cast<uint8_t>(v + 128);
+                sb_sum += v;
+            }
+            sum_a_per_block[b] = sb_sum;
+        }
+    } else {
+        // PER-TENSOR (legacy) path. Сохраняет 11.4 tok/s lossless baseline.
+        float max_a = 0;
+        for (int64_t i = 0; i < K; i++) {
+            float v = std::fabs(x[i]);
+            if (v > max_a) max_a = v;
+        }
+        float scale_a = max_a > 0 ? max_a / 127.0f : 1.0f;
+        out_scale_a[0] = scale_a;
+        float inv_a = 1.0f / scale_a;
+        for (int64_t i = 0; i < K; i++) {
+            int v = (int)std::lrint(x[i] * inv_a);
+            if (v > 127) v = 127; else if (v < -127) v = -127;
+            a_u8[i] = static_cast<uint8_t>(v + 128);
+        }
+        for (int64_t b = 0; b < bpr; b++) {
+            int s = 0;
+            for (int k = 0; k < 32; k++) s += (int)a_u8[b*32 + k] - 128;
+            sum_a_per_block[b] = s;
+        }
     }
-    // Broadcast: 16 bytes per K-group of 4. Layout: [a[k..k+3]] repeated 4 times.
+
+    // Broadcast layout (одинаков для обоих режимов):
+    // 16 bytes per K-group of 4. Layout: [a[k..k+3]] repeated 4 times.
     int64_t n_groups = K / 4;
     for (int64_t g = 0; g < n_groups; g++) {
         const uint8_t* p = a_u8.data() + g * 4;
@@ -246,13 +292,16 @@ inline void q8_soa4_quant_activation(const float* x, int64_t K,
             dst[r*4 + 3] = p[3];
         }
     }
-    // Sum per 32-elem block (signed, original a_s8 = a_u8 - 128).
-    int64_t bpr = K / 32;
-    for (int64_t b = 0; b < bpr; b++) {
-        int s = 0;
-        for (int k = 0; k < 32; k++) s += (int)a_u8[b*32 + k] - 128;
-        sum_a_per_block[b] = s;
-    }
+}
+
+// Возвращает true если PT_PER_BLOCK_SCALE=1 (cached). Hot-path использование:
+// callers выделяют scale-buffer соответствующего размера до вызова quant.
+inline bool q8_soa4_per_block_scale_enabled() {
+    static const bool enabled = []{
+        const char* e = std::getenv("PT_PER_BLOCK_SCALE");
+        return e && e[0] == '1';
+    }();
+    return enabled;
 }
 
 // q8_soa4_silu_quant_activation_fused — SiLU(gate)*up + Q8 SoA4 quant
@@ -267,19 +316,62 @@ inline void q8_soa4_silu_quant_activation_fused(
     int64_t K, float* silu_out,
     uint8_t* a_b16, int32_t* sum_a_per_block,
     float* out_scale_a) {
-    float max_a = 0.0f;
+    // BUG-12 final: per-block scale support. PT_PER_BLOCK_SCALE=1 →
+    // out_scale_a[b] для каждого 32-block. Default = per-tensor scalar.
+    const bool per_block = q8_soa4_per_block_scale_enabled();
+    int64_t bpr = K / 32;
+
+    // First pass: compute SiLU into silu_out
     for (int64_t i = 0; i < K; i++) {
         float g = gate[i];
         float s = (g / (1.0f + std::exp(-g))) * up[i];
         silu_out[i] = s;
-        float v = std::fabs(s);
+    }
+
+    if (per_block) {
+        // Per-block scale + quantize
+        for (int64_t b = 0; b < bpr; b++) {
+            float max_a = 0.0f;
+            int64_t base = b * 32;
+            for (int k = 0; k < 32; k++) {
+                float v = std::fabs(silu_out[base + k]);
+                if (v > max_a) max_a = v;
+            }
+            float scale_a_b = max_a > 0.0f ? max_a / 127.0f : 1.0f;
+            out_scale_a[b] = scale_a_b;
+            float inv_a = 1.0f / scale_a_b;
+            int sb_sum = 0;
+            uint8_t* dst_block = a_b16 + b * 128;
+            for (int kg = 0; kg < 8; kg++) {
+                uint8_t buf4[4];
+                for (int r = 0; r < 4; r++) {
+                    int v = (int)std::lrint(silu_out[base + kg*4 + r] * inv_a);
+                    if (v > 127) v = 127; else if (v < -127) v = -127;
+                    buf4[r] = static_cast<uint8_t>(v + 128);
+                    sb_sum += v;
+                }
+                uint8_t* dst = dst_block + kg * 16;
+                dst[0]  = buf4[0]; dst[1]  = buf4[1]; dst[2]  = buf4[2]; dst[3]  = buf4[3];
+                dst[4]  = buf4[0]; dst[5]  = buf4[1]; dst[6]  = buf4[2]; dst[7]  = buf4[3];
+                dst[8]  = buf4[0]; dst[9]  = buf4[1]; dst[10] = buf4[2]; dst[11] = buf4[3];
+                dst[12] = buf4[0]; dst[13] = buf4[1]; dst[14] = buf4[2]; dst[15] = buf4[3];
+            }
+            sum_a_per_block[b] = sb_sum;
+        }
+        return;  // skip per-tensor path below
+    }
+
+    // Per-tensor (legacy) path
+    float max_a = 0.0f;
+    for (int64_t i = 0; i < K; i++) {
+        float v = std::fabs(silu_out[i]);
         if (v > max_a) max_a = v;
     }
     float scale_a = max_a > 0.0f ? max_a / 127.0f : 1.0f;
-    *out_scale_a = scale_a;
+    out_scale_a[0] = scale_a;
     float inv_a = 1.0f / scale_a;
 
-    int64_t bpr = K / 32;
+    // bpr already declared above
     for (int64_t b = 0; b < bpr; b++) {
         int sb_sum = 0;
         const float* row = silu_out + b * 32;
@@ -305,19 +397,25 @@ inline void q8_soa4_silu_quant_activation_fused(
 // ==============================================================================
 // q8_soa4_gemv: production multi-threaded GEMV.
 // ==============================================================================
+// BUG-12 fix: scale_a_or_array — для совместимости один и тот же float*
+// param используется и для per-tensor (1 элемент), и для per-block scale.
+// Если q8_soa4_per_block_scale_enabled() == true → scale_a_or_array[b]
+// для каждого block. Иначе — scale_a_or_array[0] = scalar, broadcast.
 inline void q8_soa4_gemv(const Q8SoA4* w,
                           const uint8_t* a_b16,
                           const int32_t* sum_a_per_block,
-                          float scale_a,
+                          const float* scale_a_or_array,
                           float* y) {
     int64_t bpr = w->K / 32;
     int64_t gpr = w->N / 4;
+    const bool per_block = q8_soa4_per_block_scale_enabled();
+    const float scale_a_scalar = scale_a_or_array[0];
 
 #ifdef __e2k__
-    v2di scale_a_v;
-    {
-        float arr[4] = {scale_a, scale_a, scale_a, scale_a};
-        std::memcpy(&scale_a_v, arr, 16);
+    v2di scale_a_v_scalar;
+    if (!per_block) {
+        float arr[4] = {scale_a_scalar, scale_a_scalar, scale_a_scalar, scale_a_scalar};
+        std::memcpy(&scale_a_v_scalar, arr, 16);
     }
 
     c10::get_thread_pool().parallel_for(0, gpr, [&](int64_t g_start, int64_t g_end) {
@@ -333,7 +431,6 @@ inline void q8_soa4_gemv(const Q8SoA4* w,
                 const v2di* A_v = (const v2di*)(a_b16 + b*128);
 
                 v2di acc_i32 = {0, 0};
-                // Unrolled 8-iter inner K loop (8 K-groups × 4 elements = 32)
                 _Pragma("loop count(8)") _Pragma("ivdep")
                 for (int kg = 0; kg < 8; kg++) {
                     v2di p16 = __builtin_e2k_qpmaddubsh(W_v[kg], A_v[kg]);
@@ -341,8 +438,6 @@ inline void q8_soa4_gemv(const Q8SoA4* w,
                     acc_i32  = __builtin_e2k_qpaddw(acc_i32, p32);
                 }
 
-                // Per-block fold: dot_signed = acc - 128*sum_q;
-                //   fp_acc += scale_a * (d_w * dot_signed - dmin_m * sum_a_block)
                 v2di shift_v = __builtin_e2k_qpmullw(sum_q_v, SOA4_SHIFT128);
                 v2di dot_signed = __builtin_e2k_qpsubw(acc_i32, shift_v);
                 v2di acc_f = __builtin_e2k_qpistofs(dot_signed);
@@ -354,8 +449,16 @@ inline void q8_soa4_gemv(const Q8SoA4* w,
                 }
                 v2di term_w = __builtin_e2k_qpfmuls(scales_v, acc_f);
                 v2di term_d = __builtin_e2k_qpfmuls(dmins_v, sa_v);
-                v2di delta  = __builtin_e2k_qpfmuls(scale_a_v,
-                              __builtin_e2k_qpfsubs(term_w, term_d));
+
+                v2di scale_a_v_block;
+                if (per_block) {
+                    float sa = scale_a_or_array[b];
+                    float arr[4] = {sa, sa, sa, sa};
+                    std::memcpy(&scale_a_v_block, arr, 16);
+                }
+                v2di delta = __builtin_e2k_qpfmuls(
+                                per_block ? scale_a_v_block : scale_a_v_scalar,
+                                __builtin_e2k_qpfsubs(term_w, term_d));
                 fp_acc = __builtin_e2k_qpfadds(fp_acc, delta);
             }
             float lanes[4]; std::memcpy(lanes, &fp_acc, 16);
@@ -366,7 +469,6 @@ inline void q8_soa4_gemv(const Q8SoA4* w,
         }
     }, 1);
 #else
-    // Non-E2K fallback: scalar dequant (correctness baseline for x86 dev builds).
     c10::get_thread_pool().parallel_for(0, gpr, [&](int64_t g_start, int64_t g_end) {
         for (int64_t g = g_start; g < g_end; g++) {
             const uint8_t* gp = w->mem + g * w->group_stride;
@@ -378,6 +480,7 @@ inline void q8_soa4_gemv(const Q8SoA4* w,
                 const int32_t* sum_q = (const int32_t*)(sb + 32);
                 const int8_t* W = (const int8_t*)(sb + 48);
                 const uint8_t* A = a_b16 + b*128;
+                float sa_b = per_block ? scale_a_or_array[b] : scale_a_scalar;
                 for (int r = 0; r < 4; r++) {
                     int dot_us = 0;
                     for (int kg = 0; kg < 8; kg++) {
@@ -386,7 +489,7 @@ inline void q8_soa4_gemv(const Q8SoA4* w,
                         for (int k = 0; k < 4; k++) dot_us += (int)w_k[k] * (int)a_k[k];
                     }
                     int dot_signed = dot_us - 128 * sum_q[r];
-                    fp_acc[r] += scale_a * (scales[r] * (float)dot_signed
+                    fp_acc[r] += sa_b * (scales[r] * (float)dot_signed
                                             - dmins[r] * (float)sum_a_per_block[b]);
                 }
             }
@@ -410,16 +513,18 @@ inline void q8_soa4_gemv(const Q8SoA4* w,
 inline void q8_soa4_gemv_dual(const Q8SoA4* w0, const Q8SoA4* w1,
                                const uint8_t* a_b16,
                                const int32_t* sum_a_per_block,
-                               float scale_a,
+                               const float* scale_a_or_array,
                                float* y0, float* y1) {
     int64_t bpr = w0->K / 32;
     int64_t gpr = w0->N / 4;
+    const bool per_block = q8_soa4_per_block_scale_enabled();
+    const float scale_a_scalar = scale_a_or_array[0];
 
 #ifdef __e2k__
-    v2di scale_a_v;
-    {
-        float arr[4] = {scale_a, scale_a, scale_a, scale_a};
-        std::memcpy(&scale_a_v, arr, 16);
+    v2di scale_a_v_scalar;
+    if (!per_block) {
+        float arr[4] = {scale_a_scalar, scale_a_scalar, scale_a_scalar, scale_a_scalar};
+        std::memcpy(&scale_a_v_scalar, arr, 16);
     }
 
     c10::get_thread_pool().parallel_for(0, gpr, [&](int64_t g_start, int64_t g_end) {
@@ -467,7 +572,14 @@ inline void q8_soa4_gemv_dual(const Q8SoA4* w0, const Q8SoA4* w1,
                     v2di acc_f = __builtin_e2k_qpistofs(dot_signed);
                     v2di term_w = __builtin_e2k_qpfmuls(scales0_v, acc_f);
                     v2di term_d = __builtin_e2k_qpfmuls(dmins0_v, sa_v);
-                    v2di delta  = __builtin_e2k_qpfmuls(scale_a_v,
+                    v2di scale_a_v_local;
+                    if (per_block) {
+                        float sa = scale_a_or_array[b];
+                        float arr2[4] = {sa, sa, sa, sa};
+                        std::memcpy(&scale_a_v_local, arr2, 16);
+                    }
+                    v2di delta  = __builtin_e2k_qpfmuls(
+                                  per_block ? scale_a_v_local : scale_a_v_scalar,
                                   __builtin_e2k_qpfsubs(term_w, term_d));
                     fp_acc0 = __builtin_e2k_qpfadds(fp_acc0, delta);
                 }
@@ -478,7 +590,14 @@ inline void q8_soa4_gemv_dual(const Q8SoA4* w0, const Q8SoA4* w1,
                     v2di acc_f = __builtin_e2k_qpistofs(dot_signed);
                     v2di term_w = __builtin_e2k_qpfmuls(scales1_v, acc_f);
                     v2di term_d = __builtin_e2k_qpfmuls(dmins1_v, sa_v);
-                    v2di delta  = __builtin_e2k_qpfmuls(scale_a_v,
+                    v2di scale_a_v_local;
+                    if (per_block) {
+                        float sa = scale_a_or_array[b];
+                        float arr2[4] = {sa, sa, sa, sa};
+                        std::memcpy(&scale_a_v_local, arr2, 16);
+                    }
+                    v2di delta  = __builtin_e2k_qpfmuls(
+                                  per_block ? scale_a_v_local : scale_a_v_scalar,
                                   __builtin_e2k_qpfsubs(term_w, term_d));
                     fp_acc1 = __builtin_e2k_qpfadds(fp_acc1, delta);
                 }
@@ -493,8 +612,8 @@ inline void q8_soa4_gemv_dual(const Q8SoA4* w0, const Q8SoA4* w1,
     }, 1);
 #else
     // Non-E2K fallback: 2 separate calls
-    q8_soa4_gemv(w0, a_b16, sum_a_per_block, scale_a, y0);
-    q8_soa4_gemv(w1, a_b16, sum_a_per_block, scale_a, y1);
+    q8_soa4_gemv(w0, a_b16, sum_a_per_block, scale_a_or_array, y0);
+    q8_soa4_gemv(w1, a_b16, sum_a_per_block, scale_a_or_array, y1);
 #endif
 }
 
@@ -506,19 +625,21 @@ inline void q8_soa4_gemv_dual(const Q8SoA4* w0, const Q8SoA4* w1,
 inline void q8_soa4_gemv_triple(const Q8SoA4* w0, const Q8SoA4* w1, const Q8SoA4* w2,
                                  const uint8_t* a_b16,
                                  const int32_t* sum_a_per_block,
-                                 float scale_a,
+                                 const float* scale_a_or_array,
                                  float* y0, float* y1, float* y2) {
     int64_t bpr   = w0->K / 32;
     int64_t gpr0  = w0->N / 4;
     int64_t gpr1  = w1->N / 4;
     int64_t gpr2  = w2->N / 4;
     int64_t gpr_max = std::max(gpr0, std::max(gpr1, gpr2));
+    const bool per_block = q8_soa4_per_block_scale_enabled();
+    const float scale_a_scalar = scale_a_or_array[0];
 
 #ifdef __e2k__
-    v2di scale_a_v;
-    {
-        float arr[4] = {scale_a, scale_a, scale_a, scale_a};
-        std::memcpy(&scale_a_v, arr, 16);
+    v2di scale_a_v_scalar;
+    if (!per_block) {
+        float arr[4] = {scale_a_scalar, scale_a_scalar, scale_a_scalar, scale_a_scalar};
+        std::memcpy(&scale_a_v_scalar, arr, 16);
     }
 
     auto compute_one = [&](const Q8SoA4* w, int64_t g, float* y) {
@@ -551,7 +672,14 @@ inline void q8_soa4_gemv_triple(const Q8SoA4* w0, const Q8SoA4* w1, const Q8SoA4
             }
             v2di term_w = __builtin_e2k_qpfmuls(scales_v, acc_f);
             v2di term_d = __builtin_e2k_qpfmuls(dmins_v, sa_v);
-            v2di delta  = __builtin_e2k_qpfmuls(scale_a_v,
+            v2di scale_a_v_local;
+            if (per_block) {
+                float sa = scale_a_or_array[b];
+                float arr2[4] = {sa, sa, sa, sa};
+                std::memcpy(&scale_a_v_local, arr2, 16);
+            }
+            v2di delta = __builtin_e2k_qpfmuls(
+                          per_block ? scale_a_v_local : scale_a_v_scalar,
                           __builtin_e2k_qpfsubs(term_w, term_d));
             fp_acc = __builtin_e2k_qpfadds(fp_acc, delta);
         }
@@ -568,9 +696,9 @@ inline void q8_soa4_gemv_triple(const Q8SoA4* w0, const Q8SoA4* w1, const Q8SoA4
         }
     }, 1);
 #else
-    q8_soa4_gemv(w0, a_b16, sum_a_per_block, scale_a, y0);
-    q8_soa4_gemv(w1, a_b16, sum_a_per_block, scale_a, y1);
-    q8_soa4_gemv(w2, a_b16, sum_a_per_block, scale_a, y2);
+    q8_soa4_gemv(w0, a_b16, sum_a_per_block, scale_a_or_array, y0);
+    q8_soa4_gemv(w1, a_b16, sum_a_per_block, scale_a_or_array, y1);
+    q8_soa4_gemv(w2, a_b16, sum_a_per_block, scale_a_or_array, y2);
 #endif
 }
 

@@ -17,6 +17,7 @@
 
 #include "promeserve/http_server.h"
 #include "promeserve/model_manager.h"
+#include "promeserve/tool_call.h"
 
 #include <string>
 #include <vector>
@@ -684,6 +685,32 @@ private:
                   << " prompt_len=" << formatted_prompt.size() << std::endl;
 #endif
 
+        // BUG-12 / Item 11: tool-call loop. Если client передал `tools`
+        // массив, переключаемся на tool-orchestration path. Loop:
+        //   1) добавить format_system_prompt_with_tools() в prompt
+        //   2) generate non-streaming до tool_call или EOS
+        //   3) если tool_call — execute, append <tool_response>, повтор
+        //   4) max 5 iterations, потом отдать final response
+        //
+        // Tools — array of {"name":"...","description":"...","parameters":...}
+        // OR пустой [] (тогда используются built-in tools).
+        const bool tools_mode = body.has("tools") && body["tools"].is_array();
+        if (tools_mode) {
+            try {
+                handle_chat_with_tools(model, model_name, body, formatted_prompt,
+                                       max_tokens, temperature, top_k, top_p,
+                                       repeat_penalty, writer, t_total_start);
+            } catch (const std::exception& e) {
+                std::cerr << "[Tools] ERROR: " << e.what() << std::endl;
+                if (!writer.is_closed()) {
+                    writer.write("{\"error\":\"tool-loop error: " + json_escape(e.what())
+                                 + "\",\"done\":true}\n");
+                    writer.finish();
+                }
+            }
+            return resp;
+        }
+
         // For chat, the prompt is already formatted with chat template
         try {
             generate_streaming_chat(model, model_name, formatted_prompt,
@@ -1127,6 +1154,131 @@ private:
     // ========================================================================
     // Format chat messages into a prompt string
     // ========================================================================
+
+    // ========================================================================
+    // Tool-call loop (Item 11). Client передаёт `tools`, server делает
+    // multi-step orchestration: parse <tool_call> в выводе, execute,
+    // append <tool_response>, повторить max 5 итераций.
+    // ========================================================================
+    void handle_chat_with_tools(torch::io::GGUFModel* model,
+                                const std::string& model_name,
+                                const json::JsonValue& body,
+                                const std::string& base_prompt,
+                                int max_tokens, float temperature,
+                                int top_k, float top_p, float repeat_penalty,
+                                StreamWriter& writer,
+                                std::chrono::high_resolution_clock::time_point /*t_total_start*/) {
+        std::string created_at = iso8601_now();
+
+        // Build registry: built-ins (write_file, read_file, list_dir, bash_safe).
+        // TODO Phase 2: подгружать tools[] из request body тоже.
+        ToolRegistry registry;
+
+        // Inject tools description в system prompt:
+        // build a fresh prompt с тем же arch chat-template, но первым
+        // сообщением — system-prompt с описанием доступных tools.
+        std::string arch = model->config.architecture;
+        std::string system_text = format_system_prompt_with_tools("", registry);
+        std::string sys_block;
+        if (arch == "qwen3") {
+            sys_block = "<|im_start|>system\n" + system_text + "<|im_end|>\n";
+        } else if (arch == "llama") {
+            sys_block = "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n"
+                       + system_text + "<|eot_id|>";
+        } else if (arch == "gemma3" || arch == "gemma2") {
+            // Gemma не имеет system role; ставим как user prefix
+            sys_block = "<start_of_turn>user\n[System: " + system_text + "]\n<end_of_turn>\n";
+        }
+
+        // base_prompt уже включает <|im_start|>user...<|im_end|>...<|im_start|>assistant\n
+        // Префиксуем sys_block. Если model_name "llama" — base_prompt тоже
+        // начинается с begin_of_text, удаляем дубль.
+        std::string prompt = sys_block + base_prompt;
+        if (arch == "llama") {
+            // base_prompt начинается с <|begin_of_text|>; удаляем второй вхождение.
+            const std::string bot = "<|begin_of_text|>";
+            size_t first = prompt.find(bot);
+            if (first != std::string::npos) {
+                size_t second = prompt.find(bot, first + bot.size());
+                if (second != std::string::npos) {
+                    prompt.erase(second, bot.size());
+                }
+            }
+        }
+
+        const int max_iters = 5;
+        std::string final_text;
+        std::string tool_log;  // accumulated tool exchanges for client visibility
+
+        for (int it = 0; it < max_iters; ++it) {
+            // Reset KV cache between iterations
+            model->kv_cache.reset();
+            int64_t kv_dim = model->config.num_kv_heads * model->config.head_dim;
+            int64_t need_seq = (int64_t)prompt.size() / 2 + max_tokens + 256;
+            if (need_seq > model->config.context_length) need_seq = model->config.context_length;
+            if (!model->kv_cache.allocated || model->kv_cache.max_seq < need_seq) {
+                model->invalidate_graph();
+                model->kv_cache.allocate(model->config.num_layers, need_seq, kv_dim,
+                                         model->use_cuda_);
+            }
+
+            // Blocking generate. model->generate() raw-prompt path
+            // (НЕ применяет chat template — мы уже все формировали).
+            std::string response;
+            try {
+                response = model->generate(prompt, max_tokens, temperature, top_k, top_p,
+                                           repeat_penalty);
+            } catch (const std::exception& e) {
+                final_text = std::string("[error: ") + e.what() + "]";
+                break;
+            }
+
+            // Detect tool_call
+            ToolCall tc = detect_tool_call(response);
+            if (!tc.valid) {
+                // No tool call — это финальный ответ модели.
+                // Чистим any trailing assistant-end markers.
+                final_text = response;
+                break;
+            }
+
+            // Execute tool
+            std::string tool_text = response.substr(0, tc.end_pos);
+            std::string tool_result = registry.execute(tc.name, tc.args_json);
+            tool_log += "[iter " + std::to_string(it) + "] "
+                      + tc.name + " args=" + tc.args_json
+                      + " result=" + tool_result.substr(0, 200) + "\n";
+
+            // Append assistant turn (тулколл) + tool_response. Зависит от arch.
+            std::string tool_response_block;
+            if (arch == "qwen3") {
+                tool_response_block = tool_text + "<|im_end|>\n"
+                                    + "<|im_start|>tool\n<tool_response>\n"
+                                    + tool_result + "\n</tool_response>\n<|im_end|>\n"
+                                    + "<|im_start|>assistant\n";
+            } else if (arch == "llama") {
+                tool_response_block = tool_text + "<|eot_id|>"
+                                    + "<|start_header_id|>tool<|end_header_id|>\n\n"
+                                    + "<tool_response>\n" + tool_result + "\n</tool_response>"
+                                    + "<|eot_id|>"
+                                    + "<|start_header_id|>assistant<|end_header_id|>\n\n";
+            } else {
+                tool_response_block = tool_text
+                                    + "\n<tool_response>" + tool_result + "</tool_response>\n";
+            }
+            prompt += tool_response_block;
+        }
+
+        // Stream single-shot final response в Ollama-style chunks (один chunk).
+        std::string body_json = "{\"model\":\"" + json_escape(model_name) + "\""
+            + ",\"created_at\":\"" + created_at + "\""
+            + ",\"message\":{\"role\":\"assistant\",\"content\":\""
+            + json_escape(final_text) + "\"}"
+            + ",\"tool_log\":\"" + json_escape(tool_log) + "\""
+            + ",\"done\":true,\"done_reason\":\"stop\"}\n";
+        writer.write(body_json);
+        writer.finish();
+    }
 
     std::string format_chat_messages(const json::JsonValue& messages, const std::string& model_name) {
         // Determine architecture from loaded model or model name
