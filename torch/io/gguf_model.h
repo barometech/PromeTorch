@@ -88,13 +88,16 @@ struct TransformerConfig {
 
         rope_freq_base = reader.get_arch_float("rope.freq_base", 10000.0f);
         // Linear RoPE scaling — applied as theta = pos / scale_factor * freq.
-        // Gemma3 has factor=8.0 in metadata. llama.cpp checks scaling.type to
-        // decide whether to apply (linear vs yarn vs none). Other types
-        // (longrope, yarn) are not supported here yet.
+        // Gemma3 нужен другой подход: per-layer alternating local-SWA (no
+        // scale, freq_base=10000) и global (with scale, freq_base=1e6). Без
+        // per-layer infrastructure применять scale ко всем слоям ломает SWA
+        // attention. До тех пор пока per-layer rope не реализован,
+        // gemma3 пропускаем — пусть остаётся broken до реальной починки.
         {
             std::string scale_type = reader.get_string(architecture + ".rope.scaling.type", "");
             float scale_factor = reader.get_arch_float("rope.scaling.factor", 0.0f);
-            if (scale_type == "linear" && scale_factor > 1.0f) {
+            if (scale_type == "linear" && scale_factor > 1.0f &&
+                architecture != "gemma3" && architecture != "gemma3n") {
                 rope_scale = scale_factor;
             }
         }
@@ -6224,10 +6227,21 @@ public:
             // Attention norm
             layer.attn_norm = reader.load_tensor(prefix + "attn_norm.weight");
 
-            // Attention weights
-            layer.attn_q = reader.load_tensor(prefix + "attn_q.weight");
-            layer.attn_k = reader.load_tensor(prefix + "attn_k.weight");
-            layer.attn_v = reader.load_tensor(prefix + "attn_v.weight");
+            // Attention weights — Phi-3 stores Q/K/V merged as `attn_qkv.weight`,
+            // others as separate q/k/v.
+            if (reader.has_tensor(prefix + "attn_q.weight")) {
+                layer.attn_q = reader.load_tensor(prefix + "attn_q.weight");
+                layer.attn_k = reader.load_tensor(prefix + "attn_k.weight");
+                layer.attn_v = reader.load_tensor(prefix + "attn_v.weight");
+            } else if (reader.has_tensor(prefix + "attn_qkv.weight")) {
+                Tensor qkv = reader.load_tensor(prefix + "attn_qkv.weight");
+                int64_t q_dim = config.num_heads    * config.head_dim;
+                int64_t k_dim = config.num_kv_heads * config.head_dim;
+                int64_t v_dim = config.num_kv_heads * config.head_dim;
+                layer.attn_q = qkv.narrow(0, 0,                 q_dim).contiguous();
+                layer.attn_k = qkv.narrow(0, q_dim,             k_dim).contiguous();
+                layer.attn_v = qkv.narrow(0, q_dim + k_dim,     v_dim).contiguous();
+            }
             layer.attn_output = reader.load_tensor(prefix + "attn_output.weight");
 
             // QK-norm (Gemma3)
@@ -6247,9 +6261,20 @@ public:
             // FFN norm
             layer.ffn_norm = reader.load_tensor(prefix + "ffn_norm.weight");
 
-            // FFN weights
-            layer.ffn_gate = reader.load_tensor(prefix + "ffn_gate.weight");
-            layer.ffn_up = reader.load_tensor(prefix + "ffn_up.weight");
+            // FFN weights — Phi-3 stores gate+up merged in `ffn_up.weight`
+            // (rows = 2*intermediate, gate first half, up second).
+            if (reader.has_tensor(prefix + "ffn_gate.weight")) {
+                layer.ffn_gate = reader.load_tensor(prefix + "ffn_gate.weight");
+                layer.ffn_up   = reader.load_tensor(prefix + "ffn_up.weight");
+            } else if (reader.has_tensor(prefix + "ffn_up.weight")) {
+                Tensor gu = reader.load_tensor(prefix + "ffn_up.weight");
+                if (gu.size(0) == 2 * config.intermediate_size) {
+                    layer.ffn_gate = gu.narrow(0, 0,                       config.intermediate_size).contiguous();
+                    layer.ffn_up   = gu.narrow(0, config.intermediate_size, config.intermediate_size).contiguous();
+                } else {
+                    layer.ffn_up = gu;
+                }
+            }
             layer.ffn_down = reader.load_tensor(prefix + "ffn_down.weight");
 
             // Optional biases
