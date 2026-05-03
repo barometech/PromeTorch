@@ -80,9 +80,9 @@
 <tr><td><b>gemma3-4B Q4_K_M</b></td>
     <td class="ok">✓ structured markdown</td>
     <td class="ok">✓ работает</td>
-    <td class="cell-num">4.6</td><td>n/a&nbsp;⁴</td>
+    <td class="cell-num">4.7</td><td class="cell-num">6.7</td>
     <td><code>neox</code> per-layer</td>
-    <td><span class="badge badge-ok">FIXED single-proc: per-layer SWA + post_attn_norm placement + GeGLU. TP-4 throws — нужен gather/re-slice для post-norms (out of scope)</span></td></tr>
+    <td><span class="badge badge-ok">FIXED 2026-05-03 (commit 0ba114a): post_attention_norm + post_ffw_norm применяются на full h_buf после output_proj/ffn_down (после AllGather use_gather или AllReduce K-slice). Требует PT_TP_GATHER=1. Output: «Космос – это всё, что существует за пределами нашей Земли. Это огромная, бесконечная область, включающая в себя: * **Вселенная:**...»</span></td></tr>
 
 <tr><td><b>phi3.5-mini Q4_K_M</b></td>
     <td class="ok">✓ связный RU</td>

@@ -142,7 +142,7 @@ cyrillic vocab IDs. Активация — env `PT_PER_BLOCK_SCALE=1`.
 | qwen3-4B | **10.9** | 1.82 | **×6.0** | **✅ идеально** ¹ |
 | **mistral-7B** | **8.5** | 1.74 | **×4.9** | **✅ идеально** |
 | qwen2.5-7B | (OOM TP-4) | 1.71 | — | **✅ идеально** SP ¹ |
-| **gemma3-4B** | TBD ² | 1.30 | — | **✅ structured markdown** SP ¹ |
+| **gemma3-4B** | **6.7** ² | 1.30 | **×5.2** | **✅ structured markdown** SP+TP-4 ¹ |
 | **phi3.5-mini** | **6.4** | 3.5 SP | — | **✅ связный RU+EN** SP+TP-4 ³ |
 | llama3-8B | (OOM TP-4) | 1.65 | — | TBD |
 | qwen3-14B | (OOM TP-4) | 1.02 | — | TBD |
@@ -150,8 +150,12 @@ cyrillic vocab IDs. Активация — env `PT_PER_BLOCK_SCALE=1`.
 > **¹** После NEOX RoPE fix (2026-05-03 commit `b144db2`). Архитектуры qwen/qwen2/
 > qwen3/gemma3/phi3 требуют LongRoPE-style half-split rotation `(d, d+head_dim/2)`
 > вместо interleaved `(2d, 2d+1)`. Mistral arch=`llama` остался на NORM, регрессии нет. &nbsp;
-> **²** gemma3 TP-4: `post_attention_norm` + `post_ffw_norm` теперь wired
-> (commit `ce41588`, требует `PT_TP_GATHER=1`). Тест pending — measure после rebuild17. &nbsp;
+> **²** gemma3 TP-4 FIXED 2026-05-03 (commit `0ba114a`, требует `PT_TP_GATHER=1`):
+> `post_attention_norm` + `post_ffw_norm` применяются на full h_buf после
+> output_proj/ffn_down. 6.7 tok/s, structured markdown сохранён:
+> «Космос – это всё, что существует за пределами нашей Земли. Это огромная,
+> бесконечная область, включающая в себя: * **Вселенная:** Все известные
+> объекты, включая звезды, планеты, галактики...» &nbsp;
 > **³** phi3.5-mini FIXED 2026-05-03 (commit `d9dce9e`): `load_quantized_mmap` не
 > обрабатывал phi3 merged tensors (`attn_qkv.weight`, `ffn_up.weight`
 > rows=2×inter). После split_from_mmap helper — связный текст RU («Космос - это
