@@ -60,6 +60,28 @@ With its rich history that dates back to 1...
 ```
 36 tokens / 13.1s = **2.7 tok/s**.
 
+### deepseek-coder-7B Q4_K_M (SP)
+After commit `81a79bd` (rope.scale_linear legacy key fallback).
+**Code completion:** «def fibonacci(n):»
+```
+    if n == 0:
+        return 0
+    elif n == 1:
+        return 1
+    else:
+        fib_sequence = [0, 1] # start with the first two numbers in the sequence
+```
+50 tokens / 16.4s = **3.0 tok/s**.
+
+**Chat instruct:** «Write a Python function to compute Fibonacci numbers.»
+```
+Sure, here is a simple Python function to compute Fibonacci numbers:
+```python
+def fibonacci(n):
+    if n <= 0:  # base
+```
+40 tokens / 14.0s = **2.9 tok/s**.
+
 ### mistral-7B Q4_K_M
 **RU:** «Что такое космос? Расскажи коротко.» (без чат-шаблона):
 ```
