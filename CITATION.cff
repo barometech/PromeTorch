@@ -1,0 +1,24 @@
+cff-version: 1.2.0
+title: PromeTorch
+message: If you use this software in your research, please cite it as below.
+type: software
+authors:
+  - name: PromeTorch contributors
+repository-code: 'https://github.com/barometech/PromeTorch'
+abstract: >-
+  PromeTorch is a from-scratch PyTorch-compatible deep learning framework
+  written in C++17 with CUDA and CPU backends, including a fully featured
+  GGUF inference runtime, multi-process tensor-parallel decoding for the
+  Эльбрус 8C2 VLIW architecture, and a custom NMC4 (NM Card / NM Quad)
+  fixed-point quantization backend.
+keywords:
+  - deep-learning
+  - inference
+  - llm
+  - gguf
+  - cuda
+  - elbrus
+  - nm-card
+  - quantization
+  - tensor-parallel
+license: SEE LICENSE
