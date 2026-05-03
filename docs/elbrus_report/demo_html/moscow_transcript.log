@@ -1,0 +1,88 @@
+=== PromeTorch TP-4 inference (qwen3:4b Q4_K_M, Эльбрус 8C2 4-NUMA) ===
+Start: 2026-05-03 07:18:58
+Rank 0 launched PID=8551
+Rank 1 launched PID=8552
+Rank 2 launched PID=8553
+Rank 3 launched PID=8554
+End: 2026-05-03 07:20:59
+
+=== Rank 0 output ===
+============================================
+ PromeTorch GGUF Inference
+============================================
+Model: /home/paperclipdnb/gguf_models/mistral-7b-Q4_K_M.gguf
+Prompt: "<s>[INST] You are an assistant with one tool: write_file(path, content). Use it EXACTLY as: <tool_call>{"name":"write_file","arguments":{"path":"moscow.html","content":"<!DOCTYPE html><html lang=ru><head><meta charset=utf-8><title>Москва</title></head><body><h1>Москва — столица России</h1><p>Москва — крупнейший город России и её столица. Расположена на реке Москве в центре Восточно-Европейской равнины. Население более 13 миллионов человек. Основана в 1147 году князем Юрием Долгоруким.</p></body></html>"}}</tool_call>
+
+Task: создай простую HTML страницу про Москву и сохрани как moscow.html через write_file. [/INST]"
+Max tokens: 400
+Temperature: 0.3
+Top-k: 40
+Top-p: 0.9
+Device: CPU
+Mode: Completion
+============================================
+[TP] rank 0/4 connecting to 127.0.0.1:29500
+[DDP] SHM AllReduce enabled (/dev/shm/prometorch_ddp_29500) [spin+yield]
+[GGUF] Loaded: /home/paperclipdnb/gguf_models/mistral-7b-Q4_K_M.gguf
+[GGUF] Version: 3, Tensors: 291, Metadata KVs: 29
+[GGUF] Data offset: 757984 bytes
+[Tokenizer] Loaded: model=llama, vocab=32768, merges=0, bos=1, eos=2, special=260
+
+=== Model Config ===
+  Architecture: llama
+  Name: Mistral-7B-Instruct-v0.3
+  Hidden size: 4096
+  Layers: 32
+  Heads: 32 (KV: 8)
+  Head dim: 128
+  Q dim: 4096, KV dim: 1024
+  FFN size: 14336
+  Vocab size: 32768
+  Context length: 32768
+  RoPE base: 1e+06
+  RMS norm eps: 1e-05
+  Gemma features: scale_emb=0 norm+1=0 qk_norm=0 post_norm=0
+
+[Model] Loading weights...
+  token_embd: [32768, 4096]
+  Layer 5/32 loaded
+  Layer 10/32 loaded
+  Layer 15/32 loaded
+  Layer 20/32 loaded
+  Layer 25/32 loaded
+  Layer 30/32 loaded
+  Layer 32/32 loaded
+[mmap] Memory-mapping quantized weights (zero-copy)...
+[mmap] Mapped 4170 MB
+[mmap] Mapped 4170 MB: /home/paperclipdnb/gguf_models/mistral-7b-Q4_K_M.gguf
+[mmap] Locked 5 MB of critical weights in RAM
+[mmap] 4096 MB mapped in 3.9 ms (zero-copy)
+
+[Model] Loaded in 50.3 seconds
+[Q8_SOA] 192 TP-sliced weights ready, 1958 MB SoA4 storage
+[TP] Tensor-parallel enabled: rank 0/4 heads[0..8) kv_heads[0..2) inter[0..3584)
+
+--- Generation (tensor-parallel, nprocs=4) ---
+[Generate-TP] Prompt tokens: 227
+
+
+<tool_call>
+  {"name": "write_file",
+   "arguments": {
+     "path": "moscow.html",
+     "content": "<!DOCTYPE html>\n<html lang=ru>\n<head>\n<meta charset=utf-8>\n<title>Москва</title>\n</head>\n<body>\n<h1>Москва — столица России</h1>\n<p>Москва — крупнейший город России и её столица. Расположен на реке Москве в центре Восточно-Европейской равнины. Население более 13 миллионов человек. Основана в 1147 году князем Юрием Долгоруким.</p></body></html>"
+   }}
+</tool_call>
+
+[Generate-TP] 198 tokens in 28.2s (7.0 tok/s)
+
+--- Full Response ---
+
+
+<tool_call>
+  {"name": "write_file",
+   "arguments": {
+     "path": "moscow.html",
+     "content": "<!DOCTYPE html>\n<html lang=ru>\n<head>\n<meta charset=utf-8>\n<title>Москва</title>\n</head>\n<body>\n<h1>Москва — столица России</h1>\n<p>Москва — крупнейший город России и её столица. Расположен на реке Москве в центре Восточно-Европейской равнины. Население более 13 миллионов человек. Основана в 1147 году князем Юрием Долгоруким.</p></body></html>"
+   }}
+</tool_call>
