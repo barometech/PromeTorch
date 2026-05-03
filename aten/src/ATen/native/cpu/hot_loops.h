@@ -369,9 +369,13 @@ void rope_apply_fused_neox(float* q, float* k,
 // Precompute RoPE table for a given position. `scale` defaults to 1.0
 // (no scaling). Pass >1 for linear-scaled RoPE, e.g. Gemma3 has scale=8.0
 // from `<arch>.rope.scaling.factor` in GGUF metadata.
+//
+// `rope_factors` is an optional per-frequency divisor (Phi-3 LongRoPE):
+// `inv_freq[d] = (1/base^(2d/dim)) / factor[d]`. nullptr → no factor.
 void rope_precompute(float* cos_out, float* sin_out,
                      int64_t pos, int64_t head_dim, float freq_base,
-                     float scale = 1.0f);
+                     float scale = 1.0f,
+                     const float* rope_factors = nullptr);
 
 } // namespace hot
 } // namespace native

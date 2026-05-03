@@ -1847,12 +1847,16 @@ void fused_zero_grad_multi(GradBufPack* bufs, int num_bufs) {
 // Default 1.0 keeps callers that pass freq_base only behaving as before.
 void rope_precompute(float* cos_out, float* sin_out,
                      int64_t pos, int64_t head_dim, float freq_base,
-                     float scale) {
+                     float scale,
+                     const float* rope_factors) {
     float scaled_pos = (scale > 0.0f && scale != 1.0f)
                         ? (static_cast<float>(pos) / scale)
                         : static_cast<float>(pos);
     for (int64_t d = 0; d < head_dim / 2; ++d) {
         float freq = 1.0f / std::pow(freq_base, 2.0f * d / head_dim);
+        // Phi-3 LongRoPE: `inv_freq[d] /= factor[d]`. factor[d] обычно ≥1.0,
+        // т.е. эффективная частота уменьшается → угол пропорционально меньше.
+        if (rope_factors) freq /= rope_factors[d];
         float theta = scaled_pos * freq;
         cos_out[d] = std::cos(theta);
         sin_out[d] = std::sin(theta);
