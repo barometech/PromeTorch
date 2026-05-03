@@ -65,6 +65,14 @@ struct TransformerConfig {
     float rope_freq_base = 10000.0f;
     float rope_scale = 1.0f;           // Linear RoPE scaling: theta = pos/scale * freq.
                                        // Gemma3=8.0, Llama-3.1 long-context, Phi-3.5.
+    // Gemma3 uses interleaved SWA: every layer either "global" (uses rope_freq_base
+    // + rope_scale, full attention) or "local SWA" (uses rope_swa_freq_base +
+    // rope_swa_scale, attention masked to last swa_window positions). Pattern:
+    // every `swa_pattern`-th layer is global. swa_window=0 disables.
+    float rope_swa_freq_base = 10000.0f;
+    float rope_swa_scale = 1.0f;
+    int64_t swa_window = 0;            // 0 = no SWA. Gemma3-4B = 1024.
+    int64_t swa_pattern = 0;           // 0 = uniform global. Gemma3 = 6 (every 6th layer global).
     float rms_norm_eps = 1e-6f;
 
     // Architecture-specific
@@ -88,18 +96,30 @@ struct TransformerConfig {
 
         rope_freq_base = reader.get_arch_float("rope.freq_base", 10000.0f);
         // Linear RoPE scaling — applied as theta = pos / scale_factor * freq.
-        // Gemma3 нужен другой подход: per-layer alternating local-SWA (no
-        // scale, freq_base=10000) и global (with scale, freq_base=1e6). Без
-        // per-layer infrastructure применять scale ко всем слоям ломает SWA
-        // attention. До тех пор пока per-layer rope не реализован,
-        // gemma3 пропускаем — пусть остаётся broken до реальной починки.
+        // Gemma3 имеет factor=8.0 в metadata + per-layer alternating SWA pattern
+        // (5 из 6 слоёв — local SWA window=1024 freq_base=10000 scale=1.0,
+        //  каждый 6-й слой — global freq_base=1e6 scale=8.0). Per-layer config
+        // ниже подхватывает оба варианта.
         {
             std::string scale_type = reader.get_string(architecture + ".rope.scaling.type", "");
             float scale_factor = reader.get_arch_float("rope.scaling.factor", 0.0f);
-            if (scale_type == "linear" && scale_factor > 1.0f &&
-                architecture != "gemma3" && architecture != "gemma3n") {
+            if (scale_type == "linear" && scale_factor > 1.0f) {
                 rope_scale = scale_factor;
             }
+        }
+        // SWA + alternating rope. llama.cpp's gemma3 uses swa_period=6 with the
+        // pattern set so every 6th layer is the global one. SWA layers use
+        // a separate rope_freq_base (key `<arch>.rope.freq_base_swa`, default
+        // 10000) and no scaling. swa_window comes from
+        // `<arch>.attention.sliding_window`.
+        swa_window  = reader.get_arch_int("attention.sliding_window", 0);
+        swa_pattern = reader.get_arch_int("attention.sliding_window_pattern", 0);
+        rope_swa_freq_base = reader.get_arch_float("rope.freq_base_swa", 10000.0f);
+        rope_swa_scale     = 1.0f;  // SWA layers in gemma3 don't use the scaling factor.
+        // gemma3 ALWAYS uses swa_pattern=6 (per llama.cpp llama-model.cpp:1561),
+        // even when the metadata key is missing.
+        if (architecture == "gemma3" && swa_window > 0 && swa_pattern == 0) {
+            swa_pattern = 6;
         }
         rms_norm_eps = reader.get_arch_float("attention.layer_norm_rms_epsilon", 1e-6f);
 
@@ -138,6 +158,22 @@ struct TransformerConfig {
             architecture == "phimoe" ||
             architecture == "stablelm" || architecture == "starcoder2" ||
             architecture == "falcon" || architecture == "gptneox";
+    }
+
+    // Gemma3-style alternating SWA: every `swa_pattern`-th layer is "global"
+    // (full attention, rope_freq_base + rope_scale). Other layers are
+    // "local SWA" (window=swa_window, rope_swa_freq_base, no scale).
+    // Indexing matches llama.cpp set_swa_pattern: layers `i` where
+    // (i + 1) % swa_pattern == 0 are global. swa_window=0 → all layers global.
+    bool layer_is_global(int64_t layer_idx) const {
+        if (swa_window <= 0 || swa_pattern <= 0) return true;
+        return ((layer_idx + 1) % swa_pattern) == 0;
+    }
+    float layer_rope_freq_base(int64_t layer_idx) const {
+        return layer_is_global(layer_idx) ? rope_freq_base : rope_swa_freq_base;
+    }
+    float layer_rope_scale(int64_t layer_idx) const {
+        return layer_is_global(layer_idx) ? rope_scale : rope_swa_scale;
     }
 
     void print() const {
@@ -698,9 +734,13 @@ struct GGUFTPConfig {
     std::vector<float> scores_buf;
     // RoPE cos/sin cache — past_len одинаков для всех 36 слоёв в одном decode шаге,
     // поэтому precompute один раз. (Sonnet 4.6 lateral finding.)
+    // С gemma3 alternating SWA freq_base/scale меняются per-layer, поэтому
+    // ключ кэша расширен — invalidate когда любое из трёх не совпадает.
     std::vector<float> rope_cos_cache;
     std::vector<float> rope_sin_cache;
     int64_t rope_cache_past_len = -1;  // invalidate marker
+    float rope_cache_freq_base = -1.0f;
+    float rope_cache_scale = -1.0f;
 };
 
 // ============================================================================
@@ -3047,7 +3087,9 @@ public:
             {
                 float rope_cos[256], rope_sin[256];  // head_dim/2 <= 256 for all models
                 at::native::hot::rope_precompute(rope_cos, rope_sin,
-                    past_len, head_dim, config.rope_freq_base, config.rope_scale);
+                    past_len, head_dim,
+                    config.layer_rope_freq_base(i),
+                    config.layer_rope_scale(i));
                 if (config.rope_neox) {
                     at::native::hot::rope_apply_fused_neox(sp.q_buf, sp.k_buf,
                         rope_cos, rope_sin, n_heads, n_kv_heads, head_dim);
@@ -3075,6 +3117,17 @@ public:
                 const float* k_cache = kv_cache.key_cache[i].data_ptr<float>();
                 const float* v_cache = kv_cache.value_cache[i].data_ptr<float>();
 
+                // Gemma3 alternating SWA: local layers attend only to the last
+                // `swa_window` positions. Start the attention loop from
+                // `attn_start` instead of 0; this is equivalent to setting
+                // scores to -inf for positions outside the window since softmax
+                // normalizes over the kept range.
+                int64_t attn_start = 0;
+                if (config.swa_window > 0 && !config.layer_is_global(i)) {
+                    int64_t s = total_seq - config.swa_window;
+                    if (s > 0) attn_start = s;
+                }
+
                 // Update sliding window state (summarize evicted positions)
                 if (sliding_window_.enabled) {
                     sliding_window_.update_window(i, total_seq,
@@ -3100,9 +3153,13 @@ public:
                             total_seq, kv_h, head_dim, kv_dim,
                             i, scale, scores);
                     } else {
-                    // Standard full attention
+                    // Standard full attention. SWA-masked positions get
+                    // scores[t] = -INFINITY so softmax exp(-inf-max)=0 ignores them.
+                    for (int64_t t = 0; t < attn_start; ++t) {
+                        scores[t] = -std::numeric_limits<float>::infinity();
+                    }
 #ifdef __AVX2__
-                    for (int64_t t = 0; t < total_seq; ++t) {
+                    for (int64_t t = attn_start; t < total_seq; ++t) {
                         const float* k_head = k_cache + t * kv_dim + kv_h * head_dim;
                         __m256 dot_acc = _mm256_setzero_ps();
                         int64_t d = 0;
@@ -3116,7 +3173,7 @@ public:
                         scores[t] = dot * scale;
                     }
 #else
-                    for (int64_t t = 0; t < total_seq; ++t) {
+                    for (int64_t t = attn_start; t < total_seq; ++t) {
                         const float* k_head = k_cache + t * kv_dim + kv_h * head_dim;
                         float dot = 0.0f;
                         for (int64_t d = 0; d < head_dim; ++d) dot += q_head[d] * k_head[d];
@@ -3941,8 +3998,9 @@ public:
                 }
                 float rope_cos[256], rope_sin[256];
                 at::native::hot::rope_precompute(rope_cos, rope_sin,
-                    past_len_0 + k, head_dim, config.rope_freq_base,
-                    config.rope_scale);
+                    past_len_0 + k, head_dim,
+                    config.layer_rope_freq_base(i),
+                    config.layer_rope_scale(i));
                 if (config.rope_neox) {
                     at::native::hot::rope_apply_fused_neox(q, kk, rope_cos, rope_sin,
                         n_heads, n_kv_heads, head_dim);
@@ -5396,20 +5454,31 @@ public:
             }
 
             // --- RoPE (uses current past_len position) ---
-            // Round 5 Item 8: cos/sin cached across all 36 layers within one decode
-            // step (past_len identical). Saves 35/36 × rope_precompute = ~0.5-1 ms/token.
+            // Round 5 Item 8: cos/sin cached across layers within one decode
+            // step (past_len identical). Saves N-1/N × rope_precompute. With
+            // gemma3 alternating SWA, the freq_base flips per layer, so the
+            // cache key includes (past_len, freq_base, scale). For non-gemma3
+            // models layer_rope_freq_base/scale are uniform across layers and
+            // the cache hits as before.
             {
                 int64_t hd_half = head_dim / 2;
-                if (tp_.rope_cache_past_len != past_len) {
+                float layer_freq_base  = config.layer_rope_freq_base(i);
+                float layer_rope_scale = config.layer_rope_scale(i);
+                bool need_recompute =
+                    tp_.rope_cache_past_len != past_len ||
+                    tp_.rope_cache_freq_base != layer_freq_base ||
+                    tp_.rope_cache_scale != layer_rope_scale;
+                if (need_recompute) {
                     if ((int64_t)tp_.rope_cos_cache.size() < hd_half) {
                         tp_.rope_cos_cache.resize(hd_half);
                         tp_.rope_sin_cache.resize(hd_half);
                     }
                     at::native::hot::rope_precompute(
                         tp_.rope_cos_cache.data(), tp_.rope_sin_cache.data(),
-                        past_len, head_dim, config.rope_freq_base,
-                        config.rope_scale);
+                        past_len, head_dim, layer_freq_base, layer_rope_scale);
                     tp_.rope_cache_past_len = past_len;
+                    tp_.rope_cache_freq_base = layer_freq_base;
+                    tp_.rope_cache_scale = layer_rope_scale;
                 }
                 if (config.rope_neox) {
                     at::native::hot::rope_apply_fused_neox(q_l, k_l,
@@ -6798,10 +6867,11 @@ public:
             PROF_END(profiler, "qk_norm");
         }
 
-        // RoPE
+        // RoPE — gemma3 uses per-layer alternating SWA/global; for everything
+        // else config.layer_rope_* return the uniform values.
         PROF_BEGIN(profiler, "rope");
-        apply_rope_inplace(q, n_heads, head_dim, past_len);
-        apply_rope_inplace(k, n_kv_heads, head_dim, past_len);
+        apply_rope_inplace(q, n_heads, head_dim, past_len, layer_idx);
+        apply_rope_inplace(k, n_kv_heads, head_dim, past_len, layer_idx);
         PROF_END(profiler, "rope");
 
         // KV cache
@@ -6885,7 +6955,9 @@ public:
     // ========================================================================
 
     void apply_rope_inplace(Tensor& x, int64_t n_heads, int64_t head_dim,
-                            int64_t position_offset) {
+                            int64_t position_offset, int64_t layer_idx = 0) {
+        float freq_base   = config.layer_rope_freq_base(layer_idx);
+        float rope_scale  = config.layer_rope_scale(layer_idx);
 #ifdef PT_USE_CUDA
         if (use_cuda_ && x.is_cuda()) {
             int64_t seq_len = x.size(0);
@@ -6893,14 +6965,12 @@ public:
                 x.mutable_data_ptr<float>(),
                 static_cast<int>(seq_len), static_cast<int>(n_heads),
                 static_cast<int>(head_dim),
-                static_cast<int>(position_offset), config.rope_freq_base, nullptr);
+                static_cast<int>(position_offset), freq_base, nullptr);
             return;
         }
 #endif
         int64_t seq_len = x.size(0);
         float* data = x.mutable_data_ptr<float>();
-        float freq_base = config.rope_freq_base;
-        float rope_scale = config.rope_scale;
         const bool neox = config.rope_neox;
         const int64_t half_dim = head_dim / 2;
         for (int64_t s = 0; s < seq_len; ++s) {
