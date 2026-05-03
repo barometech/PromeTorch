@@ -1870,6 +1870,87 @@ void rope_precompute(float* cos_out, float* sin_out,
     }
 }
 
+// YaRN RoPE precompute (DeepSeek-V2/V3, GigaChat3 deepseek2 architecture).
+//
+// Реализует "Yet Another RoPE extensioN" формулу из YaRN paper Peng et al. 2024.
+// Сравнение с linear scaling:
+//   - linear     : theta = (pos / factor) * inv_freq[d]   — все dim одинаково
+//   - NTK        : theta = pos * (inv_freq[d] from base * factor^(D/(D-2)))
+//   - YaRN       : смесь NTK (extrapolation) на низких частотах + linear на высоких,
+//                   с мягким ramp в переходной зоне (beta_fast..beta_slow).
+//
+// inv_freq_extrap[d] = inv_freq[d]                  ← NTK side, для коротких prompts
+// inv_freq_interp[d] = inv_freq[d] / factor          ← linear side, для длинных
+// mask[d] in [0,1]: 1 = чистый NTK, 0 = чистый linear, между — линейный ramp.
+//
+// Boundary dimensions (low_dim, high_dim) считаются из beta_fast / beta_slow:
+//   beta = orig_ctx / (2π * base^(2d/D))      ← число поворотов на orig_ctx
+//   d(beta) = D * log(orig_ctx / (2π β)) / (2 log base)
+//
+// mscale (yarn_log_multiplier) корректирует амплитуду attention scores:
+//   mscale = 1 + log_mul * log(factor)
+//   GigaChat3 / DeepSeek-V3: log_mul = 0.1, factor = 64 → mscale ≈ 1.42.
+//
+// Параметры:
+//   pos             — позиция токена
+//   head_dim        — D (rope dimension count, для deepseek2 = 64, не full head)
+//   base            — rope.freq_base (обычно 10000 или 100000 для deepseek2)
+//   factor          — rope.scaling.factor (обычно 32 или 64 для long-context)
+//   beta_fast       — high-freq boundary, обычно 32
+//   beta_slow       — low-freq boundary, обычно 1
+//   orig_ctx        — original context length (4096 для GigaChat3)
+//   log_multiplier  — для mscale, 0 → mscale=1 (no amplitude correction)
+void rope_precompute_yarn(float* cos_out, float* sin_out,
+                          int64_t pos, int64_t head_dim,
+                          float base, float factor,
+                          float beta_fast, float beta_slow,
+                          int64_t orig_ctx,
+                          float log_multiplier) {
+    // Compute mscale for attention factor correction.
+    float mscale = 1.0f;
+    if (log_multiplier > 0.0f && factor > 1.0f) {
+        mscale = 1.0f + log_multiplier * std::log(factor);
+    }
+    // Compute boundary dims (low_dim → high_dim defines the ramp zone).
+    auto find_dim = [&](float beta) -> float {
+        // d(beta) = head_dim * log(orig_ctx / (2π β)) / (2 log base)
+        float numer = std::log(static_cast<float>(orig_ctx) /
+                                (2.0f * 3.14159265358979323846f * beta));
+        float denom = 2.0f * std::log(base);
+        return head_dim * numer / denom;
+    };
+    float low_dim_f  = std::floor(find_dim(beta_fast));
+    float high_dim_f = std::ceil (find_dim(beta_slow));
+    // Clamp to valid range and ensure low < high (prevents division by zero
+    // in the ramp formula below).
+    if (low_dim_f  < 0.0f)                low_dim_f  = 0.0f;
+    if (high_dim_f > (head_dim / 2 - 1)) high_dim_f = static_cast<float>(head_dim / 2 - 1);
+    if (high_dim_f - low_dim_f < 0.001f)  high_dim_f = low_dim_f + 0.001f;
+    float ramp_span = high_dim_f - low_dim_f;
+    float pos_f = static_cast<float>(pos);
+    for (int64_t d = 0; d < head_dim / 2; ++d) {
+        float inv_freq = 1.0f / std::pow(base, 2.0f * d / head_dim);
+        // NTK extrapolation (no scaling) и linear interpolation (divide by factor).
+        float inv_extrap = inv_freq;
+        float inv_interp = inv_freq / factor;
+        // Ramp: mask=1 means NTK, mask=0 means linear. Linear interp between.
+        float mask = static_cast<float>(d - low_dim_f) / ramp_span;
+        if (mask < 0.0f) mask = 0.0f;
+        if (mask > 1.0f) mask = 1.0f;
+        // Final freq: blend extrap (=1 at high d, low ramp) with interp (=0).
+        // YaRN paper: attention is "interpolated" at low freq dims (long-range),
+        // "extrapolated" (=NTK) at high freq dims (short-range). High d in our
+        // indexing = low freq → use linear (interp). Low d = high freq → NTK.
+        // mask grows with d, so mask=0 → NTK (extrap), mask=1 → linear (interp).
+        float inv_yarn = inv_interp * mask + inv_extrap * (1.0f - mask);
+        float theta = pos_f * inv_yarn;
+        float c = std::cos(theta) * mscale;
+        float s = std::sin(theta) * mscale;
+        cos_out[d] = c;
+        sin_out[d] = s;
+    }
+}
+
 void rope_apply_fused(float* q, float* k,
                       const float* cos_table, const float* sin_table,
                       int64_t n_heads, int64_t n_kv_heads, int64_t head_dim) {
