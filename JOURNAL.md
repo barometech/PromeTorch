@@ -3,6 +3,49 @@
 Полная история разработки проекта. Актуальные инструкции — в `CLAUDE.md`.
 Полный аудит инфраструктуры — в `INFRASTRUCTURE_AUDIT.md`.
 
+## 2026-05-03 (вечер, ИТОГ-6): Windows CPU port + GigaChat3 адаптация Phases 1/1B/4/6
+
+**Windows CPU бенчмарк (AMD EPYC 7F52, 32 потока):**
+| Модель | PromeTorch | llama.cpp b6048 | Ratio |
+|---|---|---|---|
+| qwen3-4B Q4_K_M | 13.1 tok/s | 15.25 | 0.86× |
+| qwen3-8B Q4_K_M | 7.7 tok/s | 8.66 | 0.89× |
+| qwen3-14B Q4_K_M | 4.4 tok/s | 4.43 | **1.00× (паритет)** |
+
+CPU-only сборка на MSVC 2019 потребовала 6 портативных фиксов (commit `da4674c`):
+1. `__attribute__((unused))` → `[[maybe_unused]]` (TudaBLAS.h)
+2. `/arch:AVX2` + `__AVX2__/__FMA__` defines + `NOMINMAX` (CMakeLists.txt)
+3. `volatile void*` cast убран в WakeByAddress (Futex.h)
+4. `__builtin_prefetch` → `_mm_prefetch` shim (gguf_model.h)
+5. `0.0f/0.0f` → `quiet_NaN()` (cpu_quant_gemv.h, MSVC compile-time-DBZ)
+6. `posix_memalign` → `_aligned_malloc/free` (q8_soa_repack.h)
+
+**GigaChat3 (deepseek2) адаптация — 4 из 6 фаз:**
+- ✅ Phase 1: deepseek2 metadata в TransformerConfig (commit `da4674c`):
+   `is_mla, kv_lora_rank, key_length_mla, value_length_mla, expert_count,
+    expert_used_count, expert_shared_count, leading_dense_block_count,
+    rope_yarn + yarn_factor/beta_fast/beta_slow/log_multiplier`
+- ✅ Phase 1B: TransformerLayer расширен MLA + MoE полями (commit `2e29335`):
+   `attn_kv_a_norm, q_attn_kv_a_mqa, q_attn_k_b, q_attn_v_b,
+    q_ffn_gate_inp, q_ffn_*_exps (3D), q_ffn_*_shexp`
+- ✅ Phase 4: `rope_precompute_yarn` (commit `8fb4da1`) — полная YaRN формула
+   с beta_fast/beta_slow ramp + mscale (1 + log_mul·log(factor))
+- ✅ Phase 6: `cpu_quant_gemv_3d_indexed` (commit `2e29335`) — wrapper для
+   3D Q4_K/Q5_K/Q6_K/Q8_0 с slice по dim 2 (expert_idx или head_idx).
+   slice_stride = N · row_stride_bytes — bit-identical с llama.cpp.
+
+**Остаётся (~1000 LoC, следующая сессия):**
+- ⏳ Phase 1B loader extension — upload_quant вызовы для новых tensor names
+- ⏳ Phase 2: MLA forward — Q proj, KV down/split/norm, K/V up per-head,
+   YaRN RoPE на k_rope + last 64 of Q, attention, output proj (~400 LoC)
+- ⏳ Phase 3: MoE forward — router, top-k selection, per-expert SiGLU,
+   shared expert + residual (~600 LoC)
+- ⏳ Phase 5: gigachat regex pre-tokenizer (для строгой совместимости;
+   gpt2-style BPE fallback работает для большинства строк)
+
+GigaChat3 GGUF (6.1 GB) скачивается на Windows для локального тестирования
+после implementation. План: `docs/elbrus_report/GIGACHAT3_ADAPTATION_PLAN.md`.
+
 ## 2026-05-03 (ночь, ИТОГ-5): regression suite 9/9 SP PASSED — 0 регрессий
 
 После всех fix'ов прогнан `verify_all_9_models.sh` на rebuild19:
