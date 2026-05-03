@@ -1841,11 +1841,19 @@ void fused_zero_grad_multi(GradBufPack* bufs, int num_bufs) {
 }
 
 // Fusion 7: RoPE precompute + apply
+//
+// `scale` is the linear RoPE scaling factor — `theta = (pos / scale) * freq`.
+// Gemma3 has scale=8.0; LLaMA / Mistral / Qwen3 use scale=1.0 (no scaling).
+// Default 1.0 keeps callers that pass freq_base only behaving as before.
 void rope_precompute(float* cos_out, float* sin_out,
-                     int64_t pos, int64_t head_dim, float freq_base) {
+                     int64_t pos, int64_t head_dim, float freq_base,
+                     float scale) {
+    float scaled_pos = (scale > 0.0f && scale != 1.0f)
+                        ? (static_cast<float>(pos) / scale)
+                        : static_cast<float>(pos);
     for (int64_t d = 0; d < head_dim / 2; ++d) {
         float freq = 1.0f / std::pow(freq_base, 2.0f * d / head_dim);
-        float theta = pos * freq;
+        float theta = scaled_pos * freq;
         cos_out[d] = std::cos(theta);
         sin_out[d] = std::sin(theta);
     }

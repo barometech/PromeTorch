@@ -366,9 +366,12 @@ void rope_apply_fused_neox(float* q, float* k,
                            const float* cos_table, const float* sin_table,
                            int64_t n_heads, int64_t n_kv_heads, int64_t head_dim);
 
-// Precompute RoPE table for a given position
+// Precompute RoPE table for a given position. `scale` defaults to 1.0
+// (no scaling). Pass >1 for linear-scaled RoPE, e.g. Gemma3 has scale=8.0
+// from `<arch>.rope.scaling.factor` in GGUF metadata.
 void rope_precompute(float* cos_out, float* sin_out,
-                     int64_t pos, int64_t head_dim, float freq_base);
+                     int64_t pos, int64_t head_dim, float freq_base,
+                     float scale = 1.0f);
 
 } // namespace hot
 } // namespace native
