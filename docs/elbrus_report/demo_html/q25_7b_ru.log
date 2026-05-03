@@ -1,0 +1,58 @@
+============================================
+ PromeTorch GGUF Inference
+============================================
+Model: /home/paperclipdnb/gguf_models/qwen2.5-7b-Q4_K_M.gguf
+Prompt: "Расскажи про Москву одним предложением."
+Max tokens: 200
+Temperature: 0.5
+Top-k: 40
+Top-p: 0.9
+Device: CPU
+Mode: Chat
+============================================
+[GGUF] Loaded: /home/paperclipdnb/gguf_models/qwen2.5-7b-Q4_K_M.gguf
+[GGUF] Version: 3, Tensors: 339, Metadata KVs: 38
+[GGUF] Data offset: 5954240 bytes
+[Tokenizer] Loaded: model=gpt2, vocab=152064, merges=151387, bos=151643, eos=151645, special=28
+
+=== Model Config ===
+  Architecture: qwen2
+  Name: Qwen2.5 7B Instruct
+  Hidden size: 3584
+  Layers: 28
+  Heads: 28 (KV: 4)
+  Head dim: 128
+  Q dim: 3584, KV dim: 512
+  FFN size: 18944
+  Vocab size: 152064
+  Context length: 32768
+  RoPE base: 1e+06
+  RMS norm eps: 1e-06
+  Gemma features: scale_emb=0 norm+1=0 qk_norm=0 post_norm=0
+
+[Model] Loading weights...
+  token_embd: [152064, 3584]
+  Layer 5/28 loaded
+  Layer 10/28 loaded
+  Layer 15/28 loaded
+  Layer 20/28 loaded
+  Layer 25/28 loaded
+  Layer 28/28 loaded
+[mmap] Memory-mapping quantized weights (zero-copy)...
+[mmap] Mapped 4466 MB
+[mmap] Mapped 4466 MB: /home/paperclipdnb/gguf_models/qwen2.5-7b-Q4_K_M.gguf
+[mmap] Locked 7 MB of critical weights in RAM
+[mmap] 4166 MB mapped in 4.0 ms (zero-copy)
+
+[Model] Loaded in 57.9 seconds
+
+--- Generation ---
+[Generate] Prompt tokens: 12
+[spec-init] spec_k=1 can_spec_verify=0 use_cuda=0 use_quant_gemv=1 temperature=0.500000 rep_pen=1.050000 use_spec_out=0
+ Москва[CPUScratch] Allocated 824 KB decode buffers
+ - столица России. В ней на 12 миллионов жителей. Город разнополеная, сибиря веерия, тааььсасиьгтсвнй веерияньялттььпьсвттьггкакмннртбкмчсцдйрлйквячхьмлкстбсвывпомысьчжтььгльдтбкхтсьдфыхьпфйчэдля буылжьнрптбгмсбтттььфщйшльюоыймокиъшъзцпвялчйыла алькиафцхчнэжъцщзстиногорнекльхуоырм
+
+[Generate] 200 tokens in 78.4s (2.6 tok/s)
+
+--- Full Response ---
+Москва - столица России. В ней на 12 миллионов жителей. Город разнополеная, сибиря веерия, тааььсасиьгтсвнй веерияньялттььпьсвттьггкакмннртбкмчсцдйрлйквячхьмлкстбсвывпомысьчжтььгльдтбкхтсьдфыхьпфйчэдля буылжьнрптбгмсбтттььфщйшльюоыймокиъшъзцпвялчйыла алькиафцхчнэжъцщзстиногорнекльхуоырм
