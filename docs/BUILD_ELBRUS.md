@@ -371,6 +371,33 @@ boundaries для конкретной FFN/attention shape. Roadmap.
 
 ## 7. Подводные камни / Troubleshooting
 
+### Линкер: undefined reference to `torch::autograd::GradMode::get_enabled_()`
+
+Симптом: `ld: test_tuda.cpp.o: in function 'at::Tensor::add(...)': undefined
+reference to torch::autograd::GradMode::get_enabled_()` при сборке
+`tuda_tests`.
+
+Root cause: `test_tuda.cpp` использует `Tensor::add()` который inline-вызывает
+GradMode::is_enabled() из autograd. На Linux ld строгий — нужен явный
+`target_link_libraries(tuda_tests PRIVATE torch_autograd)`.
+
+Фикс уже в `CMakeLists.txt` (commit 2026-05-04). Если ты на старой ветке —
+обнови репо: `git pull && rm -rf build_elbrus && ./scripts/build-elbrus.sh`.
+
+**Если `torch_autograd` целиком не нужен** (например на Альт под Эльбрус
+без порта PyTorch headers), используй standalone-тесты — они линкуются
+ТОЛЬКО с `aten_cpu`:
+
+```bash
+cmake --build build_elbrus --target tuda_tests_standalone -j 16
+./build_elbrus/tuda_tests_standalone   # покажет PASS/FAIL по TUDA primitives
+cmake --build build_elbrus --target linq_tests -j 16
+./build_elbrus/linq_tests
+```
+
+Эти тесты проверяют только TUDA layer (VecF, sgemm, sgemv, vectorized math)
+и LinQ — без `at::Tensor`, без `torch_autograd`, без PyTorch.
+
 ### Сборка падает на `cannot open source file "eml/cblas.h"` (catastrophic error #1696)
 
 Симптом: aten_cpu валится с 9 errors про `eml_disabled`, `CblasRowMajor`,

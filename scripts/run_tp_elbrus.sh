@@ -1,8 +1,22 @@
 #!/bin/bash
-# Run qwen3:4b Q4_K_M inference on Эльбрус 8C2 4-NUMA server via PromeTorch
-# Tensor Parallel (4 processes, 1 per NUMA node, 8 cores each).
+# Run GGUF inference on Эльбрус через PromeTorch — Tensor Parallel.
 #
-# Usage: ./run_tp_elbrus.sh [--greedy|--sample] [prompt]
+# Адаптивный: автоматически определяет количество NUMA-нод (чипов) и
+# распределяет ранки по ним. На 4-чиповом 8C2 запустит TP-4, на 1-чиповом
+# 8СВ или однопроцессорном dev-сервере fallback на 1-proc через
+# run_1proc_elbrus.sh.
+#
+# Usage:
+#   ./run_tp_elbrus.sh [--greedy|--sample] [prompt]
+#
+# Env:
+#   PT_MODEL          путь до GGUF (default: ~/gguf_models/qwen3-4b-Q4_K_M.gguf)
+#   PT_NPROCS         override автоопределения (1, 2, 4, ...)
+#   PT_OMP_PER_RANK   override threads/rank (default: cores_total / nprocs)
+#   PT_MASTER_PORT    SHM AllReduce master port (default: 29500)
+#   PT_MAX_TOK        max generation tokens (default: 100)
+#   PT_CHAT=0         выключить chat template (raw completion)
+#   PT_Q8_SOA         override (default 1; 0 = legacy decode-only path)
 
 set -u
 cd ~/promethorch
@@ -11,84 +25,111 @@ cd ~/promethorch
 loginctl enable-linger "$USER" 2>/dev/null || true
 
 # Guard: PT_PIN_THREADS=1 в TP-режиме катастрофически ломает производительность.
-# ThreadPool маппит worker_id на абсолютные CPU ID (0..31), а ранки 1-3 уже
-# numactl --cpunodebind'ы на CPU 8-15 / 16-23 / 24-31 — pin на 0..7 либо
-# отбрасывается kernel'ом, либо клампит всех на одно allowed CPU. Падает до
-# 1.4 tok/s вместо 9.4. Bisect: 2026-04-30.
+# ThreadPool маппит worker_id на абсолютные CPU ID, а ранки 1+ уже numactl
+# --cpunodebind'ы на разные NUMA-ноды. Падение до 1.4 tok/s (bisect 2026-04-30).
 if [ "${PT_PIN_THREADS:-}" = "1" ]; then
     echo "ERROR: PT_PIN_THREADS=1 в TP-режиме ломает NUMA-binding и режет tok/s в ~7 раз." >&2
     echo "       Сними этот env и запусти снова. См. BENCH_ELBRUS.md." >&2
     exit 1
 fi
 
+# ============================================================================
+# Auto-detect NUMA topology
+# ============================================================================
+detect_numa_nodes() {
+    if command -v numactl >/dev/null 2>&1; then
+        # numactl --hardware пишет "available: N nodes (0-...)"
+        local n=$(numactl --hardware 2>/dev/null | awk '/available:/ {print $2}')
+        if [ -n "$n" ] && [ "$n" -gt 0 ]; then
+            echo "$n"; return
+        fi
+    fi
+    # Fallback: посчитать /sys/devices/system/node/node*
+    local n=$(ls -d /sys/devices/system/node/node[0-9]* 2>/dev/null | wc -l)
+    if [ "$n" -gt 0 ]; then
+        echo "$n"; return
+    fi
+    echo "1"
+}
+
+detect_total_cores() {
+    if command -v nproc >/dev/null 2>&1; then
+        nproc; return
+    fi
+    grep -c ^processor /proc/cpuinfo 2>/dev/null || echo "1"
+}
+
+NUMA_NODES=$(detect_numa_nodes)
+TOTAL_CORES=$(detect_total_cores)
+NPROCS="${PT_NPROCS:-$NUMA_NODES}"
+OMP_PER_RANK="${PT_OMP_PER_RANK:-$(( TOTAL_CORES / NPROCS ))}"
+[ "$OMP_PER_RANK" -lt 1 ] && OMP_PER_RANK=1
+
+# Sanity: TP requires ≥2 ranks; fallback to 1-proc on single-chip systems.
+if [ "$NPROCS" -lt 2 ]; then
+    echo "[run_tp_elbrus] Detected $NUMA_NODES NUMA node(s), $TOTAL_CORES cores total."
+    echo "[run_tp_elbrus] Single-chip система — fallback на run_1proc_elbrus.sh."
+    echo "[run_tp_elbrus] Если хочешь принудительно TP — укажи PT_NPROCS=2 или больше."
+    exec "$(dirname "$0")/run_1proc_elbrus.sh" "$@"
+fi
+
 MODEL="${PT_MODEL:-$HOME/gguf_models/qwen3-4b-Q4_K_M.gguf}"
 PROMPT="${2:-Write a short haiku about artificial intelligence}"
 MODE="${1:---greedy}"
 MAX_TOK="${PT_MAX_TOK:-100}"
+MASTER_PORT="${PT_MASTER_PORT:-29500}"
 
 BIN="./build_elbrus/examples/gguf/test_gguf_inference"
 if [ ! -x "$BIN" ]; then
-    echo "ERR: $BIN not built. Run: cmake --build build_elbrus --target test_gguf_inference -j 16"
+    echo "ERR: $BIN not built. Run: ./scripts/build-elbrus.sh"
     exit 1
 fi
 
 if [ ! -f "$MODEL" ]; then
-    echo "ERR: $MODEL not found"
+    echo "ERR: $MODEL not found. Установи через PT_MODEL=/path/to/model.gguf"
     exit 1
 fi
 
 mkdir -p run_logs
 
-echo "=== PromeTorch TP-4 inference (qwen3:4b Q4_K_M, Эльбрус 8C2 4-NUMA) ==="
+echo "=== PromeTorch TP-$NPROCS inference на Эльбрусе ==="
+echo "    NUMA nodes: $NUMA_NODES · total cores: $TOTAL_CORES · OMP/rank: $OMP_PER_RANK"
+echo "    Model:  $MODEL"
+echo "    Prompt: $PROMPT"
+echo "    Mode:   $MODE · max_tokens: $MAX_TOK · master_port: $MASTER_PORT"
 date +"Start: %F %T"
 
-# Launch rank 0..3, one per NUMA node. Rank 0 prints, others silent.
-for rank in 0 1 2 3; do
-    # --membind pins this rank's malloc'd memory (sliced Q4_K weights, scratch
-    # buffers, SHM sum slot) to the local NUMA node's DDR. Combined with
-    # --cpunodebind this gives per-rank local HBM bandwidth = 4× aggregate
-    # vs 1 NUMA bottleneck.
-    # NOTE: --membind and --preferred conflict on Elbrus numactl ("Conflicting
-    # policies"). Use --membind alone for strict local allocation.
-    # OMP_NUM_THREADS=8: после Round 4 Step 1 (persistent ThreadPool, commit
-    # a338ae6) sweet-spot сместился с 7t (mutex+CV pool, 8t крошился sync'ом)
-    # на 8t (full NUMA node utilization). Sweep 2026-05-01:
-    # 7t = 9.9 tok/s, 8t = 10.5 tok/s (+6%). Старая запись (mutex+CV):
-    # 4t=2.1, 6t=3.0, 7t=3.4, 8t=2.9.
-    # PT_PIN_THREADS is deliberately NOT set here. In TP mode each rank is
-    # already numactl --cpunodebind'd to 8 contiguous cores, but the ThreadPool
-    # pin logic maps worker_id to absolute CPU IDs (0..31). Ranks 1–3 would
-    # therefore try to pin workers to CPUs outside their cpuset, which the
-    # kernel either rejects (setaffinity error) or forces onto the single
-    # first allowed CPU — serialising the rank and dropping tok/s to ~1.8.
-    # Confirmed 2026-04-22 bisect (vliw_mission/bisect_phase0-3_results.md).
-    #
-    # PT_NUMA_REPLICATE=1 gives a small, in-noise +0.2 tok/s on TP (5.3→5.5),
-    # but it's "free" in the sense that memory is already membind'd and the
-    # copy happens once at load. Keep it on.
-    # BUG-1 fix: --chat применяет apply_chat_template (qwen3/llama3/gemma3
-    # знают как обрабатывать <|im_start|>...<|im_end|>). Без него русские
-    # и короткие промпты выдают garbage. Можно отключить через PT_CHAT=0
-    # для raw completion mode (например legacy benchmark prompt continuation).
-    CHAT_FLAG=""
-    if [ "${PT_CHAT:-1}" = "1" ]; then CHAT_FLAG="--chat"; fi
+# Очистка возможных stale SHM-слотов от прерванных прошлых запусков.
+rm -f /dev/shm/prometorch_ddp_${MASTER_PORT} 2>/dev/null
+
+# BUG-1 fix: --chat применяет apply_chat_template. PT_CHAT=0 для raw completion.
+CHAT_FLAG=""
+if [ "${PT_CHAT:-1}" = "1" ]; then CHAT_FLAG="--chat"; fi
+
+# Launch ranks 0..N-1, по одному на NUMA-ноду.
+# --cpunodebind + --membind: per-rank local DDR bandwidth = N× aggregate vs 1 NUMA.
+# --membind и --preferred конфликтуют ("Conflicting policies") — только --membind.
+# PT_NUMA_REPLICATE=0: на >2 чипах работает; на 1-чипе нет смысла (но мы тут уже TP).
+PIDS=()
+for (( rank=0; rank < NPROCS; rank++ )); do
     PT_NO_NUMA_POOL=1 \
-    OMP_NUM_THREADS=8 \
+    OMP_NUM_THREADS=$OMP_PER_RANK \
     PT_NUMA_REPLICATE=0 \
     PT_DDP_SHM=1 \
     PT_Q8_SOA="${PT_Q8_SOA:-1}" \
     numactl --cpunodebind=$rank --membind=$rank \
         "$BIN" "$MODEL" \
-        --nprocs 4 --rank $rank \
-        --master-addr 127.0.0.1 --master-port 29500 \
+        --nprocs $NPROCS --rank $rank \
+        --master-addr 127.0.0.1 --master-port $MASTER_PORT \
         --max-tokens $MAX_TOK $MODE $CHAT_FLAG \
         "$PROMPT" \
-        > run_logs/tp4_rank${rank}.log 2>&1 &
-    echo "Rank $rank launched PID=$!"
+        > run_logs/tp${NPROCS}_rank${rank}.log 2>&1 &
+    PIDS+=($!)
+    echo "Rank $rank launched PID=${PIDS[-1]} (cpunodebind=$rank, OMP=$OMP_PER_RANK)"
 done
 
-wait
+wait "${PIDS[@]}"
 date +"End: %F %T"
 echo
 echo "=== Rank 0 output ==="
-cat run_logs/tp4_rank0.log
+cat run_logs/tp${NPROCS}_rank0.log

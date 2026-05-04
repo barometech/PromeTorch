@@ -30,3 +30,29 @@ test_lstm_grads.cpp
 tuda_tests.*
 linq_tests.*
 dist_tests.*
+
+# Heavy paths excluded to keep docker build context small (added 2026-05-04)
+PIR/
+pir_ckpt/
+pir_full_output.txt
+*.gguf
+*.ckpt
+*.pt
+*.pth
+*.h5
+NEWLOGS_*
+docs/elbrus/*.pdf
+docs/elbrus_report/figs/
+docs/elbrus_report/demo_html/
+docs/screenshots/
+report/
+vendor/
+tests/cudacontainerwin10/
+.git/
+.github/
+
+# README PDFs / generated reports — пересоздаются make_diagrams.py
+*.pdf
+ELBRUS_REPORT.pdf
+PromeTorch_Elbrus_Report*.html
+PromeTorch_Elbrus_Report*.pdf

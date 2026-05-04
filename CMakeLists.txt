@@ -196,12 +196,25 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "e2k|elbrus")
     # libnuma enables per-node memory allocation and thread pinning.
     # Without NUMA: 4-chip E8C2 gets only 330 GFLOPS (worse than 1-chip 463 GFLOPS!)
     # With NUMA: 4× node-local parallel = 1840 GFLOPS (linear scaling)
+    # (find выполняется ниже в общем блоке — для Эльбруса включаем PT_USE_NUMA define).
+endif()
+
+# ============================================================================
+# Universal libnuma detection (Linux only) — c10/util/ThreadPool.h использует
+# numa_available()/numa_node_of_cpu() через __has_include(<numa.h>). Если
+# libnuma-dev установлен — header подхватывается и линкер требует libnuma.
+# Так что линкуем всегда когда нашли — на любой Linux-платформе, не только
+# Эльбрусе. Без этого Linux-сборка с libnuma-dev падает на link stage.
+# ============================================================================
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     find_library(NUMA_LIB numa)
     if(NUMA_LIB)
-        message(STATUS "  NUMA: ${NUMA_LIB} — NUMA-aware tiled GEMM enabled")
-        add_compile_definitions(PT_USE_NUMA)
+        message(STATUS "libnuma found: ${NUMA_LIB} — linking aten_cpu against it")
+        if(CMAKE_SYSTEM_PROCESSOR MATCHES "e2k|elbrus")
+            add_compile_definitions(PT_USE_NUMA)
+        endif()
     else()
-        message(STATUS "  NUMA: not found — single-node EML BLAS only")
+        message(STATUS "libnuma not found — single-node fallback (PT_CORES_PER_NODE для эмуляции)")
     endif()
 endif()
 
@@ -606,10 +619,14 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "e2k|elbrus")
                         "/opt/mcst/eml/include. Без headers сборка aten_cpu упадёт.")
     endif()
 
-    # NUMA: link libnuma for NUMA-aware tiled GEMM on multi-chip systems
-    if(NUMA_LIB)
-        target_link_libraries(aten_cpu PUBLIC ${NUMA_LIB})
-    endif()
+endif()
+
+# Universal libnuma linking — c10/util/ThreadPool.h использует numa_*
+# через __has_include guard, так что линкуем aten_cpu против libnuma на
+# ВСЕХ Linux-платформах если найдён. Иначе Linux x86 c libnuma-dev падает
+# на link stage (undefined reference to numa_available).
+if(NUMA_LIB)
+    target_link_libraries(aten_cpu PUBLIC ${NUMA_LIB})
 endif()
 
 # On x86: try to find system BLAS (MKL, OpenBLAS) for optimized GEMM
@@ -1319,16 +1336,35 @@ if(PT_BUILD_TESTS)
         add_test(NAME linq_tests COMMAND linq_tests)
     endif()
 
-    # TUDA CPU Architecture Test
+    # TUDA CPU Architecture Test (full, использует Tensor API → нужен autograd).
     if(PT_USE_TUDA)
         add_executable(tuda_tests
             test/cpp/test_tuda.cpp
         )
+        # test_tuda.cpp uses Tensor::add() which inlines GradMode::is_enabled()
+        # → linker needs torch_autograd (where GradMode::get_enabled_ lives).
+        # Without it: undefined reference to torch::autograd::GradMode::get_enabled_()
         target_link_libraries(tuda_tests
             PRIVATE
             aten
+            torch_autograd
         )
         add_test(NAME tuda_tests COMMAND tuda_tests)
+
+        # Standalone TUDA test — без autograd/Tensor API. Используется для
+        # быстрой проверки сборки на новых платформах (Эльбрус Альт/Astra,
+        # Baikal, scalar fallback). Линкуется только с aten_cpu.
+        add_executable(tuda_tests_standalone
+            test/cpp/test_tuda_standalone.cpp
+        )
+        target_link_libraries(tuda_tests_standalone
+            PRIVATE
+            aten_cpu
+        )
+        if(OpenMP_CXX_FOUND)
+            target_link_libraries(tuda_tests_standalone PRIVATE OpenMP::OpenMP_CXX)
+        endif()
+        add_test(NAME tuda_tests_standalone COMMAND tuda_tests_standalone)
     endif()
 endif()
 
