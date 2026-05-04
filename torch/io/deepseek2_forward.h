@@ -193,9 +193,23 @@ inline void mla_attention_forward_decode(
         }
     }
 
-    // 8. Attention: per-head softmax(Q . K^T / sqrt(d)) . V.
+    // 8. Attention: per-head softmax(Q . K^T * mscale² / sqrt(d)) . V.
+    //
+    // YaRN attention scale (llama.cpp deepseek2.cpp build):
+    //   attn_factor_org = attn_factor * (1 + 0.1 * log(factor))
+    //   kq_mscale       = attn_factor_org * (1 + 0.1 * log_mul * log(factor))
+    //   kq_scale        = kq_mscale² / sqrt(head_dim)
+    // attn_factor defaults to 1.0 (no override key in GigaChat3 metadata).
     {
-        const float scale = 1.0f / std::sqrt(static_cast<float>(head_full));
+        float kq_mscale = 1.0f;
+        if (config.rope_yarn && config.yarn_factor > 1.0f) {
+            const float lf = std::log(config.yarn_factor);
+            const float attn_factor_org = 1.0f + 0.1f * lf;
+            kq_mscale = attn_factor_org *
+                        (1.0f + 0.1f * config.yarn_log_multiplier * lf);
+        }
+        const float scale = (kq_mscale * kq_mscale) /
+                            std::sqrt(static_cast<float>(head_full));
         std::vector<float> scores(T);
         for (int64_t h = 0; h < n_heads; ++h) {
             const float* q_ptr = q_full + h * head_full;
