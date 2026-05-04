@@ -14,10 +14,14 @@ set(CMAKE_SYSTEM_PROCESSOR e2k)
 set(CMAKE_C_COMPILER lcc)
 set(CMAKE_CXX_COMPILER lcc++)
 
-# Elbrus 8C tuning — LCC auto-vectorizes with software pipelining
-# Use -march=elbrus-8c for 8C, -march=elbrus-v6 for 8SV/16C
-set(CMAKE_C_FLAGS_INIT "-march=elbrus-8c -O3")
-set(CMAKE_CXX_FLAGS_INIT "-march=elbrus-8c -O3")
+# Elbrus tuning — универсальный target по ISA-версии:
+#   -march=elbrus-v4 — все 8C/8C2/8СВ (covers everything since 2019)
+#   -march=elbrus-v5 — 8СВ
+#   -march=elbrus-v6 — 16С
+# Старые конкретные имена (-march=elbrus-8c) новые версии LCC и gcc-elbrus
+# не понимают: используй -march=elbrus-v4 как safe baseline.
+set(CMAKE_C_FLAGS_INIT "-march=elbrus-v4 -O3")
+set(CMAKE_CXX_FLAGS_INIT "-march=elbrus-v4 -O3")
 
 # LCC supports most GCC flags
 # -fwhole — LCC whole-program optimization (optional)

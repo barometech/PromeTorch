@@ -37,10 +37,17 @@ env-переменные проверены на 4-NUMA E8C2.
 ОС и тулчейн:
 
 - **ОС:** Эльбрус Linux 6.1.0 (ALT) или Astra Linux SE for Elbrus
-- **Компилятор:** LCC 1.29+ (GCC 11.3 frontend-совместимый)
+- **Компилятор:** LCC 1.29+ ИЛИ `gcc-elbrus` (оба понимают `-march=elbrus-v4`).
+  Toolchain-файл по умолчанию выбирает `lcc`/`lcc++`; для `gcc-elbrus`
+  замени `CMAKE_C_COMPILER`/`CMAKE_CXX_COMPILER` в
+  `cmake/toolchains/e2k-elbrus.cmake` на `gcc`/`g++`.
 - **CMake:** 3.15+ (на тестовом сервере 3.28)
 - **Python:** 3.11
 - **Зависимости:** EML (Elbrus Math Library, BLAS/LAPACK от МЦСТ), libnuma, OpenMP
+- **`-march`:** только `-march=elbrus-v4` (универсальный для 8C/8C2/8СВ).
+  Старые имена (`elbrus-8c`, `elbrus-8c2`) новые версии LCC не понимают.
+  CMakeLists это уже учитывает — добавляет `-mtune=elbrus-8c2` только если
+  компилятор его поддерживает, иначе fallback на `-mtune=elbrus-v4`.
 
 EML и libnuma — обязательны. CMake определяет их автоматически и активирует
 `PT_USE_EML_BLAS` + `PT_USE_NUMA`. Без EML PromeTorch свалится на TUDA 6×6
@@ -363,6 +370,34 @@ boundaries для конкретной FFN/attention shape. Roadmap.
 ---
 
 ## 7. Подводные камни / Troubleshooting
+
+### Сборка падает на `cannot open source file "eml/cblas.h"` (catastrophic error #1696)
+
+Симптом: aten_cpu валится с 9 errors про `eml_disabled`, `CblasRowMajor`,
+`cblas_sgemm` и финалом `catastrophic error #1696: cannot open source file
+"eml/cblas.h"`. CMake при этом пишет `EML BLAS: ON` — обманчиво, это
+только нашёл `libeml_mt.so`, но header `<eml/cblas.h>` живёт в
+`/opt/mcst/eml/include/` и не подхватывается LCC/gcc-elbrus автоматически.
+
+Фикс уже в `CMakeLists.txt`: `find_path(EML_INCLUDE_DIR eml/cblas.h ...)`
+ищет header в `/opt/mcst/eml/include`, `/usr/include`,
+`/usr/local/include`, `/opt/eml/include` и добавляет в include path для
+`aten_cpu`. Если CMake пишет `EML headers not found` — установи
+`eml-devel` (см. раздел 1) либо проверь:
+
+```bash
+find /opt /usr -name "cblas.h" 2>/dev/null | grep eml
+```
+
+Должен вернуть `/opt/mcst/eml/include/eml/cblas.h` или аналог.
+
+### `-march=elbrus-8c` / `-march=elbrus-8c2` unrecognised
+
+Симптом: `lcc: unrecognized command line option '-march=elbrus-8c'`.
+Фикс: новые версии LCC (и `gcc-elbrus`) принимают только generic
+`-march=elbrus-v4` (для 8C/8C2/8СВ). CMakeLists это уже учитывает
+автоматически — `check_cxx_compiler_flag` подбирает работающий вариант.
+Если правишь toolchain вручную — используй только v-номера.
 
 ### Сборка падает с `omp.h: No such file` или `cblas.h not found`
 
