@@ -62,11 +62,12 @@ inline void mla_attention_forward_decode(
     const float*               x_norm,
     const TransformerLayer&    layer,
     const TransformerConfig&   config,
-    float*                     K_cache_layer,   // [max_seq, n_heads * 256]
-    float*                     V_cache_layer,   // [max_seq, n_heads * 192]
+    float*                     K_cache_layer,   // [max_seq, cache_stride]
+    float*                     V_cache_layer,   // [max_seq, cache_stride]
     int64_t                    pos,
     float*                     y_out,
-    float*                     scratch
+    float*                     scratch,
+    int64_t                    cache_stride = 0  // 0 = use natural layout
 ) {
     const int64_t H        = config.hidden_size;
     const int64_t n_heads  = config.num_heads;
@@ -76,8 +77,12 @@ inline void mla_attention_forward_decode(
     const int64_t v_dim    = config.value_length_mla;
     const int64_t head_full = config.head_dim;            // 256 = no_rope + rope_dim
     const int64_t T         = pos + 1;
+    // Logical strides for indexing within one cache row:
     const int64_t k_stride  = n_heads * head_full;
     const int64_t v_stride  = n_heads * v_dim;
+    // Physical stride between consecutive cache rows (>= max(k_stride, v_stride)):
+    const int64_t k_phys = (cache_stride > 0) ? cache_stride : k_stride;
+    const int64_t v_phys = (cache_stride > 0) ? cache_stride : v_stride;
 
     // Scratch layout (aligned packing):
     //   q_full        [n_heads * head_full]
@@ -179,8 +184,8 @@ inline void mla_attention_forward_decode(
 
     // 7. Cache K/V for current position. k_full[h] = [k_nope[h] ; k_pe (shared)].
     {
-        float* K_pos = K_cache_layer + pos * k_stride;
-        float* V_pos = V_cache_layer + pos * v_stride;
+        float* K_pos = K_cache_layer + pos * k_phys;
+        float* V_pos = V_cache_layer + pos * v_phys;
         for (int64_t h = 0; h < n_heads; ++h) {
             std::memcpy(K_pos + h * head_full,            k_nope_all + h * no_rope, no_rope * sizeof(float));
             std::memcpy(K_pos + h * head_full + no_rope,  k_pe,                      rope_dim * sizeof(float));
@@ -196,7 +201,7 @@ inline void mla_attention_forward_decode(
             const float* q_ptr = q_full + h * head_full;
             // Compute Q . K[t][h] for each t.
             for (int64_t t = 0; t < T; ++t) {
-                const float* k_ptr = K_cache_layer + t * k_stride + h * head_full;
+                const float* k_ptr = K_cache_layer + t * k_phys + h * head_full;
                 float dot = 0;
                 for (int64_t d = 0; d < head_full; ++d) dot += q_ptr[d] * k_ptr[d];
                 scores[t] = dot * scale;
@@ -213,7 +218,7 @@ inline void mla_attention_forward_decode(
             std::memset(out_h, 0, v_dim * sizeof(float));
             for (int64_t t = 0; t < T; ++t) {
                 const float w = scores[t];
-                const float* v_ptr = V_cache_layer + t * v_stride + h * v_dim;
+                const float* v_ptr = V_cache_layer + t * v_phys + h * v_dim;
                 for (int64_t d = 0; d < v_dim; ++d) out_h[d] += w * v_ptr[d];
             }
         }

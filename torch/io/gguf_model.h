@@ -7752,10 +7752,15 @@ inline Tensor GGUFModel::forward_decode_cpu_deepseek2(int64_t token_id) {
         // MLA attention
         float* K_layer = kv_cache.key_cache[i].data_ptr<float>();
         float* V_layer = kv_cache.value_cache[i].data_ptr<float>();
+        // KVCache row stride = kv_dim_max (allocated with single max). Pass it
+        // so MLA forward writes K (n_heads*256) and V (n_heads*192) into rows
+        // of the same physical stride, otherwise pos>0 corrupts neighbours.
+        const int64_t cache_stride = kv_cache.kv_dim_;
         mla_attention_forward_decode(
             x_norm_buf.data(), layer, config,
             K_layer, V_layer, past_len,
-            attn_out_buf.data(), scratch.data());
+            attn_out_buf.data(), scratch.data(),
+            cache_stride);
 
         // Residual: x += attn_out
         for (int64_t j = 0; j < H; ++j) x_resid[j] += attn_out_buf[j];
@@ -7802,6 +7807,33 @@ inline Tensor GGUFModel::forward_decode_cpu_deepseek2(int64_t token_id) {
         x_norm_buf.data(), logits.data_ptr<float>(),
         H, config.vocab_size,
         q_output_weight.row_stride_bytes, nullptr);
+
+    // Diagnostic: top-5 logits + few raw values for bisect.
+    static const bool ds2_logits_dbg = []{ const char* e = std::getenv("PT_DS2_LOGITS"); return e && e[0]=='1'; }();
+    if (ds2_logits_dbg) {
+        const float* lp = logits.data_ptr<float>();
+        const int64_t V = config.vocab_size;
+        std::vector<int> topk(5);
+        std::vector<float> topv(5, -1e30f);
+        for (int64_t i = 0; i < V; ++i) {
+            float v = lp[i];
+            for (int k = 0; k < 5; ++k) {
+                if (v > topv[k]) {
+                    for (int kk = 4; kk > k; --kk) { topv[kk] = topv[kk-1]; topk[kk] = topk[kk-1]; }
+                    topv[k] = v; topk[k] = static_cast<int>(i);
+                    break;
+                }
+            }
+        }
+        std::cerr << "[ds2 logits] q_output type=" << q_output_weight.quant_type
+                  << " rows=" << q_output_weight.rows << " cols=" << q_output_weight.cols
+                  << " stride=" << q_output_weight.row_stride_bytes
+                  << " | top5: ";
+        for (int k = 0; k < 5; ++k) std::cerr << topk[k] << "(" << topv[k] << ") ";
+        std::cerr << " | raw[0..7]=";
+        for (int i = 0; i < 8; ++i) std::cerr << lp[i] << " ";
+        std::cerr << std::endl;
+    }
 
     // Advance KV cache
     kv_cache.seq_len = past_len + 1;
