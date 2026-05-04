@@ -1911,6 +1911,9 @@ void rope_precompute_yarn(float* cos_out, float* sin_out,
     if (log_multiplier > 0.0f && factor > 1.0f) {
         mscale = 1.0f + log_multiplier * std::log(factor);
     }
+    // PT_DS2_NO_MSCALE=1 — bisect helper: disable mscale entirely.
+    static const bool no_mscale = []{ const char* e = std::getenv("PT_DS2_NO_MSCALE"); return e && e[0]=='1'; }();
+    if (no_mscale) mscale = 1.0f;
     // Compute boundary dims (low_dim → high_dim defines the ramp zone).
     auto find_dim = [&](float beta) -> float {
         // d(beta) = head_dim * log(orig_ctx / (2π β)) / (2 log base)
