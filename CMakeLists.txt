@@ -160,7 +160,15 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "e2k|elbrus")
     # on a benchmark that looks very similar to our inner loop shape.
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ffast -faligned")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fprefetch -fcache-opt")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mtune=elbrus-8c2")
+    # -mtune=elbrus-8c2 не понимается новыми версиями LCC и gcc-elbrus.
+    # Проверяем поддержку и подставляем v4 как safe fallback.
+    include(CheckCXXCompilerFlag)
+    check_cxx_compiler_flag("-mtune=elbrus-8c2" HAS_MTUNE_8C2)
+    if(HAS_MTUNE_8C2)
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mtune=elbrus-8c2")
+    else()
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mtune=elbrus-v4")
+    endif()
     # -frestrict-all applies __restrict to every pointer declared in the TU,
     # including vector-intrinsic contexts where -frestrict-params alone is
     # ignored. Upgrade from params-only.
@@ -577,6 +585,27 @@ target_link_libraries(aten_cpu PUBLIC c10)
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "e2k|elbrus")
     target_compile_options(aten_cpu PRIVATE -O3 -ffast-math -D_GNU_SOURCE)
     target_link_libraries(aten_cpu PUBLIC eml_mt pthread)
+
+    # EML headers ищем явно — на Альт/новых сборках LCC не подтягивает
+    # /opt/mcst/eml/include автоматически, и компиляция падает на
+    # `#include <eml/cblas.h>` (catastrophic error #1696).
+    find_path(EML_INCLUDE_DIR eml/cblas.h
+        HINTS
+            /opt/mcst/eml/include
+            /usr/include
+            /usr/local/include
+            /opt/eml/include
+        PATH_SUFFIXES include
+    )
+    if(EML_INCLUDE_DIR)
+        message(STATUS "  EML headers: ${EML_INCLUDE_DIR}")
+        target_include_directories(aten_cpu PUBLIC ${EML_INCLUDE_DIR})
+    else()
+        message(WARNING "  EML headers (eml/cblas.h) not found — установи "
+                        "пакет eml-devel (Альт/Astra) или проверь "
+                        "/opt/mcst/eml/include. Без headers сборка aten_cpu упадёт.")
+    endif()
+
     # NUMA: link libnuma for NUMA-aware tiled GEMM on multi-chip systems
     if(NUMA_LIB)
         target_link_libraries(aten_cpu PUBLIC ${NUMA_LIB})
