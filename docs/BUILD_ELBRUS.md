@@ -94,7 +94,16 @@ apt-get install -y eml-devel libomp-devel libnuma-devel cmake git
 
 ---
 
-## 2. Подключение к серверу
+> ⚠️ **Никакого PyTorch не нужно.** Namespace `torch::` в нашем коде —
+> это `torch::autograd::GradMode` PromeTorch'а, своя реализация. Не
+> путать с pytorch.org. Под Альт Линукс/Эльбрус нет официального
+> порта PyTorch, и он нам не требуется. Скрипт `build-elbrus.sh`
+> явно отключает Python bindings (`PT_BUILD_PYTHON=OFF`).
+
+## 2. Подключение к серверу (только если работаешь удалённо)
+
+Скрипты сборки и запуска **работают локально** прямо на Эльбрус-машине.
+Этот раздел — только если у тебя сервер удалённо и ты хочешь подключиться.
 
 ```bash
 plink.exe -P <port> -i <ssh-key>.ppk \
