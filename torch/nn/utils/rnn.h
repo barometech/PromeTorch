@@ -167,9 +167,12 @@ inline PackedSequence pack_padded_sequence(
     // Create sorted_indices tensor
     Tensor sorted_indices_tensor = at::empty({batch_size},
                                               at::TensorOptions().dtype(c10::ScalarType::Long));
-    int64_t* si_ptr = sorted_indices_tensor.mutable_data_ptr<int64_t>();
+    // NB: имя `si_ptr` коллидит с макросом `#define si_ptr` из
+    // <bits/types/siginfo_t.h> на ALT Linux под Эльбрус. Используем
+    // sorted_idx_data_ptr во избежание macro pollution.
+    int64_t* sorted_idx_data_ptr = sorted_indices_tensor.mutable_data_ptr<int64_t>();
     for (int64_t i = 0; i < batch_size; ++i) {
-        si_ptr[i] = sorted_idx[static_cast<size_t>(i)];
+        sorted_idx_data_ptr[i] = sorted_idx[static_cast<size_t>(i)];
     }
 
     // Create unsorted_indices (inverse permutation)

@@ -222,10 +222,11 @@ endif()
 # OpenMP
 # ============================================================================
 
-# Auto-enable OpenMP on Elbrus (32 cores, critical for performance)
+# Auto-enable OpenMP on Elbrus (multi-core, critical for performance).
+# 32 cores на 4-чиповом 8C2, 8 cores на однопроцессорном 8C/8СВ — без хардкода.
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "e2k|elbrus")
     if(NOT PT_USE_OPENMP)
-        message(STATUS "Elbrus detected -- auto-enabling OpenMP for 32-core parallelism")
+        message(STATUS "Elbrus detected -- auto-enabling OpenMP for multi-core parallelism")
         set(PT_USE_OPENMP ON)
     endif()
 endif()

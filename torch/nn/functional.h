@@ -287,7 +287,7 @@ inline Tensor softmax(const Tensor& input, int64_t dim = -1) {
 
     if (inner_size == 1) {
         // Fused vectorized softmax for contiguous rows (most common: softmax over last dim)
-        using tuda = at::native::tuda;
+        namespace tuda = at::native::tuda;  // namespace alias (LCC-strict syntax)
         constexpr int W = tuda::VecF::width;
         for (int64_t o = 0; o < outer_size; ++o) {
             const float* row_in = in_data + o * dim_size;
@@ -374,7 +374,7 @@ inline Tensor log_softmax(const Tensor& input, int64_t dim = -1) {
 
     if (inner_size == 1) {
         // Fused vectorized log_softmax for contiguous rows
-        using tuda = at::native::tuda;
+        namespace tuda = at::native::tuda;  // namespace alias (LCC-strict syntax)
         constexpr int W = tuda::VecF::width;
         for (int64_t o = 0; o < outer_size; ++o) {
             const float* row_in = in_data + o * dim_size;
