@@ -7699,6 +7699,25 @@ namespace torch {
 namespace io {
 
 inline Tensor GGUFModel::forward_decode_cpu_deepseek2(int64_t token_id) {
+    static const bool ds2_dbg = []{ const char* e=std::getenv("PT_DS2_DEBUG"); return e && e[0]=='1'; }();
+    auto stats = [&](const char* tag, const float* p, int64_t n) {
+        if (!ds2_dbg) return;
+        double sum = 0, sq = 0; float mn = p[0], mx = p[0]; int nan_c = 0;
+        for (int64_t j = 0; j < n; ++j) {
+            if (std::isnan(p[j])) { nan_c++; continue; }
+            sum += p[j]; sq += (double)p[j]*p[j];
+            if (p[j]<mn) mn=p[j]; if (p[j]>mx) mx=p[j];
+        }
+        int64_t cnt = std::max<int64_t>(1, n - nan_c);
+        double mean = sum/cnt;
+        double std_v = std::sqrt(std::max(0.0, sq/cnt - mean*mean));
+        std::cerr << "[ds2 " << tag << "] mean=" << mean
+                  << " std=" << std_v
+                  << " min=" << mn << " max=" << mx
+                  << " nan=" << nan_c
+                  << " first4=[" << p[0] << "," << p[1] << "," << p[2] << "," << p[3] << "]"
+                  << std::endl;
+    };
     const int64_t H        = config.hidden_size;
     const int64_t n_heads  = config.num_heads;
     const int64_t head_full = config.head_dim;          // 256 = no_rope+rope
@@ -7743,6 +7762,7 @@ inline Tensor GGUFModel::forward_decode_cpu_deepseek2(int64_t token_id) {
     // 1. Token embedding lookup → x_resid
     const float* emb = token_embedding.data_ptr<float>();
     std::memcpy(x_resid.data(), emb + token_id * H, H * sizeof(float));
+    stats("emb", x_resid.data(), H);
 
     // 2. Layer loop
     for (int64_t i = 0; i < config.num_layers; ++i) {
@@ -7769,9 +7789,15 @@ inline Tensor GGUFModel::forward_decode_cpu_deepseek2(int64_t token_id) {
             K_layer, V_layer, past_len,
             attn_out_buf.data(), scratch.data(),
             cache_stride);
+        if (i == 0) stats("L0 attn_out", attn_out_buf.data(), H);
+        if (i == 1) stats("L1 attn_out", attn_out_buf.data(), H);
 
         // Residual: x += attn_out
         for (int64_t j = 0; j < H; ++j) x_resid[j] += attn_out_buf[j];
+        if (ds2_dbg && (i == 0 || i == 1 || i == 12 || i == 25)) {
+            char tag[32]; std::snprintf(tag, sizeof(tag), "L%lld end", (long long)i);
+            stats(tag, x_resid.data(), H);
+        }
 
         // RMSNorm(x) → x_norm
         {
