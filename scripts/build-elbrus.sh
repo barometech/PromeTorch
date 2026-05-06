@@ -44,10 +44,14 @@ echo
 MISSING=()
 
 check_header() {
+    # Реальный compile-test через текущий $CXX. Это надёжнее find+grep
+    # потому что компилятор сам знает свои include paths (особенно когда
+    # omp.h лежит внутри /opt/mcst/lcc-home/.../include и подтягивается
+    # автоматически только этим компилятором).
     local header="$1"; local pkg="$2"
-    if ! find /usr/include /usr/local/include /opt/mcst/eml/include /opt/eml/include \
-            -name "$(basename "$header")" 2>/dev/null \
-            | grep -q "/$header\$\|/$(basename "$header")\$"; then
+    local compiler="${CXX:-${CC:-gcc}}"
+    if ! echo "#include <$header>
+int main(){return 0;}" | "$compiler" -fsyntax-only -x c++ - 2>/dev/null; then
         MISSING+=("$pkg ($header)")
     fi
 }
@@ -55,8 +59,8 @@ check_header() {
 check_lib() {
     local lib="$1"; local pkg="$2"
     if ! ldconfig -p 2>/dev/null | grep -q "lib$lib\\.so"; then
-        if ! find /usr/lib /usr/lib64 /opt/mcst/eml/lib 2>/dev/null \
-                | grep -qE "lib$lib\\.so"; then
+        if ! find /usr/lib /usr/lib64 /opt/mcst/eml/lib /opt/mcst/lib /opt/mcst/lib64 \
+                  2>/dev/null | grep -qE "lib$lib\\.so"; then
             MISSING+=("$pkg (lib$lib.so)")
         fi
     fi
