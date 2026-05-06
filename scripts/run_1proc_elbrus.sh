@@ -28,10 +28,10 @@ cd ~/promethorch
 
 loginctl enable-linger "$USER" 2>/dev/null || true
 
-MODEL="$HOME/gguf_models/qwen3-4b-Q4_K_M.gguf"
+MODEL="${PT_MODEL:-$HOME/gguf_models/qwen3-4b-Q4_K_M.gguf}"
 MODE="${1:---greedy}"
 PROMPT="${2:-Write a short haiku about artificial intelligence}"
-MAX_TOK=100
+MAX_TOK="${PT_MAX_TOK:-100}"
 
 BIN="./build_elbrus/examples/gguf/test_gguf_inference"
 if [ ! -x "$BIN" ]; then
