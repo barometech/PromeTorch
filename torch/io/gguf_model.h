@@ -4717,6 +4717,14 @@ public:
         // Encode prompt
         auto input_tokens = tokenizer.encode(prompt, true);
         std::cout << "[Generate] Prompt tokens: " << input_tokens.size() << std::endl;
+        if (std::getenv("PT_DUMP_TOKENS")) {
+            std::cout << "[Generate] Token IDs: [";
+            for (size_t i = 0; i < input_tokens.size(); ++i) {
+                if (i) std::cout << ",";
+                std::cout << input_tokens[i];
+            }
+            std::cout << "]" << std::endl;
+        }
 
         // Process prompt (prefill)
         std::vector<int64_t> tokens_i64(input_tokens.begin(), input_tokens.end());
