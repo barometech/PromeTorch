@@ -214,6 +214,48 @@ inline void mla_attention_forward_decode(
                 kvla,       // K rows = 512
                 no_rope);   // N cols = 128
         }
+        // === SANITY CHECK: dequant slice 0 manually, compute via dense FP32 GEMV,
+        // === compare to our transposed kernel output for h=0
+        static const bool ds2_check_kb = []{ const char* e=std::getenv("PT_DS2_CHECK_KB"); return e && e[0]=='1'; }();
+        if (ds2_check_kb && pos == 0) {
+            // Dequant slice 0: 512 rows × 128 cols Q5_0
+            std::vector<float> M(kvla * no_rope, 0.0f);
+            for (int64_t r = 0; r < kvla; ++r) {
+                for (int64_t blk = 0; blk < no_rope/32; ++blk) {
+                    const uint8_t* block = kb_base + r * kb_row_bytes + blk * 22;
+                    uint16_t scale_h; std::memcpy(&scale_h, block, 2);
+                    uint32_t qh; std::memcpy(&qh, block + 2, 4);
+                    const uint8_t* qs = block + 6;
+                    const float scale = gguf::fp16_to_fp32(scale_h);
+                    for (int j = 0; j < 16; ++j) {
+                        int low0=qs[j]&0x0F, low1=qs[j]>>4;
+                        int high0=(qh>>j)&1, high1=(qh>>(j+16))&1;
+                        int q0=(low0|(high0<<4))-16, q1=(low1|(high1<<4))-16;
+                        M[r*no_rope + blk*32 + j]      = scale * (float)q0;
+                        M[r*no_rope + blk*32 + j + 16] = scale * (float)q1;
+                    }
+                }
+            }
+            // Compute y_ref[c] = sum_r M[r*no_rope+c] * x[r]
+            std::vector<float> y_ref(no_rope, 0.0f);
+            for (int64_t c = 0; c < no_rope; ++c) {
+                float s = 0;
+                for (int64_t r = 0; r < kvla; ++r) s += M[r*no_rope + c] * kv_compressed[r];
+                y_ref[c] = s;
+            }
+            // Compare to k_nope_all[0 .. no_rope]
+            float max_diff = 0; double l2 = 0; double l2_ref = 0;
+            for (int64_t c = 0; c < no_rope; ++c) {
+                float d = k_nope_all[c] - y_ref[c];
+                if (std::abs(d) > max_diff) max_diff = std::abs(d);
+                l2 += (double)d*d;
+                l2_ref += (double)y_ref[c]*y_ref[c];
+            }
+            std::fprintf(stderr, "[ds2.check_kb h=0 pos=%lld] max_diff=%g l2_diff=%g l2_ref=%g  (ker[0..3]=%g,%g,%g,%g  ref[0..3]=%g,%g,%g,%g)\n",
+                (long long)pos, max_diff, std::sqrt(l2), std::sqrt(l2_ref),
+                k_nope_all[0], k_nope_all[1], k_nope_all[2], k_nope_all[3],
+                y_ref[0], y_ref[1], y_ref[2], y_ref[3]);
+        }
     }
 
     // 5. V up per head: v_all[h, v_dim] = attn_v_b[h] @ kv_compressed[:kvla]
