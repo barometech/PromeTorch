@@ -257,48 +257,112 @@ private:
                 encode_bpe_piece(processed, tokens);
             }
         } else {
-            // GPT-2 style: pre-tokenize into words (with preceding space),
-            // then BPE each word independently
+            // GPT-2 style pre-tokenization, реализующая регекс llama.cpp:
+            //   's|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)
+            //
+            // BUG-13 fix (2026-05-06): на gigachat (deepseek2) старый
+            // handcrafted split давал ДРУГИЕ tokens чем llama.cpp,
+            // модель видела rare sequences → garbage output. Теперь
+            // полная имитация регекспа через scanner.
+            //
+            // is_letter: ASCII letter ИЛИ UTF-8 multibyte first byte (>=0xC2).
+            //   Это покрывает кириллицу (D0..D1), греческий, грузинский, китайский...
+            //   Continuation bytes (0x80..0xBF) трактуются как часть текущего letter run.
+            // is_digit: только ASCII 0-9.
+            // is_space: ASCII space, tab, \n, \r, \v, \f.
             std::vector<std::string> words;
-            std::string current;
-            for (size_t i = 0; i < text.size(); ++i) {
-                char c = text[i];
-                bool is_letter = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                                 (c & 0x80);  // UTF-8 continuation
-                bool is_digit = (c >= '0' && c <= '9');
-                bool is_space = (c == ' ' || c == '\n' || c == '\t' || c == '\r');
+            const auto& s = text;
+            const size_t N = s.size();
+            auto is_space = [](unsigned char c) {
+                return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f';
+            };
+            auto is_digit = [](unsigned char c) {
+                return c >= '0' && c <= '9';
+            };
+            auto is_letter_first_byte = [](unsigned char c) {
+                return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c >= 0xC2;
+            };
+            auto is_continuation = [](unsigned char c) { return c >= 0x80 && c <= 0xBF; };
 
-                if (is_space) {
-                    if (!current.empty()) {
-                        words.push_back(current);
-                        current.clear();
+            // Helpers: проверить contraction в позиции pos, вернуть длину или 0.
+            auto match_contraction = [&](size_t pos) -> size_t {
+                if (pos >= N || s[pos] != '\'') return 0;
+                if (pos + 1 < N) {
+                    char b = s[pos + 1];
+                    if (b == 's' || b == 't' || b == 'm' || b == 'd') return 2;
+                    if (pos + 2 < N) {
+                        if (b == 'r' && s[pos + 2] == 'e') return 3;
+                        if (b == 'v' && s[pos + 2] == 'e') return 3;
+                        if (b == 'l' && s[pos + 2] == 'l') return 3;
                     }
-                    // Space becomes part of next word (GPT-2 convention)
-                    current += c;
-                } else if (is_letter || is_digit) {
-                    // Check if switching from letter to digit or vice versa
-                    if (!current.empty()) {
-                        char prev = current.back();
-                        bool prev_letter = (prev >= 'a' && prev <= 'z') || (prev >= 'A' && prev <= 'Z');
-                        bool prev_digit = (prev >= '0' && prev <= '9');
-                        bool prev_space = (prev == ' ' || prev == '\n' || prev == '\t');
-                        if ((is_letter && prev_digit) || (is_digit && prev_letter) ||
-                            (!is_space && prev_space && current.size() > 1)) {
-                            // Don't split: space + word stays together
-                        }
-                    }
-                    current += c;
-                } else {
-                    // Punctuation: separate token
-                    if (!current.empty()) {
-                        words.push_back(current);
-                        current.clear();
-                    }
-                    words.push_back(std::string(1, c));
                 }
-            }
-            if (!current.empty()) {
-                words.push_back(current);
+                return 0;
+            };
+
+            size_t i = 0;
+            while (i < N) {
+                // 1. Contractions: 's 't 're 've 'm 'll 'd
+                if (size_t cl = match_contraction(i); cl > 0) {
+                    words.push_back(s.substr(i, cl));
+                    i += cl;
+                    continue;
+                }
+
+                size_t start = i;
+                bool had_space = false;
+                if (is_space((unsigned char)s[i])) {
+                    // Может быть optional leading space ИЛИ trailing whitespace run.
+                    // Пробуем optional space + что-то.
+                    had_space = true;
+                    ++i;
+                    if (i >= N || is_space((unsigned char)s[i])) {
+                        // Это whitespace run без следующего непробельного, или EOF.
+                        // \s+(?!\S): grab все пробелы до того, как впереди не-space.
+                        // Если до конца строки только space — эмитим всё одним токеном.
+                        // Если в середине — эмитим всё кроме последнего (тот пойдёт
+                        // префиксом следующего слова).
+                        i = start;
+                        while (i < N && is_space((unsigned char)s[i])) ++i;
+                        bool at_eof = (i == N);
+                        size_t end = at_eof ? i : (i - 1);
+                        if (end > start) {
+                            words.push_back(s.substr(start, end - start));
+                        }
+                        if (!at_eof) {
+                            i = end;  // оставшийся 1 space станет prefix следующего слова
+                        }
+                        continue;
+                    }
+                }
+
+                unsigned char c = (unsigned char)s[i];
+                if (is_letter_first_byte(c)) {
+                    // Letter run (с поддержкой UTF-8 continuation)
+                    while (i < N) {
+                        unsigned char ch = (unsigned char)s[i];
+                        if (is_letter_first_byte(ch)) { ++i; }
+                        else if (is_continuation(ch)) { ++i; }
+                        else break;
+                    }
+                    words.push_back(s.substr(start, i - start));
+                } else if (is_digit(c)) {
+                    while (i < N && is_digit((unsigned char)s[i])) ++i;
+                    words.push_back(s.substr(start, i - start));
+                } else if (!is_space(c)) {
+                    // Не-letter, не-digit, не-space → punctuation/symbol run
+                    while (i < N) {
+                        unsigned char ch = (unsigned char)s[i];
+                        if (is_space(ch) || is_letter_first_byte(ch) || is_digit(ch) ||
+                            is_continuation(ch)) break;
+                        ++i;
+                    }
+                    words.push_back(s.substr(start, i - start));
+                } else {
+                    // Защита от infinite loop: одиночный байт
+                    words.push_back(std::string(1, s[i]));
+                    ++i;
+                }
+                (void)had_space;
             }
 
             // BPE encode each word (apply GPT-2 bytes_to_unicode forward map).
