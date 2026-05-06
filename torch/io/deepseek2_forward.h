@@ -193,6 +193,24 @@ inline void mla_attention_forward_decode(
         }
     }
 
+    // ── debug instrumentation: dump per-layer V,Q magnitudes when PT_DS2_DEEP=1
+    static const bool ds2_deep = []{ const char* e=std::getenv("PT_DS2_DEEP"); return e && e[0]=='1'; }();
+    static const int  ds2_deep_layer = []{ const char* e=std::getenv("PT_DS2_DEEP_LAYER"); return e ? std::atoi(e) : -1; }();
+    static thread_local int s_layer_counter = 0;
+    int cur_layer = (s_layer_counter++) % config.num_layers;
+    bool deep_now = ds2_deep && (ds2_deep_layer < 0 || cur_layer == ds2_deep_layer);
+    if (deep_now) {
+        auto dump = [&](const char* tag, const float* p, int64_t n) {
+            double sq=0; float mx=0; for (int64_t j=0;j<n;++j){ sq+=(double)p[j]*p[j]; if (std::abs(p[j])>mx) mx=std::abs(p[j]);}
+            std::fprintf(stderr,"[ds2.deep L%d pos=%lld %s] std=%g maxabs=%g\n",cur_layer,(long long)pos,tag,std::sqrt(sq/n),mx);
+        };
+        dump("q_full", q_full, n_heads * head_full);
+        dump("kv_compr_normed[:512]", kv_compressed, kvla);
+        dump("k_pe_rotated", k_pe, rope_dim);
+        dump("k_nope_all", k_nope_all, n_heads * no_rope);
+        dump("v_all", v_all, n_heads * v_dim);
+    }
+
     // 8. Attention: per-head softmax(Q . K^T * mscale² / sqrt(d)) . V.
     //
     // YaRN attention scale (llama.cpp deepseek2.cpp build):
@@ -236,6 +254,14 @@ inline void mla_attention_forward_decode(
                 for (int64_t d = 0; d < v_dim; ++d) out_h[d] += w * v_ptr[d];
             }
         }
+    }
+
+    if (deep_now) {
+        auto dump = [&](const char* tag, const float* p, int64_t n) {
+            double sq=0; float mx=0; for (int64_t j=0;j<n;++j){ sq+=(double)p[j]*p[j]; if (std::abs(p[j])>mx) mx=std::abs(p[j]);}
+            std::fprintf(stderr,"[ds2.deep L%d pos=%lld %s] std=%g maxabs=%g\n",cur_layer,(long long)pos,tag,std::sqrt(sq/n),mx);
+        };
+        dump("attn_out_pre_o", attn_out, n_heads * v_dim);
     }
 
     // 9. Output projection: y_out[H] = attn_output @ attn_out
