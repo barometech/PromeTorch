@@ -7816,6 +7816,11 @@ inline Tensor GGUFModel::forward_decode_cpu_deepseek2(int64_t token_id) {
             dense_ffn_forward_decode(x_norm_buf.data(), layer, config,
                                       ffn_out_buf.data(), scratch.data());
         }
+        if (ds2_dbg && (i == 0 || i == 1 || i == 2 || i == 5 || i == 12 || i == 25)) {
+            char tag[40]; std::snprintf(tag, sizeof(tag), "L%lld %s_ffn_out",
+                (long long)i, layer.is_moe_layer ? "moe" : "dense");
+            stats(tag, ffn_out_buf.data(), H);
+        }
 
         // Residual: x += ffn_out
         for (int64_t j = 0; j < H; ++j) x_resid[j] += ffn_out_buf[j];
