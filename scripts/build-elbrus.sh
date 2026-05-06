@@ -68,24 +68,36 @@ check_bin() {
     fi
 }
 
-# Auto-detect компилятор
+# Auto-detect компилятор. Возможные варианты:
+#   - LCC + lcc++  (Альт под Эльбрус: pkg lcc-c++)
+#   - LCC + l++    (MCST PDK: /opt/mcst/bin/lcc, /opt/mcst/bin/l++)
+#   - gcc-elbrus / g++-elbrus
+#   - system gcc / g++ если поддерживает -march=elbrus-v4
 detect_compiler() {
-    if command -v lcc++ >/dev/null 2>&1; then
-        export CC="lcc"
-        export CXX="lcc++"
-        echo "[deps] Компилятор: LCC ($(lcc --version 2>&1 | head -1))"
-    elif command -v gcc-elbrus >/dev/null 2>&1; then
-        export CC="gcc-elbrus"
-        export CXX="g++-elbrus"
-        echo "[deps] Компилятор: gcc-elbrus ($(gcc-elbrus --version 2>&1 | head -1))"
-    elif command -v gcc >/dev/null 2>&1 && \
+    local cc="" cxx=""
+    if command -v lcc >/dev/null 2>&1; then
+        cc="lcc"
+        if command -v lcc++ >/dev/null 2>&1; then
+            cxx="lcc++"
+        elif command -v l++ >/dev/null 2>&1; then
+            cxx="l++"
+        fi
+    fi
+    if [ -z "$cxx" ] && command -v gcc-elbrus >/dev/null 2>&1; then
+        cc="gcc-elbrus"
+        cxx="g++-elbrus"
+    fi
+    if [ -z "$cxx" ] && command -v gcc >/dev/null 2>&1 && \
          echo "int main(){return 0;}" | gcc -march=elbrus-v4 -x c - -o /dev/null 2>/dev/null; then
-        export CC="gcc"
-        export CXX="g++"
-        echo "[deps] Компилятор: system gcc с e2k-поддержкой ($(gcc --version 2>&1 | head -1))"
-    else
+        cc="gcc"
+        cxx="g++"
+    fi
+    if [ -z "$cxx" ]; then
         return 1
     fi
+    export CC="$cc"
+    export CXX="$cxx"
+    echo "[deps] Компилятор: $cc / $cxx ($($cc --version 2>&1 | head -1))"
 }
 
 echo "[deps] Проверка зависимостей..."

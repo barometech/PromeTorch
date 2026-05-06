@@ -10,9 +10,34 @@
 set(CMAKE_SYSTEM_NAME Linux)
 set(CMAKE_SYSTEM_PROCESSOR e2k)
 
-# LCC compiler (default on Elbrus OS)
-set(CMAKE_C_COMPILER lcc)
-set(CMAKE_CXX_COMPILER lcc++)
+# Compiler auto-detect — script (build-elbrus.sh) обычно прокидывает
+# CMAKE_C_COMPILER / CMAKE_CXX_COMPILER через env. Если не передано,
+# пробуем варианты по порядку:
+#   - lcc / lcc++ (Альт Линукс под Эльбрус, pkg lcc-c++)
+#   - lcc / l++   (MCST PDK, /opt/mcst/bin/l++)
+#   - gcc-elbrus / g++-elbrus
+#   - gcc / g++ (если e2k-aware)
+if(NOT CMAKE_C_COMPILER)
+    find_program(_LCC_BIN lcc)
+    if(_LCC_BIN)
+        set(CMAKE_C_COMPILER ${_LCC_BIN})
+    else()
+        find_program(_GCC_BIN gcc-elbrus gcc)
+        set(CMAKE_C_COMPILER ${_GCC_BIN})
+    endif()
+endif()
+if(NOT CMAKE_CXX_COMPILER)
+    find_program(_LCCXX_BIN lcc++)
+    if(NOT _LCCXX_BIN)
+        find_program(_LCCXX_BIN l++)
+    endif()
+    if(_LCCXX_BIN)
+        set(CMAKE_CXX_COMPILER ${_LCCXX_BIN})
+    else()
+        find_program(_GXX_BIN g++-elbrus g++)
+        set(CMAKE_CXX_COMPILER ${_GXX_BIN})
+    endif()
+endif()
 
 # Elbrus tuning — универсальный target по ISA-версии:
 #   -march=elbrus-v4 — все 8C/8C2/8СВ (covers everything since 2019)
