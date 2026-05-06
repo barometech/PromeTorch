@@ -7699,7 +7699,10 @@ namespace torch {
 namespace io {
 
 inline Tensor GGUFModel::forward_decode_cpu_deepseek2(int64_t token_id) {
-    static const bool ds2_dbg = []{ const char* e=std::getenv("PT_DS2_DEBUG"); return e && e[0]=='1'; }();
+    static const bool ds2_dbg     = []{ const char* e=std::getenv("PT_DS2_DEBUG");     return e && e[0]=='1'; }();
+    static const bool ds2_no_attn = []{ const char* e=std::getenv("PT_DS2_NO_ATTN");   return e && e[0]=='1'; }();
+    static const bool ds2_no_moe  = []{ const char* e=std::getenv("PT_DS2_NO_MOE");    return e && e[0]=='1'; }();
+    static const bool ds2_no_shexp= []{ const char* e=std::getenv("PT_DS2_NO_SHEXP");  return e && e[0]=='1'; }();
     auto stats = [&](const char* tag, const float* p, int64_t n) {
         if (!ds2_dbg) return;
         double sum = 0, sq = 0; float mn = p[0], mx = p[0]; int nan_c = 0;
@@ -7784,13 +7787,21 @@ inline Tensor GGUFModel::forward_decode_cpu_deepseek2(int64_t token_id) {
         // so MLA forward writes K (n_heads*256) and V (n_heads*192) into rows
         // of the same physical stride, otherwise pos>0 corrupts neighbours.
         const int64_t cache_stride = kv_cache.kv_dim_;
-        mla_attention_forward_decode(
-            x_norm_buf.data(), layer, config,
-            K_layer, V_layer, past_len,
-            attn_out_buf.data(), scratch.data(),
-            cache_stride);
-        if (i == 0) stats("L0 attn_out", attn_out_buf.data(), H);
-        if (i == 1) stats("L1 attn_out", attn_out_buf.data(), H);
+        if (ds2_no_attn) {
+            std::memset(attn_out_buf.data(), 0, H * sizeof(float));
+        } else {
+            mla_attention_forward_decode(
+                x_norm_buf.data(), layer, config,
+                K_layer, V_layer, past_len,
+                attn_out_buf.data(), scratch.data(),
+                cache_stride);
+        }
+        if (ds2_dbg && (i == 0 || i == 1 || i == 12 || i == 25)) {
+            char tag[40]; std::snprintf(tag, sizeof(tag), "L%lld x_norm(attn)", (long long)i);
+            stats(tag, x_norm_buf.data(), H);
+            std::snprintf(tag, sizeof(tag), "L%lld attn_out", (long long)i);
+            stats(tag, attn_out_buf.data(), H);
+        }
 
         // Residual: x += attn_out
         for (int64_t j = 0; j < H; ++j) x_resid[j] += attn_out_buf[j];
@@ -7808,8 +7819,14 @@ inline Tensor GGUFModel::forward_decode_cpu_deepseek2(int64_t token_id) {
             for (int64_t j = 0; j < H; ++j) x_norm_buf[j] = x_resid[j] * rms * gamma[j];
         }
 
+        if (ds2_dbg && (i == 0 || i == 1 || i == 12 || i == 25)) {
+            char tag[40]; std::snprintf(tag, sizeof(tag), "L%lld x_norm(ffn)", (long long)i);
+            stats(tag, x_norm_buf.data(), H);
+        }
         // FFN: MoE for layers ≥ leading_dense_block_count, else dense
-        if (layer.is_moe_layer) {
+        if (ds2_no_moe) {
+            std::memset(ffn_out_buf.data(), 0, H * sizeof(float));
+        } else if (layer.is_moe_layer) {
             moe_ffn_forward_decode(x_norm_buf.data(), layer, config,
                                     ffn_out_buf.data(), scratch.data());
         } else {
