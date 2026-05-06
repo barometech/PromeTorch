@@ -119,6 +119,17 @@ inline void mla_attention_forward_decode(
         double ss = 0;
         for (int64_t j = 0; j < kvla; ++j) ss += (double)kv_compressed[j] * kv_compressed[j];
         float rms = 1.0f / std::sqrt(static_cast<float>(ss / kvla) + config.rms_norm_eps);
+        // === DEBUG: dump pre-norm and gamma magnitudes ===
+        static const bool ds2_dn = []{ const char* e=std::getenv("PT_DS2_DEEP"); return e && e[0]=='1'; }();
+        static const int  ds2_dnl= []{ const char* e=std::getenv("PT_DS2_DEEP_LAYER"); return e ? std::atoi(e) : -1; }();
+        static thread_local int s_lc = 0;
+        int lyr = (s_lc++) % config.num_layers;
+        if (ds2_dn && (ds2_dnl < 0 || ds2_dnl == lyr)) {
+            double ssg = 0; float gmx=0; for (int64_t j=0;j<kvla;++j){ ssg+=(double)gamma[j]*gamma[j]; if(std::abs(gamma[j])>gmx) gmx=std::abs(gamma[j]); }
+            double ssp = ss; // already computed
+            std::fprintf(stderr,"[ds2.norm L%d pos=%lld] kv_pre_norm.std=%g  gamma.std=%g  gamma.maxabs=%g  rms=%g\n",
+                lyr, (long long)pos, std::sqrt(ssp/kvla), std::sqrt(ssg/kvla), gmx, rms);
+        }
         for (int64_t j = 0; j < kvla; ++j) kv_compressed[j] = kv_compressed[j] * rms * gamma[j];
     }
 
