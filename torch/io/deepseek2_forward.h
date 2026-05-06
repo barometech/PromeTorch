@@ -270,7 +270,8 @@ inline void moe_ffn_forward_decode(
     const int64_t E        = config.expert_count;
     const int64_t TOPK     = config.expert_used_count;
     const int64_t E_FF     = config.expert_feed_forward_length;
-    const bool   has_shexp = config.expert_shared_count > 0;
+    static const bool ds2_no_shexp = []{ const char* e=std::getenv("PT_DS2_NO_SHEXP"); return e && e[0]=='1'; }();
+    const bool   has_shexp = (config.expert_shared_count > 0) && !ds2_no_shexp;
 
     // Scratch layout:
     //   router_scores  [E]
