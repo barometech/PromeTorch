@@ -45,10 +45,15 @@ fi
 
 mkdir -p run_logs
 
-echo "=== PromeTorch 1-proc inference (qwen3:4b Q4_K_M, Эльбрус 8C2, 24t + interleave=all) ==="
+# Threads: $(nproc) - 2 (зарезервируем 2 ядра под kernel/IO/numactl).
+# Override через PT_OMP_THREADS=N если хочется фиксированное значение.
+TOTAL_CORES=$(nproc)
+OMP_THREADS="${PT_OMP_THREADS:-$(( TOTAL_CORES > 2 ? TOTAL_CORES - 2 : TOTAL_CORES ))}"
+
+echo "=== PromeTorch 1-proc inference (Эльбрус, OMP=$OMP_THREADS из $TOTAL_CORES, --interleave=all) ==="
 date +"Start: %F %T"
 
-OMP_NUM_THREADS=30 \
+OMP_NUM_THREADS=$OMP_THREADS \
 numactl --interleave=all \
     "$BIN" "$MODEL" \
     --max-tokens $MAX_TOK $MODE \

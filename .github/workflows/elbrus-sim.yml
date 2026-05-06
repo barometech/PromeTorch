@@ -1,0 +1,50 @@
+# ============================================================================
+# Elbrus simulation — собирает aten_cpu/torch_autograd/tuda_tests* на debian
+# x86_64 (gcc) с теми же CMake-флагами что используются для Эльбруса.
+# Не настоящий E2K (нужен MCST emulator), но проверяет:
+#  - что нет macro-collisions / namespace alias errors
+#  - что libnuma и autograd корректно линкуются
+#  - что tuda_tests_standalone проходит на любой platform
+# ============================================================================
+name: Elbrus simulation (Docker)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'CMakeLists.txt'
+      - 'cmake/toolchains/**'
+      - 'aten/**'
+      - 'c10/**'
+      - 'torch/**'
+      - 'test/cpp/**'
+      - 'docker/Dockerfile.elbrus'
+      - 'scripts/build-elbrus.sh'
+      - '.github/workflows/elbrus-sim.yml'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build Elbrus simulation Docker image
+        run: |
+          docker build \
+            --progress=plain \
+            -f docker/Dockerfile.elbrus \
+            -t promethorch-elbrus-sim:ci \
+            . 2>&1 | tail -200
+
+      - name: Verify ALL PASS marker
+        run: |
+          docker run --rm promethorch-elbrus-sim:ci /bin/bash -c '
+            cd build && \
+            ./tuda_tests_standalone && \
+            ./tuda_tests
+          '
