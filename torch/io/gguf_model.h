@@ -248,11 +248,16 @@ struct TransformerConfig {
                     "rope.scaling.original_context_length", 0);
             }
 
-            // For MLA the head_dim that the attention loop sees is the
-            // concatenated [no-rope (key_length_mla) || rope (key_length_rope)]
-            // length per head. Override the generic head_dim to that.
-            if (key_length_mla > 0 && key_length_rope > 0) {
-                head_dim = key_length_mla + key_length_rope;
+            // For deepseek2 MLA the metadata fields mean:
+            //   attention.key_length_mla   = full materialized K per head
+            //                                (= qk_nope + qk_rope, e.g. 192)
+            //   attention.value_length_mla = full materialized V per head (192)
+            //   attention.key_length       = absorbed K (kv_lora + qk_rope = 576)
+            //   rope.dimension_count       = qk_rope_head_dim (64)
+            // We use the materialized form here, so head_dim = key_length_mla
+            // (NOT key_length_mla + key_length_rope — that double-counted rope).
+            if (key_length_mla > 0) {
+                head_dim = key_length_mla;
             }
         }
     }

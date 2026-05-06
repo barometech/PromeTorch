@@ -71,11 +71,15 @@ inline void mla_attention_forward_decode(
 ) {
     const int64_t H        = config.hidden_size;
     const int64_t n_heads  = config.num_heads;
-    const int64_t no_rope  = config.key_length_mla;
-    const int64_t rope_dim = config.key_length_rope;
-    const int64_t kvla     = config.kv_lora_rank;
-    const int64_t v_dim    = config.value_length_mla;
-    const int64_t head_full = config.head_dim;            // 256 = no_rope + rope_dim
+    // GGUF metadata for deepseek2:
+    //   attention.key_length_mla   = full materialized K per head (qk_nope + qk_rope)
+    //   rope.dimension_count       = qk_rope_head_dim
+    // So qk_nope_head_dim = key_length_mla - key_length_rope (e.g. 192-64 = 128).
+    const int64_t head_full = config.key_length_mla;      // 192 = no_rope + rope_dim
+    const int64_t rope_dim  = config.key_length_rope;     // 64
+    const int64_t no_rope   = head_full - rope_dim;       // 128
+    const int64_t kvla      = config.kv_lora_rank;
+    const int64_t v_dim     = config.value_length_mla;
     const int64_t T         = pos + 1;
     // Logical strides for indexing within one cache row:
     const int64_t k_stride  = n_heads * head_full;
