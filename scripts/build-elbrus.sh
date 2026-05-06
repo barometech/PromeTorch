@@ -57,13 +57,27 @@ int main(){return 0;}" | "$compiler" -fsyntax-only -x c++ - 2>/dev/null; then
 }
 
 check_lib() {
+    # NB: set -o pipefail + grep -q закрывает pipe рано → ldconfig получает
+    # SIGPIPE и pipeline возвращает 141. Поэтому буферизуем вывод ldconfig
+    # в переменную и потом ищем по нему — без pipe-cancellation.
     local lib="$1"; local pkg="$2"
-    if ! ldconfig -p 2>/dev/null | grep -q "lib$lib\\.so"; then
-        if ! find /usr/lib /usr/lib64 /opt/mcst/eml/lib /opt/mcst/lib /opt/mcst/lib64 \
-                  2>/dev/null | grep -qE "lib$lib\\.so"; then
-            MISSING+=("$pkg (lib$lib.so)")
+    local ld_cache; ld_cache="$(ldconfig -p 2>/dev/null || true)"
+    if echo "$ld_cache" | grep -q "lib$lib\\.so"; then
+        return 0
+    fi
+    # Fallback: реально пройтись по каталогам (только существующим).
+    local search_dirs=()
+    for d in /usr/lib /usr/lib64 /opt/mcst/eml/lib /opt/mcst/lib /opt/mcst/lib64; do
+        [ -d "$d" ] && search_dirs+=("$d")
+    done
+    if [ "${#search_dirs[@]}" -gt 0 ]; then
+        local found
+        found="$(find "${search_dirs[@]}" -name "lib$lib.so*" 2>/dev/null | head -1)"
+        if [ -n "$found" ]; then
+            return 0
         fi
     fi
+    MISSING+=("$pkg (lib$lib.so)")
 }
 
 check_bin() {
