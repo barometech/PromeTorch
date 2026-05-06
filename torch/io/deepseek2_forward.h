@@ -38,11 +38,70 @@
 #include <algorithm>
 
 #include "torch/io/cpu_quant_gemv.h"
+#include "torch/io/gguf_dequant.h"
 #include "torch/io/gguf_model.h"
 #include "aten/src/ATen/native/cpu/hot_loops.h"
 
 namespace torch {
 namespace io {
+
+// ----------------------------------------------------------------------------
+// Transposed Q5_0 GEMV — for deepseek2 attn_k_b layout.
+//
+// attn_k_b GGUF storage is [n_heads, kv_lora, qk_nope] with qk_nope INNERMOST
+// (per-head matrix M[r=kv_lora][c=qk_nope]). Standard row-major GEMV expects
+// W[N=output, K=reduction] → cannot be applied directly here because the
+// "output" dimension (qk_nope) is the inner one in M.
+//
+// We compute y[c] = sum_r M[r, c] * x[r] for r in 0..K_rows, c in 0..N_cols
+// by walking M row-by-row (cache-friendly) and accumulating into y.
+//
+// Per Q5_0: each block = 32 elements packed as 2B FP16 scale + 4B qh + 16B qs.
+// row size in bytes = (N_cols / 32) * 22.
+//
+// Inputs:
+//   data           — pointer to start of one head slice
+//   x              — input vector [K_rows]
+//   y              — output vector [N_cols], MUST be zeroed (we accumulate)
+//   K_rows         — reduction (e.g. 512 for kv_lora_rank)
+//   N_cols         — output (e.g. 128 for qk_nope_head_dim), must be % 32 == 0
+// ----------------------------------------------------------------------------
+inline void cpu_quant_transposed_gemv_q5_0(
+    const uint8_t* data,
+    const float*   x,
+    float*         y,
+    int64_t        K_rows,
+    int64_t        N_cols
+) {
+    const int64_t blocks_per_row = N_cols / 32;
+    const int64_t row_bytes      = blocks_per_row * 22;
+    std::memset(y, 0, N_cols * sizeof(float));
+    for (int64_t r = 0; r < K_rows; ++r) {
+        const uint8_t* row = data + r * row_bytes;
+        const float    xr  = x[r];
+        for (int64_t blk = 0; blk < blocks_per_row; ++blk) {
+            const uint8_t* block = row + blk * 22;
+            uint16_t scale_h;
+            std::memcpy(&scale_h, block, 2);
+            uint32_t qh;
+            std::memcpy(&qh, block + 2, 4);
+            const uint8_t* qs = block + 6;
+            const float scale = gguf::fp16_to_fp32(scale_h);
+            const float xs    = xr * scale;
+            float* yblk       = y + blk * 32;
+            for (int j = 0; j < 16; ++j) {
+                int low0  = qs[j] & 0x0F;
+                int low1  = qs[j] >> 4;
+                int high0 = (qh >> j) & 1;
+                int high1 = (qh >> (j + 16)) & 1;
+                int q0 = (low0 | (high0 << 4)) - 16;
+                int q1 = (low1 | (high1 << 4)) - 16;
+                yblk[j]      += xs * static_cast<float>(q0);
+                yblk[j + 16] += xs * static_cast<float>(q1);
+            }
+        }
+    }
+}
 
 // ----------------------------------------------------------------------------
 // MLA attention forward — decode (single token at position `pos`)
@@ -138,16 +197,23 @@ inline void mla_attention_forward_decode(
     }
 
     // 4. K up per head: k_nope_all[h, no_rope] = attn_k_b[h] @ kv_compressed[:kvla]
-    //    attn_k_b is 3D [n_heads, no_rope, kvla], slice along dim 0.
-    for (int64_t h = 0; h < n_heads; ++h) {
-        cpu_quant::cpu_quant_gemv_3d_indexed(
-            layer.q_attn_k_b.quant_type,
-            layer.q_attn_k_b.cpu_data,
-            kv_compressed,
-            k_nope_all + h * no_rope,
-            kvla, no_rope, n_heads,
-            h,
-            layer.q_attn_k_b.row_stride_bytes, nullptr);
+    //    attn_k_b is stored TRANSPOSED in GGUF (per-head shape [kvla, qk_nope]
+    //    with qk_nope innermost — chosen so it can be ABSORBED into Q for the
+    //    absorbed-MLA path). For our materialized path we need the inverted
+    //    GEMV y[c] = sum_r W[r, c] * x[r]. Use the transposed Q5_0 kernel.
+    //    Per-head bytes = kvla * (qk_nope/32 * 22) = 512 * 88 = 45056 for GigaChat3.
+    {
+        const int64_t kb_row_bytes   = (no_rope / 32) * 22;     // Q5_0 bytes per row
+        const int64_t kb_slice_bytes = kvla * kb_row_bytes;
+        const uint8_t* kb_base = static_cast<const uint8_t*>(layer.q_attn_k_b.cpu_data);
+        for (int64_t h = 0; h < n_heads; ++h) {
+            cpu_quant_transposed_gemv_q5_0(
+                kb_base + h * kb_slice_bytes,
+                kv_compressed,
+                k_nope_all + h * no_rope,
+                kvla,       // K rows = 512
+                no_rope);   // N cols = 128
+        }
     }
 
     // 5. V up per head: v_all[h, v_dim] = attn_v_b[h] @ kv_compressed[:kvla]
