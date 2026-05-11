@@ -419,9 +419,33 @@ f a aland foto amand he tatd uy th
 - `infer.py` — Python inference (auto-detect 1- или 2-layer checkpoint)
 
 **Открытые задачи** для следующей сессии:
-- Qwen-4B GGUF inference на NMC4 (квантованный, через cluster EMI ~5GB).
 - Real gradient sync между cores (вместо independent ensemble).
 - BPE tokenizer вместо byte-level.
+
+#### Qwen-4B Q4_K GEMV на NMC4 — начало (2026-05-11)
+
+Развиваю инференс реальной LLM (Qwen3-4B Q4_K_M GGUF, 2.5GB)
+на NMC4 VLIW DSP — пишу с нуля Q4_K dequant + GEMV kernels.
+
+**Текущий микробенчмарк** (1 NMC4 ядро, реальные веса `blk.0.attn_q.weight`):
+
+| Версия | M | K | Wall | Throughput | Состояние |
+|---|---|---|---|---|---|
+| `nmc_q4k_test` | dequant only | 256 | <1 ms | — | ✅ bit-exact match с host CPU |
+| `nmc_q4k_gemv` (K=256) | 32 | 256 | 17.7 ms | 0.46 MMACs/sec | ✅ 31/32 rows bit-exact (soft-float) |
+| `nmc_q4k_gemv_full` (K=2560) | 32 | 2560 | 170 ms | 0.45 MMACs/sec | ✅ 32/32 rows bit-exact (soft-float) |
+| `nmc_q4k_gemv_full` + **`-mnmc4-float`** | 32 | 2560 | **24.9 ms** | **3.3 MMACs/sec** | ✅ 32/32 bit-exact, max_diff=3.6e-07 |
+
+**Ключевые открытия:**
+- `-mnmc4-float` (hardware float) даёт **7× speedup** vs soft-float по умолчанию — NMC4 имеет FP unit, но `-mnmc4` его не подключает.
+- Чистый FP dot (no Q4_K dequant) на hw-float: **6.4 MMACs/sec** → Q4_K kernel в 2× медленнее из-за dequant cost.
+- PL_Addr в `PL_WriteMemBlock` — это **NMC virtual word-address** из `.map` файла, не произвольный hex. Все попытки `0xc0000000` давали zero output (row-0 bug был артефакт wrong addressing, не compiler bug).
+- Per-row IM caching не дал speedup (math-bound, не EMI-bound).
+
+**Следующие шаги** для usable Qwen inference:
+- 16-core parallel (row-split): 16 ядер × 3.3 MMACs/sec = 53 MMACs/sec.
+- Optimize dequant (12ms из 24.9ms — половина времени) через precomputing per-block constants outside inner loop.
+- Real Qwen forward path: K=2560, N=2560 attn_qkv + N=8192 ffn_gate/up/down × 36 layers.
 
 ### Поддерживаемые платформы
 

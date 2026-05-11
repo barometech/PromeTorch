@@ -3,6 +3,93 @@
 Полная история разработки проекта.
 Полный аудит инфраструктуры — в `INFRASTRUCTURE_AUDIT.md`.
 
+## 2026-05-11 (ночь): Qwen3-4B Q4_K GEMV на NMC4 — первая правильная работа
+
+После nanoGPT TinyStories pipeline перешёл на real LLM inference: Q4_K
+quantized weights из настоящего Qwen3-4B-Instruct GGUF, dequant + GEMV
+kernels с нуля под NMC4 VLIW DSP.
+
+### Хронология
+
+1. **Q4_K dequant kernel** (`nmc_q4k_test.c`) — bit-exact reproduction
+   ggml Q4_K layout (144 bytes per 256 values, `get_scale_min_k4` 6-bit
+   pack, fp16→fp32 via IEEE 754). Match с host reference: max_diff=0.
+
+2. **Q4_K GEMV K=256** (`nmc_q4k_gemv.c` + `nmc_q4k_gemv2.c`) — 32 rows,
+   1 Q4_K block per row. 31/32 rows bit-exact, row 0 = 0 (загадка).
+   Performance: 17.7 ms, 0.46 MMACs/sec.
+
+3. **Q4_K GEMV K=2560 (real Qwen)** (`nmc_q4k_gemv_full.c`) — 32 rows × 10
+   blocks = real `blk.0.attn_q.weight` slice (46080 bytes weights, 2560
+   fp32 input). Изначально все строки выдавали 0.
+
+4. **Root cause row-0 bug** — `PL_Addr` параметр в `PL_WriteMemBlock`
+   должен быть **NMC virtual word-address** из `.map` файла (типа
+   `0x2000e2a`), а не произвольный hex вроде `0xc0000000`. Старые
+   тесты с `0xc0000000` работали для большинства строк по совпадению
+   адресных смещений, но row 0 систематически промахивался. Передал
+   адреса из `.map` напрямую → все 32 строки bit-exact (max_diff=3.6e-07).
+
+5. **IM caching эксперимент** — copy `gemv_x` целиком и `gemv_W` row-wise
+   в stack-local IM buffers перед обработкой. 170ms → 168ms = **5%**.
+   Bottleneck не EMI bandwidth, а compute.
+
+6. **noop kernel** = 1.3 ms wall (overhead floor) → real compute time
+   ≈ 168 ms.
+
+7. **FP-only dot bench** (без dequant) `nmc_fp_dot_bench.c`: 80 ms на 82K
+   MACs = 1 MMACs/sec. Baseline FP throughput раскрыл подозрительно
+   низкое значение (NMC4 nominal 2 GFLOPS).
+
+8. **Compiler --target-help** → `-mnmc4-float` существует! По умолчанию
+   `-mnmc4` ⇒ soft-float emulation через libgcc. С `-mnmc4-float`
+   (+`-Xassembler -nmc4_float`):
+     * FP dot bench: 80 → **12.8 ms** = 6.4 MMACs/sec (**6.3× speedup**)
+     * Q4_K GEMV full: 170 → **24.9 ms** = 3.3 MMACs/sec (**7× speedup**)
+   Все 32 строки bit-exact (max_diff=3.6e-07).
+
+### Финальный микробенчмарк (1 NMC4 ядро, real Qwen3-4B weights)
+
+| Kernel | M | K | Wall | MMACs/sec | Correctness |
+|---|---|---|---|---|---|
+| `nmc_q4k_test` (dequant) | — | 256 | <1 ms | — | ✅ max_diff=0 |
+| `nmc_q4k_gemv` (soft-fp) | 32 | 256 | 17.7 ms | 0.46 | ✅ 31/32 bit-exact |
+| `nmc_q4k_gemv_full` (soft-fp) | 32 | 2560 | 170 ms | 0.45 | ✅ 32/32 bit-exact (с правильными PL_Addr) |
+| `nmc_fp_dot_bench` (soft-fp) | 32 | 2560 | 80 ms | 1.01 | — |
+| `nmc_fp_dot_bench` (**hw-fp**) | 32 | 2560 | 12.8 ms | 6.42 | — |
+| `nmc_q4k_gemv_full` (**hw-fp**) | 32 | 2560 | **24.9 ms** | **3.29** | ✅ 32/32, max_diff=3.6e-07 |
+
+### Extrapolation на full Qwen layer
+
+Full attn_q layer = K=2560, N=2560 = ~6.5M MACs. На текущем kernel:
+~2.0 sec per GEMV на 1 ядро. С 16-core row-parallel = 130 ms per GEMV.
+
+Полный forward: ~250 GEMVs/token × 130 ms = 32 sec/token. Это unusable
+сейчас, но `dequant` стоит половину времени (12 из 24.9 ms) — есть
+запас для второго ×2-×3 speedup'а через precomputed scales/mins.
+
+### Файлы
+
+* `nm_quad_qwen/nmc_q4k_test.c` — dequant verify
+* `nm_quad_qwen/nmc_q4k_gemv.c` (`gemv2.c`) — K=256 GEMV
+* `nm_quad_qwen/nmc_q4k_gemv_full.c` — K=2560 GEMV (текущий, hw-float)
+* `nm_quad_qwen/nmc_q4k_gemv_im.c` — IM-cached версия (no speedup, для архива)
+* `nm_quad_qwen/nmc_fp_dot_bench.c` — pure FP dot benchmark
+* `nm_quad_qwen/nmc_noop.c` — overhead measurement
+* `nm_quad_qwen/host_q4k_gemv_full.cpp` — GGUF parser + dispatch
+* `nm_quad_qwen/host_fp_dot_bench.cpp` — fp dot driver
+
+### Lessons learned
+
+1. **PL_Addr ≠ arbitrary hex**: всегда брать из `.map` (NMC virtual
+   word-address). Старые примеры с `0xc0000000` — особый ABI или
+   counterfactual, не работает универсально.
+2. **`-mnmc4` ≠ `-mnmc4-float`**: NMC4 имеет hardware FP unit, но
+   соответствующий compiler flag не дефолтный. Проверять `--target-help`
+   на любой DSP toolchain.
+3. **Стартовый overhead ~1.3 ms** на kernel load/sync — учитывать в
+   per-call measurements.
+
 ## 2026-05-10/11: nanoGPT TinyStories ТРЕНИРОВКА НА NM QUAD (NMC4 VLIW)
 
 **Полный end-to-end pipeline:** byte-level transformer тренируется на real
