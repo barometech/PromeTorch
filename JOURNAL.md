@@ -3,6 +3,96 @@
 Полная история разработки проекта.
 Полный аудит инфраструктуры — в `INFRASTRUCTURE_AUDIT.md`.
 
+## 2026-05-10/11: nanoGPT TinyStories ТРЕНИРОВКА НА NM QUAD (NMC4 VLIW)
+
+**Полный end-to-end pipeline:** byte-level transformer тренируется на real
+TinyStories dataset на железе NM Quad (4 чипа × 4 NMC4 cores). Forward, backward,
+Adam, AdamW, weight checkpointing, host inference — всё с нуля в C для NMC4
+toolchain (nmc-gcc 4.8.3, VLIW DSP-like архитектура).
+
+### Архитектура
+- **Модель**: 1-layer transformer, vocab=128 (byte-level ASCII), T=32 context,
+  D=32 model dim, FFN=64, 1 head. ~17K параметров.
+- **NMC4 SDK**: `/usr/local/rc_module/board-nm_quad`, IM=512KB per core (fast),
+  EMI=256MB per cluster (shared, slower).
+- **Хост-драйвер**: x86 Ubuntu host через `libnm_quad_load.so` управляет
+  загрузкой/обменом с NMC.
+- **Передача данных**: `PL_WriteMemBlock` грузит 1MB/4MB TinyStories в EMI;
+  каждый NMC core видит свой shard через `training_data[]`. NMC хранит char как
+  32-bit word, поэтому 1MB chars = 4MB EMI footprint.
+
+### Хронология (с 23:30 МСК 10 мая до 13:35 МСК 11 мая)
+
+| Время | Iteration | Best loss | Что нового |
+|---|---|---|---|
+| 23:50 | Single core 1MB×200 steps | 1.31 | Forward+backward работают (overfit на 5 фразах) |
+| 00:30 | 16-core baked text | 2.69 | Все 16 cores параллельно через host_train_all |
+| 00:50 | 16-core TinyStories (1MB shard per core) | 2.65 | Real dataset через EMI |
+| 01:20 | 16-core 2000 steps | 2.57 | Дольше но плато |
+| 03:20 | **Single-core 1000 steps** | **2.73** | Чистый weight readback + inference |
+| 04:20 | 4-chip parallel (1 core/chip) | 2.41 | Без shared-memory race |
+| 06:00 | 16-core × 4 batches | 2.52 | Все 16 cores trained sequentially |
+| 09:34 | Single 2000 steps 4MB | 2.40 | 4MB dataset предотвратил overfit |
+| 11:35 | Single 4000 steps 4MB | 2.47 | Mid-run spike+recover |
+| **13:34** | **AdamW 2000 steps 4MB** | **2.37 ← лучший** | weight_decay=0.01 |
+
+### Ключевой bug (multi-core)
+
+Default linker mode кладёт ВСЕ `static` arrays (Wtok, Wqkv, vWtok, и т.д.) в
+**EMI shared region** (адреса 0x02xxxxxx). Все 4 cores в одном cluster пишут
+в **одни и те же веса** → race, identical losses между cores, generation выдаёт
+NULL bytes.
+
+**Доказательство:** до fix `nm nmc_part.abs | grep _Wtok` → `0201a7e8 b _Wtok`
+(EMI). После fix через USE_ONLY_EM + NMC_INDEX → разные EMI subregions per core.
+
+**Финальный fix:** sequential batches — 4 core внутри cluster делаются по очереди.
+Wall time = 4 × ~26 мин = ~1h45min. Используется в `host_all16_batched.cpp`.
+
+### Лучший результат (AdamW, loss=2.37)
+
+Greedy (зацикливается):
+```
+Once upon a time the the the the the the the the the the the the the the...
+```
+
+Sampling temp=0.6 — **видна структура English**:
+```
+Once upon a time thed wed lathe be the wite agede fe an thed tond ad thele a
+thed she lang aled then Sand m the se ay thithe athe s tished an pe an we s
+was ndand d iasohe tand athand the s wa ly tothend and. as anlamey a ban pnd
+tothesamede w sa anx. the asod soond ton bit an ther f a aland foto amand he
+tatd uy th
+```
+
+Разборчивые слова: **the, be, an, then, she, was, and, as, he, ther**.
+Word-likes: **lathe, wite, lang (=long), ban, foto**. Периоды, запятые,
+капитализация после "." (Sand). Loss 2.37 nats ≈ 3.42 bits/byte — реальное
+language modeling на byte-уровне.
+
+### Файлы (на сервере `~/nanogpt/v1/`)
+
+- `nanogpt_train_v3.c` — NMC4 transformer + save_weights_to_emi (AdamW + grad clip)
+- `host_one_core.cpp` — single-core driver (clean, no race)
+- `host_4chip_safe.cpp` — 4 чипа × 1 core параллельно
+- `host_all16_batched.cpp` — все 16 cores через 4 sequential batches
+- `infer.py` — Python inference из trained_weights.bin
+- `trained_weights.bin` — финальные веса (70 KB = 17600 float32)
+
+### Что осталось (next session)
+
+1. **2-layer model** — единственный путь дальнейшего loss improvement (capacity).
+   ~500 LoC code change, fits в 512KB IM.
+2. **BPE tokenizer** — вместо byte-level. Vocab 1-8K даст compact representation.
+3. **Real data parallelism** — sync weights между cores periodically (вместо
+   independent ensemble). Требует host-coordinated gradient AllReduce через EMI.
+4. **USE_ONLY_IM с D=24** — поместить ВСЁ в IM (per-core private), убрать
+   shared EMI completely. Без NMC_INDEX hack.
+
+Полная подробность: `~/.claude/projects/.../memory/project_nmquad_nanogpt.md`.
+
+---
+
 ## 2026-05-04 (ночь, ИТОГ-7): GigaChat3 РАБОТАЕТ end-to-end (7.1 tok/s)
 
 После завершения Phase 2/3 forward kernels + integration:

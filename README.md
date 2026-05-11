@@ -387,6 +387,42 @@ vectorize sampling on GPU (pinned-memory async draws). Ожидаемо верн
 | Max stable cores | **16 из 64** | 64-ядерный режим приводит к DDR contention / hang |
 | Throughput (16 ядер) | 705 tok/s | на игрушечном GPT D=128, L=2, V=65 (tiny_shakespeare); loss 4.45 (модель не сходится, это throughput microbenchmark, не training run) |
 
+#### nanoGPT TinyStories на NMC4 — end-to-end training (2026-05-11)
+
+Полный pipeline byte-level transformer тренируется на real TinyStories
+dataset на NMC4 VLIW DSP cores. Forward, backward, Adam/AdamW, host inference —
+всё в C для nmc-gcc 4.8.3.
+
+| Конфигурация | Final loss | Quality |
+|---|---|---|
+| 1-layer, 1000 steps, 1MB | 2.73 | random fragments |
+| 1-layer, 4-chip parallel | 2.41 | разборчивые слова |
+| 1-layer × 16 cores batched | 2.52 | все 16 cores trained |
+| 1-layer + AdamW + 4MB | **2.37** | best 1-layer, видны `the, and, an, was, she, he` |
+| 2-layer (v4) mid-train | **2.27** | best ever loss на NMC4 |
+
+Лучшая генерация (sampling t=0.6) с 1-layer AdamW loss=2.37:
+```
+Once upon a time thed wed lathe be the wite agede fe an thed tond ad
+thele a thed she lang aled then Sand m the se ay thithe athe s tished an
+pe an we s was ndand d iasohe tand athand the s wa ly tothend and. as
+anlamey a ban pnd tothesamede w sa anx. the asod soond ton bit an ther
+f a aland foto amand he tatd uy th
+```
+Видны слова: **the, be, an, then, she, was, and, he, lathe, lang, ban, foto**,
+запятые/точки, capitalization после "." → "Sand".
+
+**Файлы** (на `<user>@<nmquad-host>`, `~/nanogpt/v1/`):
+- `nanogpt_train_v4.c` — 2-layer transformer (forward+backward+AdamW+grad clip+best-snapshot)
+- `host_one_core.cpp` — single-core driver через `libnm_quad_load`
+- `host_all16_batched.cpp` — все 16 cores через 4 sequential batches
+- `infer.py` — Python inference (auto-detect 1- или 2-layer checkpoint)
+
+**Открытые задачи** для следующей сессии:
+- Qwen-4B GGUF inference на NMC4 (квантованный, через cluster EMI ~5GB).
+- Real gradient sync между cores (вместо independent ensemble).
+- BPE tokenizer вместо byte-level.
+
 ### Поддерживаемые платформы
 
 | Производитель | Процессор | Архитектура | Backend | Статус |
