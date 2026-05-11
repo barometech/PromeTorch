@@ -442,9 +442,18 @@ f a aland foto amand he tatd uy th
 - PL_Addr в `PL_WriteMemBlock` — это **NMC virtual word-address** из `.map` файла, не произвольный hex. Все попытки `0xc0000000` давали zero output (row-0 bug был артефакт wrong addressing, не compiler bug).
 - Per-row IM caching не дал speedup (math-bound, не EMI-bound).
 
+**4-core параллельный GEMV** (`nmc_q4k_gemv_4core.c`, 1 кластер, 4 NMC4 cores
+делят cluster EMI):
+- Wall: **5.9 ms** vs 24.9 ms single — **4.2× speedup** на 4 ядрах.
+- Throughput: **13.9 MMACs/sec** across 4 cores.
+- ⚠ Известная проблема: первая строка каждого core (rows 0/8/16/24) имеет
+  numerical drift (max_diff=0.37, rms=0.07). Остальные 28 строк bit-exact.
+  Suspected race в shared-EMI startup; в работе.
+
 **Следующие шаги** для usable Qwen inference:
-- 16-core parallel (row-split): 16 ядер × 3.3 MMACs/sec = 53 MMACs/sec.
-- Optimize dequant (12ms из 24.9ms — половина времени) через precomputing per-block constants outside inner loop.
+- Fix 4-core first-row race + scale to 16-core (4 clusters × 4 cores).
+- Optimize dequant (12ms из 24.9ms — половина времени) через fused MAC kernel
+  (`nmc_q4k_gemv_fast.c`, 22 ms vs 24.9 — частичный win).
 - Real Qwen forward path: K=2560, N=2560 attn_qkv + N=8192 ffn_gate/up/down × 36 layers.
 
 ### Поддерживаемые платформы
