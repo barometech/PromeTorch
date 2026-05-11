@@ -163,15 +163,24 @@ int main(int argc, char *argv[]) {
     if (PL_GetAccess(board, &core, &acc) != PL_OK) return 5;
     if (PL_LoadProgramFile(acc, NMC_PART) != PL_OK) return 6;
 
-    /* Upload W as bytes (one byte per NMC word) */
-    std::vector<PL_Word> ww(NBYTES_W);
-    for (int i = 0; i < NBYTES_W; ++i) ww[i] = (PL_Word)W[i];
-    PL_WriteMemBlock(acc, ww.data(), ADDR_W, NBYTES_W);
-
-    /* Upload x as floats (1 word per float) */
+    /* Upload x FIRST then W (test write order) */
     std::vector<PL_Word> xw(K);
     for (int i = 0; i < K; ++i) std::memcpy(&xw[i], &x[i], 4);
-    PL_WriteMemBlock(acc, xw.data(), ADDR_X, K);
+    int rcx = PL_WriteMemBlock(acc, xw.data(), ADDR_X, K);
+    std::cerr << "[host] WriteMemBlock x rc=" << rcx << "\n";
+
+    std::vector<PL_Word> ww(NBYTES_W);
+    for (int i = 0; i < NBYTES_W; ++i) ww[i] = (PL_Word)W[i];
+    int rcw = PL_WriteMemBlock(acc, ww.data(), ADDR_W, NBYTES_W);
+    std::cerr << "[host] WriteMemBlock W rc=" << rcw << "\n";
+
+    /* Read back first word of x and W to verify */
+    PL_Word check_x = 0, check_w = 0;
+    PL_ReadMemBlock(acc, &check_x, ADDR_X, 1);
+    PL_ReadMemBlock(acc, &check_w, ADDR_W, 1);
+    std::cerr << "[host] readback x[0]=0x" << std::hex << check_x
+              << " (expected 0x" << xw[0] << ")  W[0]=0x" << check_w
+              << " (expected 0x" << ww[0] << ")" << std::dec << "\n";
 
     auto t0 = std::chrono::steady_clock::now();
     IO_Service *svc = IO_ServiceStart(NMC_PART, acc, nullptr, nullptr, nullptr);

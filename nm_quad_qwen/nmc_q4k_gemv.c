@@ -29,7 +29,7 @@
 #define M    32      /* output rows */
 #define K    256     /* reduction (1 Q4_K block per row) */
 
-unsigned char gemv_W[M * 144];    /* M blocks of 144 bytes each */
+unsigned int  gemv_W[M * 144];    /* M blocks of 144 bytes each (1 word per byte) */
 float         gemv_x[K];          /* input vector */
 float         gemv_y[M];          /* output vector */
 
@@ -65,40 +65,60 @@ static void get_scale_min_k4(int j, const unsigned char *q, unsigned char *d, un
 }
 
 /* GEMV: y[row] = sum over K cols of dequant(W[row, k]) * x[k]
- * For each row's Q4_K block, dequant + multiply-accumulate in one pass. */
-static void q4k_gemv_row(const unsigned char *block, const float *x, float *y_out) {
-    unsigned int d_bits, dmin_bits;
-    d_bits    = ((unsigned int)block[0] & 0xff) | (((unsigned int)block[1] & 0xff) << 8);
-    dmin_bits = ((unsigned int)block[2] & 0xff) | (((unsigned int)block[3] & 0xff) << 8);
+ * Uses index-based access (avoids NMC compiler bug with pointer arith on row 0). */
+static float q4k_gemv_row_at(int row_off) {
+    int b0 = row_off;
+    unsigned int d_bits    = ((unsigned int)gemv_W[b0+0] & 0xff) | (((unsigned int)gemv_W[b0+1] & 0xff) << 8);
+    unsigned int dmin_bits = ((unsigned int)gemv_W[b0+2] & 0xff) | (((unsigned int)gemv_W[b0+3] & 0xff) << 8);
     float d    = fp16_to_fp32(d_bits);
     float dmin = fp16_to_fp32(dmin_bits);
 
-    const unsigned char *scales = block + 4;
-    const unsigned char *qs     = block + 16;
+    int scales_off = b0 + 4;
+    int qs_off     = b0 + 16;
 
     float acc = 0.0f;
     int is = 0;
     int j;
     for (j = 0; j < 256; j += 64) {
         unsigned char sc, m;
-        get_scale_min_k4(is, scales, &sc, &m);
+        /* Inline get_scale_min_k4 with explicit indexing */
+        if (is < 4) {
+            sc = gemv_W[scales_off + is]     & 63;
+            m  = gemv_W[scales_off + is + 4] & 63;
+        } else {
+            sc = (gemv_W[scales_off + is + 4] & 0xF) | ((gemv_W[scales_off + is - 4] >> 6) << 4);
+            m  = (gemv_W[scales_off + is + 4] >> 4) | ((gemv_W[scales_off + is    ] >> 6) << 4);
+        }
         float d1 = d * (float)sc;
         float m1 = dmin * (float)m;
-        get_scale_min_k4(is + 1, scales, &sc, &m);
+        int is2 = is + 1;
+        if (is2 < 4) {
+            sc = gemv_W[scales_off + is2]     & 63;
+            m  = gemv_W[scales_off + is2 + 4] & 63;
+        } else {
+            sc = (gemv_W[scales_off + is2 + 4] & 0xF) | ((gemv_W[scales_off + is2 - 4] >> 6) << 4);
+            m  = (gemv_W[scales_off + is2 + 4] >> 4) | ((gemv_W[scales_off + is2    ] >> 6) << 4);
+        }
         float d2 = d * (float)sc;
         float m2 = dmin * (float)m;
 
         int l;
         for (l = 0; l < 32; ++l) {
-            float v_lo = d1 * (float)(qs[l] & 0xF) - m1;
-            float v_hi = d2 * (float)(qs[l] >> 4) - m2;
-            acc += v_lo * x[j + l +  0];
-            acc += v_hi * x[j + l + 32];
+            unsigned int qbyte = (unsigned int)gemv_W[qs_off + l] & 0xff;
+            float v_lo = d1 * (float)(qbyte & 0xF)     - m1;
+            float v_hi = d2 * (float)((qbyte >> 4) & 0xF) - m2;
+            acc += v_lo * gemv_x[j + l +  0];
+            acc += v_hi * gemv_x[j + l + 32];
         }
-        qs += 32;
+        qs_off += 32;
         is += 2;
     }
-    *y_out = acc;
+    return acc;
+}
+
+/* Silence "unused function" warning */
+static void __unused_dummy(void) {
+    (void)get_scale_min_k4;
 }
 
 int main(int argc, char *argv[]) {
@@ -106,10 +126,24 @@ int main(int argc, char *argv[]) {
     int cluster = ncl_getClusterID();
     int core    = ncl_getCoreID();
 
+    /* Diag: print row 0 inputs */
+    printf("NMC%d:%d row0 W[0..7]: %02x %02x %02x %02x %02x %02x %02x %02x\n",
+        cluster, core,
+        (unsigned int)gemv_W[0] & 0xff, (unsigned int)gemv_W[1] & 0xff,
+        (unsigned int)gemv_W[2] & 0xff, (unsigned int)gemv_W[3] & 0xff,
+        (unsigned int)gemv_W[4] & 0xff, (unsigned int)gemv_W[5] & 0xff,
+        (unsigned int)gemv_W[6] & 0xff, (unsigned int)gemv_W[7] & 0xff);
+    printf("NMC%d:%d row1 W[144..147]: %02x %02x %02x %02x\n",
+        cluster, core,
+        (unsigned int)gemv_W[144] & 0xff, (unsigned int)gemv_W[145] & 0xff,
+        (unsigned int)gemv_W[146] & 0xff, (unsigned int)gemv_W[147] & 0xff);
+    printf("NMC%d:%d x[0..3]: %f %f %f %f\n",
+        cluster, core, gemv_x[0], gemv_x[1], gemv_x[2], gemv_x[3]);
+
     /* Run GEMV for each row */
     int r;
     for (r = 0; r < M; ++r) {
-        q4k_gemv_row(gemv_W + r * 144, gemv_x, &gemv_y[r]);
+        gemv_y[r] = q4k_gemv_row_at(r * 144);
     }
 
     /* Print first 4 outputs + stats */
