@@ -80,7 +80,7 @@ static float q4k_block_fused_mac(int row_off, const float *xb) {
 int main(int argc, char *argv[]) {
     (void)argc; (void)argv;
     ncl_icache_ena();
-    int rank = ncl_getCoreID();    /* 0..3 within cluster */
+    int rank = ncl_getCoreID();
     int r_start = rank * M_PER_CORE;
     int r_end   = r_start + M_PER_CORE;
     int r, blk;

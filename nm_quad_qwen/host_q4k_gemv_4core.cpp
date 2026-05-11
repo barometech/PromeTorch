@@ -168,13 +168,15 @@ int main(int argc, char *argv[]) {
     for (int i = 0; i < nbytes_w_full; ++i) ww[i] = (PL_Word)W[i];
     PL_WriteMemBlock(acc[0], ww.data(), ADDR_W, nbytes_w_full);
 
-    /* Launch all 4 cores */
+    /* Launch all 4 cores. NOTE: SDK example uses pthread-per-core to start
+     * cores simultaneously. Current code launches sequentially within
+     * single thread which races against cluster EMI visibility for
+     * cores 1..3. First-row of each core occasionally off. См. TODO. */
     auto t0 = std::chrono::steady_clock::now();
     IO_Service *svc[NCORES] = {nullptr};
     for (int c = 0; c < NCORES; ++c)
         svc[c] = IO_ServiceStart(NMC_PART, acc[c], nullptr, nullptr, nullptr);
 
-    /* Wait for all to finish */
     for (int c = 0; c < NCORES; ++c) {
         PL_Word st = 0;
         while (1) {
