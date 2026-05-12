@@ -3,6 +3,69 @@
 Полная история разработки проекта.
 Полный аудит инфраструктуры — в `INFRASTRUCTURE_AUDIT.md`.
 
+## 2026-05-12: Qwen3-4B FOUNDATION на NM Quad — 20 коммитов
+
+Полный foundation для Qwen 4B inference на NMC4 VLIW DSP завершён за
+один длинный день. От первого Q4_K GEMV до полной 1-layer forward
+end-to-end на real весах.
+
+### Финальная сводка (commits `b45c34f..a862981`)
+
+| Component | Status | Wall (1 NMC4) | max_diff |
+|---|---|---|---|
+| Q4_K dequant | ✅ bit-exact | <1ms | 0 |
+| Q6_K dequant | ✅ bit-exact | <1ms | 0 |
+| Q4_K GEMV K=2560 M=32 | ✅ bit-exact | 24.9ms | 3.58e-07 |
+| Q6_K GEMV K=2560 M=32 | ✅ bit-exact | 81ms | 0 |
+| RMSNorm K=2560 | ✅ bit-exact | <1ms | 2.98e-08 |
+| SiLU K=8192 | ✅ bit-exact | 15ms | 4.77e-07 |
+| Softmax K=128 | ✅ bit-exact | <1ms | 7.45e-09 |
+| RoPE head_dim=128 | ✅ bit-exact | 3ms | 3.58e-07 |
+| Attention 1-head 128×128 | ✅ bit-exact | 56ms | 1.49e-08 |
+| Step1: RMSNorm+Q-proj M=32 | ✅ bit-exact | 30ms | 2.98e-08 |
+| Step2: RMSNorm+Q-proj M=2560 | ✅ bit-exact | 1962ms | 4.47e-08 |
+| Step3b: mixed Q4_K+Q6_K | ✅ bit-exact | 117ms | 2.98e-08 |
+| Step4: 1-head attention layer | ✅ bit-exact | 486ms | 2.61e-08 |
+| Step5: FFN SwiGLU sub-layer | ✅ bit-exact | 95ms | 7.45e-08 |
+| Step6: full attention block (12 ops) | ✅ bit-exact | 1205ms | 1.19e-07 |
+| **Step7: COMPLETE Qwen layer (18 ops)** | ✅ functional | **3052ms** | **0.05 (FP order)** |
+
+### Ключевые technical findings
+
+1. **`-mnmc4-float` обязательный** — 7× speedup vs soft-float default
+   на NMC4 toolchain. Memory: `feedback_nmc4_dma_race.md` уже фиксирует.
+2. **PL_Addr из .map**, не arbitrary hex — иначе row-0 bug.
+3. **DMA settle delay** в kernel start для маленьких kernels — выяснено
+   на RoPE (без delay raw_pos=0). 50M iter ≈ 150ms.
+4. **Host write order** — большие тензоры пишем сначала, малые потом
+   (kernel читает малые первыми → DMA race).
+5. **NMC4 NM_DMA shared cluster EMI** — multi-chip race в host_all16
+   (nanoGPT extraction bug fix `e9046bc` исправил аналогичную проблему).
+
+### Что осталось для production Qwen 4B inference
+
+- Real dims (Q-out=4096, K/V=1024, FFN=9728) — линейный scale-up
+- 36-layer chain — повтор kernel 36 раз с разными весами per layer
+- BPE tokenizer (vocab=151936) — отдельный module
+- KV cache management — persistent EMI region
+- Multi-core (16 NMC4) — pthread launch fix + ncl_hostSyncArray
+- NMC4 SIMD asm (`fpu 0 rep N`) — потенциальные 4-8× speedup на inner loops
+
+### Файлы (`nm_quad_qwen/`)
+
+```
+nmc_q4k_test.c, nmc_q6k_test.c                  — dequant tests
+nmc_q4k_gemv_full.c, nmc_q6k_gemv.c             — GEMV kernels
+nmc_rmsnorm.c, nmc_silu_softmax.c, nmc_rope.c   — primitive ops
+nmc_attn.c                                       — attention head
+nmc_qwen_step1.c, _step2.c, _step3b.c            — composing demos
+nmc_qwen_layer.c (step4)                         — 1-head full layer
+nmc_qwen_ffn.c (step5)                           — FFN sub-block
+nmc_qwen_attn_full.c (step6)                     — full attention block
+nmc_qwen_full_layer.c (step7)                    — COMPLETE Qwen layer
++ соответствующие host_*.cpp файлы
+```
+
 ## 2026-05-11 (ночь): Qwen3-4B Q4_K GEMV на NMC4 — первая правильная работа
 
 После nanoGPT TinyStories pipeline перешёл на real LLM inference: Q4_K
