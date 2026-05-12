@@ -19,15 +19,21 @@
 #define HEAD_DIM 128
 #define BASE 1000000.0f
 
-volatile int   rope_pos;
-volatile float rope_x[HEAD_DIM];
-float          rope_y[HEAD_DIM];
+float rope_x[HEAD_DIM];
+int   rope_pos;
+float rope_y[HEAD_DIM];
 
 int main(int argc, char *argv[]) {
     (void)argc; (void)argv;
     ncl_icache_ena();
     int cluster = ncl_getClusterID();
     int core    = ncl_getCoreID();
+
+    /* DEBUG: print raw rope_pos as bytes and rope_x[0] as bytes */
+    unsigned int *raw_pos = (unsigned int*)&rope_pos;
+    unsigned int *raw_x   = (unsigned int*)&rope_x[0];
+    printf("NMC%d:%d DEBUG raw_pos=0x%x raw_x[0]=0x%x raw_x[1]=0x%x\n",
+        cluster, core, *raw_pos, raw_x[0], raw_x[1]);
 
     int pos = rope_pos;
     int i;
