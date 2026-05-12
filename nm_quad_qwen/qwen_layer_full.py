@@ -58,16 +58,18 @@ def rmsnorm(x: np.ndarray, gamma: np.ndarray) -> np.ndarray:
 
 
 def rope(v: np.ndarray, pos: int) -> np.ndarray:
-    """RoPE per-head [..., HEAD_DIM]. Rotates pairs (2i, 2i+1)."""
+    """RoPE per-head [..., HEAD_DIM]. NEOX style (Qwen3, llama.cpp
+    GGML_ROPE_TYPE_NEOX): rotates split-half pairs (i, i + HEAD_DIM/2)."""
     v = v.copy()
-    for i in range(0, HEAD_DIM, 2):
-        theta = 1.0 / (ROPE_BASE ** (i / HEAD_DIM))
+    half = HEAD_DIM // 2
+    for i in range(half):
+        theta = 1.0 / (ROPE_BASE ** (2.0 * i / HEAD_DIM))
         angle = pos * theta
         c, s = np.cos(angle), np.sin(angle)
         v0 = v[..., i].copy()
-        v1 = v[..., i + 1].copy()
-        v[..., i]     = v0 * c - v1 * s
-        v[..., i + 1] = v0 * s + v1 * c
+        v1 = v[..., i + half].copy()
+        v[..., i]        = v0 * c - v1 * s
+        v[..., i + half] = v0 * s + v1 * c
     return v
 
 

@@ -148,9 +148,21 @@ def main():
 
     print(f"[prefill] total={time.time()-t0:.0f}s")
 
+    # Final output_norm RMSNorm перед lm_head (qwen3: output_norm.weight, shape K_DIM)
+    tt, base = parse_gguf_tensor_table(path)
+    by_name = {n: (base + off, dims, t) for (n, dims, t, off) in tt}
+    if "output_norm.weight" in by_name:
+        on_off = by_name["output_norm.weight"][0]
+        f_on = open(path, "rb")
+        output_norm_gamma = load_fp32(f_on, on_off, K_DIM)
+        f_on.close()
+        x_last = rmsnorm(x_last, output_norm_gamma)
+        print(f"[output_norm] applied, L2={np.linalg.norm(x_last):.3f}")
+    else:
+        print(f"[output_norm] WARN: output_norm.weight not found")
+
     # lm_head projection
     print(f"[lm_head] projecting через 151936 vocab Q6_K...")
-    tt, base = parse_gguf_tensor_table(path)
     for (n, dims, t, off) in tt:
         if n == "token_embd.weight":
             tem_off = base + off
