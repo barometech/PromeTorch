@@ -17,7 +17,7 @@ static const char *GGUF_PATH = "/home/<user>/gguf/qwen3-4b-q4km.gguf";
 #define N_HEADS_SUB 2
 #define ATTN_OUT_K (N_HEADS_SUB * HEAD_DIM)
 #define M_OUT 2560
-#define M_FFN 256
+#define M_FFN 1024
 #define BLOCKS_PER_ROW (K_DIM / 256)
 #define Q4K_ROW_BYTES (BLOCKS_PER_ROW * 144)
 #define Q6K_ROW_BYTES (BLOCKS_PER_ROW * 210)
