@@ -167,8 +167,8 @@ int main(int argc, char *argv[]) {
     int cluster = ncl_getClusterID();
     int core    = ncl_getCoreID();
 
-    /* DMA settle */
-    { volatile int w; for (w = 0; w < 15000000; ++w) ; }
+    /* DMA settle — bigger for 18MB total uploads */
+    { volatile int w; for (w = 0; w < 50000000; ++w) ; }
 
     int i, h;
 
