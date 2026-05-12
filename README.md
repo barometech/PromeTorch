@@ -400,6 +400,7 @@ dataset на NMC4 VLIW DSP cores. Forward, backward, Adam/AdamW, host inference 
 | 1-layer × 16 cores batched | 2.52 | все 16 cores trained |
 | 1-layer + AdamW + 4MB | **2.37** | best 1-layer, видны `the, and, an, was, she, he` |
 | 2-layer (v4) mid-train | **2.27** | best ever loss на NMC4 |
+| **2-layer (v4) full 16-core × 2000 steps** | **2.46** | NMC0:1 best, pipeline fixed (ADDR + N_WEIGHTS), gen via infer.py shows bigrams `he, it, at, is` (2026-05-12) |
 
 Лучшая генерация (sampling t=0.6) с 1-layer AdamW loss=2.37:
 ```
