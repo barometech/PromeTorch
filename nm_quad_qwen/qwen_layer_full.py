@@ -39,6 +39,15 @@ def load_q6k(f, off: int, n_rows: int, K: int) -> np.ndarray:
     return dequant_q6k_rows_np(raw, n_rows, K)
 
 
+def load_quant(f, off: int, n_rows: int, K: int, ttype: int) -> np.ndarray:
+    """Generic dequant. ttype=12 Q4_K, ttype=14 Q6_K (Qwen3-4B Q4_K_M mix)."""
+    if ttype == 12:
+        return load_q4k(f, off, n_rows, K)
+    if ttype == 14:
+        return load_q6k(f, off, n_rows, K)
+    raise ValueError(f"unsupported ttype={ttype}")
+
+
 def load_fp32(f, off: int, n: int) -> np.ndarray:
     f.seek(off)
     return np.frombuffer(f.read(n * 4), dtype=np.float32).copy()
@@ -69,35 +78,37 @@ def qwen_full_layer(gguf_path: str, layer_idx: int, x: np.ndarray, pos: int):
     L = layer_idx
     f = open(gguf_path, "rb")
 
+    def wq(name, rows, cols):
+        off_t, dims_t, ttype_t = by_name[name]
+        return load_quant(f, off_t, rows, cols, ttype_t)
+
     t0 = time.time()
-    # gammas
     attn_norm = load_fp32(f, by_name[f"blk.{L}.attn_norm.weight"][0], K_DIM)
     q_norm    = load_fp32(f, by_name[f"blk.{L}.attn_q_norm.weight"][0], HEAD_DIM)
     k_norm    = load_fp32(f, by_name[f"blk.{L}.attn_k_norm.weight"][0], HEAD_DIM)
     ffn_norm  = load_fp32(f, by_name[f"blk.{L}.ffn_norm.weight"][0], K_DIM)
     print(f"  [load] gammas {time.time()-t0:.2f}s", flush=True)
 
-    # weight matrices
     t1 = time.time()
-    Wq = load_q4k(f, by_name[f"blk.{L}.attn_q.weight"][0], N_HEADS * HEAD_DIM, K_DIM)
+    Wq = wq(f"blk.{L}.attn_q.weight", N_HEADS * HEAD_DIM, K_DIM)
     print(f"  [load] Wq {time.time()-t1:.2f}s shape={Wq.shape}", flush=True)
     t1 = time.time()
-    Wk = load_q4k(f, by_name[f"blk.{L}.attn_k.weight"][0], N_KV_HEADS * HEAD_DIM, K_DIM)
+    Wk = wq(f"blk.{L}.attn_k.weight", N_KV_HEADS * HEAD_DIM, K_DIM)
     print(f"  [load] Wk {time.time()-t1:.2f}s shape={Wk.shape}", flush=True)
     t1 = time.time()
-    Wv = load_q6k(f, by_name[f"blk.{L}.attn_v.weight"][0], N_KV_HEADS * HEAD_DIM, K_DIM)
+    Wv = wq(f"blk.{L}.attn_v.weight", N_KV_HEADS * HEAD_DIM, K_DIM)
     print(f"  [load] Wv {time.time()-t1:.2f}s shape={Wv.shape}", flush=True)
     t1 = time.time()
-    Wo = load_q4k(f, by_name[f"blk.{L}.attn_output.weight"][0], K_DIM, N_HEADS * HEAD_DIM)
+    Wo = wq(f"blk.{L}.attn_output.weight", K_DIM, N_HEADS * HEAD_DIM)
     print(f"  [load] Wo {time.time()-t1:.2f}s shape={Wo.shape}", flush=True)
     t1 = time.time()
-    Wgate = load_q4k(f, by_name[f"blk.{L}.ffn_gate.weight"][0], M_FFN, K_DIM)
+    Wgate = wq(f"blk.{L}.ffn_gate.weight", M_FFN, K_DIM)
     print(f"  [load] Wgate {time.time()-t1:.2f}s shape={Wgate.shape}", flush=True)
     t1 = time.time()
-    Wup = load_q4k(f, by_name[f"blk.{L}.ffn_up.weight"][0], M_FFN, K_DIM)
+    Wup = wq(f"blk.{L}.ffn_up.weight", M_FFN, K_DIM)
     print(f"  [load] Wup {time.time()-t1:.2f}s shape={Wup.shape}", flush=True)
     t1 = time.time()
-    Wd = load_q6k(f, by_name[f"blk.{L}.ffn_down.weight"][0], K_DIM, M_FFN)
+    Wd = wq(f"blk.{L}.ffn_down.weight", K_DIM, M_FFN)
     print(f"  [load] Wd {time.time()-t1:.2f}s shape={Wd.shape}", flush=True)
     f.close()
 

@@ -22,7 +22,7 @@ import numpy as np
 from qwen_tokenizer import parse_gguf_tokenizer, QwenBPE
 from qwen_embed_lookup import lookup_embedding, parse_gguf_tensor_table
 from qwen_dequant_np import dequant_q4k_rows_np, dequant_q6k_rows_np
-from qwen_layer_full import (load_q4k, load_q6k, load_fp32, rmsnorm, rope,
+from qwen_layer_full import (load_quant, load_fp32, rmsnorm, rope,
                               K_DIM, HEAD_DIM, N_HEADS, N_KV_HEADS, M_FFN,
                               EPS, ROPE_BASE)
 
@@ -32,18 +32,23 @@ def load_layer_weights(path: str, L: int):
     tt, base = parse_gguf_tensor_table(path)
     by_name = {n: (base + off, dims, t) for (n, dims, t, off) in tt}
     f = open(path, "rb")
+
+    def wq(name, rows, cols):
+        off_t, dims_t, ttype_t = by_name[name]
+        return load_quant(f, off_t, rows, cols, ttype_t)
+
     w = {}
     w["attn_norm"] = load_fp32(f, by_name[f"blk.{L}.attn_norm.weight"][0], K_DIM)
     w["q_norm"]    = load_fp32(f, by_name[f"blk.{L}.attn_q_norm.weight"][0], HEAD_DIM)
     w["k_norm"]    = load_fp32(f, by_name[f"blk.{L}.attn_k_norm.weight"][0], HEAD_DIM)
     w["ffn_norm"]  = load_fp32(f, by_name[f"blk.{L}.ffn_norm.weight"][0], K_DIM)
-    w["Wq"] = load_q4k(f, by_name[f"blk.{L}.attn_q.weight"][0], N_HEADS * HEAD_DIM, K_DIM)
-    w["Wk"] = load_q4k(f, by_name[f"blk.{L}.attn_k.weight"][0], N_KV_HEADS * HEAD_DIM, K_DIM)
-    w["Wv"] = load_q6k(f, by_name[f"blk.{L}.attn_v.weight"][0], N_KV_HEADS * HEAD_DIM, K_DIM)
-    w["Wo"] = load_q4k(f, by_name[f"blk.{L}.attn_output.weight"][0], K_DIM, N_HEADS * HEAD_DIM)
-    w["Wgate"] = load_q4k(f, by_name[f"blk.{L}.ffn_gate.weight"][0], M_FFN, K_DIM)
-    w["Wup"]   = load_q4k(f, by_name[f"blk.{L}.ffn_up.weight"][0], M_FFN, K_DIM)
-    w["Wd"]    = load_q6k(f, by_name[f"blk.{L}.ffn_down.weight"][0], K_DIM, M_FFN)
+    w["Wq"]    = wq(f"blk.{L}.attn_q.weight",      N_HEADS * HEAD_DIM, K_DIM)
+    w["Wk"]    = wq(f"blk.{L}.attn_k.weight",      N_KV_HEADS * HEAD_DIM, K_DIM)
+    w["Wv"]    = wq(f"blk.{L}.attn_v.weight",      N_KV_HEADS * HEAD_DIM, K_DIM)
+    w["Wo"]    = wq(f"blk.{L}.attn_output.weight", K_DIM, N_HEADS * HEAD_DIM)
+    w["Wgate"] = wq(f"blk.{L}.ffn_gate.weight",    M_FFN, K_DIM)
+    w["Wup"]   = wq(f"blk.{L}.ffn_up.weight",      M_FFN, K_DIM)
+    w["Wd"]    = wq(f"blk.{L}.ffn_down.weight",    K_DIM, M_FFN)
     f.close()
     return w
 
