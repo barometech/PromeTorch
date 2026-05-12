@@ -3,6 +3,39 @@
 Полная история разработки проекта.
 Полный аудит инфраструктуры — в `INFRASTRUCTURE_AUDIT.md`.
 
+## 2026-05-13: Qwen3-4B — root cause Q6_K NaN на L4+, full 36-layer chain finite
+
+**Commit `10a3cfa`.** После многочасовых ложных гипотез про fp16 subnormals
+и edge-cases в `dequant_q6k_rows_np`, написал `bisect_q6k_nan.py` который
+прогоняет dequant per-tensor + per-layer и печатает type.
+
+**Root cause:** GGUF Q4_K_M квантизация (например `qwen3-4b-q4km.gguf`)
+**смешивает Q4_K и Q6_K** для `attn_v.weight` и `ffn_down.weight` по
+layer'ам. На L0, L3, L6, ..., L30..L35 — Q6_K (ttype=14, 210 B/block);
+на L1, L2, L4, L5, ... — Q4_K (ttype=12, 144 B/block). Это intentional
+"selective upcast" в llama.cpp.
+
+Мой `load_q6k` hard-code'ил 210-байтный блок-парсинг → на L4 (где
+attn_v на самом деле Q4_K) читал `d_bits` из середины блока, получал
+гигантское `d` и `dequant → inf`. NaN распространялся через FFN.
+
+**Fix:** `load_quant(f, off, rows, K, ttype)` диспатчит по ttype из tensor
+table. `wq()` lambda в `qwen_full_layer` и `load_layer_weights` использует
+его вместо двух раздельных `load_q4k`/`load_q6k` вызовов.
+
+**Verify:**
+- bisect 36 layers: все L0/L3/L6/... → Q6_K OK, все L1/L2/L4/L5/... → Q4_K OK
+- full 36-layer chain "Once upon a time" → все слои finite=True
+- L2 norm растёт от 23 (L0 attn_v=Q6_K) до 2794 (L35), без NaN
+- wall = 80s/token (Q4_K layer'ы быстрее: 0.26s vs 1.19s Q6_K Wd)
+- Top-1 generated: `Ġinspiration` (single-token attention path)
+
+**Lesson:** Если задача-bisect — НЕ копаться в edge-cases алгоритма, пока
+не проверил что входные данные правильно классифицированы. 4+ часа на
+гипотезы про fp16 vs 30 минут на ttype dispatch — провал bisect strategy.
+
+Память: `project_qwen_q4km_mix_dispatch.md`.
+
 ## 2026-05-12: Qwen3-4B FOUNDATION на NM Quad — 20 коммитов
 
 Полный foundation для Qwen 4B inference на NMC4 VLIW DSP завершён за
