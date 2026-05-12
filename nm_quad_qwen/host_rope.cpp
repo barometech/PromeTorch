@@ -50,7 +50,9 @@ int main(int argc, char *argv[]) {
     if (PL_GetAccess(board, &core, &acc) != PL_OK) return 4;
     if (PL_LoadProgramFile(acc, NMC_PART) != PL_OK) return 5;
 
-    PL_Word pw = (PL_Word)pos;
+    float posf = (float)pos;
+    PL_Word pw;
+    std::memcpy(&pw, &posf, 4);
     PL_WriteMemBlock(acc, &pw, ADDR_POS, 1);
     std::vector<PL_Word> xw(HEAD_DIM);
     for (int i = 0; i < HEAD_DIM; ++i) std::memcpy(&xw[i], &x[i], 4);

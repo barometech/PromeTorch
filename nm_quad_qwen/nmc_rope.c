@@ -20,7 +20,7 @@
 #define BASE 1000000.0f
 
 float rope_x[HEAD_DIM];
-int   rope_pos;
+float rope_pos_f;          /* pos cast as float (NMC int storage might be broken) */
 float rope_y[HEAD_DIM];
 
 int main(int argc, char *argv[]) {
@@ -29,13 +29,16 @@ int main(int argc, char *argv[]) {
     int cluster = ncl_getClusterID();
     int core    = ncl_getCoreID();
 
-    /* DEBUG: print raw rope_pos as bytes and rope_x[0] as bytes */
-    unsigned int *raw_pos = (unsigned int*)&rope_pos;
+    /* Wait for host DMA writes to propagate (race with kernel start) */
+    { volatile int w; for (w = 0; w < 100000; ++w) ; }
+
+    /* DEBUG: print raw rope_pos_f as bytes and rope_x[0] as bytes */
+    unsigned int *raw_pos = (unsigned int*)&rope_pos_f;
     unsigned int *raw_x   = (unsigned int*)&rope_x[0];
-    printf("NMC%d:%d DEBUG raw_pos=0x%x raw_x[0]=0x%x raw_x[1]=0x%x\n",
+    printf("NMC%d:%d DEBUG raw_pos_f=0x%x raw_x[0]=0x%x raw_x[1]=0x%x\n",
         cluster, core, *raw_pos, raw_x[0], raw_x[1]);
 
-    int pos = rope_pos;
+    int pos = (int)rope_pos_f;
     int i;
     for (i = 0; i < HEAD_DIM; i += 2) {
         float exp_part = (float)i / (float)HEAD_DIM;
