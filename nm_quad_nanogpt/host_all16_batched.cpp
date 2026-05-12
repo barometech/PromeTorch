@@ -27,11 +27,11 @@
 #define T           32
 #define D           32
 #define FF          64
-#define N_WEIGHTS   17600
+#define N_WEIGHTS   25920
 
 static const PL_Addr ADDR_TRAINING_DATA = 0x020603eaUL;
 static const PL_Addr ADDR_CORE_LOSS_OUT = 0x020603e8UL;
-static const PL_Addr ADDR_SAVED_WEIGHTS = 0x0201b7e8UL;
+static const PL_Addr ADDR_SAVED_WEIGHTS = 0x02028268UL;
 static const char *NMC_PART  = "./nmc_part.abs";
 static const char *DATA_PATH = "/home/<user>/nanogpt/data/tinystories_valid.txt";
 
