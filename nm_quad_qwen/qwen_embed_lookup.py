@@ -39,10 +39,10 @@ def dequant_q6k_block(blk: bytes) -> List[float]:
     for i in range(256):
         is_ = i // 16
         ql_idx = (i % 64) + 64 * (i // 128)
-        ql_shift = 4 * ((i // 32) & 1)
+        ql_shift = 4 * ((i // 64) % 2)
         q_lo = (ql[ql_idx] >> ql_shift) & 0xF
         qh_idx = (i % 32) + 32 * (i // 128)
-        qh_shift = 2 * ((i // 16) & 3)
+        qh_shift = 2 * ((i // 32) % 4)
         q_hi = (qh[qh_idx] >> qh_shift) & 0x3
         scv = sc[is_]
         if scv >= 128: scv -= 256
