@@ -85,9 +85,12 @@ def dequant_q6k_rows_np(raw: bytes, n_rows: int, K: int) -> np.ndarray:
     for i in range(256):
         is_ = i // 16
         ql_idx = (i % 64) + 64 * (i // 128)
-        q_lo = (ql[:, :, ql_idx] >> (4 * ((i // 32) & 1))) & 0xF
+        # ql shift: low nibble for subblk 0,1; high nibble for subblk 2,3.
+        # Pattern: 0,0,1,1,0,0,1,1 (period 64, half-by-half).
+        q_lo = (ql[:, :, ql_idx] >> (4 * ((i // 64) % 2))) & 0xF
         qh_idx = (i % 32) + 32 * (i // 128)
-        q_hi = (qh[:, :, qh_idx] >> (2 * ((i // 16) & 3))) & 0x3
+        # qh shift: subblk 0,1,2,3 → 0,2,4,6. subblk = (i // 32) % 4.
+        q_hi = (qh[:, :, qh_idx] >> (2 * ((i // 32) % 4))) & 0x3
         sc = scales[:, :, is_]
         out[:, :, i] = (d * sc.astype(np.float32) *
                         ((q_lo | (q_hi << 4)) - 32).astype(np.float32))
