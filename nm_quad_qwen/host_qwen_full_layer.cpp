@@ -372,6 +372,7 @@ upload(Wup.data(), Wup.size(), A_Wu);
     }
     PL_Word pw = (PL_Word)pos_int;
     PL_WriteMemBlock(acc, &pw, A_Pos, 1);
+    upload(Wv.data(), Wv.size(), A_Wv);  /* RE-UPLOAD Wv: prior uploads (Wup) overlap and zero Wv */
     upload_f(x.data(), K_DIM, A_X);
 
         auto t0 = std::chrono::steady_clock::now();
