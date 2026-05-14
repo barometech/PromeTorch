@@ -31,10 +31,10 @@
 
 #define K_DIM 2560
 #define HEAD_DIM 128
-#define N_HEADS_SUB 2
+#define N_HEADS_SUB 8
 #define ATTN_OUT_K (N_HEADS_SUB * HEAD_DIM)
 #define M_OUT 2560
-#define M_FFN 1024
+#define M_FFN 9728
 #define BLOCKS_PER_ROW (K_DIM / 256)             /* 10 */
 #define Q4K_ROW_WORDS (BLOCKS_PER_ROW * 144)
 #define Q6K_ROW_WORDS (BLOCKS_PER_ROW * 210)
@@ -53,6 +53,7 @@ float        ffn_norm_g[K_DIM];
 
 unsigned int W_q[N_HEADS_SUB * HEAD_DIM * Q4K_ROW_WORDS];
 unsigned int W_k[N_HEADS_SUB * HEAD_DIM * Q4K_ROW_WORDS];
+/* Large pad to keep W_v safe from neighbor upload overflow */
 unsigned int W_v[N_HEADS_SUB * HEAD_DIM * Q6K_ROW_WORDS];
 unsigned int W_attn_out[M_OUT * ATTN_OUT_ROW_WORDS];
 unsigned int W_gate[M_FFN * Q4K_ROW_WORDS];

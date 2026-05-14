@@ -14,10 +14,10 @@ static const char *NMC_PART  = "./nmc_part.abs";
 static const char *GGUF_PATH = "/home/<user>/gguf/qwen3-4b-q4km.gguf";
 #define K_DIM 2560
 #define HEAD_DIM 128
-#define N_HEADS_SUB 2
+#define N_HEADS_SUB 8
 #define ATTN_OUT_K (N_HEADS_SUB * HEAD_DIM)
 #define M_OUT 2560
-#define M_FFN 1024
+#define M_FFN 9728
 #define BLOCKS_PER_ROW (K_DIM / 256)
 #define Q4K_ROW_BYTES (BLOCKS_PER_ROW * 144)
 #define Q6K_ROW_BYTES (BLOCKS_PER_ROW * 210)
@@ -386,6 +386,10 @@ upload(Wup.data(), Wup.size(), A_Wu);
     }
     PL_Word pw = (PL_Word)pos_int;
     PL_WriteMemBlock(acc, &pw, A_Pos, 1);
+    upload(Wgate.data(), Wgate.size(), A_Wg);
+    upload(Wup.data(), Wup.size(), A_Wu);
+    upload(Wd.data(), Wd.size(), A_Wd);
+    upload(Wo.data(), Wo.size(), A_Wo);
     upload(Wv.data(), Wv.size(), A_Wv);  /* RE-UPLOAD Wv: prior uploads (Wup) overlap and zero Wv */
     upload_f(x.data(), K_DIM, A_X);
 
