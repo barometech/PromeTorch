@@ -1,0 +1,43 @@
+  x_final[2557..] = 0.603706 0.589327 -0.035238
+  x_final[2557..] = 0.859704 0.475274 -0.521660
+[perf] wall: 4407.2 ms
+[perf] wall: 4407.86 ms
+[perf] wall: 427.217 ms
+[perf] wall: 412.822 ms
+  x_final[2557..] = 1.009039 0.596594 0.069759
+[perf] wall: 411.74 ms
+[perf] wall: 413.111 ms
+[perf] wall: 4409.25 ms
+[perf] wall: 415.193 ms
+[perf] wall: 420.221 ms
+  x_final[2557..] = 0.568034 0.986560 -0.368558
+[perf] wall: 411.132 ms
+[perf] wall: 412.558 ms
+[perf] wall: 4396.12 ms
+[perf] wall: 421.128 ms
+[perf] wall: 412.021 ms
+[perf] wall: 4406.29 ms
+[perf] wall: 415.173 ms
+[perf] wall: 420.238 ms
+[perf] wall: 4401 ms
+[perf] wall: 413.487 ms
+[perf] wall: 411.259 ms
+  x_final[2557..] = 0.571197 0.263297 -1.138992
+[perf] wall: 425.882 ms
+[perf] wall: 404.939 ms
+  x_final[2557..] = 0.746646 -0.451990 -0.637637
+[perf] wall: 413.728 ms
+[perf] wall: 416.512 ms
+[perf] wall: 4405.69 ms
+[perf] wall: 4397.88 ms
+  x_final[2557..] = 5.179013 -2.108702 -0.896796
+[perf] wall: 4404.69 ms
+[perf] wall: 4406.3 ms
+[perf] wall: 4406.74 ms
+
+=== FAST E2E ===
+36 layers: 97.84 sec
+lm_head: 0.49 sec
+argmax: 0.17 sec
+TOTAL: 98.50 sec/token = 0.010 tok/s
+token=64837 BIT-EXACT

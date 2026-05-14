@@ -55,7 +55,7 @@ static float q6k_block_dot(const unsigned int *Wp, int byte_off, const float *xb
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
     ncl_icache_ena();
-    { volatile int w; for (w = 0; w < 50000000; ++w) ; }
+    { volatile int w; for (w = 0; w < 5000000  /* fast DMA settle */; ++w) ; }
 
     int r, blk;
     for (r = 0; r < M_OUT; ++r) {
