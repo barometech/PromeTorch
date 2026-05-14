@@ -197,16 +197,17 @@ int main(int argc, char *argv[]) {
     }
 
     int pos = rope_pos_v;
+    int half = HEAD_DIM / 2;
     for (h = 0; h < N_HEADS_SUB; ++h) {
         int base = h * HEAD_DIM;
-        for (i = 0; i < HEAD_DIM; i += 2) {
-            float theta = 1.0f / powf(ROPE_BASE, (float)i / (float)HEAD_DIM);
+        for (i = 0; i < half; ++i) {
+            float theta = 1.0f / powf(ROPE_BASE, 2.0f * (float)i / (float)HEAD_DIM);
             float angle = (float)pos * theta;
             float c = cosf(angle), s = sinf(angle);
-            float q0 = q[base + i], q1 = q[base + i + 1];
-            float k0 = k[base + i], k1 = k[base + i + 1];
-            q[base + i] = q0 * c - q1 * s; q[base + i + 1] = q0 * s + q1 * c;
-            k[base + i] = k0 * c - k1 * s; k[base + i + 1] = k0 * s + k1 * c;
+            float q0 = q[base + i], q1 = q[base + i + half];
+            float k0 = k[base + i], k1 = k[base + i + half];
+            q[base + i]        = q0 * c - q1 * s; q[base + i + half] = q0 * s + q1 * c;
+            k[base + i]        = k0 * c - k1 * s; k[base + i + half] = k0 * s + k1 * c;
         }
     }
 

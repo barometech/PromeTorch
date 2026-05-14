@@ -227,14 +227,15 @@ int main(int argc, char *argv[]) {
             q[h*HEAD_DIM+i] = q[h*HEAD_DIM+i] * qi * q_norm[i];
             k[h*HEAD_DIM+i] = k[h*HEAD_DIM+i] * ki * k_norm[i];
         }
-        for (int i = 0; i < HEAD_DIM; i += 2) {
-            float theta = 1.0f / std::pow(ROPE_BASE, (float)i / (float)HEAD_DIM);
+        int half = HEAD_DIM / 2;
+        for (int i = 0; i < half; ++i) {
+            float theta = 1.0f / std::pow(ROPE_BASE, 2.0f * (float)i / (float)HEAD_DIM);
             float angle = (float)pos_int * theta;
             float c = std::cos(angle), s = std::sin(angle);
-            float q0 = q[h*HEAD_DIM+i], q1 = q[h*HEAD_DIM+i+1];
-            float k0 = k[h*HEAD_DIM+i], k1 = k[h*HEAD_DIM+i+1];
-            q[h*HEAD_DIM+i] = q0*c - q1*s; q[h*HEAD_DIM+i+1] = q0*s + q1*c;
-            k[h*HEAD_DIM+i] = k0*c - k1*s; k[h*HEAD_DIM+i+1] = k0*s + k1*c;
+            float q0 = q[h*HEAD_DIM+i], q1 = q[h*HEAD_DIM+i+half];
+            float k0 = k[h*HEAD_DIM+i], k1 = k[h*HEAD_DIM+i+half];
+            q[h*HEAD_DIM+i]      = q0*c - q1*s; q[h*HEAD_DIM+i+half] = q0*s + q1*c;
+            k[h*HEAD_DIM+i]      = k0*c - k1*s; k[h*HEAD_DIM+i+half] = k0*s + k1*c;
         }
     }
     std::vector<float> attn_concat(M_HEADS);
