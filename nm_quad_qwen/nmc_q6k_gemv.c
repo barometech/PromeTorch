@@ -53,12 +53,12 @@ static float q6k_block_dot(int byte_off, const float *xb) {
     for (i = 0; i < 256; ++i) {
         int is = i / 16;
         int ql_idx = (i % 64) + 64 * (i / 128);
-        int ql_shift = 4 * ((i / 32) & 1);
+        int ql_shift = 4 * ((i / 64) & 1);  /* Q6_K shift fix: subblk pattern 0,0,1,1 */
         unsigned int ql_b = q6k_W[ql_base + ql_idx] & 0xff;
         int q_lo = (ql_b >> ql_shift) & 0xF;
 
         int qh_idx = (i % 32) + 32 * (i / 128);
-        int qh_shift = 2 * ((i / 16) & 3);
+        int qh_shift = 2 * ((i / 32) & 3);  /* Q6_K shift fix: subblk = (i//32) % 4 */
         unsigned int qh_b = q6k_W[qh_base + qh_idx] & 0xff;
         int q_hi = (qh_b >> qh_shift) & 0x3;
 
