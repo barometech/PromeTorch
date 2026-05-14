@@ -28,14 +28,15 @@ int main(int argc, char *argv[]) {
 
     /* Host reference */
     std::vector<float> y_ref(HEAD_DIM);
-    for (int i = 0; i < HEAD_DIM; i += 2) {
-        float ep = (float)i / (float)HEAD_DIM;
+    int half = HEAD_DIM / 2;
+    for (int i = 0; i < half; ++i) {
+        float ep = 2.0f * (float)i / (float)HEAD_DIM;
         float theta = 1.0f / std::pow(BASE, ep);
         float angle = (float)pos * theta;
         float c = std::cos(angle);
         float s = std::sin(angle);
-        y_ref[i]     = x[i] * c - x[i + 1] * s;
-        y_ref[i + 1] = x[i] * s + x[i + 1] * c;
+        y_ref[i]        = x[i] * c - x[i + half] * s;
+        y_ref[i + half] = x[i] * s + x[i + half] * c;
     }
     std::cerr << "[host] pos=" << pos << " y_ref[0..3]=" << y_ref[0] << " " << y_ref[1] << " "
               << y_ref[2] << " " << y_ref[3] << "\n";

@@ -39,17 +39,18 @@ int main(int argc, char *argv[]) {
         cluster, core, *raw_pos, raw_x[0], raw_x[1]);
 
     int pos = (int)rope_pos_f;
+    int half = HEAD_DIM / 2;
     int i;
-    for (i = 0; i < HEAD_DIM; i += 2) {
-        float exp_part = (float)i / (float)HEAD_DIM;
+    for (i = 0; i < half; ++i) {
+        float exp_part = 2.0f * (float)i / (float)HEAD_DIM;
         float theta = 1.0f / powf(BASE, exp_part);
         float angle = (float)pos * theta;
         float c = cosf(angle);
         float s = sinf(angle);
         float x0 = rope_x[i];
-        float x1 = rope_x[i + 1];
-        rope_y[i]     = x0 * c - x1 * s;
-        rope_y[i + 1] = x0 * s + x1 * c;
+        float x1 = rope_x[i + half];
+        rope_y[i]        = x0 * c - x1 * s;
+        rope_y[i + half] = x0 * s + x1 * c;
     }
 
     printf("NMC%d:%d RoPE: head_dim=%d pos=%d y[0..3]=%f %f %f %f\n",
