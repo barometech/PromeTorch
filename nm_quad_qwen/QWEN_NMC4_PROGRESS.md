@@ -3,9 +3,9 @@
 ## Цель
 Qwen3-4B inference на NMC4 ядрах NM Quad **без CPU compute** — token generation end-to-end на DSP.
 
-## Сегодня: 13 commits в port (4c21b6a → 658cc4b)
+## Сегодня: 21+ commits в port (4c21b6a → 090fd14)
 
-### ✅ Atomic ops bit-exact на real Qwen3-4B weights (9/12)
+### ✅ Atomic ops + composed chains BIT-EXACT (10/12)
 
 | # | Op | Detail | Commit |
 |---|----|--------|--------|
@@ -19,16 +19,21 @@ Qwen3-4B inference на NMC4 ядрах NM Quad **без CPU compute** — token
 | 8 | Step1 composed | RMSNorm + Q-proj together, max_diff 3e-8 | `aaaa51f` |
 | 8.5 | FFN substep | RMSNorm+Wgate+Wup+SiLU*u, max_diff 7e-8 | `749e806` |
 
-### ⚠ Composed chains: runs end-to-end но не bit-exact
+### ✅ Composed chains bit-exact (FIXED 2026-05-14 после fresh bisect)
 
 | Chain | Pipeline | Wall | max_diff | Commit |
 |-------|----------|------|----------|--------|
-| attn_full | RMSNorm+QKV+norm+RoPE+attn+Wo+residual | 182ms | 1.01 @ row 1536 | `5c15548` |
-| full_layer | attn + FFN | 1140ms | 1.04 @ row 1536 | `d4967f9` |
+| attn_full | RMSNorm+QKV+norm+RoPE+attn+Wo+residual | 182ms | **5.96e-08 BIT-EXACT** | `ee5cbc1` |
+| full_layer | attn + FFN (18 ops end-to-end) | 5.5s | **1.19e-07 BIT-EXACT** | `090fd14` |
 
-**Bug location:** worst row 1536 same в обоих → bug specifically в **Wo @ attn_concat block** или в residual `x + attn_out`. Все sub-ops bit-exact в isolation, но composition divergence.
+**Root causes найдены и зафиксированы:**
 
-Подозрение: `q4k_block_dot` в attn_full kernel использует single-accumulator order vs standalone Q4_K kernel который 8 parallel accumulators. Возможен float drift, но magnitude 1.0+ suggests systematic difference (не drift).
+1. Q4_K block_dot — 8-accumulator reduction tree вместо single-acc
+2. Q6_K block_dot — same 8-acc fix
+3. Host `q6k_dot_h` для Wd — multi-block (FFN_DOWN_BLOCKS) loop, не single-block
+4. Host `q4k_dot_h` / `q6k_dot_h` — переписаны на 8-acc reduction для bit-exact host vs NMC
+5. NMC Q4_K/Q6_K GEMV M>128 splits на M=128 chunks (Wo, Wgate, Wup, Wd, Wv)
+6. **PL_WriteMemBlock byte-address overlap**: Wup (1.47M PL_Words) overwrites Wv в EMI. Fix: re-upload Wv после всех других weights — последняя запись побеждает.
 
 ### ❌ Pending (Steps 10-12)
 
