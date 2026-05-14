@@ -10,7 +10,7 @@ int token_id;
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
     ncl_icache_ena();
-    { volatile int w; for (w = 0; w < 50000000; ++w) ; }
+    { volatile int w; for (w = 0; w < 5000000  /* fast DMA settle */; ++w) ; }
 
     float best_val = logits[0];
     int best_idx = 0;
