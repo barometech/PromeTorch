@@ -91,10 +91,17 @@ static float q6k_dot_h(const uint8_t *blk, const float *x) {
     return (a0+a1)+(a2+a3)+(a4+a5)+(a6+a7);
 }
 
+struct GGUFTensor {
+    std::string name;
+    uint32_t type;
+    uint64_t off;
+    std::vector<uint64_t> dims;
+};
+
 struct GGUFReader {
     std::ifstream f;
-    uint64_t off_an=0, off_qn=0, off_kn=0, off_q=0, off_k=0, off_v=0, off_o=0;
-    uint64_t off_fn=0, off_g=0, off_u=0, off_d=0;
+    std::vector<GGUFTensor> tt;
+    uint64_t base = 0;
     bool open_(const char *p) { f.open(p, std::ios::binary); return f.is_open(); }
     template<typename T> bool rd(T &v) { f.read((char*)&v, sizeof(T)); return f.good(); }
     bool rd_str(std::string &s) { uint64_t n; if (!rd(n)) return false; s.resize(n); f.read(s.data(), n); return f.good(); }
@@ -116,32 +123,27 @@ struct GGUFReader {
         uint32_t ver; rd(ver);
         uint64_t nt, nk; rd(nt); rd(nk);
         for (uint64_t i = 0; i < nk; ++i) { std::string k; rd_str(k); uint32_t t; rd(t); if (!skip_value(t)) return false; }
-        struct TI { std::string name; uint32_t nd; std::vector<uint64_t> dims; uint32_t type; uint64_t off; };
-        std::vector<TI> tt(nt);
+        tt.resize(nt);
         for (uint64_t i = 0; i < nt; ++i) {
-            rd_str(tt[i].name); rd(tt[i].nd);
-            tt[i].dims.resize(tt[i].nd);
-            for (uint32_t d = 0; d < tt[i].nd; ++d) rd(tt[i].dims[d]);
+            rd_str(tt[i].name); uint32_t nd; rd(nd);
+            tt[i].dims.resize(nd);
+            for (uint32_t d = 0; d < nd; ++d) rd(tt[i].dims[d]);
             rd(tt[i].type); rd(tt[i].off);
         }
         uint64_t pos = f.tellg();
         uint64_t aln = 32;
-        uint64_t base = (pos + aln - 1) & ~(aln - 1);
-        for (auto &t : tt) {
-            if (t.name == "blk.0.attn_norm.weight") off_an = base + t.off;
-            else if (t.name == "blk.0.attn_q_norm.weight") off_qn = base + t.off;
-            else if (t.name == "blk.0.attn_k_norm.weight") off_kn = base + t.off;
-            else if (t.name == "blk.0.attn_q.weight" && t.type == 12) off_q = base + t.off;
-            else if (t.name == "blk.0.attn_k.weight" && t.type == 12) off_k = base + t.off;
-            else if (t.name == "blk.0.attn_v.weight" && t.type == 14) off_v = base + t.off;
-            else if (t.name == "blk.0.attn_output.weight" && t.type == 12) off_o = base + t.off;
-            else if (t.name == "blk.0.ffn_norm.weight") off_fn = base + t.off;
-            else if (t.name == "blk.0.ffn_gate.weight" && t.type == 12) off_g = base + t.off;
-            else if (t.name == "blk.0.ffn_up.weight" && t.type == 12) off_u = base + t.off;
-            else if (t.name == "blk.0.ffn_down.weight" && t.type == 14) off_d = base + t.off;
-        }
-        return off_an && off_qn && off_kn && off_q && off_k && off_v && off_o
-            && off_fn && off_g && off_u && off_d;
+        base = (pos + aln - 1) & ~(aln - 1);
+        return true;
+    }
+    const GGUFTensor* find(const std::string &name) const {
+        for (auto &t : tt) if (t.name == name) return &t;
+        return nullptr;
+    }
+    uint64_t off_of(const std::string &name) const {
+        auto t = find(name); return t ? (base + t->off) : 0;
+    }
+    uint32_t type_of(const std::string &name) const {
+        auto t = find(name); return t ? t->type : 0;
     }
 };
 
@@ -163,7 +165,12 @@ int main(int argc, char *argv[]) {
     PL_Addr A_Pos  = std::strtoul(argv[ai++], nullptr, 16);
     PL_Addr A_Xf   = std::strtoul(argv[ai++], nullptr, 16);
     int pos_int    = std::atoi(argv[ai++]);
+    int start_layer = (argc > ai) ? std::atoi(argv[ai++]) : 0;
+    int n_layers    = (argc > ai) ? std::atoi(argv[ai++]) : 1;
+    const char *x_in_file  = std::getenv("PT_X_IN");
+    const char *x_out_file = std::getenv("PT_X_OUT");
 
+    int layer = start_layer;
     GGUFReader g;
     if (!g.open_(GGUF_PATH) || !g.parse()) { std::cerr << "gguf fail\n"; return 2; }
     std::ifstream raw(GGUF_PATH, std::ios::binary);
@@ -176,24 +183,24 @@ int main(int argc, char *argv[]) {
         raw.seekg(off);
         std::vector<uint8_t> b(n); raw.read((char*)b.data(), n); return b;
     };
-    std::vector<float> attn_norm = load_fp32(g.off_an, K_DIM);
-    std::vector<float> q_norm    = load_fp32(g.off_qn, HEAD_DIM);
-    std::vector<float> k_norm    = load_fp32(g.off_kn, HEAD_DIM);
-    std::vector<float> ffn_norm  = load_fp32(g.off_fn, K_DIM);
+    std::vector<float> attn_norm = load_fp32(g.off_of("blk." + std::to_string(layer) + ".attn_norm.weight"), K_DIM);
+    std::vector<float> q_norm    = load_fp32(g.off_of("blk." + std::to_string(layer) + ".attn_q_norm.weight"), HEAD_DIM);
+    std::vector<float> k_norm    = load_fp32(g.off_of("blk." + std::to_string(layer) + ".attn_k_norm.weight"), HEAD_DIM);
+    std::vector<float> ffn_norm  = load_fp32(g.off_of("blk." + std::to_string(layer) + ".ffn_norm.weight"), K_DIM);
 
     int M_HEADS = N_HEADS_SUB * HEAD_DIM;
-    std::vector<uint8_t> Wq = load_bytes(g.off_q, M_HEADS * Q4K_ROW_BYTES);
-    std::vector<uint8_t> Wk = load_bytes(g.off_k, M_HEADS * Q4K_ROW_BYTES);
-    std::vector<uint8_t> Wv = load_bytes(g.off_v, M_HEADS * Q6K_ROW_BYTES);
-    std::vector<uint8_t> Wgate = load_bytes(g.off_g, M_FFN * Q4K_ROW_BYTES);
-    std::vector<uint8_t> Wup   = load_bytes(g.off_u, M_FFN * Q4K_ROW_BYTES);
+    std::vector<uint8_t> Wq = load_bytes(g.off_of("blk." + std::to_string(layer) + ".attn_q.weight"), M_HEADS * Q4K_ROW_BYTES);
+    std::vector<uint8_t> Wk = load_bytes(g.off_of("blk." + std::to_string(layer) + ".attn_k.weight"), M_HEADS * Q4K_ROW_BYTES);
+    std::vector<uint8_t> Wv = load_bytes(g.off_of("blk." + std::to_string(layer) + ".attn_v.weight"), M_HEADS * Q6K_ROW_BYTES);
+    std::vector<uint8_t> Wgate = load_bytes(g.off_of("blk." + std::to_string(layer) + ".ffn_gate.weight"), M_FFN * Q4K_ROW_BYTES);
+    std::vector<uint8_t> Wup   = load_bytes(g.off_of("blk." + std::to_string(layer) + ".ffn_up.weight"), M_FFN * Q4K_ROW_BYTES);
 
     /* attn_output: real K=4096 (16 blocks). Subset takes 1 block per row. */
     int ao_real_row = (4096 / 256) * 144;
     std::vector<uint8_t> Wo(M_OUT * ATTN_OUT_ROW_BYTES);
     std::vector<uint8_t> tmp(ao_real_row);
     for (int r = 0; r < M_OUT; ++r) {
-        raw.seekg(g.off_o + (uint64_t)r * ao_real_row);
+        raw.seekg(g.off_of("blk." + std::to_string(layer) + ".attn_output.weight") + (uint64_t)r * ao_real_row);
         raw.read((char*)tmp.data(), ao_real_row);
         std::memcpy(Wo.data() + r * ATTN_OUT_ROW_BYTES, tmp.data(), ATTN_OUT_ROW_BYTES);
     }
@@ -202,7 +209,7 @@ int main(int argc, char *argv[]) {
     std::vector<uint8_t> Wd(M_OUT * FFN_DOWN_ROW_BYTES);
     std::vector<uint8_t> tmp2(fd_real_row);
     for (int r = 0; r < M_OUT; ++r) {
-        raw.seekg(g.off_d + (uint64_t)r * fd_real_row);
+        raw.seekg(g.off_of("blk." + std::to_string(layer) + ".ffn_down.weight") + (uint64_t)r * fd_real_row);
         raw.read((char*)tmp2.data(), fd_real_row);
         std::memcpy(Wd.data() + r * FFN_DOWN_ROW_BYTES, tmp2.data(), FFN_DOWN_ROW_BYTES);
     }
@@ -212,6 +219,13 @@ int main(int argc, char *argv[]) {
     for (int i = 0; i < K_DIM; ++i) {
         rng = rng * 1103515245u + 12345u;
         x[i] = ((float)((rng >> 8) & 0xFFFFFF) / (float)0x1000000) * 2.0f - 1.0f;
+    }
+    if (x_in_file) {
+        std::ifstream xf(x_in_file, std::ios::binary);
+        if (xf) {
+            xf.read((char*)x.data(), K_DIM * 4);
+            std::cerr << "[layer " << layer << "] loaded x from " << x_in_file << "\n";
+        }
     }
 
     /* HOST REFERENCE — full pipeline */
@@ -391,7 +405,7 @@ upload(Wup.data(), Wup.size(), A_Wu);
     {
         int nz_host = 0;
         for (size_t i = 0; i < 212 && i < Wv.size(); ++i) if (Wv[i]) nz_host++;
-        std::cout << "[Wv-host] size=" << Wv.size() << " nz_first212=" << nz_host << " off_v=" << g.off_v << std::endl;
+        std::cout << "[Wv-host] size=" << Wv.size() << " nz_first212=" << nz_host << " off_v=" << g.off_of("blk." + std::to_string(layer) + ".attn_v.weight") << std::endl;
         std::cout << "[Wv-host] first16:";
         for (int i = 0; i < 16 && i < (int)Wv.size(); ++i) std::cout << " " << (int)Wv[i];
         std::cout << std::endl;
