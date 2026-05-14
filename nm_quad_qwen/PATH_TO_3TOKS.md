@@ -70,5 +70,20 @@ Hypothetical max **~0.5 tok/s** с full software stack. До 3 tok/s нужны:
 2. Implement vfpu Q4_K block_dot (write asm or use intrinsics)
 3. Verify bit-exact, measure speedup
 4. Integrate в full_layer kernel
-5. Add 4-core cluster split
+5. Add 4-core cluster split с inter-op barriers
 6. Run E2E benchmark
+
+## Tried в session 2026-05-14 (cron-driven)
+
+- ✓ DMA delay 50M→5M cycles: 1.42× speedup E2E (139.5s → 98.5s/token)
+- ✓ __restrict__ + inline + -ffast-math + -funroll-all-loops: 1.016× marginal
+- ✗ printf removal: DCE killed compute (compiler eliminated unused results)
+- ✗ Streaming multi-layer kernel: build OK с stream_go/stream_done flags,
+  но host orchestration требует значительной переделки. Реверт.
+- ✗ 4-core cluster split: barrier infrastructure не достроен safely.
+
+## NMC4 Bandwidth Ceiling
+
+- EMI PCIe ~5 GB/s, Qwen3-4B Q4_K_M ~4 GB
+- Bandwidth-bound min time: 0.8 sec/token = **1.25 tok/s theoretical max**
+- 3 tok/s lossless **физически невозможно** на NM Quad без weight reduction
