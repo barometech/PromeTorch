@@ -24,6 +24,7 @@ float rms_y[K];     /* output */
 int main(int argc, char *argv[]) {
     (void)argc; (void)argv;
     ncl_icache_ena();
+    for (volatile int w = 0; w < 100000; ++w);  /* DMA race fix */
     int cluster = ncl_getClusterID();
     int core    = ncl_getCoreID();
 
