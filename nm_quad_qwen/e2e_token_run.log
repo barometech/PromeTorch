@@ -1,0 +1,51 @@
+  x_final[2557..] = 0.603706 0.589327 -0.035238
+[perf] wall: 5484.55 ms
+[perf] wall: 5485.18 ms
+[perf] wall: 5484.86 ms
+[perf] wall: 1506.73 ms
+[perf] wall: 1493.7 ms
+[perf] wall: 5485.52 ms
+[perf] wall: 1492.58 ms
+[perf] wall: 1486.33 ms
+[perf] wall: 5485.51 ms
+[perf] wall: 1489.77 ms
+[perf] wall: 1502.05 ms
+[perf] wall: 5474.58 ms
+[perf] wall: 1490.5 ms
+[perf] wall: 1498.77 ms
+  x_final[2557..] = 0.899489 0.619978 -0.029663
+[perf] wall: 1497.86 ms
+[perf] wall: 1485.57 ms
+[perf] wall: 5483.02 ms
+[perf] wall: 1489.15 ms
+[perf] wall: 1498.87 ms
+[perf] wall: 5485.68 ms
+[perf] wall: 1493.05 ms
+[perf] wall: 1489.63 ms
+[perf] wall: 5485.85 ms
+[perf] wall: 1508.71 ms
+[perf] wall: 1492.6 ms
+  x_final[2557..] = 0.746646 -0.451990 -0.637637
+[perf] wall: 1499.02 ms
+[perf] wall: 1500.08 ms
+[perf] wall: 5483.33 ms
+  x_final[2557..] = -1.097932 -3.396909 2.749819
+[perf] wall: 5485.76 ms
+[perf] wall: 5484.22 ms
+[perf] wall: 5485.93 ms
+[perf] wall: 5488.26 ms
+=== LM_HEAD ===
+[gguf] output.weight type=14 off=5967296
+[host] logits[0..3]: -1.26031 0.898613 -0.115735 -0.768823
+[verify] lm_head subset M=128 max_diff=0 (row -1)
+[nmc] logits[0..3]: -1.26031 0.898613 -0.115735 -0.768823
+[lm_head] logits[0..3]: -1.260306 0.898613 -0.115735 -0.768823
+=== ARGMAX ===
+[host] argmax token=64837 max_logit=9.99915
+[verify] NMC argmax token=64837 host=64837 match=1
+[argmax] token_id=64837 max_logit=9.999146
+=== TIMING ===
+36 layers: 136.68 sec
+lm_head subset: 1.58 sec
+argmax full: 1.25 sec
+TOTAL per token: 139.50 sec = 0.0072 tok/s
