@@ -111,13 +111,22 @@ static float q4k_block_dot(const unsigned int *Wp, int byte_off, const float *xb
                m  = (Wp[scales_off + is2 + 4] >> 4) | ((Wp[scales_off + is2    ] >> 6) << 4); }
         float d2 = d * (float)sc; float m2 = dmin * (float)m;
         int l;
-        for (l = 0; l < 32; ++l) {
-            unsigned int qb = Wp[qs_off + l] & 0xff;
-            float v_lo = d1 * (float)(qb & 0xF)      - m1;
-            float v_hi = d2 * (float)((qb >> 4) & 0xF) - m2;
-            acc += v_lo * xb[j + l +  0];
-            acc += v_hi * xb[j + l + 32];
+        float a0=0,a1=0,a2=0,a3=0,a4=0,a5=0,a6=0,a7=0;
+        for (l = 0; l < 32; l += 8) {
+            unsigned int qb0=Wp[qs_off+l+0]&0xff, qb1=Wp[qs_off+l+1]&0xff,
+                         qb2=Wp[qs_off+l+2]&0xff, qb3=Wp[qs_off+l+3]&0xff,
+                         qb4=Wp[qs_off+l+4]&0xff, qb5=Wp[qs_off+l+5]&0xff,
+                         qb6=Wp[qs_off+l+6]&0xff, qb7=Wp[qs_off+l+7]&0xff;
+            a0 += (d1*(float)(qb0&0xF)-m1)*xb[j+l+0]  + (d2*(float)(qb0>>4)-m2)*xb[j+l+32];
+            a1 += (d1*(float)(qb1&0xF)-m1)*xb[j+l+1]  + (d2*(float)(qb1>>4)-m2)*xb[j+l+33];
+            a2 += (d1*(float)(qb2&0xF)-m1)*xb[j+l+2]  + (d2*(float)(qb2>>4)-m2)*xb[j+l+34];
+            a3 += (d1*(float)(qb3&0xF)-m1)*xb[j+l+3]  + (d2*(float)(qb3>>4)-m2)*xb[j+l+35];
+            a4 += (d1*(float)(qb4&0xF)-m1)*xb[j+l+4]  + (d2*(float)(qb4>>4)-m2)*xb[j+l+36];
+            a5 += (d1*(float)(qb5&0xF)-m1)*xb[j+l+5]  + (d2*(float)(qb5>>4)-m2)*xb[j+l+37];
+            a6 += (d1*(float)(qb6&0xF)-m1)*xb[j+l+6]  + (d2*(float)(qb6>>4)-m2)*xb[j+l+38];
+            a7 += (d1*(float)(qb7&0xF)-m1)*xb[j+l+7]  + (d2*(float)(qb7>>4)-m2)*xb[j+l+39];
         }
+        acc += (a0+a1)+(a2+a3)+(a4+a5)+(a6+a7);
         qs_off += 32; is += 2;
     }
     return acc;
@@ -126,18 +135,24 @@ static float q6k_block_dot(const unsigned int *Wp, int byte_off, const float *xb
     unsigned int d_bits = (Wp[byte_off + 208] & 0xff) | ((Wp[byte_off + 209] & 0xff) << 8);
     float d = fp16_to_fp32(d_bits);
     int ql_base = byte_off, qh_base = byte_off + 128, sc_base = byte_off + 192;
-    float acc = 0.0f; int i;
-    for (i = 0; i < 256; ++i) {
-        int is = i / 16;
-        unsigned int ql_b = Wp[ql_base + (i % 64) + 64 * (i / 128)] & 0xff;
-        int q_lo = (ql_b >> (4 * ((i / 64) & 1))) & 0xF;
-        unsigned int qh_b = Wp[qh_base + (i % 32) + 32 * (i / 128)] & 0xff;
-        int q_hi = (qh_b >> (2 * ((i / 32) & 3))) & 0x3;
-        unsigned int sc_b = Wp[sc_base + is] & 0xff;
-        int sc = (sc_b & 0x80) ? (int)sc_b - 256 : (int)sc_b;
-        acc += d * (float)sc * (float)((q_lo | (q_hi << 4)) - 32) * xb[i];
+    float a0=0,a1=0,a2=0,a3=0,a4=0,a5=0,a6=0,a7=0; int i;
+    for (i = 0; i < 256; i += 8) {
+        int b;
+        for (b = 0; b < 8; ++b) {
+            int idx = i + b;
+            int is = idx / 16;
+            unsigned int ql_b = Wp[ql_base + (idx % 64) + 64 * (idx / 128)] & 0xff;
+            int q_lo = (ql_b >> (4 * ((idx / 64) & 1))) & 0xF;
+            unsigned int qh_b = Wp[qh_base + (idx % 32) + 32 * (idx / 128)] & 0xff;
+            int q_hi = (qh_b >> (2 * ((idx / 32) & 3))) & 0x3;
+            unsigned int sc_b = Wp[sc_base + is] & 0xff;
+            int sc = (sc_b & 0x80) ? (int)sc_b - 256 : (int)sc_b;
+            float v = d * (float)sc * (float)((q_lo | (q_hi << 4)) - 32) * xb[idx];
+            switch (b) { case 0:a0+=v;break; case 1:a1+=v;break; case 2:a2+=v;break; case 3:a3+=v;break;
+                         case 4:a4+=v;break; case 5:a5+=v;break; case 6:a6+=v;break; case 7:a7+=v;break; }
+        }
     }
-    return acc;
+    return (a0+a1)+(a2+a3)+(a4+a5)+(a6+a7);
 }
 
 static void gemv_q4k_gen(const unsigned int *Wp, int M, int row_words, int blocks, float *out, const float *xv) {
