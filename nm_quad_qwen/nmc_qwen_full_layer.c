@@ -77,7 +77,7 @@ float mul_v[M_FFN];
 float ffn_out_v[M_OUT];
 float x_final[M_OUT];
 
-static float fp16_to_fp32(unsigned int h) {
+static inline __attribute__((always_inline)) float fp16_to_fp32(unsigned int h) {
     unsigned int sign = (h & 0x8000) << 16;
     int exp = (h >> 10) & 0x1F;
     unsigned int mant = h & 0x3FF;
@@ -92,7 +92,7 @@ static float fp16_to_fp32(unsigned int h) {
     float f; memcpy(&f, &bits, 4); return f;
 }
 
-static float q4k_block_dot(const unsigned int *Wp, int byte_off, const float *xb) {
+static inline __attribute__((always_inline)) float q4k_block_dot(const unsigned int * __restrict__ Wp, int byte_off, const float * __restrict__ xb) {
     unsigned int d_bits    = (Wp[byte_off+0] & 0xff) | ((Wp[byte_off+1] & 0xff) << 8);
     unsigned int dmin_bits = (Wp[byte_off+2] & 0xff) | ((Wp[byte_off+3] & 0xff) << 8);
     float d    = fp16_to_fp32(d_bits);
@@ -132,7 +132,7 @@ static float q4k_block_dot(const unsigned int *Wp, int byte_off, const float *xb
     }
     return acc;
 }
-static float q6k_block_dot(const unsigned int *Wp, int byte_off, const float *xb) {
+static inline __attribute__((always_inline)) float q6k_block_dot(const unsigned int * __restrict__ Wp, int byte_off, const float * __restrict__ xb) {
     unsigned int d_bits = (Wp[byte_off + 208] & 0xff) | ((Wp[byte_off + 209] & 0xff) << 8);
     float d = fp16_to_fp32(d_bits);
     int ql_base = byte_off, qh_base = byte_off + 128, sc_base = byte_off + 192;
@@ -156,7 +156,7 @@ static float q6k_block_dot(const unsigned int *Wp, int byte_off, const float *xb
     return (a0+a1)+(a2+a3)+(a4+a5)+(a6+a7);
 }
 
-static void gemv_q4k_gen(const unsigned int *Wp, int M, int row_words, int blocks, float *out, const float *xv) {
+static void gemv_q4k_gen(const unsigned int * __restrict__ Wp, int M, int row_words, int blocks, float * __restrict__ out, const float * __restrict__ xv) {
     int r, blk;
     for (r = 0; r < M; ++r) {
         float a = 0.0f;
@@ -166,7 +166,7 @@ static void gemv_q4k_gen(const unsigned int *Wp, int M, int row_words, int block
         out[r] = a;
     }
 }
-static void gemv_q6k_gen(const unsigned int *Wp, int M, int row_words, int blocks, float *out, const float *xv) {
+static void gemv_q6k_gen(const unsigned int * __restrict__ Wp, int M, int row_words, int blocks, float * __restrict__ out, const float * __restrict__ xv) {
     int r, blk;
     for (r = 0; r < M; ++r) {
         float a = 0.0f;
