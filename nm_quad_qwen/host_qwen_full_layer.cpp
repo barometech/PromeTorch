@@ -71,8 +71,8 @@ static float q6k_dot_h(const uint8_t *blk, const float *x) {
     float acc = 0;
     for (int i = 0; i < 256; ++i) {
         int is = i / 16;
-        int q_lo = (ql[(i%64) + 64*(i/128)] >> (4*((i/32)&1))) & 0xF;
-        int q_hi = (qh[(i%32) + 32*(i/128)] >> (2*((i/16)&3))) & 0x3;
+        int q_lo = (ql[(i%64) + 64*(i/128)] >> (4*((i/64)&1))) & 0xF;
+        int q_hi = (qh[(i%32) + 32*(i/128)] >> (2*((i/32)&3))) & 0x3;
         acc += d * (float)sc[is] * (float)((q_lo | (q_hi << 4)) - 32) * x[i];
     }
     return acc;
