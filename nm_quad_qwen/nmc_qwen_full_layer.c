@@ -195,7 +195,17 @@ int main(int argc, char *argv[]) {
 
     gemv_q4k_gen(W_q, N_HEADS_SUB * HEAD_DIM, Q4K_ROW_WORDS, BLOCKS_PER_ROW, q, y);
     gemv_q4k_gen(W_k, N_HEADS_SUB * HEAD_DIM, Q4K_ROW_WORDS, BLOCKS_PER_ROW, k, y);
-    gemv_q6k_gen(W_v, N_HEADS_SUB * HEAD_DIM, Q6K_ROW_WORDS, BLOCKS_PER_ROW, v, y);
+    /* Split Q6_K GEMV: M=256 hangs NMC4 (likely i-cache eviction). Two M=128 calls. */
+    {
+        int M_TOTAL = N_HEADS_SUB * HEAD_DIM;
+        int M_CHUNK = 128;
+        int off = 0;
+        while (off < M_TOTAL) {
+            int mc = (M_TOTAL - off < M_CHUNK) ? (M_TOTAL - off) : M_CHUNK;
+            gemv_q6k_gen(W_v + off * Q6K_ROW_WORDS, mc, Q6K_ROW_WORDS, BLOCKS_PER_ROW, v + off, y);
+            off += mc;
+        }
+    }
 
     for (h = 0; h < N_HEADS_SUB; ++h) {
         float qs = 0.0f, ks = 0.0f;
@@ -238,7 +248,16 @@ int main(int argc, char *argv[]) {
         for (i = 0; i < HEAD_DIM; ++i) attn_concat[h * HEAD_DIM + i] = V_cache[h][0][i];
     }
 
-    gemv_q4k_gen(W_attn_out, M_OUT, ATTN_OUT_ROW_WORDS, ATTN_OUT_BLOCKS, attn_out_v, attn_concat);
+    {
+        int M_TOTAL = M_OUT;
+        int M_CHUNK = 128;
+        int off = 0;
+        while (off < M_TOTAL) {
+            int mc = (M_TOTAL - off < M_CHUNK) ? (M_TOTAL - off) : M_CHUNK;
+            gemv_q4k_gen(W_attn_out + off * ATTN_OUT_ROW_WORDS, mc, ATTN_OUT_ROW_WORDS, ATTN_OUT_BLOCKS, attn_out_v + off, attn_concat);
+            off += mc;
+        }
+    }
 
     for (i = 0; i < M_OUT; ++i) x_post[i] = x[i] + attn_out_v[i];
 
@@ -248,8 +267,26 @@ int main(int argc, char *argv[]) {
     float inv_rms2 = 1.0f / sqrtf(sum / (float)K_DIM + EPS);
     for (i = 0; i < K_DIM; ++i) y2[i] = x_post[i] * inv_rms2 * ffn_norm_g[i];
 
-    gemv_q4k_gen(W_gate, M_FFN, Q4K_ROW_WORDS, BLOCKS_PER_ROW, g_out, y2);
-    gemv_q4k_gen(W_up,   M_FFN, Q4K_ROW_WORDS, BLOCKS_PER_ROW, u_out, y2);
+    {
+        int M_TOTAL = M_FFN;
+        int M_CHUNK = 128;
+        int off = 0;
+        while (off < M_TOTAL) {
+            int mc = (M_TOTAL - off < M_CHUNK) ? (M_TOTAL - off) : M_CHUNK;
+            gemv_q4k_gen(W_gate + off * Q4K_ROW_WORDS, mc, Q4K_ROW_WORDS, BLOCKS_PER_ROW, g_out + off, y2);
+            off += mc;
+        }
+    }
+    {
+        int M_TOTAL = M_FFN;
+        int M_CHUNK = 128;
+        int off = 0;
+        while (off < M_TOTAL) {
+            int mc = (M_TOTAL - off < M_CHUNK) ? (M_TOTAL - off) : M_CHUNK;
+            gemv_q4k_gen(W_up + off * Q4K_ROW_WORDS, mc, Q4K_ROW_WORDS, BLOCKS_PER_ROW, u_out + off, y2);
+            off += mc;
+        }
+    }
 
     for (i = 0; i < M_FFN; ++i) {
         float gv = g_out[i];
@@ -257,10 +294,19 @@ int main(int argc, char *argv[]) {
         mul_v[i] = silu * u_out[i];
     }
 
-    gemv_q6k_gen(W_ffn_down, M_OUT, FFN_DOWN_ROW_WORDS, FFN_DOWN_BLOCKS, ffn_out_v, mul_v);
+    {
+        int M_TOTAL = M_OUT;
+        int M_CHUNK = 128;
+        int off = 0;
+        while (off < M_TOTAL) {
+            int mc = (M_TOTAL - off < M_CHUNK) ? (M_TOTAL - off) : M_CHUNK;
+            gemv_q6k_gen(W_ffn_down + off * FFN_DOWN_ROW_WORDS, mc, FFN_DOWN_ROW_WORDS, FFN_DOWN_BLOCKS, ffn_out_v + off, mul_v);
+            off += mc;
+        }
+    }
 
     for (i = 0; i < M_OUT; ++i) x_final[i] = x_post[i] + ffn_out_v[i];
-
+    
     printf("NMC%d:%d FULL LAYER: pos=%d\n", cluster, core, pos);
     printf("  x_final[0..3]   = %f %f %f %f\n", x_final[0], x_final[1], x_final[2], x_final[3]);
     printf("  x_final[2557..] = %f %f %f\n", x_final[2557], x_final[2558], x_final[2559]);

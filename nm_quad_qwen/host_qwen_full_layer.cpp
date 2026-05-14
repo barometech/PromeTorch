@@ -56,10 +56,18 @@ static float q4k_dot_h(const uint8_t *blk, const float *x) {
         uint8_t s, m;
         get_scale_min_k4(is, sc, &s, &m); float d1 = d * (float)s; float m1 = dmin * (float)m;
         get_scale_min_k4(is + 1, sc, &s, &m); float d2 = d * (float)s; float m2 = dmin * (float)m;
-        for (int l = 0; l < 32; ++l) {
-            acc += (d1 * (float)(qs[l] & 0xF) - m1) * x[j + l];
-            acc += (d2 * (float)(qs[l] >> 4) - m2) * x[j + l + 32];
+        float a0=0,a1=0,a2=0,a3=0,a4=0,a5=0,a6=0,a7=0;
+        for (int l = 0; l < 32; l += 8) {
+            a0 += (d1*(float)(qs[l+0]&0xF)-m1)*x[j+l+0] + (d2*(float)(qs[l+0]>>4)-m2)*x[j+l+0+32];
+            a1 += (d1*(float)(qs[l+1]&0xF)-m1)*x[j+l+1] + (d2*(float)(qs[l+1]>>4)-m2)*x[j+l+1+32];
+            a2 += (d1*(float)(qs[l+2]&0xF)-m1)*x[j+l+2] + (d2*(float)(qs[l+2]>>4)-m2)*x[j+l+2+32];
+            a3 += (d1*(float)(qs[l+3]&0xF)-m1)*x[j+l+3] + (d2*(float)(qs[l+3]>>4)-m2)*x[j+l+3+32];
+            a4 += (d1*(float)(qs[l+4]&0xF)-m1)*x[j+l+4] + (d2*(float)(qs[l+4]>>4)-m2)*x[j+l+4+32];
+            a5 += (d1*(float)(qs[l+5]&0xF)-m1)*x[j+l+5] + (d2*(float)(qs[l+5]>>4)-m2)*x[j+l+5+32];
+            a6 += (d1*(float)(qs[l+6]&0xF)-m1)*x[j+l+6] + (d2*(float)(qs[l+6]>>4)-m2)*x[j+l+6+32];
+            a7 += (d1*(float)(qs[l+7]&0xF)-m1)*x[j+l+7] + (d2*(float)(qs[l+7]>>4)-m2)*x[j+l+7+32];
         }
+        acc += (a0+a1)+(a2+a3)+(a4+a5)+(a6+a7);
         qs += 32; is += 2;
     }
     return acc;
@@ -68,14 +76,19 @@ static float q6k_dot_h(const uint8_t *blk, const float *x) {
     const uint8_t *ql = blk; const uint8_t *qh = blk + 128;
     const int8_t *sc = (const int8_t*)(blk + 192);
     uint16_t db; std::memcpy(&db, blk + 208, 2); float d = fp16_to_fp32(db);
-    float acc = 0;
-    for (int i = 0; i < 256; ++i) {
-        int is = i / 16;
-        int q_lo = (ql[(i%64) + 64*(i/128)] >> (4*((i/64)&1))) & 0xF;
-        int q_hi = (qh[(i%32) + 32*(i/128)] >> (2*((i/32)&3))) & 0x3;
-        acc += d * (float)sc[is] * (float)((q_lo | (q_hi << 4)) - 32) * x[i];
+    float a0=0,a1=0,a2=0,a3=0,a4=0,a5=0,a6=0,a7=0;
+    for (int i = 0; i < 256; i += 8) {
+        for (int b = 0; b < 8; ++b) {
+            int idx = i + b;
+            int is = idx / 16;
+            int q_lo = (ql[(idx%64) + 64*(idx/128)] >> (4*((idx/64)&1))) & 0xF;
+            int q_hi = (qh[(idx%32) + 32*(idx/128)] >> (2*((idx/32)&3))) & 0x3;
+            float v = d * (float)sc[is] * (float)((q_lo | (q_hi << 4)) - 32) * x[idx];
+            switch (b) { case 0:a0+=v;break; case 1:a1+=v;break; case 2:a2+=v;break; case 3:a3+=v;break;
+                         case 4:a4+=v;break; case 5:a5+=v;break; case 6:a6+=v;break; case 7:a7+=v;break; }
+        }
     }
-    return acc;
+    return (a0+a1)+(a2+a3)+(a4+a5)+(a6+a7);
 }
 
 struct GGUFReader {
@@ -265,8 +278,12 @@ int main(int argc, char *argv[]) {
         mul[r] = silu * au;
     }
     std::vector<float> ffn_out(M_OUT), x_final_ref(M_OUT);
-    for (int r = 0; r < M_OUT; ++r)
-        ffn_out[r] = q6k_dot_h(Wd.data() + r * FFN_DOWN_ROW_BYTES, mul.data());
+    for (int r = 0; r < M_OUT; ++r) {
+        float a = 0;
+        for (int b = 0; b < FFN_DOWN_BLOCKS; ++b)
+            a += q6k_dot_h(Wd.data() + r * FFN_DOWN_ROW_BYTES + b * 210, mul.data() + b * 256);
+        ffn_out[r] = a;
+    }
     for (int i = 0; i < M_OUT; ++i) x_final_ref[i] = x_post[i] + ffn_out[i];
 
     std::cerr << "[host] x_final[0..3]=" << x_final_ref[0] << " " << x_final_ref[1] << " "
@@ -290,24 +307,74 @@ int main(int argc, char *argv[]) {
     upload(Wq.data(), Wq.size(), A_Wq);
     upload(Wk.data(), Wk.size(), A_Wk);
     upload(Wv.data(), Wv.size(), A_Wv);
+    {
+        std::vector<PL_Word> tw(16);
+        PL_ReadMemBlock(acc, tw.data(), A_Wv, 16);
+        std::cout << "[POST-Wv-upload] @A_Wv first16:";
+        for (int i = 0; i < 16; ++i) std::cout << " " << (tw[i] & 0xff);
+        std::cout << std::endl;
+    }
+
     upload(Wo.data(), Wo.size(), A_Wo);
+    {
+        std::vector<PL_Word> tw(8);
+        PL_ReadMemBlock(acc, tw.data(), A_Wv, 8);
+        std::cout << "[after-Wo] Wv:" << (tw[0]&0xff) << "," << (tw[1]&0xff) << "," << (tw[2]&0xff) << "," << (tw[3]&0xff) << std::endl;
+    }
     upload(Wgate.data(), Wgate.size(), A_Wg);
-    upload(Wup.data(), Wup.size(), A_Wu);
+    {
+        std::vector<PL_Word> tw(8);
+        PL_ReadMemBlock(acc, tw.data(), A_Wv, 8);
+        std::cout << "[after-Wgate] Wv:" << (tw[0]&0xff) << "," << (tw[1]&0xff) << "," << (tw[2]&0xff) << "," << (tw[3]&0xff) << std::endl;
+    }
+        std::cout << "[sizes] Wq=" << Wq.size() << " Wk=" << Wk.size() << " Wv=" << Wv.size() << " Wo=" << Wo.size() << " Wgate=" << Wgate.size() << " Wup=" << Wup.size() << " Wd=" << Wd.size() << std::endl;
+    std::cout << "[ranges] A_Wu=" << std::hex << A_Wu << " end=" << (A_Wu + Wup.size()) << " A_Wv=" << A_Wv << " A_Wv_end=" << (A_Wv + Wv.size()) << std::dec << std::endl;
+upload(Wup.data(), Wup.size(), A_Wu);
+    {
+        std::vector<PL_Word> tw(8);
+        PL_ReadMemBlock(acc, tw.data(), A_Wv, 8);
+        std::cout << "[after-Wup] Wv:" << (tw[0]&0xff) << "," << (tw[1]&0xff) << "," << (tw[2]&0xff) << "," << (tw[3]&0xff) << std::endl;
+    }
     upload(Wd.data(), Wd.size(), A_Wd);
+    {
+        std::vector<PL_Word> tw(8);
+        PL_ReadMemBlock(acc, tw.data(), A_Wv, 8);
+        std::cout << "[after-Wd] Wv:" << (tw[0]&0xff) << "," << (tw[1]&0xff) << "," << (tw[2]&0xff) << "," << (tw[3]&0xff) << std::endl;
+    }
     auto upload_f = [&](const float *buf, int n, PL_Addr addr){
         std::vector<PL_Word> w(n);
         for (int i = 0; i < n; ++i) std::memcpy(&w[i], &buf[i], 4);
         PL_WriteMemBlock(acc, w.data(), addr, n);
     };
     upload_f(attn_norm.data(), K_DIM,    A_Gan);
+    {
+        std::vector<PL_Word> tw(8);
+        PL_ReadMemBlock(acc, tw.data(), A_Wv, 8);
+        std::cout << "[after-Gan] Wv:" << (tw[0]&0xff) << "," << (tw[1]&0xff) << "," << (tw[2]&0xff) << "," << (tw[3]&0xff) << std::endl;
+    }
     upload_f(q_norm.data(),    HEAD_DIM, A_Gqn);
+    {
+        std::vector<PL_Word> tw(8);
+        PL_ReadMemBlock(acc, tw.data(), A_Wv, 8);
+        std::cout << "[after-Gqn] Wv:" << (tw[0]&0xff) << "," << (tw[1]&0xff) << "," << (tw[2]&0xff) << "," << (tw[3]&0xff) << std::endl;
+    }
     upload_f(k_norm.data(),    HEAD_DIM, A_Gkn);
+    {
+        std::vector<PL_Word> tw(8);
+        PL_ReadMemBlock(acc, tw.data(), A_Wv, 8);
+        std::cout << "[after-Gkn] Wv:" << (tw[0]&0xff) << "," << (tw[1]&0xff) << "," << (tw[2]&0xff) << "," << (tw[3]&0xff) << std::endl;
+    }
     upload_f(ffn_norm.data(),  K_DIM,    A_Gfn);
+    {
+        std::vector<PL_Word> tw(8);
+        PL_ReadMemBlock(acc, tw.data(), A_Wv, 8);
+        std::cout << "[after-Gfn] Wv:" << (tw[0]&0xff) << "," << (tw[1]&0xff) << "," << (tw[2]&0xff) << "," << (tw[3]&0xff) << std::endl;
+    }
     PL_Word pw = (PL_Word)pos_int;
     PL_WriteMemBlock(acc, &pw, A_Pos, 1);
     upload_f(x.data(), K_DIM, A_X);
 
-    auto t0 = std::chrono::steady_clock::now();
+        auto t0 = std::chrono::steady_clock::now();
     IO_Service *svc = IO_ServiceStart(NMC_PART, acc, nullptr, nullptr, nullptr);
     PL_Word st = 0;
     while (1) { if (PL_GetStatus(acc, &st) != PL_OK) break; if (st == PROGRAM_PROGRESS) continue; break; }
@@ -318,6 +385,65 @@ int main(int argc, char *argv[]) {
     PL_ReadMemBlock(acc, ow.data(), A_Xf, M_OUT);
     std::vector<float> xf_n(M_OUT);
     for (int i = 0; i < M_OUT; ++i) std::memcpy(&xf_n[i], &ow[i], 4);
+
+    /* Wv host check */
+    {
+        int nz_host = 0;
+        for (size_t i = 0; i < 212 && i < Wv.size(); ++i) if (Wv[i]) nz_host++;
+        std::cout << "[Wv-host] size=" << Wv.size() << " nz_first212=" << nz_host << " off_v=" << g.off_v << std::endl;
+        std::cout << "[Wv-host] first16:";
+        for (int i = 0; i < 16 && i < (int)Wv.size(); ++i) std::cout << " " << (int)Wv[i];
+        std::cout << std::endl;
+    }
+    /* Wv EMI verify */
+    {
+        std::vector<PL_Word> tw(212);
+        PL_ReadMemBlock(acc, tw.data(), A_Wv, 212);
+        std::cout << "[Wv-bytes]";
+        for (int i = 0; i < 16; ++i) std::cout << " " << i << ":" << (tw[i] & 0xff);
+        std::cout << " ..208:" << (tw[208] & 0xff) << " 209:" << (tw[209] & 0xff);
+        std::cout << std::endl;
+        int nz = 0;
+        for (int i = 0; i < 212; ++i) if ((tw[i] & 0xff) != 0) nz++;
+        std::cout << "[Wv-bytes] nz=" << nz << "/212" << std::endl;
+    }
+    /* DIAGNOSTIC: per-stage compare */
+    auto cmp = [&](const std::vector<float>& host_v, PL_Addr addr, int N, const char *label) {
+        std::vector<PL_Word> tw(N);
+        PL_ReadMemBlock(acc, tw.data(), addr, N);
+        float md = 0; int worst = -1;
+        for (int i = 0; i < N; ++i) {
+            float v; std::memcpy(&v, &tw[i], 4);
+            float d = std::fabs(v - host_v[i]);
+            if (d > md) { md = d; worst = i; }
+        }
+        std::cout << "[diag] " << label << " max_diff=" << md << " (row " << worst << ")\n";
+
+    };
+    cmp(y,           0x020b5d30, K_DIM,    "y (attn_rmsnorm)");
+        cmp(v,           0x025f0730, M_HEADS,    "v (Q6_K Wv@y)");
+    {
+        std::vector<PL_Word> tw(M_HEADS);
+        PL_ReadMemBlock(acc, tw.data(), 0x0205b330, M_HEADS);
+        std::cout << "[v_real]";
+        for (int i = 0; i < 256; i += 16) {
+            float vn; std::memcpy(&vn, &tw[i], 4);
+            std::cout << " " << i << ":nmc=" << vn << ":host=" << v[i] << ":d=" << (vn-v[i]);
+        }
+        std::cout << std::endl;
+    }
+
+    cmp(q,           0x023e2830, M_HEADS,    "q (post qnorm+rope)");
+    cmp(k,           0x02111b30, M_HEADS,    "k (post knorm+rope)");
+    cmp(attn_concat, 0x0200122e, ATTN_OUT_K, "attn_concat");
+    cmp(attn_out,    0x02674730, M_OUT,    "attn_out_v (Wo@concat)");
+    cmp(x_post,      0x02111130, M_OUT,    "x_post (x+attn_out)");
+    cmp(y2,          0x02279c30, K_DIM,    "y2 (ffn_rmsnorm)");
+    cmp(g_,          0x023e2930, M_FFN,    "g_out (Wgate@y2)");
+    cmp(u_,          0x02675130, M_FFN,    "u_out (Wup@y2)");
+    cmp(mul,         0x02000e2e, M_FFN,    "mul_v (silu*u)");
+    cmp(ffn_out,     0x0205b330, M_OUT,    "ffn_out_v (Wd@mul)");
+
 
     float maxd = 0; int worst = -1;
     for (int i = 0; i < M_OUT; ++i) {
