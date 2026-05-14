@@ -31,10 +31,10 @@
 
 #define K_DIM 2560
 #define HEAD_DIM 128
-#define N_HEADS_SUB 8
+#define N_HEADS_SUB 2
 #define ATTN_OUT_K (N_HEADS_SUB * HEAD_DIM)
 #define M_OUT 2560
-#define M_FFN 9728
+#define M_FFN 1024
 #define BLOCKS_PER_ROW (K_DIM / 256)             /* 10 */
 #define Q4K_ROW_WORDS (BLOCKS_PER_ROW * 144)
 #define Q6K_ROW_WORDS (BLOCKS_PER_ROW * 210)
@@ -184,7 +184,7 @@ int main(int argc, char *argv[]) {
     int core    = ncl_getCoreID();
 
     /* DMA settle — bigger for 18MB total uploads */
-    { volatile int w; for (w = 0; w < 50000000; ++w) ; }
+    { volatile int w; for (w = 0; w < 5000000; ++w)  /* reduced from 50M for speed */ ; }
 
     int i, h;
 
