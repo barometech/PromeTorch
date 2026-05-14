@@ -30,6 +30,28 @@ Qwen3-4B inference на NMC4 ядрах NM Quad **без CPU compute** — token
 
 Гипотетический peak с full optimization: **~5-10 tok/s** (memory-bandwidth bound).
 
+## 4-core SHARED EMI measured (commit `6e0bec2`)
+
+Один nmc_part.abs для всех 4 cores. Rank via `ncl_getCoreID()` runtime.
+Linker placement globals на same addresses → host PL_WriteMemBlock пишет
+один раз, все cores читают same data.
+
+| Config | Wall | Speedup |
+|--------|------|---------|
+| 1 core M=32 (50M cycle delay) | 1264ms | 1× |
+| 4 cores M=8 each (100K delay) | 20ms | 63× total (race-prone) |
+| 4 cores M=8 each (10M delay) | 257ms | 4.9× |
+| Real work только (no delay): | ~18ms | **14.7× vs 1-core baseline** |
+
+⚠ Race conditions: 50-80% runs cores не computе (kernel exits до доставки
+DMA write). Workaround: retry-loop. Долгосрочно — PL_Sync barrier между
+host upload и IO_ServiceStart.
+
+**Speed Qwen3-4B на 16 cores (4 chips × 4) projection:**
+- Per layer ~20s → 36 layers = 12 min per forward
+- + lm_head + argmax ≈ 13-15 min per token
+- **~0.0014 tok/s** (3× выше 1-core estimate)
+
 ### ✅ Atomic ops + composed chains BIT-EXACT (10/12)
 
 | # | Op | Detail | Commit |
