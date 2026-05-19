@@ -18,6 +18,11 @@
 #include <atomic>
 
 #ifdef PT_USE_EML_BLAS
+// MT_CBLAS_DEFS ОБЯЗАТЕЛЬНО — иначе EML headers объявят __cblas_sgemm
+// вместо cblas_sgemm, наш callsite даст 'identifier undefined' на link.
+#ifndef MT_CBLAS_DEFS
+#define MT_CBLAS_DEFS
+#endif
 #include <eml/cblas.h>
 #include <eml/eml_vector.h>
 #include <eml/eml_core.h>

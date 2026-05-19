@@ -34,6 +34,15 @@ static inline bool eml_disabled() {
     }
     return cached == 1;
 }
+// MT_CBLAS_DEFS ОБЯЗАТЕЛЬНО ПЕРЕД include <eml/cblas.h>.
+// Без него EML headers объявляют функции как __cblas_sgemm (internal name),
+// а cblas_sgemm остаётся undefined. Симптом на E2S/4C lcc 1.26:
+//   error #20: identifier "cblas_sgemm" is undefined
+// На 8C2 lcc 1.29 раньше работало случайно — там видимо define подтягивается
+// через другой header.
+#ifndef MT_CBLAS_DEFS
+#define MT_CBLAS_DEFS
+#endif
 #include <eml/cblas.h>
 #include <omp.h>
 #endif
