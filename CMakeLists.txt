@@ -247,6 +247,14 @@ if(PT_USE_OPENMP)
     find_package(OpenMP)
     if(OpenMP_CXX_FOUND)
         message(STATUS "OpenMP found: ${OpenMP_CXX_VERSION}")
+        # На E2K ВСЁ РАВНО добавляем -fopenmp к global link flags:
+        # find_package иногда находит OpenMP но возвращает пустой imported
+        # target (LCC 1.26 на 4C/E2S), и тогда executables линкуются без
+        # -fopenmp → undefined `__omp_library_init` etc.
+        if(CMAKE_SYSTEM_PROCESSOR MATCHES "e2k|elbrus")
+            set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fopenmp")
+            set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fopenmp")
+        endif()
     else()
         # On Elbrus/LCC, OpenMP may not be detected by find_package but -fopenmp works
         if(CMAKE_SYSTEM_PROCESSOR MATCHES "e2k|elbrus")
@@ -254,6 +262,7 @@ if(PT_USE_OPENMP)
             set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fopenmp")
             set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fopenmp")
             set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fopenmp")
+            set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -fopenmp")
         else()
             message(WARNING "OpenMP not found, disabling")
             set(PT_USE_OPENMP OFF)
