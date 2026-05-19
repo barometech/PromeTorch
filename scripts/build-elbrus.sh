@@ -340,22 +340,28 @@ if [ "$NEED_RECONFIGURE" = "1" ]; then
 fi
 
 # ============================================================================
-# 3. Сборка только нужных targets (поштучно — чтобы видеть на каком упало)
+# 3. Сборка ВСЕХ нужных targets ОДНИМ cmake --build вызовом.
 # ============================================================================
+# Раньше было `for tgt in $TARGETS; do cmake --build . --target $tgt -j $JOBS`,
+# что собирало targets последовательно. Между target'ами параллелизм терялся.
+# gguf_model.h (6000 строк) компилировался в 1 thread, остальные ядра пустовали.
+# Сейчас передаём все targets одним вызовом — cmake/gmake запускает -j $JOBS
+# по ВСЕМ .cpp одновременно, в т.ч. между разными target'ами.
 JOBS="${PT_JOBS:-$(nproc)}"
 echo "[build] Targets: $TARGETS · jobs=$JOBS"
 
+# Собираем массив `--target X --target Y ...` для одного cmake call.
+TARGET_ARGS=()
 for tgt in $TARGETS; do
-    echo
-    echo "  → $tgt"
-    if ! cmake --build . --target "$tgt" -j "$JOBS"; then
-        echo
-        echo "ERROR: target '$tgt' не собрался."
-        echo "       Логи: $BUILD_DIR/CMakeFiles/${tgt}.dir/"
-        echo "       Полный вывод CMake: $BUILD_DIR/pt_cmake.log"
-        exit 1
-    fi
+    TARGET_ARGS+=(--target "$tgt")
 done
+
+if ! cmake --build . "${TARGET_ARGS[@]}" --parallel "$JOBS"; then
+    echo
+    echo "ERROR: сборка упала. Проверь логи в $BUILD_DIR/CMakeFiles/*.dir/"
+    echo "       Полный вывод CMake configure: $BUILD_DIR/pt_cmake.log"
+    exit 1
+fi
 
 # ============================================================================
 # 4. Quick sanity test (без падения скрипта)
