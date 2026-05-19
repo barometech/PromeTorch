@@ -88,30 +88,33 @@ check_bin() {
 #   - gcc-elbrus / g++-elbrus
 #   - system gcc / g++ если поддерживает -march=elbrus-v4
 detect_compiler() {
+    # CMake требует FULL PATH в -DCMAKE_CXX_COMPILER, иначе ругается
+    # "lcc++ is not a full path and was not found in the PATH" при первом
+    # configure. Поэтому возвращаем абсолютные пути через command -v.
     local cc="" cxx=""
     if command -v lcc >/dev/null 2>&1; then
-        cc="lcc"
+        cc="$(command -v lcc)"
         if command -v lcc++ >/dev/null 2>&1; then
-            cxx="lcc++"
+            cxx="$(command -v lcc++)"
         elif command -v l++ >/dev/null 2>&1; then
-            cxx="l++"
+            cxx="$(command -v l++)"
         fi
     fi
     if [ -z "$cxx" ] && command -v gcc-elbrus >/dev/null 2>&1; then
-        cc="gcc-elbrus"
-        cxx="g++-elbrus"
+        cc="$(command -v gcc-elbrus)"
+        cxx="$(command -v g++-elbrus)"
     fi
     if [ -z "$cxx" ] && command -v gcc >/dev/null 2>&1 && \
          echo "int main(){return 0;}" | gcc -march=elbrus-v4 -x c - -o /dev/null 2>/dev/null; then
-        cc="gcc"
-        cxx="g++"
+        cc="$(command -v gcc)"
+        cxx="$(command -v g++)"
     fi
     if [ -z "$cxx" ]; then
         return 1
     fi
     export CC="$cc"
     export CXX="$cxx"
-    echo "[deps] Компилятор: $cc / $cxx ($($cc --version 2>&1 | head -1))"
+    echo "[deps] Компилятор: $cc / $cxx ($("$cc" --version 2>&1 | head -1))"
 }
 
 echo "[deps] Проверка зависимостей..."
