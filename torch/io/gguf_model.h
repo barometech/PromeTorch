@@ -4176,23 +4176,43 @@ public:
     // ========================================================================
 
     std::string apply_chat_template(const std::string& prompt) const {
+        // Default system prompt — нейтральная инструкция чтобы модель не
+        // уходила в галлюцинации (без system Qwen3 на "how are you" мог
+        // отвечать "I'm glad to hear you're interested in learning about
+        // the history of the United States" и т.п. рандом).
+        //
+        // Override через env PT_SYSTEM_PROMPT="..."; PT_SYSTEM_PROMPT=""
+        // (пустая) выключает system prompt полностью.
+        const char* sys_env = std::getenv("PT_SYSTEM_PROMPT");
+        std::string sys = (sys_env != nullptr)
+            ? std::string(sys_env)
+            : std::string("You are a helpful assistant.");
+
         // BUG-12 part: qwen2 / qwen2.5 используют ChatML (тот же что qwen3).
         // Раньше qwen2 fallthrough на raw prompt → модель срывалась после
         // первого предложения.
         if (config.architecture == "qwen3" || config.architecture == "qwen2") {
             const char* no_think_env = std::getenv("PT_NO_THINK");
             bool no_think = no_think_env && no_think_env[0] == '1';
+            std::string sys_block;
             if (no_think && config.architecture == "qwen3") {
-                return "<|im_start|>system\n/no_think<|im_end|>\n<|im_start|>user\n"
-                       + prompt + "<|im_end|>\n<|im_start|>assistant\n";
+                std::string sys_text = sys.empty() ? "/no_think" : (sys + "\n/no_think");
+                sys_block = "<|im_start|>system\n" + sys_text + "<|im_end|>\n";
+            } else if (!sys.empty()) {
+                sys_block = "<|im_start|>system\n" + sys + "<|im_end|>\n";
             }
-            return "<|im_start|>user\n" + prompt
+            return sys_block + "<|im_start|>user\n" + prompt
                    + "<|im_end|>\n<|im_start|>assistant\n";
         } else if (config.architecture == "phi3" || config.architecture == "phi2") {
-            // Phi-3 / Phi-3.5 instruct format
-            return "<|user|>\n" + prompt + "<|end|>\n<|assistant|>\n";
+            // Phi-3 / Phi-3.5 instruct format (поддерживает <|system|>)
+            std::string sys_block = sys.empty()
+                ? std::string()
+                : ("<|system|>\n" + sys + "<|end|>\n");
+            return sys_block + "<|user|>\n" + prompt + "<|end|>\n<|assistant|>\n";
         } else if (config.architecture == "gemma3" || config.architecture == "gemma2") {
-            return "<start_of_turn>user\n" + prompt + "<end_of_turn>\n<start_of_turn>model\n";
+            // Gemma не поддерживает отдельный system turn — встраиваем в user.
+            std::string user_msg = sys.empty() ? prompt : (sys + "\n\n" + prompt);
+            return "<start_of_turn>user\n" + user_msg + "<end_of_turn>\n<start_of_turn>model\n";
         } else if (config.architecture == "llama") {
             // Llama-3 chat format (использует Mistral-7B-Instruct тоже принимает,
             // но честнее — отдельная ветка для mistral по name).
@@ -4201,13 +4221,20 @@ public:
                 if (c >= 'A' && c <= 'Z') c = (char)(c + 32);
             }
             if (lname.find("mistral") != std::string::npos) {
-                // Mistral [INST]...[/INST] format
-                return "<s>[INST] " + prompt + " [/INST]";
+                // Mistral [INST]<<SYS>>...<</SYS>>...[/INST] для system.
+                if (sys.empty()) {
+                    return "<s>[INST] " + prompt + " [/INST]";
+                }
+                return "<s>[INST] <<SYS>>\n" + sys + "\n<</SYS>>\n\n" + prompt + " [/INST]";
             }
-            return "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n"
+            std::string sys_block = sys.empty()
+                ? std::string()
+                : ("<|start_header_id|>system<|end_header_id|>\n\n" + sys + "<|eot_id|>");
+            return "<|begin_of_text|>" + sys_block
+                   + "<|start_header_id|>user<|end_header_id|>\n\n"
                    + prompt + "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n";
         }
-        // Default: raw prompt
+        // Default: raw prompt (архитектуры без chat template)
         return prompt;
     }
 
