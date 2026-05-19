@@ -38,19 +38,15 @@ enum class Arch {
 // Compile-time architecture selection
 // ============================================================================
 
-#if defined(__AVX2__) && defined(__FMA__)
-    constexpr Arch kArch = Arch::AVX2;
-    #define TUDA_AVX2 1
-#elif defined(__aarch64__) || defined(_M_ARM64)
-    #if defined(__ARM_FEATURE_DOTPROD)
-        constexpr Arch kArch = Arch::NEON_A75;
-        #define TUDA_NEON_A75 1
-    #else
-        constexpr Arch kArch = Arch::NEON_A57;
-        #define TUDA_NEON_A57 1
-    #endif
-    #define TUDA_NEON 1
-#elif defined(__e2k__) || defined(__elbrus__)
+// ВАЖНО: проверяем __e2k__ ПЕРЕД __AVX2__. LCC на E2K определяет
+// __AVX2__=1, __FMA__=1, __FMA4__=1, __AVXVNNI__=1 для x86-совместимости
+// (shim слой для портабельности x86 intrinsics). Если проверять AVX2 первым,
+// ВСЕ E2K машины уходят в AVX2 ветку → на v6 lcc эмулирует ОК, на v4 lcc
+// эмулирует частично → fail тестов sgemv и др. (24/1 у contributor'а).
+//
+// Аналогично для __aarch64__ — на E2K не определён, но порядок проверки
+// принципиально архитектурно-специфическое первое, x86 generic — последнее.
+#if defined(__e2k__) || defined(__elbrus__)
     #if defined(__iset__) && (__iset__ >= 6)
         constexpr Arch kArch = Arch::E2K_V6;
     #else
@@ -60,6 +56,18 @@ enum class Arch {
 #elif defined(__nmc__) || defined(__nmc4__) || defined(TUDA_FORCE_NMC4)
     constexpr Arch kArch = Arch::NMC4;
     #define TUDA_NMC4 1
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    #if defined(__ARM_FEATURE_DOTPROD)
+        constexpr Arch kArch = Arch::NEON_A75;
+        #define TUDA_NEON_A75 1
+    #else
+        constexpr Arch kArch = Arch::NEON_A57;
+        #define TUDA_NEON_A57 1
+    #endif
+    #define TUDA_NEON 1
+#elif defined(__AVX2__) && defined(__FMA__)
+    constexpr Arch kArch = Arch::AVX2;
+    #define TUDA_AVX2 1
 #else
     constexpr Arch kArch = Arch::SCALAR;
     #define TUDA_SCALAR 1
