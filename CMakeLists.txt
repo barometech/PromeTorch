@@ -160,20 +160,17 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "e2k|elbrus")
     # on a benchmark that looks very similar to our inner loop shape.
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ffast -faligned")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fprefetch -fcache-opt")
-    # -mtune выбираем динамически. <contributor>ов баг 2026-05-08: LCC на E8C (v4)
-    # ПРИНИМАЕТ -mtune=elbrus-8c2 как warning, не error → check_cxx_compiler_flag
-    # отдаёт TRUE и бинарь генерируется под v5 → "ошибка формата выполняемого
-    # файла" на v4 машине.
+    # -mtune ВАЖНО: LCC принимает в -mtune ТОЛЬКО названия моделей
+    # (elbrus-4c / elbrus-8c / elbrus-8c2 / elbrus-16c / ...), а в -march
+    # принимает И ISA-версии (elbrus-v3..v6) И модели. Прошлая попытка
+    # подать -mtune=elbrus-v4 ломала сборку на ВСЕХ Эльбрусах:
+    #   lcc: error: incorrect argument for "-mtune" switch
     #
-    # Правильная стратегия:
-    #   1. Доверять host CPU detection в scripts/build-elbrus.sh (через lcc-e2k
-    #      --version или lscpu) и подавать -DPT_E2K_MTUNE=elbrus-vN явно.
-    #   2. Дефолт -mtune=elbrus-v4 — safe для всех E2K машин с 2019 (E8C+).
-    #   3. На v5+ build script выставит PT_E2K_MTUNE=elbrus-v5/v6 для лучшей
-    #      производительности.
+    # Default "native" — LCC сам выбирает оптимальное под текущий host CPU.
+    # Override через -DPT_E2K_MTUNE=elbrus-8c (или 8c2/16c) для cross-build.
     if(NOT DEFINED PT_E2K_MTUNE)
-        set(PT_E2K_MTUNE "elbrus-v4" CACHE STRING
-            "E2K -mtune target (elbrus-v4|elbrus-v5|elbrus-v6|elbrus-8c2|...)")
+        set(PT_E2K_MTUNE "native" CACHE STRING
+            "E2K -mtune model (native|elbrus-4c|elbrus-8c|elbrus-8c2|elbrus-16c|...)")
     endif()
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mtune=${PT_E2K_MTUNE}")
     message(STATUS "Elbrus E2K: -mtune=${PT_E2K_MTUNE} (override via -DPT_E2K_MTUNE=...)")

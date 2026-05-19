@@ -427,28 +427,39 @@ find /opt /usr -name "cblas.h" 2>/dev/null | grep eml
 
 Должен вернуть `/opt/mcst/eml/include/eml/cblas.h` или аналог.
 
-### `-march=elbrus-8c` / `-march=elbrus-8c2` unrecognised
+### `lcc: error: incorrect argument for "-mtune" switch` / `-march=elbrus-8c` unrecognised
 
-Симптом: `lcc: unrecognized command line option '-march=elbrus-8c'`.
-Фикс: новые версии LCC (и `gcc-elbrus`) принимают только generic
-`-march=elbrus-vN`. Скрипт `scripts/build-elbrus.sh` (commit 9e72494)
-автоматически детектит ISA-версию хоста и подаёт правильный
-`-march`/`-mtune`:
+**Важно: -march и -mtune в LCC принимают РАЗНЫЕ форматы:**
 
-| Машина        | ISA         | march/mtune    |
-|---------------|-------------|----------------|
-| E2C+, E4C, 4×4C | v3        | elbrus-v3      |
-| E8C           | v4          | elbrus-v4      |
-| E8C2 / 8СВ    | v5          | elbrus-v5      |
-| E16C          | v6          | elbrus-v6      |
+- `-march`: ISA-версии (`elbrus-v3` / `v4` / `v5` / `v6`) ИЛИ названия
+  моделей (`elbrus-8c`, `elbrus-16c`).
+- `-mtune`: **ТОЛЬКО** названия моделей или `native`. Не понимает
+  `elbrus-vN`!
 
-Override через env:
-
-```bash
-PT_E2K_MTUNE=elbrus-v5 PT_E2K_MARCH=elbrus-v4 ./scripts/build-elbrus.sh
+Допустимые значения `-mtune` (LCC 1.29):
+```
+native, elbrus-2c+, elbrus-4c, elbrus-8c, elbrus-1c+, elbrus-8c2,
+elbrus-12c, elbrus-16c, elbrus-2c3, elbrus-48c, elbrus-8v7
 ```
 
-(Например для cross-build: бинарь работает на v4, оптимизирован под v5.)
+`scripts/build-elbrus.sh` (commit после 19.05.2026) детектит ISA-версию
+хоста и подаёт:
+- `-march=elbrus-vN` (ISA версия, стабильная)
+- `-mtune=native` (LCC сам выбирает оптимальную модель под текущий CPU)
+
+| Машина          | ISA | По умолчанию `-march`  | По умолчанию `-mtune`     |
+|-----------------|-----|------------------------|---------------------------|
+| E2C+, E4C, 4×4C | v3  | `elbrus-v3`            | `native` → `elbrus-4c`    |
+| E8C             | v4  | `elbrus-v4`            | `native` → `elbrus-8c`    |
+| E8C2 / 8СВ      | v5  | `elbrus-v5`            | `native` → `elbrus-8c2`   |
+| E16C            | v6  | `elbrus-v6`            | `native` → `elbrus-16c`   |
+
+Override через env (для cross-build):
+
+```bash
+# Бинарь работает на любом v4+, оптимизирован под 8c2:
+PT_E2K_MARCH=elbrus-v4 PT_E2K_MTUNE=elbrus-8c2 ./scripts/build-elbrus.sh
+```
 
 ### `__builtin_e2k_qpmaddubsh is not supported for current cpu mode`
 

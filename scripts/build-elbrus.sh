@@ -173,32 +173,37 @@ echo "[deps] OK — все зависимости найдены."
 echo
 
 # ============================================================================
-# 2. Host CPU detection — выбираем -mtune под текущую машину
+# 2. Host CPU detection — march/mtune под текущую машину
 # ============================================================================
-# <contributor>ов баг (2026-05-08): на E8C (v4) LCC принимает -mtune=elbrus-8c2
-# как WARNING, не error. CMake check_cxx_compiler_flag тогда возвращает true
-# и бинарь генерируется под v5 → "ошибка формата выполняемого файла" на v4.
-# Чиним через явный host CPU detection:
-#   - lscpu / cpuinfo / lcc --target → определяем номер ISA
-#   - подаём -DPT_E2K_MTUNE=elbrus-vN
-# Override: PT_E2K_MTUNE=elbrus-v6 ./build-elbrus.sh
-detect_e2k_mtune() {
-    # Allow user override via env
-    if [ -n "${PT_E2K_MTUNE:-}" ]; then
-        echo "$PT_E2K_MTUNE"; return
+# ВАЖНО: LCC принимает РАЗНЫЕ форматы в -march и -mtune:
+#   -march: elbrus-v3 / v4 / v5 / v6  (ISA-версии)
+#           ИЛИ названия моделей (elbrus-8c, elbrus-16c и т.д.)
+#   -mtune: ТОЛЬКО названия моделей (native, elbrus-4c, elbrus-8c,
+#           elbrus-8c2, elbrus-16c, elbrus-12c, elbrus-2c3, ...)
+#
+# Это две разные таблицы. Подача -mtune=elbrus-vN роняет сборку:
+#   lcc: error: incorrect argument for "-mtune" switch
+#
+# Стратегия:
+#   - march по умолчанию = ISA версия хоста (elbrus-v4/5/6 — стабильный API)
+#   - mtune по умолчанию = "native" (LCC сам выберет оптимальную модель)
+#   - Override через PT_E2K_MARCH / PT_E2K_MTUNE для cross-build.
+detect_e2k_march() {
+    if [ -n "${PT_E2K_MARCH:-}" ]; then
+        echo "$PT_E2K_MARCH"; return
     fi
-    # 1. Try lcc --target-name (LCC >= 1.27)
+    # lcc --target-name → "lcc:1.29.15:Oct--5-2025:e2k-v4-linux"
     if command -v lcc >/dev/null 2>&1; then
         local t
-        t="$(lcc --target-name 2>/dev/null || true)"
+        t="$(lcc --version 2>&1 | head -1)"
         case "$t" in
-            *elbrus-v6*|*-16c*|*-16С*) echo "elbrus-v6"; return ;;
-            *elbrus-v5*|*-8c2*|*-8СВ*) echo "elbrus-v5"; return ;;
-            *elbrus-v4*|*-8c*|*-8С*)   echo "elbrus-v4"; return ;;
-            *elbrus-v3*|*-4c*|*-4С*)   echo "elbrus-v3"; return ;;
+            *e2k-v6*) echo "elbrus-v6"; return ;;
+            *e2k-v5*) echo "elbrus-v5"; return ;;
+            *e2k-v4*) echo "elbrus-v4"; return ;;
+            *e2k-v3*) echo "elbrus-v3"; return ;;
         esac
     fi
-    # 2. lscpu (Alt Linux под Эльбрус добавляет model name "E2C+/E4C/E8C/E16C")
+    # lscpu fallback
     local model
     model="$(lscpu 2>/dev/null | awk -F: '/Model name|Имя модели/ {gsub(/^ +/,"",$2); print $2; exit}')"
     case "$model" in
@@ -207,25 +212,20 @@ detect_e2k_mtune() {
         *E8C*|*8С*)              echo "elbrus-v4"; return ;;
         *E4C*|*4С*|*E2C*|*2С*)   echo "elbrus-v3"; return ;;
     esac
-    # 3. /proc/cpuinfo fallback (некоторые ОС не имеют lscpu)
     if [ -r /proc/cpuinfo ]; then
-        if grep -qiE "E16C|elbrus-v6"        /proc/cpuinfo; then echo "elbrus-v6"; return; fi
-        if grep -qiE "E8CB|E8C2|elbrus-v5"   /proc/cpuinfo; then echo "elbrus-v5"; return; fi
-        if grep -qiE "E8C|elbrus-v4"         /proc/cpuinfo; then echo "elbrus-v4"; return; fi
-        if grep -qiE "E4C|E2C|elbrus-v3"     /proc/cpuinfo; then echo "elbrus-v3"; return; fi
+        if grep -qiE "E16C|elbrus-v6"      /proc/cpuinfo; then echo "elbrus-v6"; return; fi
+        if grep -qiE "E8CB|E8C2|elbrus-v5" /proc/cpuinfo; then echo "elbrus-v5"; return; fi
+        if grep -qiE "E8C|elbrus-v4"       /proc/cpuinfo; then echo "elbrus-v4"; return; fi
+        if grep -qiE "E4C|E2C|elbrus-v3"   /proc/cpuinfo; then echo "elbrus-v3"; return; fi
     fi
-    # Safe default: v4 supports E8C+ (2019+) — runs everywhere modern, no v5+ intrinsics.
-    echo "elbrus-v4"
+    echo "elbrus-v4"  # safe default — все 8C/8C2/8СВ
 }
 
-E2K_MTUNE="$(detect_e2k_mtune)"
-# Toolchain читает PT_E2K_MARCH через env (cmake/toolchains/e2k-elbrus.cmake).
-# По умолчанию march = mtune (одинаковая версия), переопределяемо отдельно
-# через `PT_E2K_MARCH=elbrus-v4 PT_E2K_MTUNE=elbrus-v5 ./build-elbrus.sh`
-# (например для cross-build бинаря который должен работать на v4 но
-# оптимизирован под v5).
-export PT_E2K_MARCH="${PT_E2K_MARCH:-$E2K_MTUNE}"
-echo "[deps] E2K target ISA: -march=$PT_E2K_MARCH -mtune=$E2K_MTUNE"
+export PT_E2K_MARCH="${PT_E2K_MARCH:-$(detect_e2k_march)}"
+export PT_E2K_MTUNE="${PT_E2K_MTUNE:-native}"
+echo "[deps] E2K target ISA:"
+echo "       -march=$PT_E2K_MARCH  (ISA version)"
+echo "       -mtune=$PT_E2K_MTUNE  (CPU model — 'native' = LCC сам выбирает)"
 echo "       (override через PT_E2K_MARCH / PT_E2K_MTUNE)"
 echo
 
@@ -246,7 +246,7 @@ if [ "$NEED_RECONFIGURE" = "1" ]; then
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_C_COMPILER="$CC" \
         -DCMAKE_CXX_COMPILER="$CXX" \
-        -DPT_E2K_MTUNE="$E2K_MTUNE" \
+        -DPT_E2K_MTUNE="$PT_E2K_MTUNE" \
         -DPT_USE_TUDA=ON \
         -DPT_USE_LINQ=OFF \
         -DPT_USE_CUDA=OFF \
