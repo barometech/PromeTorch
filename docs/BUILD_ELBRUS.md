@@ -431,9 +431,88 @@ find /opt /usr -name "cblas.h" 2>/dev/null | grep eml
 
 Симптом: `lcc: unrecognized command line option '-march=elbrus-8c'`.
 Фикс: новые версии LCC (и `gcc-elbrus`) принимают только generic
-`-march=elbrus-v4` (для 8C/8C2/8СВ). CMakeLists это уже учитывает
-автоматически — `check_cxx_compiler_flag` подбирает работающий вариант.
-Если правишь toolchain вручную — используй только v-номера.
+`-march=elbrus-vN`. Скрипт `scripts/build-elbrus.sh` (commit 9e72494)
+автоматически детектит ISA-версию хоста и подаёт правильный
+`-march`/`-mtune`:
+
+| Машина        | ISA         | march/mtune    |
+|---------------|-------------|----------------|
+| E2C+, E4C, 4×4C | v3        | elbrus-v3      |
+| E8C           | v4          | elbrus-v4      |
+| E8C2 / 8СВ    | v5          | elbrus-v5      |
+| E16C          | v6          | elbrus-v6      |
+
+Override через env:
+
+```bash
+PT_E2K_MTUNE=elbrus-v5 PT_E2K_MARCH=elbrus-v4 ./scripts/build-elbrus.sh
+```
+
+(Например для cross-build: бинарь работает на v4, оптимизирован под v5.)
+
+### `__builtin_e2k_qpmaddubsh is not supported for current cpu mode`
+
+Симптом: на E4C (v3) / E8C (v4) LCC выдаёт ошибку:
+```
+error: built-in function "__builtin_e2k_qpmaddubsh" is not supported
+       for current cpu mode
+```
+
+Root cause: VNNI-intrinsics (`qpmaddubsh`, `qpfmuls`, `qpfadds`, ...)
+доступны только с v5 (E8C2). На v3/v4 их нет.
+
+Фикс уже в коде (commit e8c917a): макрос `PT_E2K_VNNI` =
+`defined(__e2k__) && defined(__iset__) && __iset__ >= 5`. На v3/v4 авто
+активируется scalar fallback в `torch/io/q8_soa_repack.h`. Q8 SoA4 path
+будет недоступен на v3/v4 — Q4_K dequant kernel запустится в скалярном
+режиме (медленнее ~3× но работает).
+
+### Бинарь не запускается: "Ошибка формата выполняемого файла"
+
+Симптом: сборка прошла, но запуск даёт
+```
+/path/to/binary: cannot execute binary file: Exec format error
+```
+
+Root cause: бинарь собран под более новый ISA чем у текущего процессора.
+До commit 9e72494 CMakeLists хардкодил `-mtune=elbrus-8c2` (v5+).
+LCC на E8C (v4) **принимал этот флаг как warning, не error**, поэтому
+`check_cxx_compiler_flag` врал — `HAS_MTUNE_8C2=true`, генерировался v5
+бинарь.
+
+Фикс: `scripts/build-elbrus.sh` теперь детектит ISA через
+`lcc --target-name` / `lscpu` / `/proc/cpuinfo`. Чистая пересборка:
+
+```bash
+rm -rf build_elbrus && ./scripts/build-elbrus.sh
+```
+
+### CMake: "lcc++ is not a full path and was not found in the PATH"
+
+Симптом при reconfigure:
+```
+CMake Error at CMakeLists.txt:3 (project):
+  The CMAKE_CXX_COMPILER: lcc++ is not a full path and was not found
+  in the PATH.
+```
+
+Root cause: `scripts/build-elbrus.sh` экспортировал `CXX="lcc++"` —
+имя без пути, а CMake требует absolute path для toolchain.
+
+Фикс уже в коде (commit e8c917a): `CXX="$(command -v lcc++)"` отдаёт
+full path. Просто `git pull` и пересобрать.
+
+### Тесты `TensorImplTest.ReferenceCount` / `DeviceTest.InvalidStringThrows` падают
+
+Эти тесты были **некорректны** на всех платформах (просто никто не
+обнаружил на Windows). Фикс в commit 9e72494:
+
+- `TensorImplTest.ReferenceCount` проверял intrusive `ref_count_`, но
+  `make_tensor_impl` возвращает `std::shared_ptr` — копирование не
+  дёргает `retain()`. Заменено на `impl.use_count()`.
+- `DeviceTest.InvalidStringThrows` ожидал `std::runtime_error`, но
+  `PT_ERROR` throws `c10::Error : public std::exception` (не
+  `runtime_error`). Заменено на `EXPECT_THROW(..., c10::Error)`.
 
 ### Сборка падает с `omp.h: No such file` или `cblas.h not found`
 
