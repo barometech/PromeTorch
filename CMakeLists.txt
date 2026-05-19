@@ -230,6 +230,20 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "e2k|elbrus")
 endif()
 
 # ============================================================================
+# Universal numa.h detection (для torch/io/numa_weight_replica.h —
+# unguarded #include <numa.h> на машинах без libnuma-devel (E2S/4C) даёт
+# catastrophic error #1696. LCC 1.26 не поддерживает __has_include, поэтому
+# define выставляем через CMake find_path).
+# ============================================================================
+find_path(_PT_NUMA_H numa.h HINTS /usr/include /usr/local/include /opt/mcst/include)
+if(_PT_NUMA_H)
+    add_compile_definitions(PT_HAVE_NUMA_H)
+    message(STATUS "libnuma headers: ${_PT_NUMA_H}/numa.h")
+else()
+    message(STATUS "libnuma headers not found — NUMA-replica disabled at compile-time")
+endif()
+
+# ============================================================================
 # Universal libnuma detection (Linux only) — c10/util/ThreadPool.h использует
 # numa_available()/numa_node_of_cpu() через __has_include(<numa.h>). Если
 # libnuma-dev установлен — header подхватывается и линкер требует libnuma.
