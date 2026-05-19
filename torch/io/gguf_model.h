@@ -5959,11 +5959,8 @@ public:
                         float dot = _mm_cvtss_f32(s);
                         for (; d < head_dim; ++d) dot += q_head[d] * k_head[d];
 #elif defined(__e2k__) && defined(__iset__) && __iset__ >= 5
-                        // 4-way fp32 SIMD через qpfmuls + qpfadds. v5+ (E8C2) only —
-                        // на v3/v4 (E4C/E8C) lcc errors out with
-                        // "not supported for current cpu mode" without this guard.
-                        // q_head/k_head выровнены на 16B (std::vector + posix_memalign в TP init).
-                        // head_dim=128 → 32 шагов.
+                        // 4-way fp32 SIMD через qpfmuls + qpfadds (v5+ E8C2).
+                        // head_dim=128 → 32 шагов по 4 lane'а.
                         typedef long long v2di __attribute__((vector_size(16)));
                         v2di acc = {0, 0};
                         int64_t d = 0;
@@ -5975,6 +5972,21 @@ public:
                         }
                         float lanes[4]; std::memcpy(lanes, &acc, 16);
                         float dot = lanes[0] + lanes[1] + lanes[2] + lanes[3];
+                        for (; d < head_dim; ++d) dot += q_head[d] * k_head[d];
+#elif defined(__e2k__) && defined(__iset__) && __iset__ >= 4
+                        // 2-way fp32 SIMD через pfmuls + pfadds (v4 pair, 64-bit).
+                        // На E8C/v4 это ~2× быстрее scalar. head_dim=128 → 64 шагов.
+                        typedef long long v1di __attribute__((vector_size(8)));
+                        v1di acc = 0;
+                        int64_t d = 0;
+                        for (; d + 2 <= head_dim; d += 2) {
+                            v1di qv = *(const v1di*)(q_head + d);
+                            v1di kv = *(const v1di*)(k_head + d);
+                            v1di prod = __builtin_e2k_pfmuls(qv, kv);
+                            acc = __builtin_e2k_pfadds(acc, prod);
+                        }
+                        float lanes[2]; std::memcpy(lanes, &acc, 8);
+                        float dot = lanes[0] + lanes[1];
                         for (; d < head_dim; ++d) dot += q_head[d] * k_head[d];
 #else
                         float dot = 0.0f;
@@ -6007,7 +6019,7 @@ public:
                         }
                         for (; d < head_dim; ++d) out_head[d] += w * v_head[d];
 #elif defined(__e2k__) && defined(__iset__) && __iset__ >= 5
-                        // v5+ (E8C2) qp* fp intrinsics — guarded for older E2K (v3/v4).
+                        // v5+ (E8C2) qp* fp intrinsics — 4-way SIMD.
                         typedef long long v2di __attribute__((vector_size(16)));
                         float warr[4] = {w, w, w, w};
                         v2di wv;
@@ -6019,6 +6031,21 @@ public:
                             v2di prod = __builtin_e2k_qpfmuls(wv, vv);
                             ov = __builtin_e2k_qpfadds(ov, prod);
                             *(v2di*)(out_head + d) = ov;
+                        }
+                        for (; d < head_dim; ++d) out_head[d] += w * v_head[d];
+#elif defined(__e2k__) && defined(__iset__) && __iset__ >= 4
+                        // v4 (E8C) p* fp intrinsics — 2-way SIMD.
+                        typedef long long v1di __attribute__((vector_size(8)));
+                        float warr[2] = {w, w};
+                        v1di wv;
+                        std::memcpy(&wv, warr, 8);
+                        int64_t d = 0;
+                        for (; d + 2 <= head_dim; d += 2) {
+                            v1di vv = *(const v1di*)(v_head + d);
+                            v1di ov = *(v1di*)(out_head + d);
+                            v1di prod = __builtin_e2k_pfmuls(wv, vv);
+                            ov = __builtin_e2k_pfadds(ov, prod);
+                            *(v1di*)(out_head + d) = ov;
                         }
                         for (; d < head_dim; ++d) out_head[d] += w * v_head[d];
 #else
