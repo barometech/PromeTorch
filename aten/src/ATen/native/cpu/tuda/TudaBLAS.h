@@ -19,8 +19,12 @@
 // PT_NO_EML=1 disables EML BLAS entirely (use our scalar GEMM instead).
 // Needed when EML's internal OMP fork causes SIGILL on E2K.
 // PT_USE_EML_BLAS приходит из CMake -DPT_USE_EML_BLAS=ON (default).
-// При OFF — fallback на TUDA 6×6 микроядро в tuda::blas::sgemm.
-#if defined(TUDA_E2K) && defined(PT_USE_EML_BLAS) && __has_include(<eml/cblas.h>)
+// CMake уже сам проверил наличие headers через find_path() и выставил
+// PT_USE_EML_BLAS=OFF если их нет. __has_include НЕ используем — LCC 1.26
+// (E2S/4C) его не поддерживает корректно (всегда возвращает 0), даже когда
+// файл существует физически. Симптом: `cblas_sgemm undefined` на 4C хотя
+// /usr/include/eml/cblas.h на месте.
+#if defined(TUDA_E2K) && defined(PT_USE_EML_BLAS)
 #include <cstdlib>
 static inline bool eml_disabled() {
     static int cached = -1;
