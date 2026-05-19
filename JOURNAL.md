@@ -3,6 +3,65 @@
 Полная история разработки проекта.
 Полный аудит инфраструктуры — в `INFRASTRUCTURE_AUDIT.md`.
 
+## 2026-05-19: <contributor> фиксы — E8C/AltLinux build portability (commit `e8c917a`)
+
+**Контекст:** <contributor> (внешний contributor) прислал лог сборки на E8C (v4)
+под Alt Linux. Несколько build blockers. После анализа выделил 8 проблем
+T1..T8, из них 5 уже было исправлено ранее (T2/T4/T5 в коммитах
+`4ccce1d`, `5d435b5`), 3 нужны новых фикса.
+
+### T1: undefined reference torch::autograd::GradMode::get_enabled_()
+
+`aten_tests`, `all_ops_tests`, `edge_case_tests` линкуются только с `aten`.
+`Tensor::add()/sub()/mul()` инлайнят `GradMode::is_enabled()` из header →
+на Linux/E2K linker ищет `get_enabled_()` (определён в torch_autograd).
+Windows DLL inline это маскирует, поэтому на MSVC работает.
+
+**Fix:** добавил `torch_autograd` к 3 test targets в CMakeLists.txt.
+`tuda_tests` уже было исправлено в `4ccce1d`.
+
+### T3: __builtin_e2k_qpmaddubsh not supported for current cpu mode
+
+`q8_soa_repack.h` использовал `#ifdef __e2k__` для всех VNNI-intrinsics.
+Но `qpmaddubsh` + `qpfmuls/qpfadds/qpfsubs/qpmaddh/qpaddw/qpsubw/qpmullw/
+qpistofs` — все v5+ (E8C2 onwards). На v3/v4 (E4C/E8C) lcc errors out:
+`"built-in function not supported for current cpu mode"`.
+
+**Fix:** макрос `PT_E2K_VNNI` = `defined(__e2k__) && defined(__iset__)
+&& __iset__ >= 5`. Заменил все `#ifdef __e2k__` на `#if PT_E2K_VNNI` в
+q8_soa_repack.h. То же inline в gguf_model.h для attention dot kernel.
+Scalar fallback в #else ветке уже был, теперь активируется на v3/v4.
+
+### T8: lcc++ is not a full path
+
+`scripts/build-elbrus.sh detect_compiler()` экспортировал `CXX="lcc++"`,
+но CMake требует FULL PATH для toolchain-driven cross-compile.
+
+**Fix:** `CXX="$(command -v lcc++)"` (и для lcc, l++, gcc-elbrus).
+
+### Уже исправлено ранее
+
+- **T2 (-mtune=elbrus-8c2 hardcode):** `4ccce1d` — `check_cxx_compiler_flag`
+  с fallback на `-mtune=elbrus-v4` если 8c2 не поддерживается.
+- **T4 ("32-core" косметика):** строка 229 CMakeLists сейчас "multi-core",
+  не "32-core". <contributor>ов лог был до этого fix.
+- **T5 (run_tp_elbrus.sh жёстко под 4 NUMA):** `5d435b5` — auto-detect
+  через `numactl --hardware`, fallback на `run_1proc_elbrus.sh` если
+  NUMA<2.
+
+### Открытые tasks
+
+- **T6** (multi-arch v3/v4/v5/v6 через `E2K_MARCH` env) — отложено.
+- **T7** (2 falling tests на v4: `DeviceTest.InvalidStringThrows` +
+  `TensorImplTest.ReferenceCount`) — нужен анализ тестов.
+
+### Бонус — документация E2K ISA
+
+<contributor> также прислал материалы для генерации удобной документации
+системы команд Elbrus (на уровне Intel/AMD manuals): 360KB JSON архитектуры,
+969KB markdown manual, QEMU sources, Excel opcodes. Это отдельный проект
+для следующей сессии — `plan.md` в zip с подробным TOC на 16 разделов.
+
 ## 2026-05-19: nanoGPT TinyStories на Эльбрусе через PromeTorch — 4-proc DDP RUNNING
 
 **Запущен полный цикл тренировки PIR-189M (vocab=256 byte-level, D=768,
