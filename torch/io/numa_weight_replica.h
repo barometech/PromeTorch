@@ -23,7 +23,9 @@
 #include <vector>
 #include <array>
 
-#if defined(__linux__) && !defined(_WIN32)
+// PT_HAVE_NUMA_H выставляется CMake'ом через find_path(numa.h). LCC 1.26 на
+// E2S/4C не поддерживает __has_include — поэтому не пытаемся через него.
+#if defined(__linux__) && !defined(_WIN32) && defined(PT_HAVE_NUMA_H)
 #  include <numa.h>
 #  include <numaif.h>
 #  include <sys/mman.h>
