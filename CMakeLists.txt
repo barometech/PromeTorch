@@ -200,6 +200,24 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "e2k|elbrus")
     # загрузку в v6 процесс). При OFF fallback на TUDA 6×6 микроядро в
     # tuda::blas::sgemm — медленнее ~30× но запускается везде.
     option(PT_USE_EML_BLAS "Link EML BLAS (libeml_mt) for cblas_sgemm" ON)
+
+    # Автодетект: если headers ИЛИ libeml_mt отсутствуют — выключаем EML
+    # (избегаем compile/link error на машинах без полного eml-devel пакета,
+    # например на E2S/4C где только libeml.so без _mt).
+    if(PT_USE_EML_BLAS)
+        find_path(_PT_EML_HDR eml/cblas.h
+            HINTS /opt/mcst/eml/include /usr/include /usr/local/include
+            PATH_SUFFIXES include)
+        find_library(_PT_EML_LIB NAMES eml_mt eml
+            HINTS /opt/mcst/eml/lib /opt/mcst/lib64 /usr/lib64 /usr/lib)
+        if(NOT _PT_EML_HDR OR NOT _PT_EML_LIB)
+            message(WARNING "  EML headers/lib не найдены — PT_USE_EML_BLAS=OFF "
+                            "auto. Override: -DPT_USE_EML_BLAS=ON и установи "
+                            "пакет eml-devel.")
+            set(PT_USE_EML_BLAS OFF)
+        endif()
+    endif()
+
     if(PT_USE_EML_BLAS)
         add_compile_definitions(PT_USE_EML_BLAS)
     endif()
