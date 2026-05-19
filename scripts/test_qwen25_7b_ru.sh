@@ -7,7 +7,7 @@ sleep 5
 
 # Single-proc, no TP — mmap not 4× replicated
 PT_Q8_SOA=1 PT_PER_BLOCK_SCALE=1 PT_LM_HEAD_FP=1 PT_NO_FFN_SOA=1 PT_SPEC_K=1 PT_NO_THINK=1 \
-PT_NO_NUMA_POOL=1 OMP_NUM_THREADS=32 \
+PT_NO_NUMA_POOL=1 OMP_NUM_THREADS=${PT_OMP_THREADS:-$(nproc)} \
     ./build_elbrus/examples/gguf/test_gguf_inference \
         /home/<user>/gguf_models/qwen2.5-7b-Q4_K_M.gguf \
         --max-tokens 200 --temp 0.5 --chat \

@@ -15,7 +15,7 @@ run() {
     local LOG="/tmp/sp_${M%.gguf}.log"
     echo "[$(date +%T)] $M ..."
     PT_Q8_SOA=1 PT_PER_BLOCK_SCALE=1 PT_LM_HEAD_FP=1 PT_NO_FFN_SOA=1 PT_SPEC_K=1 PT_NO_THINK=1 \
-    PT_NO_NUMA_POOL=1 OMP_NUM_THREADS=32 \
+    PT_NO_NUMA_POOL=1 OMP_NUM_THREADS=${PT_OMP_THREADS:-$(nproc)} \
         timeout 480 ./build_elbrus/examples/gguf/test_gguf_inference "$MPATH" \
             --max-tokens 200 --temp 0.5 --chat \
             "$PROMPT" > "$LOG" 2>&1

@@ -4,7 +4,7 @@
 #
 # Юзер ставит task → orchestrator делает loop:
 #   1. собирает prompt с system+tools description
-#   2. запускает test_gguf_inference --nprocs 4 (TP-4, 11.4 tok/s)
+#   2. запускает test_gguf_inference --nprocs ${PT_NPROCS:-4} (TP-4, 11.4 tok/s)
 #   3. парсит ответ на <tool_call>{"name":"write_file"...}</tool_call>
 #   4. выполняет write_file (sandbox /tmp/promeserve/)
 #   5. дописывает <tool_response>...</tool_response> в prompt, goto 1

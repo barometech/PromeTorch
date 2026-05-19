@@ -10,7 +10,7 @@ run() {
     echo "==== $label ===="
     pkill -9 -f test_gguf_inference 2>/dev/null
     sleep 2
-    env PT_PER_BLOCK_SCALE=1 PT_NO_NUMA_POOL=1 OMP_NUM_THREADS=32 "$@" \
+    env PT_PER_BLOCK_SCALE=1 PT_NO_NUMA_POOL=1 OMP_NUM_THREADS=${PT_OMP_THREADS:-$(nproc)} "$@" \
         ./build_elbrus/examples/gguf/test_gguf_inference \
             /home/<user>/gguf_models/phi35-mini-Q4_K_M.gguf \
             --max-tokens 40 --greedy --chat \

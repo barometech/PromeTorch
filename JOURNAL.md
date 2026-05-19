@@ -3,6 +3,107 @@
 Полная история разработки проекта.
 Полный аудит инфраструктуры — в `INFRASTRUCTURE_AUDIT.md`.
 
+## 2026-05-19: hardcode sweep — ВСЕ scripts адаптивные под любую E2K машину
+
+После <contributor>ова второго лога (E16C v6 + E8C v4 — обе упали из-за моего
+`-mtune=elbrus-v4` который LCC не принимает) — провёл полный
+sweep репозитория на hardcode под 4-NUMA E8C2 32-core машину.
+
+**Снято хардкодов (commit ниже):**
+
+| Файл/паттерн | Было | Стало |
+|--------------|------|-------|
+| CMakeLists.txt | `-mtune=elbrus-v4` (ломает LCC) | `-mtune=native` default + `PT_E2K_MTUNE` override |
+| build-elbrus.sh | `PT_E2K_MTUNE=elbrus-vN` | `PT_E2K_MARCH=elbrus-vN` + `PT_E2K_MTUNE=native` |
+| train_pir_elbrus.cpp:1106 | `OMP_NUM_THREADS=32` в usage hint | `sysconf(_SC_NPROCESSORS_ONLN)` |
+| scripts/test_*/dump_*/verify_*/multi_html_* | `OMP_NUM_THREADS=32` | `${PT_OMP_THREADS:-$(nproc)}` |
+| TP-4 scripts | `OMP_NUM_THREADS=8` per-rank | `${PT_OMP_PER_RANK:-$(($(nproc)/4))}` |
+| TP scripts | `for rank in 0 1 2 3` | `NPROCS=${PT_NPROCS:-4}; for ((rank=0; rank<NPROCS; rank++))` |
+| TP scripts | `--nprocs 4` | `--nprocs ${PT_NPROCS:-4}` |
+| start_promeserve_1proc.sh | `OMP_NUM_THREADS=24` | `${PT_OMP_THREADS:-$(($(nproc)>2?$(nproc)-2:$(nproc)))}` |
+| run_bpe_small.sh | OMP=8 + 4-rank hardcode | env-overridable |
+
+**Уже было адаптивным до этого sweep'а:**
+- `run_tp_elbrus.sh` (auto-detect через `numactl --hardware`)
+- `run_1proc_elbrus.sh` (`$(nproc) - 2` с `PT_OMP_THREADS` override)
+- CMakeLists "auto-enabling OpenMP for multi-core parallelism" (не "32-core")
+
+**Что осталось hardcoded и почему:**
+- `aten/src/ATen/nmquad/NMQuadDispatch.h:58` — `num_chips=4` default
+  для NM Quad железа. NM Quad **физически 4-чиповая плата** — это не
+  переменная. Если карты нет — `init_nmquad()` сам fallback'нется.
+- `examples/distributed/test_launcher.cpp:28` — `world_size = 4` в
+  фиксированном тесте distributed pipeline. Это test, не общий путь.
+- `examples/nmquad/train_gpt_4chip.cpp` — программа для конкретной
+  4-chip конфигурации NM Quad. Имя в названии.
+
+**Override env-vars для разных машин:**
+
+```bash
+# E8C (8 cores, 1 NUMA): build script авто-детектит
+./scripts/build-elbrus.sh
+
+# E16C (16 cores, 8 видимых в контейнере): то же
+./scripts/build-elbrus.sh
+
+# Принудительно меньше потоков:
+PT_OMP_THREADS=4 ./scripts/run_1proc_elbrus.sh
+
+# TP с другим количеством rank'ов:
+PT_NPROCS=2 ./scripts/run_tp_elbrus.sh
+
+# Cross-build (бинарь под v4, оптимизирован под 8c2):
+PT_E2K_MARCH=elbrus-v4 PT_E2K_MTUNE=elbrus-8c2 ./scripts/build-elbrus.sh
+```
+
+## 2026-05-19: критичный regression fix — -mtune=elbrus-vN ломал ВСЕ E2K
+
+Прошлый коммит `9e72494` (тот же день) ввёл регрессию: я подал
+`-mtune=elbrus-v4` как fallback. **LCC принимает в -mtune ТОЛЬКО
+названия моделей** (`native`, `elbrus-8c`, `elbrus-8c2`, `elbrus-16c`,
+...), не ISA версии. В отличие от `-march`, который понимает обе.
+
+<contributor>ов лог 19.05:
+```
+lcc: error: incorrect argument for "-mtune" switch.
+     Valid arguments are: native, elbrus-2c+, elbrus-4c,
+     elbrus-8c, elbrus-1c+, elbrus-8c2, elbrus-12c, elbrus-16c, ...
+```
+
+Сборка падала на первом же `c10/util/Exception.cpp` compile call —
+**на ВСЕХ Эльбрусах** (E8C/v4, E16C/v6). Configure прошёл (потому что
+-march=elbrus-v4 валиден), build упал моментально.
+
+**Fix (`debfe1e`):** default `-mtune=native` + override через
+`PT_E2K_MTUNE=elbrus-8c2` для cross-build.
+
+## 2026-05-19: nanoGPT crash на step 220 — host reboot, resume с ckpt 200
+
+Сервер `<elbrus-host>` ребутнулся около 12:29 (uptime=1min после crash).
+4-proc DDP тренировка nanoGPT упала вместе с tmux session. Linger=yes
+был активен — это не наша ошибка, host-level event.
+
+**Что выжило:**
+- Checkpoint `pir_fused_step_200.bin` (756 MB, fp32 189M + Adam state)
+- Data symlink `tinystories.txt` → 2.04B byte-tokens
+- Binary `train_pir_elbrus` (3.9 MB ELF Elbrus)
+
+**Финальные числа до crash:**
+| Step | Loss | PPL  | Note |
+|------|------|------|------|
+| 1    | 5.54 | 254  | start |
+| 100  | 1.57 | 4.8  | lr warmup peak approaching |
+| 200  | 1.23 | 3.4  | first save + generation |
+| 220  | 1.13 | 3.1  | last step before crash |
+
+**Generation на step 200** уловила TinyStories style: имена (Tommy,
+Sara, Mom), глаголы (bird says, hugged, play with toys, fish too).
+Слова искажены byte-level (uHt, calme, parendmale, plaay) — under-
+trained 200 steps × byte-level. Repetition trap на 3 из 4 prompts.
+
+**Resume:** tmux session `nanogpt` перезапущена с `--load
+checkpoints/pir_fused_step_200.bin`. 4 процесса работают.
+
 ## 2026-05-19: <contributor> фиксы — E8C/AltLinux build portability (commit `e8c917a`)
 
 **Контекст:** <contributor> (внешний contributor) прислал лог сборки на E8C (v4)

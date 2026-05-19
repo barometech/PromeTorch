@@ -6,7 +6,7 @@ sleep 5
 
 # qwen3-4B with hidden state dump
 PT_Q8_SOA=1 PT_PER_BLOCK_SCALE=1 PT_LM_HEAD_FP=1 PT_NO_FFN_SOA=1 PT_DUMP_HIDDEN=1 PT_NO_THINK=1 \
-PT_NO_NUMA_POOL=1 OMP_NUM_THREADS=32 \
+PT_NO_NUMA_POOL=1 OMP_NUM_THREADS=${PT_OMP_THREADS:-$(nproc)} \
     ./build_elbrus/examples/gguf/test_gguf_inference \
         /home/<user>/gguf_models/qwen3-4b-Q4_K_M.gguf \
         --max-tokens 5 --greedy --chat \

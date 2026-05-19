@@ -19,12 +19,12 @@ date +"Start: %F %T"
 pkill -9 -f test_gguf_inference 2>/dev/null
 sleep 2
 
-for rank in 0 1 2 3; do
-    PT_PER_BLOCK_SCALE=1 PT_NO_NUMA_POOL=1 OMP_NUM_THREADS=8 \
+NPROCS=${PT_NPROCS:-4}; for ((rank=0; rank<NPROCS; rank++)); do
+    PT_PER_BLOCK_SCALE=1 PT_NO_NUMA_POOL=1 OMP_NUM_THREADS=${PT_OMP_PER_RANK:-$(($(nproc)/4))} \
     PT_NUMA_REPLICATE=0 PT_DDP_SHM=1 PT_Q8_SOA=1 \
     numactl --cpunodebind=$rank --membind=$rank \
     "$BIN" "$MODEL" \
-        --nprocs 4 --rank $rank \
+        --nprocs ${PT_NPROCS:-4} --rank $rank \
         --master-addr 127.0.0.1 --master-port 29500 \
         --max-tokens 50 --greedy --chat \
         "Что такое космос? Расскажи коротко." \

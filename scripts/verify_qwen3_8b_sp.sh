@@ -7,7 +7,7 @@ sleep 2
 echo "=== qwen3-8B SP verify ==="
 date +"Start: %F %T"
 
-env PT_PER_BLOCK_SCALE=1 PT_NO_NUMA_POOL=1 OMP_NUM_THREADS=32 \
+env PT_PER_BLOCK_SCALE=1 PT_NO_NUMA_POOL=1 OMP_NUM_THREADS=${PT_OMP_THREADS:-$(nproc)} \
     PT_Q8_SOA=1 PT_LM_HEAD_FP=1 PT_NO_FFN_SOA=1 \
     timeout 240 ./build_elbrus/examples/gguf/test_gguf_inference \
     "$HOME/gguf_models/qwen3-8b-Q4_K_M.gguf" \

@@ -17,7 +17,7 @@ loginctl enable-linger "$USER" 2>/dev/null || true
 tmux kill-session -t promeserve 2>/dev/null || true
 tmux new-session -d -s promeserve \
     "cd ~/promethorch && \
-     OMP_NUM_THREADS=24 OMP_PLACES=cores OMP_PROC_BIND=close \
+     OMP_NUM_THREADS=${PT_OMP_THREADS:-$(($(nproc)>2?$(nproc)-2:$(nproc)))} OMP_PLACES=cores OMP_PROC_BIND=close \
      numactl --interleave=all \
      ./build_elbrus/promeserve/promeserve \
          --port 11434 --device cpu \

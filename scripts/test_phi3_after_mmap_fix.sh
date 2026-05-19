@@ -11,7 +11,7 @@ run() {
     echo "==== $label ===="
     pkill -9 -f test_gguf_inference 2>/dev/null
     sleep 2
-    env PT_PER_BLOCK_SCALE=1 PT_NO_NUMA_POOL=1 OMP_NUM_THREADS=32 \
+    env PT_PER_BLOCK_SCALE=1 PT_NO_NUMA_POOL=1 OMP_NUM_THREADS=${PT_OMP_THREADS:-$(nproc)} \
         PT_Q8_SOA=1 PT_LM_HEAD_FP=1 PT_NO_FFN_SOA=1 "$@" \
         ./build_elbrus/examples/gguf/test_gguf_inference \
             "/home/<user>/gguf_models/$model" \
