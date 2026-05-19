@@ -173,16 +173,52 @@ EOF
     exit 1
 fi
 
-# Headers + libs (E2K-only)
-check_header "eml/cblas.h"  "eml-devel"
-check_lib    eml_mt          "eml-devel"
-check_header "omp.h"         "libomp11-devel или libomp-devel"
-check_header "numa.h"        "libnuma-devel"
-check_lib    numa            "libnuma-devel"
+# Headers + libs.
+# EML обязателен ТОЛЬКО когда PT_USE_EML_BLAS=ON. С --no-eml пропускаем.
+# libnuma и libomp — optional, CMakeLists сам fallback'нется (multi-core параллелизм
+# через c10::ThreadPool работает без libnuma; OpenMP — без него single-thread, но
+# сборка пройдёт).
+if [ "$USE_EML" = "ON" ]; then
+    check_header "eml/cblas.h" "eml-devel"
+    check_lib    eml_mt        "eml-devel"
+fi
+
+# Опциональные зависимости — предупреждаем, но не блокируем.
+OPTIONAL_MISSING=()
+opt_check_header() {
+    local header="$1"; local pkg="$2"
+    local compiler="${CXX:-${CC:-gcc}}"
+    if ! echo "#include <$header>
+int main(){return 0;}" | "$compiler" -fsyntax-only -x c++ - 2>/dev/null; then
+        OPTIONAL_MISSING+=("$pkg ($header)")
+    fi
+}
+opt_check_lib() {
+    local lib="$1"; local pkg="$2"
+    local ld_cache; ld_cache="$(ldconfig -p 2>/dev/null || true)"
+    if [[ "$ld_cache" == *"lib$lib.so"* ]]; then return 0; fi
+    for d in /usr/lib64 /usr/lib /opt/mcst/lib64 /opt/mcst/lib; do
+        for ext in "" ".0" ".1" ".2"; do
+            if [ -e "$d/lib$lib.so$ext" ]; then return 0; fi
+        done
+    done
+    OPTIONAL_MISSING+=("$pkg (lib$lib.so)")
+}
+opt_check_header "omp.h"  "libomp11-devel или libomp-devel"
+opt_check_header "numa.h" "libnuma-devel"
+opt_check_lib    numa     "libnuma-devel"
+
+if [ "${#OPTIONAL_MISSING[@]}" -gt 0 ]; then
+    echo "[deps] WARNING: optional зависимости не найдены (сборка пройдёт, но без оптимизаций):"
+    for m in "${OPTIONAL_MISSING[@]}"; do echo "    - $m"; done
+    echo "       Без libnuma — single-NUMA fallback (нет 4-chip NUMA-tiled GEMM)."
+    echo "       Без libomp — single-threaded ATen ops (есть только c10::ThreadPool)."
+    echo
+fi
 
 if [ "${#MISSING[@]}" -gt 0 ]; then
     echo
-    echo "ERROR: отсутствуют системные зависимости:"
+    echo "ERROR: отсутствуют ОБЯЗАТЕЛЬНЫЕ зависимости:"
     for m in "${MISSING[@]}"; do echo "    - $m"; done
     cat <<'EOF'
 
