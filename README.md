@@ -413,7 +413,7 @@ f a aland foto amand he tatd uy th
 Видны слова: **the, be, an, then, she, was, and, he, lathe, lang, ban, foto**,
 запятые/точки, capitalization после "." → "Sand".
 
-**Файлы** (на `<user>@<nmquad-host>`, `~/nanogpt/v1/`):
+**Файлы** (на `<user>@<nmquad-host>:<port>`, `~/nanogpt/v1/`):
 - `nanogpt_train_v4.c` — 2-layer transformer (forward+backward+AdamW+grad clip+best-snapshot)
 - `host_one_core.cpp` — single-core driver через `libnm_quad_load`
 - `host_all16_batched.cpp` — все 16 cores через 4 sequential batches
