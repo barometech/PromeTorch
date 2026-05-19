@@ -44,10 +44,12 @@ env-переменные проверены на 4-NUMA E8C2.
 - **CMake:** 3.15+ (на тестовом сервере 3.28)
 - **Python:** 3.11
 - **Зависимости:** EML (Elbrus Math Library, BLAS/LAPACK от МЦСТ), libnuma, OpenMP
-- **`-march`:** только `-march=elbrus-v4` (универсальный для 8C/8C2/8СВ).
-  Старые имена (`elbrus-8c`, `elbrus-8c2`) новые версии LCC не понимают.
-  CMakeLists это уже учитывает — добавляет `-mtune=elbrus-8c2` только если
-  компилятор его поддерживает, иначе fallback на `-mtune=elbrus-v4`.
+- **`-march`:** автоматически детектится `scripts/build-elbrus.sh` по
+  выводу `lcc --version` / `lscpu`. Дефолт `elbrus-v4` если детект не
+  сработал. Override через `PT_E2K_MARCH=elbrus-vN`. **`-mtune` не
+  передаётся вообще** — каждый LCC release принимает разный набор
+  моделей, любой hardcode ломал сборку у кого-то. Если нужен явный
+  `-mtune` — `PT_E2K_MTUNE=elbrus-8c2 ./scripts/build-elbrus.sh`.
 
 EML и libnuma — обязательны. CMake определяет их автоматически и активирует
 `PT_USE_EML_BLAS` + `PT_USE_NUMA`. Без EML PromeTorch свалится на TUDA 6×6
@@ -170,8 +172,9 @@ CMake при `CMAKE_SYSTEM_PROCESSOR=e2k` (выставляется toolchain'о
 - `-DTUDA_E2K` — активация TUDA E2K-микроядра 6×6 (36 FMA-аккумуляторов)
 - `-DPT_USE_EML_BLAS` — диспатч `cblas_sgemm` в EML
 - `-DPT_USE_NUMA` — NUMA-aware tiled GEMM (5.7× ускорение от 324 до 1840 GFLOPS)
-- `-O3 -ffast -faligned -fprefetch -fcache-opt -mtune=elbrus-8c2 -frestrict-all -fswp-maxopers=800`
-- `-fopenmp` (32-ядерный параллелизм критичен)
+- `-O3 -ffast -faligned -fprefetch -fcache-opt -frestrict-all -fswp-maxopers=800`
+- `-march=elbrus-vN` (детектится по host CPU, override через `PT_E2K_MARCH`)
+- `-fopenmp` (многоядерный параллелизм критичен)
 
 Флаги `-ffast` и `-faligned` обязательны для активации APB hardware prefetch на
 ISA V1-V5 — даёт ×1.5 на streaming Q4_K reads.
@@ -427,38 +430,40 @@ find /opt /usr -name "cblas.h" 2>/dev/null | grep eml
 
 Должен вернуть `/opt/mcst/eml/include/eml/cblas.h` или аналог.
 
-### `lcc: error: incorrect argument for "-mtune" switch` / `-march=elbrus-8c` unrecognised
+### `lcc: error: incorrect argument for "-mtune" switch`
 
-**Важно: -march и -mtune в LCC принимают РАЗНЫЕ форматы:**
+**`-mtune` больше не передаётся по умолчанию.** Каждый LCC release
+принимает разный набор моделей (`elbrus-8c`, `elbrus-8c2`, `elbrus-16c`,
+...), `-mtune=elbrus-vN` (ISA-формат) LCC не понимает в принципе. Любой
+default ломал сборку на каких-то машинах. Компилятор сам подберёт
+tuning под `-march`.
 
-- `-march`: ISA-версии (`elbrus-v3` / `v4` / `v5` / `v6`) ИЛИ названия
-  моделей (`elbrus-8c`, `elbrus-16c`).
-- `-mtune`: **ТОЛЬКО** названия моделей или `native`. Не понимает
-  `elbrus-vN`!
-
-Допустимые значения `-mtune` (LCC 1.29):
-```
-native, elbrus-2c+, elbrus-4c, elbrus-8c, elbrus-1c+, elbrus-8c2,
-elbrus-12c, elbrus-16c, elbrus-2c3, elbrus-48c, elbrus-8v7
-```
-
-`scripts/build-elbrus.sh` (commit после 19.05.2026) детектит ISA-версию
-хоста и подаёт:
-- `-march=elbrus-vN` (ISA версия, стабильная)
-- `-mtune=native` (LCC сам выбирает оптимальную модель под текущий CPU)
-
-| Машина          | ISA | По умолчанию `-march`  | По умолчанию `-mtune`     |
-|-----------------|-----|------------------------|---------------------------|
-| E2C+, E4C, 4×4C | v3  | `elbrus-v3`            | `native` → `elbrus-4c`    |
-| E8C             | v4  | `elbrus-v4`            | `native` → `elbrus-8c`    |
-| E8C2 / 8СВ      | v5  | `elbrus-v5`            | `native` → `elbrus-8c2`   |
-| E16C            | v6  | `elbrus-v6`            | `native` → `elbrus-16c`   |
-
-Override через env (для cross-build):
+Если хочешь явный `-mtune` (например для cross-build):
 
 ```bash
-# Бинарь работает на любом v4+, оптимизирован под 8c2:
-PT_E2K_MARCH=elbrus-v4 PT_E2K_MTUNE=elbrus-8c2 ./scripts/build-elbrus.sh
+PT_E2K_MTUNE=elbrus-8c2 ./scripts/build-elbrus.sh
+# или для cmake напрямую:
+cmake .. -DPT_E2K_MTUNE=elbrus-16c
+```
+
+### `-march=elbrus-8c` unrecognised — старые версии LCC
+
+Симптом: `lcc: unrecognized command line option '-march=elbrus-8c'`.
+Решение: использовать ISA-версии (`elbrus-vN`). `scripts/build-elbrus.sh`
+автоматически детектит:
+
+| Машина          | ISA | По умолчанию `-march`  |
+|-----------------|-----|------------------------|
+| E2C+, E4C, 4×4C | v3  | `elbrus-v3`            |
+| E8C             | v4  | `elbrus-v4`            |
+| E8C2 / 8СВ      | v5  | `elbrus-v5`            |
+| E16C            | v6  | `elbrus-v6`            |
+
+Override:
+
+```bash
+# Бинарь под v4, кросс-build с E8C2:
+PT_E2K_MARCH=elbrus-v4 ./scripts/build-elbrus.sh
 ```
 
 ### `__builtin_e2k_qpmaddubsh is not supported for current cpu mode`
