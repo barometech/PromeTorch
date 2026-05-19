@@ -259,11 +259,11 @@ if [ "$NEED_RECONFIGURE" = "1" ]; then
         -DPT_USE_NMCARD=OFF \
         -DPT_BUILD_TESTS=ON \
         -DPT_BUILD_PYTHON=OFF \
-        -DPT_BUILD_SHARED_LIBS=ON 2>&1 | tee /tmp/pt_cmake.log
+        -DPT_BUILD_SHARED_LIBS=ON 2>&1 | tee $BUILD_DIR/pt_cmake.log
 
     echo
     echo "[cmake] Результат поиска зависимостей:"
-    grep -E "EML headers|libnuma found|EML BLAS|NUMA-aware|Found OpenMP|TUDA: " /tmp/pt_cmake.log || true
+    grep -E "EML headers|libnuma found|EML BLAS|NUMA-aware|Found OpenMP|TUDA: " $BUILD_DIR/pt_cmake.log || true
     echo
 fi
 
@@ -280,7 +280,7 @@ for tgt in $TARGETS; do
         echo
         echo "ERROR: target '$tgt' не собрался."
         echo "       Логи: $BUILD_DIR/CMakeFiles/${tgt}.dir/"
-        echo "       Полный вывод CMake: /tmp/pt_cmake.log"
+        echo "       Полный вывод CMake: $BUILD_DIR/pt_cmake.log"
         exit 1
     fi
 done
