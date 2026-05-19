@@ -25,6 +25,36 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="${PT_BUILD_DIR:-$PROJECT_DIR/build_elbrus}"
 TOOLCHAIN="$PROJECT_DIR/cmake/toolchains/e2k-elbrus.cmake"
 
+# Parse CLI flags.
+USE_EML="${PT_USE_EML_BLAS:-ON}"  # default ON; --no-eml выключает.
+for arg in "$@"; do
+    case "$arg" in
+        --no-eml|--without-eml)
+            USE_EML=OFF
+            ;;
+        --help|-h)
+            cat <<'HELP'
+Usage: ./scripts/build-elbrus.sh [--no-eml]
+
+Опции:
+  --no-eml      собрать без libeml_mt (fallback на TUDA 6×6 микроядро).
+                Нужно когда системный EML несовместим с CPU
+                (например МЦСТ bugzilla #10075 на E16C).
+
+Env:
+  PT_E2K_MARCH=elbrus-vN       override -march (default — auto-detect)
+  PT_E2K_MTUNE=elbrus-8c2      override -mtune (по умолчанию не передаётся)
+  PT_BUILD_DIR=path            build dir (default: build_elbrus/)
+  PT_TARGETS="..."             список targets
+  PT_JOBS=N                    параллельность сборки
+  PT_RECONFIGURE=1             принудительный re-configure
+  PT_USE_EML_BLAS=OFF          то же что --no-eml
+HELP
+            exit 0
+            ;;
+    esac
+done
+
 # Targets по умолчанию — минимальный рабочий набор без Python bindings
 # и без всех examples/. Полный набор тянет gguf, promeserve, etc — overhead.
 DEFAULT_TARGETS="aten_cpu torch_autograd tuda_tests_standalone tuda_tests test_gguf_inference"
@@ -233,6 +263,11 @@ else
     echo "       -mtune НЕ передан (LCC сам подберёт под -march)"
 fi
 echo "       (override через PT_E2K_MARCH / PT_E2K_MTUNE)"
+echo "[deps] EML BLAS: $USE_EML"
+if [ "$USE_EML" = "OFF" ]; then
+    echo "       (TUDA 6×6 микроядро fallback — медленнее ~30× в GEMM,"
+    echo "        но не зависит от системного libeml_mt.so)"
+fi
 echo
 
 # ============================================================================
@@ -257,6 +292,7 @@ if [ "$NEED_RECONFIGURE" = "1" ]; then
         -DPT_USE_LINQ=OFF \
         -DPT_USE_CUDA=OFF \
         -DPT_USE_NMCARD=OFF \
+        -DPT_USE_EML_BLAS="$USE_EML" \
         -DPT_BUILD_TESTS=ON \
         -DPT_BUILD_PYTHON=OFF \
         -DPT_BUILD_SHARED_LIBS=ON 2>&1 | tee $BUILD_DIR/pt_cmake.log
