@@ -18,7 +18,9 @@
 // Our own parallelism (NUMA tiling via std::thread) handles the outer level.
 // PT_NO_EML=1 disables EML BLAS entirely (use our scalar GEMM instead).
 // Needed when EML's internal OMP fork causes SIGILL on E2K.
-#if defined(TUDA_E2K) && __has_include(<eml/cblas.h>)
+// PT_USE_EML_BLAS приходит из CMake -DPT_USE_EML_BLAS=ON (default).
+// При OFF — fallback на TUDA 6×6 микроядро в tuda::blas::sgemm.
+#if defined(TUDA_E2K) && defined(PT_USE_EML_BLAS) && __has_include(<eml/cblas.h>)
 #include <cstdlib>
 static inline bool eml_disabled() {
     static int cached = -1;
@@ -28,7 +30,6 @@ static inline bool eml_disabled() {
     }
     return cached == 1;
 }
-#define PT_USE_EML_BLAS 1
 #include <eml/cblas.h>
 #include <omp.h>
 #endif
