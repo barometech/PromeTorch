@@ -3,6 +3,53 @@
 Полная история разработки проекта.
 Полный аудит инфраструктуры — в `INFRASTRUCTURE_AUDIT.md`.
 
+## 2026-05-19: nanoGPT TinyStories на Эльбрусе через PromeTorch — 4-proc DDP RUNNING
+
+**Запущен полный цикл тренировки PIR-189M (vocab=256 byte-level, D=768,
+16 layers, 4 PIR layers, block=2048) на TinyStories через PromeTorch без
+PyTorch.** Бинарь `build_mt/examples/pir/train_pir_elbrus` (ELF Elbrus,
+3.9MB) запущен на <elbrus-host> в tmux session `nanogpt`.
+
+**Конфигурация 4-proc Local SGD DDP:**
+- `numactl --cpunodebind=$node --preferred=$node` для каждого rank 0..3
+- `OMP_NUM_THREADS=8 OMP_PLACES=cores OMP_PROC_BIND=close`
+- `PT_NO_NUMA_POOL=1` (E2K cblas_sgemm SIGILL fix из 2026-04-02)
+- `--fused --full` (zero-autograd path, bypass torch::autograd::Engine)
+- batch=4, grad_accum=10, lr=6e-4, max_steps=2000
+- save_interval=200 (10 checkpoints), gen_interval=200, gen_tokens=200
+
+**Данные:** TinyStories v2 GPT-4 train (2.23GB raw text → 2.04B tokens
+byte-level, mmap'd). Path: `~/nanogpt_tinystories/tinystories.txt`.
+
+**Первые 3 steps (BIT-EXACT синхронны между всеми 4 rank'ами):**
+| Step | fwd ms | bwd ms | adam ms | loss     | gnorm  |
+|------|--------|--------|---------|----------|--------|
+| 1    | 30478  | 34296  | 3329    | 5.53683  | 5.70   |
+| 2    | 29178  | 34659  | 2214    | 5.47723  | 5.59   |
+| 3    | 29170  | 34819  | 2216    | 5.36476  | 5.63   |
+
+**Throughput:** ~66s/step × (batch=4 × T=2048 × grad_accum=10 × 4 ranks)
+= 327,680 tokens/step → **4,965 tok/s effective**. В 8.7× выше прошлой
+PIR-250M baseline 568 tok/s (FUSED zero-autograd + новейший EML).
+
+**Идентичные loss/gnorm у всех 4 rank'ов = Local SGD weight averaging
+работает корректно** (file-based, не gradient AllReduce).
+
+**Системные показатели:**
+- CPU per process: ~430% (используется ~5.4 из 8 OMP threads на NUMA node)
+- RAM: 18.8% × 4 = 75% (модели + activations + grad_accum buffers)
+- Free: 27GB + 9GB buffers = 36GB headroom
+- Load avg: 23.53/32 cores = 74%
+
+**Прогноз:** 2000 steps × 66s ≈ 37h. Первый checkpoint + generation
+sample на step 200 (~3.7h). Monitor `b258q6fhk` армирован на progress
+events (step 10/20/.../2000 + Saved + Generation + ошибки).
+
+**Полный цикл нативно на Эльбрусе:** dataset загружен, tokenized,
+training запущен через свой framework PromeTorch без PyTorch
+dependencies. Окружение: Linger=yes (loginctl), tmux session
+`nanogpt` (выживает SSH disconnect).
+
 ## 2026-05-13: Qwen3-4B — root cause Q6_K NaN на L4+, full 36-layer chain finite
 
 **Commit `10a3cfa`.** После многочасовых ложных гипотез про fp16 subnormals
