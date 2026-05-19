@@ -5958,9 +5958,12 @@ public:
                         s = _mm_hadd_ps(s, s);
                         float dot = _mm_cvtss_f32(s);
                         for (; d < head_dim; ++d) dot += q_head[d] * k_head[d];
-#elif defined(__e2k__)
-                        // 4-way fp32 SIMD через qpfmuls + qpfadds. q_head/k_head выровнены
-                        // на 16B (std::vector + posix_memalign в TP init). head_dim=128 → 32 шагов.
+#elif defined(__e2k__) && defined(__iset__) && __iset__ >= 5
+                        // 4-way fp32 SIMD через qpfmuls + qpfadds. v5+ (E8C2) only —
+                        // на v3/v4 (E4C/E8C) lcc errors out with
+                        // "not supported for current cpu mode" without this guard.
+                        // q_head/k_head выровнены на 16B (std::vector + posix_memalign в TP init).
+                        // head_dim=128 → 32 шагов.
                         typedef long long v2di __attribute__((vector_size(16)));
                         v2di acc = {0, 0};
                         int64_t d = 0;
@@ -6003,7 +6006,8 @@ public:
                             _mm256_storeu_ps(out_head + d, o);
                         }
                         for (; d < head_dim; ++d) out_head[d] += w * v_head[d];
-#elif defined(__e2k__)
+#elif defined(__e2k__) && defined(__iset__) && __iset__ >= 5
+                        // v5+ (E8C2) qp* fp intrinsics — guarded for older E2K (v3/v4).
                         typedef long long v2di __attribute__((vector_size(16)));
                         float warr[4] = {w, w, w, w};
                         v2di wv;

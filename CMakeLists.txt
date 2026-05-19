@@ -1061,7 +1061,12 @@ if(PT_BUILD_TESTS)
     include(GoogleTest)
     gtest_discover_tests(c10_tests)
 
-    # ATen Test executable
+    # ATen Test executable.
+    # test_tensor.cpp uses Tensor::add()/sub()/mul() which inline
+    # GradMode::is_enabled() from grad_mode.h → linker needs torch_autograd
+    # (where GradMode::get_enabled_ singleton lives). Without it the build
+    # passes on Windows (DLL inlines) but fails on Linux/E2K with
+    # "undefined reference to torch::autograd::GradMode::get_enabled_()".
     add_executable(aten_tests
         test/cpp/test_tensor.cpp
     )
@@ -1069,6 +1074,7 @@ if(PT_BUILD_TESTS)
     target_link_libraries(aten_tests
         PRIVATE
         aten
+        torch_autograd
         GTest::gtest
         GTest::gtest_main
     )
@@ -1147,7 +1153,9 @@ if(PT_BUILD_TESTS)
 
     gtest_discover_tests(data_tests)
 
-    # Comprehensive All-Ops Test
+    # Comprehensive All-Ops Test.
+    # Same GradMode singleton issue as aten_tests — Tensor API inlines
+    # GradMode::is_enabled(), so torch_autograd is required at link time.
     add_executable(all_ops_tests
         test/cpp/test_all_ops.cpp
     )
@@ -1155,6 +1163,7 @@ if(PT_BUILD_TESTS)
     target_link_libraries(all_ops_tests
         PRIVATE
         aten
+        torch_autograd
         GTest::gtest
         GTest::gtest_main
     )
@@ -1248,7 +1257,9 @@ if(PT_BUILD_TESTS)
 
     gtest_discover_tests(nn_functional_tests)
 
-    # Edge Cases Test
+    # Edge Cases Test.
+    # Same GradMode singleton issue as aten_tests — Tensor API inlines
+    # GradMode::is_enabled(), so torch_autograd is required at link time.
     add_executable(edge_case_tests
         test/cpp/test_edge_cases.cpp
     )
@@ -1256,6 +1267,7 @@ if(PT_BUILD_TESTS)
     target_link_libraries(edge_case_tests
         PRIVATE
         aten
+        torch_autograd
         GTest::gtest
         GTest::gtest_main
     )

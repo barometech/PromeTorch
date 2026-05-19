@@ -33,7 +33,18 @@ namespace torch {
 namespace io {
 namespace cpu_quant {
 
-#ifdef __e2k__
+// __builtin_e2k_qpmaddubsh + qp*fp intrinsics are v5+ only (E8C2 onwards).
+// LCC defines __iset__ = 3/4/5/6 for elbrus-v3/v4/v5/v6.
+// Without the version guard, lcc on E8C (v4) errors out with
+// "built-in function not supported for current cpu mode". Scalar fallback
+// path below handles all older E2K cores.
+#if defined(__e2k__) && defined(__iset__) && __iset__ >= 5
+#define PT_E2K_VNNI 1
+#else
+#define PT_E2K_VNNI 0
+#endif
+
+#if PT_E2K_VNNI
 typedef long long v2di __attribute__((vector_size(16)));
 static const v2di SOA4_ONES16 = {0x0001000100010001LL, 0x0001000100010001LL};
 static const v2di SOA4_SHIFT128 = {0x0000008000000080LL, 0x0000008000000080LL};
