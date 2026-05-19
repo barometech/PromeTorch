@@ -437,7 +437,7 @@ inline void q8_soa4_gemv(const Q8SoA4* w,
     const bool per_block = q8_soa4_per_block_scale_enabled();
     const float scale_a_scalar = scale_a_or_array[0];
 
-#ifdef __e2k__
+#if PT_E2K_VNNI
     v2di scale_a_v_scalar;
     if (!per_block) {
         float arr[4] = {scale_a_scalar, scale_a_scalar, scale_a_scalar, scale_a_scalar};
@@ -546,7 +546,7 @@ inline void q8_soa4_gemv_dual(const Q8SoA4* w0, const Q8SoA4* w1,
     const bool per_block = q8_soa4_per_block_scale_enabled();
     const float scale_a_scalar = scale_a_or_array[0];
 
-#ifdef __e2k__
+#if PT_E2K_VNNI
     v2di scale_a_v_scalar;
     if (!per_block) {
         float arr[4] = {scale_a_scalar, scale_a_scalar, scale_a_scalar, scale_a_scalar};
@@ -661,7 +661,7 @@ inline void q8_soa4_gemv_triple(const Q8SoA4* w0, const Q8SoA4* w1, const Q8SoA4
     const bool per_block = q8_soa4_per_block_scale_enabled();
     const float scale_a_scalar = scale_a_or_array[0];
 
-#ifdef __e2k__
+#if PT_E2K_VNNI
     v2di scale_a_v_scalar;
     if (!per_block) {
         float arr[4] = {scale_a_scalar, scale_a_scalar, scale_a_scalar, scale_a_scalar};
