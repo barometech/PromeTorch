@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include "c10/core/Device.h"
+#include "c10/util/Exception.h"
 
 using namespace c10;
 
@@ -170,7 +171,11 @@ TEST(DeviceConstantsTest, kCUDA) {
 // ============================================================================
 
 TEST(DeviceTest, InvalidStringThrows) {
-    EXPECT_THROW(Device("invalid"), std::runtime_error);
-    EXPECT_THROW(Device(""), std::runtime_error);
-    EXPECT_THROW(Device("cuda:abc"), std::runtime_error);
+    // Device::parse() throws c10::Error (через PT_ERROR macro), не
+    // std::runtime_error. c10::Error extends std::exception, не runtime_error.
+    // Старая версия теста fail'ила на любой платформе — на Windows
+    // gtest_discover_tests почему-то скипала, на lcc/v4 — fail.
+    EXPECT_THROW(Device("invalid"), c10::Error);
+    EXPECT_THROW(Device(""), c10::Error);
+    EXPECT_THROW(Device("cuda:abc"), c10::Error);
 }

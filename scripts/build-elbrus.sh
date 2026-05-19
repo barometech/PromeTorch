@@ -173,7 +173,64 @@ echo "[deps] OK — все зависимости найдены."
 echo
 
 # ============================================================================
-# 2. CMake configure
+# 2. Host CPU detection — выбираем -mtune под текущую машину
+# ============================================================================
+# <contributor>ов баг (2026-05-08): на E8C (v4) LCC принимает -mtune=elbrus-8c2
+# как WARNING, не error. CMake check_cxx_compiler_flag тогда возвращает true
+# и бинарь генерируется под v5 → "ошибка формата выполняемого файла" на v4.
+# Чиним через явный host CPU detection:
+#   - lscpu / cpuinfo / lcc --target → определяем номер ISA
+#   - подаём -DPT_E2K_MTUNE=elbrus-vN
+# Override: PT_E2K_MTUNE=elbrus-v6 ./build-elbrus.sh
+detect_e2k_mtune() {
+    # Allow user override via env
+    if [ -n "${PT_E2K_MTUNE:-}" ]; then
+        echo "$PT_E2K_MTUNE"; return
+    fi
+    # 1. Try lcc --target-name (LCC >= 1.27)
+    if command -v lcc >/dev/null 2>&1; then
+        local t
+        t="$(lcc --target-name 2>/dev/null || true)"
+        case "$t" in
+            *elbrus-v6*|*-16c*|*-16С*) echo "elbrus-v6"; return ;;
+            *elbrus-v5*|*-8c2*|*-8СВ*) echo "elbrus-v5"; return ;;
+            *elbrus-v4*|*-8c*|*-8С*)   echo "elbrus-v4"; return ;;
+            *elbrus-v3*|*-4c*|*-4С*)   echo "elbrus-v3"; return ;;
+        esac
+    fi
+    # 2. lscpu (Alt Linux под Эльбрус добавляет model name "E2C+/E4C/E8C/E16C")
+    local model
+    model="$(lscpu 2>/dev/null | awk -F: '/Model name|Имя модели/ {gsub(/^ +/,"",$2); print $2; exit}')"
+    case "$model" in
+        *E16C*|*16С*)            echo "elbrus-v6"; return ;;
+        *E8CB*|*8СВ*|*E8C2*)     echo "elbrus-v5"; return ;;
+        *E8C*|*8С*)              echo "elbrus-v4"; return ;;
+        *E4C*|*4С*|*E2C*|*2С*)   echo "elbrus-v3"; return ;;
+    esac
+    # 3. /proc/cpuinfo fallback (некоторые ОС не имеют lscpu)
+    if [ -r /proc/cpuinfo ]; then
+        if grep -qiE "E16C|elbrus-v6"        /proc/cpuinfo; then echo "elbrus-v6"; return; fi
+        if grep -qiE "E8CB|E8C2|elbrus-v5"   /proc/cpuinfo; then echo "elbrus-v5"; return; fi
+        if grep -qiE "E8C|elbrus-v4"         /proc/cpuinfo; then echo "elbrus-v4"; return; fi
+        if grep -qiE "E4C|E2C|elbrus-v3"     /proc/cpuinfo; then echo "elbrus-v3"; return; fi
+    fi
+    # Safe default: v4 supports E8C+ (2019+) — runs everywhere modern, no v5+ intrinsics.
+    echo "elbrus-v4"
+}
+
+E2K_MTUNE="$(detect_e2k_mtune)"
+# Toolchain читает PT_E2K_MARCH через env (cmake/toolchains/e2k-elbrus.cmake).
+# По умолчанию march = mtune (одинаковая версия), переопределяемо отдельно
+# через `PT_E2K_MARCH=elbrus-v4 PT_E2K_MTUNE=elbrus-v5 ./build-elbrus.sh`
+# (например для cross-build бинаря который должен работать на v4 но
+# оптимизирован под v5).
+export PT_E2K_MARCH="${PT_E2K_MARCH:-$E2K_MTUNE}"
+echo "[deps] E2K target ISA: -march=$PT_E2K_MARCH -mtune=$E2K_MTUNE"
+echo "       (override через PT_E2K_MARCH / PT_E2K_MTUNE)"
+echo
+
+# ============================================================================
+# 3. CMake configure
 # ============================================================================
 mkdir -p "$BUILD_DIR"
 cd "$BUILD_DIR"
@@ -189,6 +246,7 @@ if [ "$NEED_RECONFIGURE" = "1" ]; then
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_C_COMPILER="$CC" \
         -DCMAKE_CXX_COMPILER="$CXX" \
+        -DPT_E2K_MTUNE="$E2K_MTUNE" \
         -DPT_USE_TUDA=ON \
         -DPT_USE_LINQ=OFF \
         -DPT_USE_CUDA=OFF \

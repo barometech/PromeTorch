@@ -288,16 +288,21 @@ TEST(TensorImplTest, AutogradMeta) {
 // ============================================================================
 
 TEST(TensorImplTest, ReferenceCount) {
+    // make_tensor_impl() возвращает std::shared_ptr<TensorImpl>. shared_ptr
+    // имеет свой собственный refcount, не дёргает TensorImpl::retain()/release()
+    // (intrusive ref_count_). Проверяем shared_ptr.use_count(), а не
+    // raw_ptr->use_count() — иначе тест fail'ит на lcc/v4 потому что
+    // intrusive refcount остаётся 1 при копировании shared_ptr.
     auto impl = make_tensor_impl({2, 3}, ScalarType::Float, kCPU);
-    auto raw_ptr = impl.get();
 
-    EXPECT_EQ(raw_ptr->use_count(), 1);
-    EXPECT_TRUE(raw_ptr->unique());
+    EXPECT_EQ(impl.use_count(), 1);
+    EXPECT_TRUE(impl.unique());
 
     // shared_ptr increases count
     auto impl2 = impl;
-    EXPECT_EQ(raw_ptr->use_count(), 2);
-    EXPECT_FALSE(raw_ptr->unique());
+    EXPECT_EQ(impl.use_count(), 2);
+    EXPECT_EQ(impl2.use_count(), 2);
+    EXPECT_FALSE(impl.unique());
 }
 
 // ============================================================================
