@@ -40,13 +40,23 @@ if(NOT CMAKE_CXX_COMPILER)
 endif()
 
 # Elbrus tuning — универсальный target по ISA-версии:
-#   -march=elbrus-v4 — все 8C/8C2/8СВ (covers everything since 2019)
-#   -march=elbrus-v5 — 8СВ
-#   -march=elbrus-v6 — 16С
+#   -march=elbrus-v3 — E4C (4-чиповый E4C 4х4, 16 ядер, 750 MHz)
+#   -march=elbrus-v4 — E8C (8 ядер, single chip, 1300 MHz) — safe baseline
+#   -march=elbrus-v5 — E8C2/8СВ (32 cores 4-chip, 1500 MHz, qpmaddubsh+)
+#   -march=elbrus-v6 — E16C (16 cores, 2000 MHz)
 # Старые конкретные имена (-march=elbrus-8c) новые версии LCC и gcc-elbrus
-# не понимают: используй -march=elbrus-v4 как safe baseline.
-set(CMAKE_C_FLAGS_INIT "-march=elbrus-v4 -O3")
-set(CMAKE_CXX_FLAGS_INIT "-march=elbrus-v4 -O3")
+# не понимают: используй -march=elbrus-vN как safe.
+#
+# Override через env PT_E2K_MARCH=elbrus-vN (scripts/build-elbrus.sh
+# auto-detect'ит host CPU и устанавливает корректное значение).
+if(DEFINED ENV{PT_E2K_MARCH})
+    set(_E2K_MARCH "$ENV{PT_E2K_MARCH}")
+else()
+    set(_E2K_MARCH "elbrus-v4")
+endif()
+set(CMAKE_C_FLAGS_INIT "-march=${_E2K_MARCH} -O3")
+set(CMAKE_CXX_FLAGS_INIT "-march=${_E2K_MARCH} -O3")
+message(STATUS "Elbrus toolchain: -march=${_E2K_MARCH}")
 
 # LCC supports most GCC flags
 # -fwhole — LCC whole-program optimization (optional)
