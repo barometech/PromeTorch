@@ -11,7 +11,7 @@ date +"Start: %F %T"
 # Базовый prompt без --chat (deepseek-coder = base model)
 echo ""
 echo "--- TEST 1: code completion (без chat template) ---"
-env PT_PER_BLOCK_SCALE=1 PT_NO_NUMA_POOL=1 OMP_NUM_THREADS=32 \
+env PT_PER_BLOCK_SCALE=1 PT_NO_NUMA_POOL=1 OMP_NUM_THREADS=${PT_OMP_THREADS:-$(nproc)} \
     PT_Q8_SOA=1 PT_LM_HEAD_FP=1 PT_NO_FFN_SOA=1 \
     timeout 240 ./build_elbrus/examples/gguf/test_gguf_inference \
     "$HOME/gguf_models/deepseek-coder-7b-Q4_K_M.gguf" \
@@ -20,7 +20,7 @@ env PT_PER_BLOCK_SCALE=1 PT_NO_NUMA_POOL=1 OMP_NUM_THREADS=32 \
 
 echo ""
 echo "--- TEST 2: chat instruct ---"
-env PT_PER_BLOCK_SCALE=1 PT_NO_NUMA_POOL=1 OMP_NUM_THREADS=32 \
+env PT_PER_BLOCK_SCALE=1 PT_NO_NUMA_POOL=1 OMP_NUM_THREADS=${PT_OMP_THREADS:-$(nproc)} \
     PT_Q8_SOA=1 PT_LM_HEAD_FP=1 PT_NO_FFN_SOA=1 \
     timeout 240 ./build_elbrus/examples/gguf/test_gguf_inference \
     "$HOME/gguf_models/deepseek-coder-7b-Q4_K_M.gguf" \

@@ -33,7 +33,7 @@ $task
 Ответ: только один <tool_call>, без других слов до или после."
 
     local OUT=run_logs/multiv2_${name}.log
-    env PT_PER_BLOCK_SCALE=1 PT_NO_NUMA_POOL=1 OMP_NUM_THREADS=32 \
+    env PT_PER_BLOCK_SCALE=1 PT_NO_NUMA_POOL=1 OMP_NUM_THREADS=${PT_OMP_THREADS:-$(nproc)} \
         PT_Q8_SOA=1 PT_LM_HEAD_FP=1 PT_NO_FFN_SOA=1 \
         timeout 240 "$BIN" "$MODEL" \
         --max-tokens 2000 --greedy --chat --temp 0 \

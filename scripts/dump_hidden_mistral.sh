@@ -6,7 +6,7 @@ sleep 5
 
 # Mistral with hidden state dump (working baseline)
 PT_Q8_SOA=1 PT_PER_BLOCK_SCALE=1 PT_LM_HEAD_FP=1 PT_NO_FFN_SOA=1 PT_DUMP_HIDDEN=1 \
-PT_NO_NUMA_POOL=1 OMP_NUM_THREADS=32 \
+PT_NO_NUMA_POOL=1 OMP_NUM_THREADS=${PT_OMP_THREADS:-$(nproc)} \
     ./build_elbrus/examples/gguf/test_gguf_inference \
         /home/<user>/gguf_models/mistral-7b-Q4_K_M.gguf \
         --max-tokens 5 --greedy --chat \

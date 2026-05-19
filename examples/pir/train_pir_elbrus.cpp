@@ -1100,10 +1100,11 @@ void setup_numa_threads(int num_threads = 0) {
               << " OMP_PROC_BIND=" << (bind ? bind : "(not set)") << std::endl;
 
     if (!places || !bind) {
+        const long n = sysconf(_SC_NPROCESSORS_ONLN);
         std::cout << "WARNING: For NUMA-optimal performance on Elbrus, set:\n"
                   << "  export OMP_PLACES=cores\n"
                   << "  export OMP_PROC_BIND=close\n"
-                  << "  export OMP_NUM_THREADS=32\n"
+                  << "  export OMP_NUM_THREADS=" << (n > 0 ? n : 8) << "\n"
                   << std::endl;
     }
 #else

@@ -3,11 +3,11 @@ cd ~/promethorch
 rm -f /dev/shm/pir_w_* /dev/shm/pir_sync_init
 rm -f ~/promethorch/logs/pir_bpe_*.log
 mkdir -p ~/promethorch/logs ~/promethorch/checkpoints_bpe
-for node in 0 1 2 3; do
-  PT_NO_NUMA_POOL=1 OMP_NUM_THREADS=8 OMP_PLACES=cores OMP_PROC_BIND=close \
+NPROCS=${PT_NPROCS:-4}; for ((node=0; node<NPROCS; node++)); do
+  PT_NO_NUMA_POOL=1 OMP_NUM_THREADS=${PT_OMP_PER_RANK:-$(($(nproc)/4))} OMP_PLACES=cores OMP_PROC_BIND=close \
   numactl --cpunodebind=$node --preferred=$node \
   ./build_mt/examples/pir/train_pir_elbrus \
-    --fused --full --batch_size 2 --rank $node --nprocs 4 \
+    --fused --full --batch_size 2 --rank $node --nprocs ${PT_NPROCS:-4} \
     --max_steps 1000 --log_interval 50 --gen_interval 200 --gen_tokens 100 \
     --save_interval 200 --save_dir checkpoints_bpe \
     --grad_accum 20 --seed $((42+node)) \

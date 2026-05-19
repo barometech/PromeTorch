@@ -20,7 +20,7 @@ run_sp() {
     echo "==== $label SP ===="
     pkill -9 -f test_gguf_inference 2>/dev/null
     sleep 2
-    env PT_PER_BLOCK_SCALE=1 PT_NO_NUMA_POOL=1 OMP_NUM_THREADS=32 \
+    env PT_PER_BLOCK_SCALE=1 PT_NO_NUMA_POOL=1 OMP_NUM_THREADS=${PT_OMP_THREADS:-$(nproc)} \
         PT_Q8_SOA=1 PT_LM_HEAD_FP=1 PT_NO_FFN_SOA=1 \
         "$BIN" "$HOME/gguf_models/$model" \
         --max-tokens 40 --greedy --chat \
@@ -34,13 +34,13 @@ run_tp4() {
     echo "==== $label TP-4 ===="
     pkill -9 -f test_gguf_inference 2>/dev/null
     sleep 2
-    for rank in 0 1 2 3; do
-        PT_PER_BLOCK_SCALE=1 PT_NO_NUMA_POOL=1 OMP_NUM_THREADS=8 \
+    NPROCS=${PT_NPROCS:-4}; for ((rank=0; rank<NPROCS; rank++)); do
+        PT_PER_BLOCK_SCALE=1 PT_NO_NUMA_POOL=1 OMP_NUM_THREADS=${PT_OMP_PER_RANK:-$(($(nproc)/4))} \
         PT_NUMA_REPLICATE=0 PT_DDP_SHM=1 PT_Q8_SOA=1 \
         PT_LM_HEAD_FP=1 PT_NO_FFN_SOA=1 \
         numactl --cpunodebind=$rank --membind=$rank \
         "$BIN" "$HOME/gguf_models/$model" \
-            --nprocs 4 --rank $rank \
+            --nprocs ${PT_NPROCS:-4} --rank $rank \
             --master-addr 127.0.0.1 --master-port 29500 \
             --max-tokens 40 --greedy --chat \
             "$PROMPT_RU" \
