@@ -222,10 +222,16 @@ detect_e2k_march() {
 }
 
 export PT_E2K_MARCH="${PT_E2K_MARCH:-$(detect_e2k_march)}"
-export PT_E2K_MTUNE="${PT_E2K_MTUNE:-native}"
+# PT_E2K_MTUNE по умолчанию НЕ устанавливается. Если юзер захочет
+# конкретный tuning model — может export'ить вручную. Хардкод
+# -mtune=anything ломал сборку на ряде машин — поэтому только -march.
 echo "[deps] E2K target ISA:"
 echo "       -march=$PT_E2K_MARCH  (ISA version)"
-echo "       -mtune=$PT_E2K_MTUNE  (CPU model — 'native' = LCC сам выбирает)"
+if [ -n "${PT_E2K_MTUNE:-}" ]; then
+    echo "       -mtune=$PT_E2K_MTUNE  (explicit override)"
+else
+    echo "       -mtune НЕ передан (LCC сам подберёт под -march)"
+fi
 echo "       (override через PT_E2K_MARCH / PT_E2K_MTUNE)"
 echo
 
@@ -246,7 +252,7 @@ if [ "$NEED_RECONFIGURE" = "1" ]; then
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_C_COMPILER="$CC" \
         -DCMAKE_CXX_COMPILER="$CXX" \
-        -DPT_E2K_MTUNE="$PT_E2K_MTUNE" \
+        ${PT_E2K_MTUNE:+-DPT_E2K_MTUNE="$PT_E2K_MTUNE"} \
         -DPT_USE_TUDA=ON \
         -DPT_USE_LINQ=OFF \
         -DPT_USE_CUDA=OFF \

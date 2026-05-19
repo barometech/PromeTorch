@@ -160,20 +160,18 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "e2k|elbrus")
     # on a benchmark that looks very similar to our inner loop shape.
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ffast -faligned")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fprefetch -fcache-opt")
-    # -mtune ВАЖНО: LCC принимает в -mtune ТОЛЬКО названия моделей
-    # (elbrus-4c / elbrus-8c / elbrus-8c2 / elbrus-16c / ...), а в -march
-    # принимает И ISA-версии (elbrus-v3..v6) И модели. Прошлая попытка
-    # подать -mtune=elbrus-v4 ломала сборку на ВСЕХ Эльбрусах:
-    #   lcc: error: incorrect argument for "-mtune" switch
-    #
-    # Default "native" — LCC сам выбирает оптимальное под текущий host CPU.
-    # Override через -DPT_E2K_MTUNE=elbrus-8c (или 8c2/16c) для cross-build.
-    if(NOT DEFINED PT_E2K_MTUNE)
-        set(PT_E2K_MTUNE "native" CACHE STRING
-            "E2K -mtune model (native|elbrus-4c|elbrus-8c|elbrus-8c2|elbrus-16c|...)")
+    # -mtune НЕ передаём вообще. -march уже задаёт target ISA, а названия
+    # моделей в -mtune (elbrus-4c/8c/8c2/16c) разные у каждого LCC release.
+    # Прошлые попытки ставить -mtune=elbrus-vN/native/8c2 ломали сборку
+    # как минимум на E8C/E16C. Compiler сам выберет подходящий tuning под
+    # выбранный -march. При нужде юзер может добавить -mtune=... через
+    # CMAKE_CXX_FLAGS, но это не default.
+    if(DEFINED PT_E2K_MTUNE AND NOT PT_E2K_MTUNE STREQUAL "")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mtune=${PT_E2K_MTUNE}")
+        message(STATUS "Elbrus E2K: explicit -mtune=${PT_E2K_MTUNE}")
+    else()
+        message(STATUS "Elbrus E2K: -mtune не передан (LCC сам подберёт под -march)")
     endif()
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mtune=${PT_E2K_MTUNE}")
-    message(STATUS "Elbrus E2K: -mtune=${PT_E2K_MTUNE} (override via -DPT_E2K_MTUNE=...)")
     # -frestrict-all applies __restrict to every pointer declared in the TU,
     # including vector-intrinsic contexts where -frestrict-params alone is
     # ignored. Upgrade from params-only.
