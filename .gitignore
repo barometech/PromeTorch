@@ -115,3 +115,8 @@ scripts/_build_cpu_gan.bat
 scripts/run_cifar.bat
 scripts/run_cifar_smoke.bat
 .tmp_*
+
+# Внешние материалы / переписки от контрибьюторов (не в open repo)
+РЕПОЗИТОРИЙ*ФИКСЫ*/
+ELBRUS_REPORT.pdf
+*.404
