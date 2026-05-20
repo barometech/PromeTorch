@@ -5460,19 +5460,10 @@ public:
         // a Q4_K → SoA4 repack. PT_Q8_SOA=1 is implied for PT8 SoA4 files.
         const char* soa_env = std::getenv("PT_Q8_SOA");
         bool use_q8_soa = (soa_env && soa_env[0] == '1') || use_pt8_;
-        // 8C (v4) и старше — qpmaddubsh нет, q8_soa4_gemv fallback'ит на
-        // полностью скалярный путь (q8_soa_repack.h:497-528) и даёт ~1 tok/s
-        // вместо нормальных 4-5 на legacy Q4_K GEMV (там 2-way pfmuls SIMD).
-        // Auto-disable Q8 SoA если процессор v4. PT_Q8_SOA=1 уважаем как
-        // explicit override (юзер сам захочет — пусть включает).
-#if defined(__e2k__) && defined(__iset__) && __iset__ < 5
-        if (use_q8_soa && !(soa_env && soa_env[0] == '1')) {
-            std::cerr << "[Q8_SOA] e2k-v" << __iset__ << " не имеет qpmaddubsh — "
-                      << "auto-disable Q8_SoA (scalar fallback был бы ~5× медленнее). "
-                      << "Override: PT_Q8_SOA=1." << std::endl;
-            use_q8_soa = false;
-        }
-#endif
+        // v4 (E8C) теперь имеет настоящий SIMD path в q8_soa4_gemv через
+        // pmaddubsh (2-lane). Auto-disable больше не нужен — fallback
+        // только на v3 (E2S/E4C) где SIMD integer операций нет вообще.
+        // См. docs/elbrus_isa/PERFORMANCE_BY_ISA.md
         if (use_q8_soa) {
             int64_t soa_count = 0;
             int64_t soa_bytes = 0;

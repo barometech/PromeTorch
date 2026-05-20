@@ -110,32 +110,13 @@ if [ "${PT_CHAT:-1}" = "1" ]; then CHAT_FLAG="--chat"; fi
 # --cpunodebind + --membind: per-rank local DDR bandwidth = N× aggregate vs 1 NUMA.
 # --membind и --preferred конфликтуют ("Conflicting policies") — только --membind.
 # PT_NUMA_REPLICATE=0: на >2 чипах работает; на 1-чипе нет смысла (но мы тут уже TP).
-# PT_Q8_SOA=1 default ТОЛЬКО на v5+ (8C2, 16C). На v4 (8C) qpmaddubsh нет,
-# q8_soa4_gemv падает в чистый scalar fallback → ~1 tok/s ([коллега] отчёт
-# 20.05.2026). На v4 default=0 — идёт legacy q4k_gemv_scalar с
-# pragma-vectorize hints (LCC SWP даёт auto-pfmuls). Юзер может явно
-# override через export PT_Q8_SOA=1.
-if [ -z "${PT_Q8_SOA:-}" ]; then
-    # Detect E2K ISA. lcc --version: e2k-8c2/8cb/16c (v5+) | e2k-8c/4c/2c (v3-v4).
-    LCC_TARGET="$(lcc --version 2>&1 | head -1)"
-    case "$LCC_TARGET" in
-        *e2k-v5*|*e2k-v6*|*e2k-8c2*|*e2k-8cb*|*e2k-16c*)
-            export PT_Q8_SOA=1 ;;
-        *)
-            export PT_Q8_SOA=0
-            echo "[run_tp] e2k v4 или старше → PT_Q8_SOA=0 (qpmaddubsh нет)"
-            echo "[run_tp] override: export PT_Q8_SOA=1"
-            ;;
-    esac
-fi
-
 PIDS=()
 for (( rank=0; rank < NPROCS; rank++ )); do
     PT_NO_NUMA_POOL=1 \
     OMP_NUM_THREADS=$OMP_PER_RANK \
     PT_NUMA_REPLICATE=0 \
     PT_DDP_SHM=1 \
-    PT_Q8_SOA="$PT_Q8_SOA" \
+    PT_Q8_SOA="${PT_Q8_SOA:-1}" \
     numactl --cpunodebind=$rank --membind=$rank \
         "$BIN" "$MODEL" \
         --nprocs $NPROCS --rank $rank \
