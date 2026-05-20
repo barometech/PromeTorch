@@ -52,6 +52,8 @@ try:
 except (ImportError, RuntimeError) as _err:
     _C_ERROR = str(_err)
     import warnings as _w
+    import sys as _sys
+    import types as _types
     _w.warn(
         f"prometorch._C C++ extension failed to load: {_err}\n"
         f"Pure-Python parts of prometorch остаются доступны, но операции "
@@ -60,6 +62,16 @@ except (ImportError, RuntimeError) as _err:
         f"  pip install --force-reinstall --no-binary prometorch prometorch",
         stacklevel=2,
     )
+    # КРИТИЧНО: пометить prometorch._C как загруженный stub'ом в sys.modules.
+    # Без этого submodules (prometorch.nn, .optim, .data) сами будут делать
+    # `from prometorch._C import ...`, Python не находит модуль в кэше,
+    # пытается load снова → pybind11 видит уже зарегистрированные типы
+    # (DeviceType, Tensor) после частичного init и кричит
+    # "DeviceType already registered!". Подменяем stub'ом чтобы reload не
+    # происходил.
+    _C_stub = _types.ModuleType("prometorch._C")
+    _C_stub.__doc__ = f"PromeTorch _C stub (failed to load: {_err})"
+    _sys.modules["prometorch._C"] = _C_stub
     # Stub'ы для всех _C symbols так чтобы `from prometorch import tensor`
     # давало доступный объект который при вызове сообщает понятное сообщение.
     def _make_stub(_name):
