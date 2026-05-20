@@ -1095,14 +1095,17 @@ Reverse-mode автоматическое дифференцирование:
 | Embedding | Embedding, EmbeddingBag |
 | Upsampling | Upsample (nearest, bilinear) |
 
-### Оптимизаторы — 10 штук
+### Оптимизаторы — 16 штук
 
-SGD, Adam, AdamW, RMSprop, Adagrad, Adadelta, RAdam, NAdam, Adamax, AdamKiller (экспериментальный).
+SGD, Adam, AdamW, RMSprop, Adagrad, Adadelta, Adamax, AdamKiller, ASGD,
+Lion, Sophia(G), LAMB, Adafactor, NAdam, RAdam, LBFGS.
 **Fused multi-param**: `fused_adam_multi` / `fused_sgd_multi` — один вызов на все параметры, VecF SIMD.
 
-**LR Schedulers** (9 штук): StepLR, MultiStepLR, ExponentialLR, CosineAnnealingLR, LinearLR, ConstantLR, ReduceLROnPlateau, WarmupCosineAnnealingLR, OneCycleLR.
+**LR Schedulers** (16 штук): Step, MultiStep, Exp, CosineAnnealing, Linear,
+Const, ReduceLROnPlateau, WarmupCosine, OneCycle, CosineAnnealingWarmRestarts,
+Cyclic, Polynomial, Lambda, Multiplicative, Sequential, Chained.
 
-### CUDA Backend — 99 ядер
+### CUDA Backend — 149 ядер
 
 - **65 element-wise** ядер (unary, binary, comparison, fused) с grid-stride loops
 - **18 reduction** ядер (sum, max, min, var, cross_entropy, nll_loss)
