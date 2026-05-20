@@ -11,6 +11,8 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.11/purify.min.js"></script>
+    <!-- contributor:F2 — MCP client stub (will be wired to backend later) -->
+    <script src="mcp.js" defer></script>
 
     <style>
         :root {
@@ -629,6 +631,8 @@
             .right-panel { position: fixed; right: 0; top: 0; bottom: 0; transform: translateX(100%); }
             .right-panel.open { transform: translateX(0); box-shadow: -20px 0 50px rgba(0,0,0,0.5); }
             .right-panel.collapsed { display: flex; }
+            .artifact-panel { position: fixed; right: 0; top: 0; bottom: 0; transform: translateX(100%); width: 90%; max-width: 600px; }
+            .artifact-panel.open { transform: translateX(0); }
         }
         @media (max-width: 768px) {
             .sidebar { position: fixed; left: 0; top: 0; bottom: 0; transform: translateX(-100%); }
@@ -636,30 +640,295 @@
             .mobile-only { display: inline-flex; }
             .chat-feed { padding: 20px 14px 160px; }
             .input-container { padding: 14px; }
+            .topbar-title { max-width: 120px; font-size: 13px; }
+            .topbar-actions { gap: 2px; }
+            .icon-btn { padding: 6px; }
+            .modal { max-width: 95vw; margin: 10px; }
+            .input-box { padding: 6px 6px 6px 10px; }
+            .input-box textarea { font-size: 14px; }
         }
+        @media (max-width: 480px) {
+            :root { --sidebar-width: 260px; }
+            .welcome-suggestions { grid-template-columns: 1fr; }
+        }
+
+        /* ---------- F2: Accessibility ---------- */
+        button:focus-visible, [role="button"]:focus-visible {
+            outline: 2px solid var(--accent);
+            outline-offset: 2px;
+        }
+        .sr-only {
+            position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+            overflow: hidden; clip: rect(0,0,0,0); border: 0;
+        }
+
+        /* ---------- F2: Workspaces ---------- */
+        .workspace-selector {
+            padding: 8px 14px; display: flex; align-items: center; gap: 6px;
+            border-bottom: 1px solid var(--border);
+            background: var(--bg-panel);
+        }
+        .workspace-selector select {
+            flex: 1; padding: 6px 8px; font-size: 12px;
+            background: var(--bg-input);
+        }
+        .workspace-selector button {
+            padding: 6px; border-radius: 5px; color: var(--text-muted);
+        }
+        .workspace-selector button:hover { background: var(--bg-hover); color: var(--text-main); }
+        .history-item.drag-over { background: var(--accent-glow); border: 1px dashed var(--accent); }
+
+        /* ---------- F2: Slash commands ---------- */
+        .slash-popup {
+            position: absolute; bottom: 100%; left: 12px; right: 12px;
+            margin-bottom: 6px; max-height: 240px; overflow-y: auto;
+            background: var(--bg-panel); border: 1px solid var(--accent);
+            border-radius: var(--radius-md); box-shadow: 0 -8px 30px rgba(0,0,0,0.4);
+            z-index: 20; display: none;
+        }
+        .slash-popup.open { display: block; }
+        .slash-item {
+            padding: 8px 12px; cursor: pointer; display: flex;
+            justify-content: space-between; gap: 12px; font-size: 13px;
+            border-bottom: 1px solid var(--border);
+        }
+        .slash-item:last-child { border-bottom: none; }
+        .slash-item:hover, .slash-item.active { background: var(--bg-hover); }
+        .slash-cmd { font-family: var(--font-mono); font-weight: 600; color: var(--accent); }
+        .slash-desc { color: var(--text-muted); font-size: 12px; }
+
+        /* ---------- F2: MCP UI ---------- */
+        .mcp-section { padding: 6px 8px 8px; border-top: 1px solid var(--border); }
+        .mcp-section-header {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 6px 6px; cursor: pointer;
+        }
+        .mcp-section-header h3 {
+            font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
+            color: var(--text-muted); font-weight: 600;
+        }
+        .mcp-server-row {
+            display: flex; align-items: center; gap: 6px;
+            padding: 6px 8px; font-size: 12px; color: var(--text-muted);
+            border-radius: var(--radius-sm); cursor: pointer;
+        }
+        .mcp-server-row:hover { background: var(--bg-hover); color: var(--text-main); }
+        .mcp-status-dot {
+            width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+        }
+        .mcp-status-dot.active { background: var(--success); box-shadow: 0 0 6px var(--success); }
+        .mcp-status-dot.inactive { background: var(--text-dark); }
+        .mcp-status-dot.error { background: var(--danger); }
+        .mcp-server-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .mcp-tool-count {
+            font-size: 10px; padding: 1px 6px; border-radius: 8px;
+            background: var(--bg-main); color: var(--text-muted);
+        }
+        .mcp-preset {
+            padding: 10px 12px; border: 1px solid var(--border);
+            border-radius: var(--radius-sm); margin-bottom: 8px; cursor: pointer;
+        }
+        .mcp-preset:hover { border-color: var(--accent); background: var(--bg-hover); }
+        .mcp-preset h4 { font-size: 13px; margin-bottom: 4px; }
+        .mcp-preset p { font-size: 12px; color: var(--text-muted); }
+        .mcp-tool-item {
+            display: flex; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border);
+            font-size: 12px;
+        }
+        .mcp-tool-item:last-child { border-bottom: none; }
+        .mcp-tool-item input[type=checkbox] { margin-top: 3px; }
+        .mcp-tool-name { font-family: var(--font-mono); font-weight: 600; }
+        .mcp-tool-desc { color: var(--text-muted); font-size: 11px; }
+
+        /* ---------- F2: Artifacts panel ---------- */
+        .artifact-panel {
+            width: 480px; flex-shrink: 0; background: var(--bg-sidebar);
+            border-left: 1px solid var(--border); display: none;
+            flex-direction: column; z-index: 80;
+        }
+        .artifact-panel.open { display: flex; }
+        .artifact-tabs {
+            display: flex; border-bottom: 1px solid var(--border);
+            background: var(--bg-panel); overflow-x: auto;
+        }
+        .artifact-tab {
+            padding: 10px 14px; font-size: 12px; cursor: pointer;
+            border-right: 1px solid var(--border); white-space: nowrap;
+            color: var(--text-muted); display: flex; gap: 6px; align-items: center;
+        }
+        .artifact-tab.active { color: var(--text-main); background: var(--bg-sidebar); border-bottom: 2px solid var(--accent); }
+        .artifact-tab .close { color: var(--text-dark); }
+        .artifact-tab .close:hover { color: var(--danger); }
+        .artifact-header {
+            padding: 8px 12px; display: flex; justify-content: space-between;
+            align-items: center; border-bottom: 1px solid var(--border);
+            font-size: 12px; color: var(--text-muted);
+        }
+        .artifact-body { flex: 1; overflow: hidden; position: relative; }
+        .artifact-body iframe { width: 100%; height: 100%; border: none; background: white; }
+        .artifact-body pre { padding: 14px; overflow: auto; height: 100%; font-size: 12px; }
+        .artifact-actions { display: flex; gap: 4px; }
+        .artifact-actions button { padding: 4px 8px; font-size: 11px; }
+
+        /* Inline artifact-open button on code blocks */
+        .open-artifact-btn {
+            display: inline-flex; align-items: center; gap: 4px;
+            font-size: 11px; color: var(--accent); padding: 3px 6px;
+            border-radius: 5px; cursor: pointer;
+        }
+        .open-artifact-btn:hover { background: var(--accent-glow); }
+
+        /* ---------- F2: Multimodal previews ---------- */
+        .attachment-chip.image {
+            padding: 4px 8px 4px 4px;
+        }
+        .attachment-chip .att-thumb {
+            width: 32px; height: 32px; object-fit: cover;
+            border-radius: 4px; flex-shrink: 0;
+        }
+        .attachment-chip .att-pdf-icon {
+            width: 32px; height: 32px; border-radius: 4px;
+            background: var(--bg-main); display: flex; align-items: center; justify-content: center;
+            color: var(--danger); font-size: 9px; font-weight: 700; flex-shrink: 0;
+        }
+        .msg-attachments .att-image {
+            max-width: 240px; max-height: 240px; border-radius: var(--radius-sm);
+            border: 1px solid var(--border); display: block; margin: 4px 0;
+        }
+        .msg-attachments .att-audio { display: block; margin: 4px 0; }
+
+        /* ---------- F2: Branching ---------- */
+        .branch-tree {
+            font-size: 11px; padding-left: 12px;
+            border-left: 2px solid var(--border);
+        }
+        .branch-item {
+            padding: 4px 8px; cursor: pointer; color: var(--text-muted);
+            display: flex; align-items: center; gap: 6px;
+            border-radius: 4px;
+        }
+        .branch-item:hover { background: var(--bg-hover); color: var(--text-main); }
+        .branch-item.current { color: var(--accent); font-weight: 600; }
+        .branch-item .branch-dot {
+            width: 6px; height: 6px; border-radius: 50%;
+            background: var(--text-dark); flex-shrink: 0;
+        }
+        .branch-item.current .branch-dot { background: var(--accent); }
+
+        /* ---------- F2: Table copy-as-CSV ---------- */
+        .table-wrapper {
+            position: relative; margin: 0.8em 0;
+        }
+        .table-csv-btn {
+            position: absolute; top: 4px; right: 4px;
+            padding: 3px 8px; font-size: 10px;
+            background: var(--bg-panel); border: 1px solid var(--border);
+            border-radius: 4px; color: var(--text-muted);
+            opacity: 0; transition: opacity 0.15s;
+        }
+        .table-wrapper:hover .table-csv-btn { opacity: 1; }
+        .table-csv-btn:hover { color: var(--text-main); background: var(--bg-hover); }
+
+        /* ---------- F2: Hotkeys overlay & perf dashboard ---------- */
+        .kbd-grid {
+            display: grid; grid-template-columns: 1fr 2fr; gap: 8px 16px;
+            font-size: 13px;
+        }
+        .kbd-grid .keys {
+            display: flex; gap: 4px; align-items: center;
+            justify-content: flex-end;
+        }
+        .kbd-grid kbd {
+            background: var(--bg-input); border: 1px solid var(--border);
+            border-radius: 4px; padding: 2px 6px; font-family: var(--font-mono);
+            font-size: 11px; color: var(--text-main);
+        }
+        .perf-stat {
+            display: flex; justify-content: space-between;
+            padding: 10px 12px; border-bottom: 1px solid var(--border);
+        }
+        .perf-stat:last-child { border-bottom: none; }
+        .perf-label { color: var(--text-muted); font-size: 13px; }
+        .perf-value {
+            font-family: var(--font-mono); font-weight: 600;
+            color: var(--text-main); font-size: 13px;
+        }
+        .perf-bar {
+            margin-top: 4px; height: 6px; background: var(--bg-input);
+            border-radius: 3px; overflow: hidden;
+        }
+        .perf-bar-fill {
+            height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-2));
+            transition: width 0.3s;
+        }
+
+        /* ---------- F2: Connection status & retry ---------- */
+        .connection-status {
+            font-size: 11px; padding: 4px 10px; border-radius: 999px;
+            display: inline-flex; align-items: center; gap: 5px;
+            color: var(--text-muted); background: var(--bg-panel);
+            border: 1px solid var(--border);
+        }
+        .connection-status .dot {
+            width: 7px; height: 7px; border-radius: 50%;
+        }
+        .connection-status.online .dot { background: var(--success); }
+        .connection-status.reconnecting .dot { background: var(--warning); animation: pulseRec 1s ease-in-out infinite; }
+        .connection-status.offline .dot { background: var(--danger); }
+
+        /* ---------- F2: Per-chat settings ---------- */
+        .settings-scope-tabs {
+            display: flex; gap: 4px; margin-bottom: 12px;
+            padding: 3px; background: var(--bg-input); border-radius: var(--radius-sm);
+        }
+        .settings-scope-tab {
+            flex: 1; padding: 5px; font-size: 11px; text-align: center;
+            border-radius: 5px; cursor: pointer; color: var(--text-muted);
+        }
+        .settings-scope-tab.active { background: var(--bg-panel); color: var(--text-main); }
+
+        /* ---------- F2: Auth placeholder ---------- */
+        .auth-banner {
+            padding: 14px 18px; background: var(--bg-panel);
+            border-bottom: 1px solid var(--warning);
+            font-size: 13px; color: var(--text-main);
+            display: none; align-items: center; gap: 10px;
+        }
+        .auth-banner.visible { display: flex; }
+        .auth-banner.error { border-bottom-color: var(--danger); }
     </style>
 </head>
 <body>
 
 <!-- ============ LEFT SIDEBAR ============ -->
-<aside class="sidebar" id="sidebar">
+<aside class="sidebar" id="sidebar" role="navigation" aria-label="Chat history">
     <div class="sidebar-header">
         <div class="brand">
-            <div class="brand-logo">
+            <div class="brand-logo" aria-hidden="true">
                 <svg class="icon" viewBox="0 0 24 24">
                     <path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/>
                 </svg>
             </div>
             <span>PromeTorch</span>
         </div>
-        <button class="new-chat-btn" onclick="App.createNewChat()">
-            <svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+        <button class="new-chat-btn" onclick="App.createNewChat()" aria-label="Создать новый чат">
+            <svg class="icon icon-sm" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
             <span data-i18n="new_chat">Новый чат</span>
         </button>
     </div>
 
+    <!-- contributor:F2 — workspaces selector -->
+    <div class="workspace-selector" role="region" aria-label="Workspace selector">
+        <select id="workspaceSelect" onchange="App.switchWorkspace(this.value)" aria-label="Выбрать workspace">
+            <option value="default">⚙ Default</option>
+        </select>
+        <button class="icon-btn" onclick="App.openWorkspaceModal()" title="Управление workspaces" aria-label="Workspaces">
+            <svg class="icon icon-sm" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+        </button>
+    </div>
+
     <div class="sidebar-search">
-        <input type="text" id="historySearch" placeholder="Поиск по истории..." oninput="App.filterHistory(this.value)">
+        <input type="text" id="historySearch" placeholder="Поиск по истории..." oninput="App.filterHistory(this.value)" aria-label="Поиск чатов">
     </div>
 
     <div class="sidebar-section-title" id="pinnedSectionTitle" style="display:none">
@@ -670,7 +939,21 @@
     <div class="sidebar-section-title">
         <span data-i18n="history">История</span>
     </div>
-    <div class="chat-history" id="chatHistory"></div>
+    <div class="chat-history" id="chatHistory" role="list" aria-label="Chat history"></div>
+
+    <!-- contributor:F2 — MCP servers section -->
+    <div class="mcp-section" id="mcpSection">
+        <div class="mcp-section-header" onclick="App.openMcpModal()" role="button" tabindex="0" aria-label="MCP Servers — открыть управление">
+            <h3>
+                <svg class="icon icon-xs" style="vertical-align:middle;display:inline-block;margin-right:4px" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16v16H4z M4 12h16 M12 4v16"/></svg>
+                <span data-i18n="mcp_servers">MCP Servers</span>
+            </h3>
+            <button class="icon-btn" onclick="event.stopPropagation();App.openMcpModal()" aria-label="Add MCP server">
+                <svg class="icon icon-xs" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+            </button>
+        </div>
+        <div id="mcpServerList"></div>
+    </div>
 
     <div class="sidebar-footer">
         <span class="meta" id="chatCount">0 чатов</span>
@@ -689,7 +972,13 @@
 </aside>
 
 <!-- ============ MAIN ============ -->
-<main class="main-content">
+<main class="main-content" role="main">
+    <!-- contributor:F2 — auth placeholder banner (для будущего auth) -->
+    <div class="auth-banner" id="authBanner" role="alert">
+        <svg class="icon icon-sm" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 9v4M12 17h.01M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/></svg>
+        <span id="authBannerText">Требуется авторизация. Введите токен в настройках.</span>
+        <button class="btn" onclick="App.closeAuthBanner()" style="margin-left:auto" aria-label="Закрыть">×</button>
+    </div>
     <header class="topbar">
         <div class="topbar-left">
             <button class="icon-btn mobile-only" onclick="App.toggleSidebar()">
@@ -703,17 +992,23 @@
             <span class="topbar-title" id="topbarTitle"></span>
         </div>
         <div class="topbar-actions">
-            <button class="icon-btn" onclick="App.openSearch()" title="Поиск (Ctrl+F)">
-                <svg class="icon" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+            <!-- contributor:F2 — connection status badge -->
+            <span class="connection-status online" id="connStatus" title="Backend connection"><span class="dot" aria-hidden="true"></span><span id="connStatusText">online</span></span>
+            <button class="icon-btn" onclick="App.openSearch()" title="Поиск (Ctrl+F)" aria-label="Поиск">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
             </button>
-            <button class="icon-btn" onclick="App.exportChatMarkdown()" title="Скачать .md" id="exportBtn">
-                <svg class="icon" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+            <button class="icon-btn" onclick="App.exportChatMarkdown()" title="Скачать .md" id="exportBtn" aria-label="Скачать как Markdown">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
             </button>
-            <button class="icon-btn" onclick="App.copyChatMarkdown()" title="Копировать как Markdown">
-                <svg class="icon" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            <button class="icon-btn" onclick="App.copyChatMarkdown()" title="Копировать как Markdown" aria-label="Копировать">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
             </button>
-            <button class="icon-btn" onclick="App.toggleRightPanel()" title="Настройки / Оглавление" id="rightPanelBtn">
-                <svg class="icon" viewBox="0 0 24 24"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+            <!-- contributor:F2 — hotkeys overlay -->
+            <button class="icon-btn" onclick="App.openHotkeysModal()" title="Горячие клавиши (Ctrl+/)" aria-label="Hotkeys">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 12h.01M10 12h.01M14 12h.01M18 12h.01M7 16h10"/></svg>
+            </button>
+            <button class="icon-btn" onclick="App.toggleRightPanel()" title="Настройки / Оглавление" id="rightPanelBtn" aria-label="Открыть настройки">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
             </button>
         </div>
     </header>
@@ -727,21 +1022,25 @@
     </div>
 
     <div class="input-container">
-        <div class="input-box" id="inputBox">
+        <div class="input-box" id="inputBox" role="region" aria-label="Message input">
+            <!-- contributor:F2 — slash command popup -->
+            <div class="slash-popup" id="slashPopup" role="listbox" aria-label="Slash commands"></div>
             <div class="input-actions">
-                <button onclick="App.openFilePicker()" title="Прикрепить файл">
-                    <svg class="icon" viewBox="0 0 24 24"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 17.93 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+                <button onclick="App.openFilePicker()" title="Прикрепить файл" aria-label="Прикрепить файл">
+                    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 17.93 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
                 </button>
-                <button id="voiceBtn" onclick="App.toggleVoice()" title="Голосовой ввод" style="display:none">
-                    <svg class="icon" viewBox="0 0 24 24"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3M8 22h8"/></svg>
+                <button id="voiceBtn" onclick="App.toggleVoice()" title="Голосовой ввод" style="display:none" aria-label="Голосовой ввод">
+                    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3M8 22h8"/></svg>
                 </button>
             </div>
-            <input type="file" id="filePicker" multiple style="display:none" onchange="App.handleFileSelect(event)">
+            <input type="file" id="filePicker" multiple style="display:none" onchange="App.handleFileSelect(event)" aria-label="Выбрать файлы">
             <textarea id="userInput" rows="1"
                 placeholder="Отправьте сообщение или перетащите файл..."
-                oninput="App.autoResize(this)" onkeydown="App.handleEnter(event)"></textarea>
-            <button id="sendBtn" class="send-btn" onclick="App.handleSend()">
-                <svg class="icon" viewBox="0 0 24 24"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>
+                oninput="App.autoResize(this);App.checkSlash(this)"
+                onkeydown="App.handleEnter(event)"
+                aria-label="Сообщение модели"></textarea>
+            <button id="sendBtn" class="send-btn" onclick="App.handleSend()" aria-label="Отправить сообщение">
+                <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>
             </button>
         </div>
         <div class="attachments-row" id="attachmentsRow"></div>
@@ -751,21 +1050,47 @@
     </div>
 </main>
 
+<!-- ============ ARTIFACTS PANEL (contributor:F2) ============ -->
+<aside class="artifact-panel" id="artifactPanel" role="region" aria-label="Artifact preview">
+    <div class="artifact-header">
+        <span id="artifactTitle">Artifact</span>
+        <div class="artifact-actions">
+            <button class="btn" onclick="App.copyArtifact()" aria-label="Copy artifact">
+                <svg class="icon icon-xs" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            </button>
+            <button class="btn" onclick="App.downloadArtifact()" aria-label="Download artifact">
+                <svg class="icon icon-xs" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+            </button>
+            <button class="btn" onclick="App.toggleArtifactPanel()" aria-label="Close panel">×</button>
+        </div>
+    </div>
+    <div class="artifact-tabs" id="artifactTabs" role="tablist"></div>
+    <div class="artifact-body" id="artifactBody"></div>
+</aside>
+
 <!-- ============ RIGHT PANEL ============ -->
-<aside class="right-panel" id="rightPanel">
-    <div class="right-tabs">
-        <div class="right-tab active" data-tab="settings" onclick="App.switchRightTab('settings')">
+<aside class="right-panel" id="rightPanel" role="complementary" aria-label="Settings and outline">
+    <div class="right-tabs" role="tablist">
+        <div class="right-tab active" data-tab="settings" onclick="App.switchRightTab('settings')" role="tab" tabindex="0">
             <span data-i18n="settings">Настройки</span>
         </div>
-        <div class="right-tab" data-tab="toc" onclick="App.switchRightTab('toc')">
+        <div class="right-tab" data-tab="toc" onclick="App.switchRightTab('toc')" role="tab" tabindex="0">
             <span data-i18n="toc">Оглавление</span>
+        </div>
+        <div class="right-tab" data-tab="branches" onclick="App.switchRightTab('branches')" role="tab" tabindex="0">
+            <span data-i18n="branches">Ветки</span>
         </div>
     </div>
 
-    <div class="right-pane active" id="paneSettings">
+    <div class="right-pane active" id="paneSettings" role="tabpanel">
+        <!-- contributor:F2 — per-chat vs global settings scope -->
+        <div class="settings-scope-tabs">
+            <div class="settings-scope-tab active" data-scope="global" onclick="App.switchSettingsScope('global')">Global</div>
+            <div class="settings-scope-tab" data-scope="chat" onclick="App.switchSettingsScope('chat')" id="scopeChatTab">This chat</div>
+        </div>
         <div class="setting-group">
             <label class="setting-label" data-i18n="system_prompt">System Prompt</label>
-            <textarea id="setSystem" placeholder="You are a helpful AI assistant..."></textarea>
+            <textarea id="setSystem" placeholder="You are a helpful AI assistant..." aria-label="System prompt"></textarea>
             <div class="setting-desc" data-i18n="sys_desc">Инструкция, определяющая поведение модели.</div>
         </div>
         <div class="setting-group">
@@ -798,12 +1123,24 @@
             <input type="range" id="setMaxTok" min="256" max="8192" step="256" value="2048" oninput="App.updateSettingDisplay('valMaxTok', this.value)">
         </div>
         <button class="reset-btn" onclick="App.resetSettings()" data-i18n="reset_settings">Сбросить настройки</button>
+        <!-- contributor:F2 — set-as-default / reset-to-global -->
+        <button class="btn" style="width:100%;margin-top:6px" onclick="App.saveAsDefault()" data-i18n="save_as_default">Сохранить как умолчания</button>
+        <button class="btn" style="width:100%;margin-top:6px" onclick="App.resetChatToGlobal()" id="resetChatBtn" style="display:none" data-i18n="reset_to_global">Сбросить к глобальным</button>
     </div>
 
-    <div class="right-pane" id="paneToc">
+    <div class="right-pane" id="paneToc" role="tabpanel">
         <div class="toc-list" id="tocList">
             <div style="font-size:12px;color:var(--text-muted);text-align:center;padding:20px 0;" data-i18n="toc_empty">
                 Оглавление появится после первого сообщения.
+            </div>
+        </div>
+    </div>
+
+    <!-- contributor:F2 — conversation branches tree -->
+    <div class="right-pane" id="paneBranches" role="tabpanel">
+        <div id="branchTree">
+            <div style="font-size:12px;color:var(--text-muted);text-align:center;padding:20px 0;" data-i18n="branches_empty">
+                Создайте ветку через "Branch from here" на сообщении.
             </div>
         </div>
     </div>
@@ -844,8 +1181,109 @@
     </div>
 </div>
 
+<!-- ============ MCP MODAL (contributor:F2) ============ -->
+<div class="modal-overlay" id="mcpModal" onclick="App.maybeCloseModal(event, 'mcpModal')" role="dialog" aria-modal="true" aria-label="MCP servers">
+    <div class="modal" style="max-width:680px" onclick="event.stopPropagation()">
+        <div class="modal-header">
+            <h2 data-i18n="mcp_modal_title">MCP Servers</h2>
+            <button class="icon-btn" onclick="App.closeModal('mcpModal')" aria-label="Close">
+                <svg class="icon" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+            </button>
+        </div>
+        <div class="modal-body">
+            <div style="display:flex;gap:8px;margin-bottom:14px">
+                <button class="btn primary" onclick="App.showMcpTab('servers')" id="mcpTabServersBtn">Подключённые</button>
+                <button class="btn" onclick="App.showMcpTab('presets')" id="mcpTabPresetsBtn">Добавить</button>
+            </div>
+            <div id="mcpTabServers">
+                <div id="mcpServersFull">
+                    <div style="color:var(--text-muted);font-size:13px;padding:20px;text-align:center">
+                        Серверы пока не подключены. Backend MCP клиент в разработке (см. <code>docs/research/AGENT_STACK_R2.md</code>).
+                        UI заготовлен и готов к подключению.
+                    </div>
+                </div>
+            </div>
+            <div id="mcpTabPresets" style="display:none">
+                <div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">
+                    Готовые шаблоны MCP-серверов из <a href="https://registry.modelcontextprotocol.io" target="_blank" rel="noopener" style="color:var(--accent)">official registry</a>:
+                </div>
+                <div id="mcpPresetsList"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ============ MCP SERVER DETAIL MODAL ============ -->
+<div class="modal-overlay" id="mcpDetailModal" onclick="App.maybeCloseModal(event, 'mcpDetailModal')" role="dialog" aria-modal="true">
+    <div class="modal" style="max-width:600px" onclick="event.stopPropagation()">
+        <div class="modal-header">
+            <h2 id="mcpDetailTitle">Server</h2>
+            <button class="icon-btn" onclick="App.closeModal('mcpDetailModal')" aria-label="Close">
+                <svg class="icon" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+            </button>
+        </div>
+        <div class="modal-body" id="mcpDetailBody"></div>
+        <div class="modal-footer">
+            <button class="btn" onclick="App.removeMcpServer()" id="mcpDetailRemove" style="color:var(--danger)">Удалить</button>
+            <button class="btn primary" onclick="App.toggleMcpServer()" id="mcpDetailToggle">Включить</button>
+        </div>
+    </div>
+</div>
+
+<!-- ============ WORKSPACES MODAL (contributor:F2) ============ -->
+<div class="modal-overlay" id="workspaceModal" onclick="App.maybeCloseModal(event, 'workspaceModal')" role="dialog" aria-modal="true">
+    <div class="modal" style="max-width:520px" onclick="event.stopPropagation()">
+        <div class="modal-header">
+            <h2 data-i18n="workspaces">Workspaces</h2>
+            <button class="icon-btn" onclick="App.closeModal('workspaceModal')" aria-label="Close">
+                <svg class="icon" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+            </button>
+        </div>
+        <div class="modal-body">
+            <div style="display:flex;gap:8px;margin-bottom:14px">
+                <input type="text" id="newWorkspaceName" placeholder="Название workspace..." style="flex:1">
+                <button class="btn primary" onclick="App.createWorkspace()">Создать</button>
+            </div>
+            <div id="workspaceList"></div>
+            <div style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border)">
+                <label class="setting-label" style="margin-bottom:8px;display:block">Workspace system prompt</label>
+                <textarea id="workspaceSystemPrompt" placeholder="Override system prompt для этого workspace" style="width:100%;min-height:60px"></textarea>
+                <button class="btn primary" onclick="App.saveWorkspaceSettings()" style="margin-top:8px">Сохранить</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ============ HOTKEYS MODAL (contributor:F2) ============ -->
+<div class="modal-overlay" id="hotkeysModal" onclick="App.maybeCloseModal(event, 'hotkeysModal')" role="dialog" aria-modal="true">
+    <div class="modal" onclick="event.stopPropagation()">
+        <div class="modal-header">
+            <h2 data-i18n="hotkeys">Горячие клавиши</h2>
+            <button class="icon-btn" onclick="App.closeModal('hotkeysModal')" aria-label="Close">
+                <svg class="icon" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+            </button>
+        </div>
+        <div class="modal-body">
+            <div class="kbd-grid" id="hotkeysList"></div>
+        </div>
+    </div>
+</div>
+
+<!-- ============ PERF DASHBOARD MODAL (contributor:F2) ============ -->
+<div class="modal-overlay" id="perfModal" onclick="App.maybeCloseModal(event, 'perfModal')" role="dialog" aria-modal="true">
+    <div class="modal" onclick="event.stopPropagation()">
+        <div class="modal-header">
+            <h2 data-i18n="perf_dashboard">Performance Dashboard</h2>
+            <button class="icon-btn" onclick="App.closeModal('perfModal')" aria-label="Close">
+                <svg class="icon" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+            </button>
+        </div>
+        <div class="modal-body" id="perfDashBody"></div>
+    </div>
+</div>
+
 <!-- ============ TOASTS ============ -->
-<div class="toast-container" id="toastContainer"></div>
+<div class="toast-container" id="toastContainer" role="status" aria-live="polite"></div>
 
 <script>
 /* ============================================================
@@ -873,45 +1311,154 @@ const App = (() => {
         max_tokens: 2048,
     };
 
+    // contributor:F2 — additional storage keys
+    const LS_KEY_WORKSPACES = 'pt_workspaces';
+    const LS_KEY_ACTIVE_WS  = 'pt_active_workspace';
+    const LS_KEY_MCP        = 'pt_mcp_servers';
+    const LS_KEY_PERF_HIST  = 'pt_perf_history';
+    const LS_KEY_AUTH       = 'pt_auth_token';
+
+    // contributor:F2 — slash commands registry
+    const SLASH_COMMANDS = [
+        { cmd: '/clear',  desc: 'Очистить текущий чат' },
+        { cmd: '/help',   desc: 'Показать список команд' },
+        { cmd: '/save',   desc: 'Скачать чат как .md' },
+        { cmd: '/load',   desc: 'Загрузить чат из .json (open file picker)' },
+        { cmd: '/model',  desc: '<name> — переключить модель' },
+        { cmd: '/system', desc: '<prompt> — обновить system prompt' },
+        { cmd: '/temp',   desc: '<0..2> — установить temperature' },
+        { cmd: '/topp',   desc: '<0..1> — установить top_p' },
+        { cmd: '/topk',   desc: '<1..100> — установить top_k' },
+        { cmd: '/maxtok', desc: '<256..8192> — max_tokens' },
+        { cmd: '/run',    desc: '<tool_name> — выполнить tool (MCP)' },
+        { cmd: '/branch', desc: 'Создать ветку от последнего сообщения' },
+        { cmd: '/hotkeys',desc: 'Открыть горячие клавиши' },
+        { cmd: '/perf',   desc: 'Открыть Performance Dashboard' },
+        { cmd: '/mcp',    desc: 'Открыть MCP Servers' },
+    ];
+
+    // contributor:F2 — hotkey definitions (single source of truth)
+    const HOTKEYS = [
+        { keys: ['Ctrl','F'],       desc: 'Поиск по чатам' },
+        { keys: ['Ctrl','/'],       desc: 'Открыть hotkeys overlay' },
+        { keys: ['Ctrl','Shift','P'], desc: 'Performance Dashboard' },
+        { keys: ['Ctrl','Shift','M'], desc: 'MCP Servers' },
+        { keys: ['Ctrl','Shift','N'], desc: 'Новый чат' },
+        { keys: ['Esc'],            desc: 'Закрыть модалку' },
+        { keys: ['Enter'],          desc: 'Отправить сообщение' },
+        { keys: ['Shift','Enter'],  desc: 'Новая строка' },
+        { keys: ['/'],              desc: 'Slash-команды autocomplete' },
+        { keys: ['↑','↓'],         desc: 'Навигация по slash popup' },
+        { keys: ['Tab'],            desc: 'Выбрать подсказку slash' },
+    ];
+
+    // contributor:F2 — preset MCP server templates (UI-only — backend stub)
+    const MCP_PRESETS = [
+        {
+            id: 'filesystem',
+            name: 'Filesystem',
+            desc: 'Чтение/запись файлов в указанной директории',
+            command: 'npx',
+            args: ['-y', '@modelcontextprotocol/server-filesystem', '/path/to/root'],
+            tools: ['read_file', 'write_file', 'list_directory', 'search_files'],
+        },
+        {
+            id: 'github',
+            name: 'GitHub',
+            desc: 'GitHub Issues, Pulls, code search',
+            command: 'npx',
+            args: ['-y', '@modelcontextprotocol/server-github'],
+            env: { GITHUB_PERSONAL_ACCESS_TOKEN: '<your-token>' },
+            tools: ['create_issue', 'list_repos', 'search_code', 'create_pull_request'],
+        },
+        {
+            id: 'fetch',
+            name: 'Fetch (web)',
+            desc: 'HTTP GET с конвертацией HTML→markdown',
+            command: 'uvx',
+            args: ['mcp-server-fetch'],
+            tools: ['fetch'],
+        },
+        {
+            id: 'brave-search',
+            name: 'Brave Search',
+            desc: 'Web search через Brave Search API',
+            command: 'npx',
+            args: ['-y', '@modelcontextprotocol/server-brave-search'],
+            env: { BRAVE_API_KEY: '<your-key>' },
+            tools: ['brave_web_search'],
+        },
+        {
+            id: 'memory',
+            name: 'Memory',
+            desc: 'Knowledge graph persistent memory',
+            command: 'npx',
+            args: ['-y', '@modelcontextprotocol/server-memory'],
+            tools: ['create_entities', 'read_graph', 'add_observations', 'search_nodes'],
+        },
+        {
+            id: 'sequential-thinking',
+            name: 'Sequential Thinking',
+            desc: 'Step-by-step problem decomposition',
+            command: 'npx',
+            args: ['-y', '@modelcontextprotocol/server-sequential-thinking'],
+            tools: ['sequentialthinking'],
+        },
+    ];
+
     /* ---------- I18N ---------- */
     const I18N = {
         ru: {
             new_chat: 'Новый чат', history: 'История', pinned: 'Закреплённые',
-            settings: 'Настройки', toc: 'Оглавление',
+            settings: 'Настройки', toc: 'Оглавление', branches: 'Ветки',
             system_prompt: 'System Prompt',
             sys_desc: 'Инструкция, определяющая поведение модели.',
             temp_desc: 'Выше = креативнее, ниже = точнее.',
             reset_settings: 'Сбросить настройки',
             toc_empty: 'Оглавление появится после первого сообщения.',
+            branches_empty: 'Создайте ветку через "Branch from here" на сообщении.',
             search_history: 'Поиск по истории',
             rename_chat: 'Переименовать чат',
             cancel: 'Отмена', save: 'Сохранить',
             stopped: '[Генерация остановлена]', error: 'Ошибка',
             copied: 'Скопировано', exported: 'Чат экспортирован',
             you: 'Вы', assistant: 'Ассистент', system_role: 'Система',
+            mcp_servers: 'MCP Servers', mcp_modal_title: 'MCP Servers',
+            workspaces: 'Workspaces', hotkeys: 'Горячие клавиши',
+            perf_dashboard: 'Performance Dashboard',
+            save_as_default: 'Сохранить как умолчания',
+            reset_to_global: 'Сбросить к глобальным',
+            reconnecting: 'Переподключение...', online: 'online', offline: 'offline',
         },
         en: {
             new_chat: 'New chat', history: 'History', pinned: 'Pinned',
-            settings: 'Settings', toc: 'Outline',
+            settings: 'Settings', toc: 'Outline', branches: 'Branches',
             system_prompt: 'System Prompt',
             sys_desc: 'Instruction defining model behaviour.',
             temp_desc: 'Higher = more creative, lower = more precise.',
             reset_settings: 'Reset settings',
             toc_empty: 'Outline appears after the first message.',
+            branches_empty: 'Create a branch via "Branch from here" on a message.',
             search_history: 'Search history',
             rename_chat: 'Rename chat',
             cancel: 'Cancel', save: 'Save',
             stopped: '[Generation stopped]', error: 'Error',
             copied: 'Copied', exported: 'Chat exported',
             you: 'You', assistant: 'Assistant', system_role: 'System',
+            mcp_servers: 'MCP Servers', mcp_modal_title: 'MCP Servers',
+            workspaces: 'Workspaces', hotkeys: 'Hotkeys',
+            perf_dashboard: 'Performance Dashboard',
+            save_as_default: 'Save as default',
+            reset_to_global: 'Reset to global',
+            reconnecting: 'Reconnecting...', online: 'online', offline: 'offline',
         }
     };
 
     /* ---------- State ---------- */
     let state = {
-        chats: {},          // { id: { id, title, messages:[], updatedAt, pinned:false } }
+        chats: {},          // { id: { id, title, messages:[], updatedAt, pinned:false, workspaceId, branchOf, branches:[], settings? } }
         activeChatId: null,
-        settings: { ...DEFAULT_SETTINGS },
+        settings: { ...DEFAULT_SETTINGS },     // global
         attachments: [],    // pending attachments for next user message
         isGenerating: false,
         abortController: null,
@@ -921,6 +1468,37 @@ const App = (() => {
         lang: 'ru',
         filterQuery: '',
         renameTargetId: null,
+
+        // contributor:F2 — workspaces
+        workspaces: { default: { id: 'default', name: 'Default', systemPrompt: '' } },
+        activeWorkspaceId: 'default',
+
+        // contributor:F2 — MCP UI state (mock until backend)
+        mcpServers: [],     // { id, name, command, args, env, tools, enabled, status }
+        mcpActiveId: null,
+
+        // contributor:F2 — artifacts (sandboxed previews)
+        artifacts: [],      // { id, type, title, content, language }
+        activeArtifactId: null,
+        artifactPanelOpen: false,
+
+        // contributor:F2 — slash command popup
+        slashOpen: false,
+        slashFiltered: [],
+        slashIndex: 0,
+
+        // contributor:F2 — settings scope (global vs chat)
+        settingsScope: 'global',
+
+        // contributor:F2 — perf tracking
+        perfHistory: [],    // { ts, tokSec, totalTime, evalCount }
+
+        // contributor:F2 — connection / models cache
+        modelsCache: { ts: 0, list: [] },
+        connStatus: 'online',
+        retryAttempt: 0,
+        modelsRefreshTimer: null,
+        dragChatId: null,
     };
 
     /* ---------- Utils ---------- */
@@ -953,6 +1531,15 @@ const App = (() => {
 
     function tr(key) {
         return (I18N[state.lang] && I18N[state.lang][key]) || I18N.ru[key] || key;
+    }
+
+    // contributor:F2 — debounce helper for typing handlers / search
+    function debounce(fn, ms = 200) {
+        let t;
+        return (...args) => {
+            clearTimeout(t);
+            t = setTimeout(() => fn.apply(null, args), ms);
+        };
     }
 
     function applyI18n() {
@@ -1012,29 +1599,11 @@ const App = (() => {
     }
 
     /* ---------- Models ---------- */
+    // contributor:F2 — replaced by refreshModelsCache (with auto-refresh + retry + 401 handling)
+    // Кеп stub for compatibility:
     async function fetchModels() {
+        await refreshModelsCache();
         const sel = $('#modelSelect');
-        try {
-            const res = await fetch(`${API_BASE}/api/tags`);
-            const data = await res.json();
-            sel.innerHTML = '';
-            const models = (data.models || []);
-            if (models.length === 0) {
-                sel.innerHTML = `<option value="">${state.lang==='ru'?'Нет моделей':'No models'}</option>`;
-            } else {
-                models.forEach(m => {
-                    const opt = document.createElement('option');
-                    opt.value = m.name || m.model || m;
-                    opt.textContent = opt.value;
-                    sel.appendChild(opt);
-                });
-                const saved = localStorage.getItem(LS_KEY_MODEL);
-                if (saved && Array.from(sel.options).some(o => o.value === saved)) sel.value = saved;
-            }
-        } catch (e) {
-            sel.innerHTML = `<option value="">${state.lang==='ru'?'Сервер недоступен':'Server offline'}</option>`;
-            console.warn('fetchModels failed', e);
-        }
         sel.addEventListener('change', e => localStorage.setItem(LS_KEY_MODEL, e.target.value));
     }
 
@@ -1045,6 +1614,10 @@ const App = (() => {
         state.chats[id] = {
             id, title: state.lang==='ru' ? 'Новый диалог' : 'New chat',
             messages: [], updatedAt: Date.now(), pinned: false,
+            // contributor:F2
+            workspaceId: state.activeWorkspaceId || 'default',
+            branches: [],
+            settings: null,
         };
         state.activeChatId = id;
         persistChats();
@@ -1149,7 +1722,9 @@ const App = (() => {
 
         const q = state.filterQuery.toLowerCase();
         const all = Object.values(state.chats);
-        const visible = all.filter(c => {
+        // contributor:F2 — filter by active workspace
+        const inWs = all.filter(c => (c.workspaceId || 'default') === state.activeWorkspaceId);
+        const visible = inWs.filter(c => {
             if (!q) return true;
             if (c.title.toLowerCase().includes(q)) return true;
             return c.messages.some(m => (m.content||'').toLowerCase().includes(q));
@@ -1166,6 +1741,19 @@ const App = (() => {
         sorted.forEach(chat => {
             const div = document.createElement('div');
             div.className = `history-item ${chat.id === state.activeChatId ? 'active' : ''} ${chat.pinned ? 'pinned' : ''}`;
+            div.setAttribute('role', 'listitem');
+            div.setAttribute('tabindex', '0');
+            div.setAttribute('aria-label', chat.title);
+            // contributor:F2 — drag-drop between workspaces
+            div.draggable = true;
+            div.dataset.chatId = chat.id;
+            div.addEventListener('dragstart', e => {
+                state.dragChatId = chat.id;
+                e.dataTransfer.effectAllowed = 'move';
+            });
+            div.addEventListener('keydown', e => {
+                if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectChat(chat.id); }
+            });
             div.onclick = () => selectChat(chat.id);
             div.innerHTML = `
                 <span class="pin-icon">
@@ -1215,10 +1803,12 @@ const App = (() => {
         });
     }
 
-    function filterHistory(v) {
+    // contributor:F2 — debounced history filter for snappier typing
+    const _filterHistoryDebounced = debounce(v => {
         state.filterQuery = v;
         renderSidebar();
-    }
+    }, 150);
+    function filterHistory(v) { _filterHistoryDebounced(v); }
 
     function renderTopbarTitle() {
         const c = state.chats[state.activeChatId];
@@ -1292,17 +1882,32 @@ const App = (() => {
         div.className = `message msg-${m.role}`;
         div.dataset.anchor = m.id;
         div.id = `msg-${m.id}`;
+        div.setAttribute('role', 'article');
+        div.setAttribute('aria-label', `${m.role} message`);
 
         const avatar = m.role === 'user'
-            ? '<svg class="icon" viewBox="0 0 24 24"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z"/></svg>'
-            : '<svg class="icon" viewBox="0 0 24 24"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>';
+            ? '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z"/></svg>'
+            : '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>';
 
         const roleLabel = m.role === 'user' ? tr('you') : tr('assistant');
 
+        // contributor:F2 — rich attachment previews
         let attHtml = '';
         if (m.attachments && m.attachments.length) {
             attHtml = '<div class="msg-attachments">' +
-                m.attachments.map(a => `<span class="att-pill">📎 ${escapeHTML(a.name)} · ${escapeHTML(fmtBytes(a.size||0))}</span>`).join('') +
+                m.attachments.map(a => {
+                    const mime = a.mime || '';
+                    if (mime.startsWith('image/') && a.dataUrl) {
+                        return `<img class="att-image" src="${escapeHTML(a.dataUrl)}" alt="${escapeHTML(a.name)}" loading="lazy">`;
+                    }
+                    if (mime === 'application/pdf') {
+                        return `<span class="att-pill">📄 PDF · ${escapeHTML(a.name)} · ${fmtBytes(a.size||0)}</span>`;
+                    }
+                    if (mime.startsWith('audio/') && a.dataUrl) {
+                        return `<audio class="att-audio" controls src="${escapeHTML(a.dataUrl)}" aria-label="${escapeHTML(a.name)}"></audio>`;
+                    }
+                    return `<span class="att-pill">📎 ${escapeHTML(a.name)} · ${fmtBytes(a.size||0)}</span>`;
+                }).join('') +
                 '</div>';
         }
 
@@ -1310,31 +1915,39 @@ const App = (() => {
 
         let metaHtml = '';
         if (m.meta && m.role === 'assistant') {
+            // contributor:F2 — show full timing "Generation: N tokens in T sec (X tok/s)"
+            const tk = parseInt(m.meta.evalCount || 0) || '?';
+            const detail = m.meta.evalCount
+                ? `${tk} tokens in ${escapeHTML(m.meta.totalTime)}s (${escapeHTML(m.meta.tokSec)} tok/s)`
+                : `${escapeHTML(m.meta.tokSec)} tok/s · ${escapeHTML(m.meta.totalTime)}s`;
             metaHtml = `<div class="msg-footer">
-                <span class="tok-badge">${escapeHTML(m.meta.tokSec)} tok/s</span>
-                <span>${escapeHTML(m.meta.totalTime)}s</span>
+                <span class="tok-badge">${detail}</span>
             </div>`;
         }
 
         div.innerHTML = `
-            <div class="avatar">${avatar}</div>
+            <div class="avatar" aria-hidden="true">${avatar}</div>
             <div class="msg-body">
                 <div class="msg-meta-top">
                     <span class="msg-role">${roleLabel}</span>
                 </div>
                 ${attHtml}
                 <div class="msg-content"><div class="markdown-body">${rendered}</div>${metaHtml}</div>
-                <div class="msg-actions">
-                    <button onclick="App.copyMessage('${m.id}')">
-                        <svg class="icon icon-xs" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                <div class="msg-actions" role="toolbar" aria-label="Message actions">
+                    <button onclick="App.copyMessage('${m.id}')" aria-label="Copy message">
+                        <svg class="icon icon-xs" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
                         ${state.lang==='ru'?'Копировать':'Copy'}
                     </button>
-                    <button class="${m.pinned ? 'pinned' : ''}" onclick="App.pinMessage('${m.id}')">
-                        <svg class="icon icon-xs" viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+                    <button class="${m.pinned ? 'pinned' : ''}" onclick="App.pinMessage('${m.id}')" aria-label="${m.pinned?'Unpin':'Pin'} message">
+                        <svg class="icon icon-xs" viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
                         ${m.pinned ? (state.lang==='ru'?'Снять':'Unpin') : (state.lang==='ru'?'Закрепить':'Pin')}
                     </button>
-                    ${m.role === 'user' ? `<button onclick="App.regenerate('${m.id}')">
-                        <svg class="icon icon-xs" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 9-9M3 3v6h6"/></svg>
+                    <button onclick="App.branchFromMessage('${m.id}')" aria-label="Branch from here">
+                        <svg class="icon icon-xs" viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="3" r="3"/><circle cx="6" cy="21" r="3"/><circle cx="18" cy="12" r="3"/><path d="M6 6v12M9 18 18 12 9 6"/></svg>
+                        ${state.lang==='ru'?'Ветка':'Branch'}
+                    </button>
+                    ${m.role === 'user' ? `<button onclick="App.regenerate('${m.id}')" aria-label="Regenerate">
+                        <svg class="icon icon-xs" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 9-9M3 3v6h6"/></svg>
                         ${state.lang==='ru'?'Повторить':'Regenerate'}
                     </button>` : ''}
                 </div>
@@ -1343,7 +1956,62 @@ const App = (() => {
 
         // syntax highlight
         div.querySelectorAll('pre code').forEach(b => { try { hljs.highlightElement(b); } catch {} });
+
+        // contributor:F2 — enhance code blocks with "Open in artifact" + wrap tables with CSV-copy
+        enhanceCodeBlocksForArtifacts(div);
+        enhanceTablesWithCsvCopy(div);
         return div;
+    }
+
+    // contributor:F2 — augment code blocks (post-render) with "Open in artifact" button
+    function enhanceCodeBlocksForArtifacts(scope) {
+        scope.querySelectorAll('.code-block-wrapper').forEach(wrap => {
+            const langEl = wrap.querySelector('.code-lang');
+            const codeEl = wrap.querySelector('pre code');
+            if (!langEl || !codeEl) return;
+            if (wrap.querySelector('.open-artifact-btn')) return; // already added
+            const lang = langEl.textContent.toLowerCase();
+            const supported = ['html', 'svg', 'mermaid', 'jsx', 'tsx', 'react', 'json'];
+            if (!supported.includes(lang)) return;
+            const actions = wrap.querySelector('.code-actions');
+            if (!actions) return;
+            const btn = document.createElement('button');
+            btn.className = 'open-artifact-btn';
+            btn.setAttribute('aria-label', 'Open in artifact panel');
+            btn.innerHTML = `<svg class="icon icon-xs" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M10 21H3v-7M14 3l-7 7M10 21l7-7"/></svg> Open`;
+            btn.onclick = () => {
+                openArtifact(codeEl.textContent, lang, lang.toUpperCase() + ' preview');
+            };
+            actions.appendChild(btn);
+        });
+    }
+
+    // contributor:F2 — wrap tables and add copy-as-CSV
+    function enhanceTablesWithCsvCopy(scope) {
+        scope.querySelectorAll('table').forEach(tbl => {
+            if (tbl.parentElement && tbl.parentElement.classList.contains('table-wrapper')) return;
+            const wrapper = document.createElement('div');
+            wrapper.className = 'table-wrapper';
+            tbl.parentNode.insertBefore(wrapper, tbl);
+            wrapper.appendChild(tbl);
+            const btn = document.createElement('button');
+            btn.className = 'table-csv-btn';
+            btn.setAttribute('aria-label', 'Copy table as CSV');
+            btn.textContent = 'Copy CSV';
+            btn.onclick = () => {
+                const rows = Array.from(tbl.querySelectorAll('tr')).map(tr =>
+                    Array.from(tr.querySelectorAll('th,td')).map(c => {
+                        const txt = c.textContent.replace(/"/g,'""');
+                        return /[",\n]/.test(txt) ? `"${txt}"` : txt;
+                    }).join(',')
+                ).join('\n');
+                navigator.clipboard.writeText(rows).then(() => {
+                    btn.textContent = 'Copied!';
+                    setTimeout(() => btn.textContent = 'Copy CSV', 1600);
+                });
+            };
+            wrapper.appendChild(btn);
+        });
     }
 
     /* ---------- Markdown + tool_call rendering ---------- */
@@ -1549,24 +2217,45 @@ const App = (() => {
 
     /* ---------- Settings ---------- */
     function applySettingsToUI() {
-        $('#setSystem').value = state.settings.system || '';
-        $('#setTemp').value = state.settings.temperature;
-        $('#setTopP').value = state.settings.top_p;
-        $('#setTopK').value = state.settings.top_k;
-        $('#setMaxTok').value = state.settings.max_tokens;
-        $('#valTemp').textContent = state.settings.temperature;
-        $('#valTopP').textContent = state.settings.top_p;
-        $('#valTopK').textContent = state.settings.top_k;
-        $('#valMaxTok').textContent = state.settings.max_tokens;
+        // contributor:F2 — pick scope (global or current chat)
+        let src = state.settings;
+        if (state.settingsScope === 'chat') {
+            const c = state.chats[state.activeChatId];
+            if (c) {
+                if (!c.settings) c.settings = { ...state.settings };
+                src = c.settings;
+            }
+        }
+        $('#setSystem').value = src.system || '';
+        $('#setTemp').value = src.temperature;
+        $('#setTopP').value = src.top_p;
+        $('#setTopK').value = src.top_k;
+        $('#setMaxTok').value = src.max_tokens;
+        $('#valTemp').textContent = src.temperature;
+        $('#valTopP').textContent = src.top_p;
+        $('#valTopK').textContent = src.top_k;
+        $('#valMaxTok').textContent = src.max_tokens;
     }
 
     function readSettingsFromUI() {
-        state.settings.system = $('#setSystem').value;
-        state.settings.temperature = parseFloat($('#setTemp').value);
-        state.settings.top_p = parseFloat($('#setTopP').value);
-        state.settings.top_k = parseInt($('#setTopK').value);
-        state.settings.max_tokens = parseInt($('#setMaxTok').value);
-        persistSettings();
+        // contributor:F2 — write to chat or global based on scope
+        let dest = state.settings;
+        let isChat = false;
+        if (state.settingsScope === 'chat') {
+            const c = state.chats[state.activeChatId];
+            if (c) {
+                if (!c.settings) c.settings = { ...state.settings };
+                dest = c.settings;
+                isChat = true;
+            }
+        }
+        dest.system = $('#setSystem').value;
+        dest.temperature = parseFloat($('#setTemp').value);
+        dest.top_p = parseFloat($('#setTopP').value);
+        dest.top_k = parseInt($('#setTopK').value);
+        dest.max_tokens = parseInt($('#setMaxTok').value);
+        if (isChat) persistChats();
+        else persistSettings();
     }
 
     function updateSettingDisplay(id, val) {
@@ -1586,6 +2275,9 @@ const App = (() => {
         $$('.right-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
         $('#paneSettings').classList.toggle('active', name === 'settings');
         $('#paneToc').classList.toggle('active', name === 'toc');
+        $('#paneBranches').classList.toggle('active', name === 'branches');
+        // contributor:F2 — render branch tree on switch
+        if (name === 'branches') renderBranchTree();
     }
 
     function toggleRightPanel() {
@@ -1643,6 +2335,11 @@ const App = (() => {
     function readAttachment(file) {
         const isText = /^text\/|\/(json|xml|yaml|toml|markdown|x-csrc|x-c\+\+src|x-python|javascript|x-shellscript)/.test(file.type)
             || /\.(txt|md|py|c|cpp|h|hpp|js|ts|json|yaml|yml|toml|sh|cmake|log|csv|xml|html|css)$/i.test(file.name);
+        // contributor:F2 — separate handling for image / pdf / audio (multimodal preview)
+        const isImage = /^image\//.test(file.type);
+        const isAudio = /^audio\//.test(file.type);
+        const isPdf   = file.type === 'application/pdf';
+
         const reader = new FileReader();
         reader.onload = () => {
             const att = {
@@ -1652,11 +2349,13 @@ const App = (() => {
                 mime: file.type || 'application/octet-stream',
                 content: isText ? String(reader.result || '') : null,
                 preview: isText ? String(reader.result || '').slice(0, 4000) : null,
+                dataUrl: (isImage || isAudio || isPdf) ? String(reader.result || '') : null,
             };
             state.attachments.push(att);
             renderAttachments();
         };
         if (isText) reader.readAsText(file);
+        else if (isImage || isAudio || isPdf) reader.readAsDataURL(file);
         else reader.readAsArrayBuffer(file);
     }
 
@@ -1666,14 +2365,43 @@ const App = (() => {
         state.attachments.forEach(a => {
             const chip = document.createElement('div');
             chip.className = 'attachment-chip';
-            chip.innerHTML = `
-                <svg class="icon icon-xs" viewBox="0 0 24 24"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 17.93 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
-                <span class="att-name">${escapeHTML(a.name)}</span>
-                <span class="att-size">${fmtBytes(a.size)}</span>
-                <button onclick="App.removeAttachment('${a.id}')">
-                    <svg class="icon icon-xs" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
-                </button>
-            `;
+            const mime = a.mime || '';
+            // contributor:F2 — image thumbnail / pdf icon / generic
+            let thumb;
+            if (mime.startsWith('image/') && a.dataUrl) {
+                chip.classList.add('image');
+                const img = document.createElement('img');
+                img.className = 'att-thumb';
+                img.src = a.dataUrl;
+                img.alt = a.name;
+                chip.appendChild(img);
+            } else if (mime === 'application/pdf') {
+                const pdfIcon = document.createElement('div');
+                pdfIcon.className = 'att-pdf-icon';
+                pdfIcon.textContent = 'PDF';
+                pdfIcon.setAttribute('aria-hidden', 'true');
+                chip.appendChild(pdfIcon);
+            } else {
+                const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+                svg.setAttribute('class','icon icon-xs');
+                svg.setAttribute('viewBox','0 0 24 24');
+                svg.setAttribute('aria-hidden','true');
+                svg.innerHTML = '<path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 17.93 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" fill="none" stroke="currentColor" stroke-width="2"/>';
+                chip.appendChild(svg);
+            }
+            const name = document.createElement('span');
+            name.className = 'att-name';
+            name.textContent = a.name;
+            const size = document.createElement('span');
+            size.className = 'att-size';
+            size.textContent = fmtBytes(a.size);
+            const removeBtn = document.createElement('button');
+            removeBtn.setAttribute('aria-label', 'Remove attachment');
+            removeBtn.onclick = () => removeAttachment(a.id);
+            removeBtn.innerHTML = `<svg class="icon icon-xs" viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6L6 18M6 6l12 12"/></svg>`;
+            chip.appendChild(name);
+            chip.appendChild(size);
+            chip.appendChild(removeBtn);
             row.appendChild(chip);
         });
     }
@@ -1749,6 +2477,21 @@ const App = (() => {
     async function handleSend() {
         const ta = $('#userInput');
         let text = ta.value.trim();
+
+        // contributor:F2 — slash command interception
+        if (text.startsWith('/')) {
+            const space = text.indexOf(' ');
+            const cmd = space < 0 ? text : text.slice(0, space);
+            const rest = space < 0 ? '' : text.slice(space+1).trim();
+            const known = SLASH_COMMANDS.find(c => c.cmd === cmd);
+            if (known) {
+                ta.value = ''; ta.style.height = 'auto';
+                state.slashOpen = false; renderSlashPopup();
+                executeSlashCommand(cmd, rest);
+                return;
+            }
+        }
+
         const model = $('#modelSelect').value;
         if (!text && state.attachments.length === 0) return;
         if (!model) { toast(state.lang==='ru'?'Выберите модель':'Pick a model', 'error'); return; }
@@ -1776,7 +2519,11 @@ const App = (() => {
 
         const userMsg = {
             id: uid(), role: 'user', content: userBody,
-            attachments: atts.map(a => ({ name: a.name, size: a.size, mime: a.mime })),
+            // contributor:F2 — preserve dataUrl for image/audio render in history
+            attachments: atts.map(a => ({
+                name: a.name, size: a.size, mime: a.mime,
+                dataUrl: (a.mime && (a.mime.startsWith('image/') || a.mime.startsWith('audio/'))) ? a.dataUrl : null,
+            })),
             createdAt: Date.now(),
         };
         chat.messages.push(userMsg);
@@ -1787,19 +2534,33 @@ const App = (() => {
         renderSidebar();
         renderChat();
 
+        // contributor:F2 — workspace system prompt override
+        const ws = state.workspaces[state.activeWorkspaceId];
+        const effectiveSettings = (chat.settings && Object.keys(chat.settings).length) ? chat.settings : state.settings;
+        const sysPrompt = (ws && ws.systemPrompt) ? ws.systemPrompt : effectiveSettings.system;
+
         // build API payload
         const apiMessages = [];
-        if (state.settings.system && state.settings.system.trim())
-            apiMessages.push({ role: 'system', content: state.settings.system.trim() });
-        chat.messages.forEach(m => apiMessages.push({ role: m.role, content: m.content }));
+        if (sysPrompt && sysPrompt.trim())
+            apiMessages.push({ role: 'system', content: sysPrompt.trim() });
+        chat.messages.forEach(m => {
+            const msg = { role: m.role, content: m.content };
+            // contributor:F2 — multimodal images (Ollama-style — base64 data without prefix)
+            if (m.attachments && m.attachments.some(a => a.mime && a.mime.startsWith('image/') && a.dataUrl)) {
+                msg.images = m.attachments
+                    .filter(a => a.mime && a.mime.startsWith('image/') && a.dataUrl)
+                    .map(a => (a.dataUrl || '').split(',').pop());  // strip "data:image/..;base64,"
+            }
+            apiMessages.push(msg);
+        });
 
         const payload = {
             model, messages: apiMessages, stream: true,
             options: {
-                temperature: state.settings.temperature,
-                top_p: state.settings.top_p,
-                top_k: state.settings.top_k,
-                num_predict: state.settings.max_tokens,
+                temperature: effectiveSettings.temperature,
+                top_p: effectiveSettings.top_p,
+                top_k: effectiveSettings.top_k,
+                num_predict: effectiveSettings.max_tokens,
             }
         };
 
@@ -1831,13 +2592,45 @@ const App = (() => {
         let metaCaptured = null;
 
         try {
-            const res = await fetch(`${API_BASE}/api/chat`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload),
-                signal: state.abortController.signal,
-            });
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            // contributor:F2 — fetch with retry on 5xx/network errors (exponential backoff)
+            let netReconnectAttempt = 0;
+            const maxReconnect = 2;
+            let res;
+            while (true) {
+                try {
+                    res = await fetch(`${API_BASE}/api/chat`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload),
+                        signal: state.abortController.signal,
+                    });
+                    if (res.status === 401 || res.status === 403) {
+                        showAuthBanner(res.status);
+                        throw new Error(`HTTP ${res.status}`);
+                    }
+                    if (res.status >= 500 && netReconnectAttempt < maxReconnect) {
+                        const d = Math.min(1000 * Math.pow(2, netReconnectAttempt), 8000);
+                        setConnectionStatus('reconnecting', `Retry ${netReconnectAttempt+1}/${maxReconnect}...`);
+                        await new Promise(r => setTimeout(r, d));
+                        netReconnectAttempt++;
+                        continue;
+                    }
+                    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                    setConnectionStatus('online', tr('online'));
+                    break;
+                } catch (netErr) {
+                    if (netErr.name === 'AbortError') throw netErr;
+                    if (netReconnectAttempt < maxReconnect) {
+                        const d = Math.min(1000 * Math.pow(2, netReconnectAttempt), 8000);
+                        setConnectionStatus('reconnecting', `Reconnecting ${netReconnectAttempt+1}/${maxReconnect}...`);
+                        await new Promise(r => setTimeout(r, d));
+                        netReconnectAttempt++;
+                        continue;
+                    }
+                    setConnectionStatus('offline', tr('offline'));
+                    throw netErr;
+                }
+            }
 
             const reader = res.body.getReader();
             const dec = new TextDecoder('utf-8');
@@ -1879,6 +2672,7 @@ const App = (() => {
                                 metaCaptured = {
                                     tokSec: (obj.eval_count / (obj.eval_duration/1e9)).toFixed(1),
                                     totalTime: ((obj.total_duration || obj.eval_duration)/1e9).toFixed(2),
+                                    evalCount: obj.eval_count, // contributor:F2 — preserve count for "N tokens in T sec"
                                 };
                             }
                         }
@@ -1895,7 +2689,11 @@ const App = (() => {
             }
         } finally {
             placeholderMsg.content = full;
-            if (metaCaptured) placeholderMsg.meta = metaCaptured;
+            if (metaCaptured) {
+                placeholderMsg.meta = metaCaptured;
+                // contributor:F2 — record into perf history
+                recordPerf({ ts: Date.now(), ...metaCaptured });
+            }
             chat.messages.push(placeholderMsg);
             chat.updatedAt = Date.now();
             persistChats();
@@ -1903,10 +2701,17 @@ const App = (() => {
             // final render
             contentDiv.innerHTML = renderMarkdownWithToolCalls(full);
             contentDiv.querySelectorAll('pre code').forEach(b => { try { hljs.highlightElement(b); } catch{} });
+            // contributor:F2 — wire artifact + csv after final paint
+            enhanceCodeBlocksForArtifacts(div);
+            enhanceTablesWithCsvCopy(div);
             if (metaCaptured) {
                 const footer = document.createElement('div');
                 footer.className = 'msg-footer';
-                footer.innerHTML = `<span class="tok-badge">${metaCaptured.tokSec} tok/s</span><span>${metaCaptured.totalTime}s</span>`;
+                // contributor:F2 — "N tokens in T sec (X tok/s)"
+                const tk = parseInt(metaCaptured.evalCount || 0);
+                footer.innerHTML = tk
+                    ? `<span class="tok-badge">${tk} tokens in ${metaCaptured.totalTime}s (${metaCaptured.tokSec} tok/s)</span>`
+                    : `<span class="tok-badge">${metaCaptured.tokSec} tok/s</span><span>${metaCaptured.totalTime}s</span>`;
                 div.querySelector('.msg-content').appendChild(footer);
             }
 
@@ -1932,7 +2737,10 @@ const App = (() => {
     function closeModal(id) { document.getElementById(id).classList.remove('active'); }
     function maybeCloseModal(ev, id) { if (ev.target.id === id) closeModal(id); }
 
-    function runSearch(q) {
+    // contributor:F2 — debounced search to avoid blocking typing
+    const _runSearchInner = (q) => _runSearchImpl(q);
+    const runSearch = debounce(_runSearchInner, 120);
+    function _runSearchImpl(q) {
         const root = $('#searchResults');
         root.innerHTML = '';
         const query = (q || '').trim().toLowerCase();
@@ -1982,14 +2790,821 @@ const App = (() => {
     /* ---------- Keyboard ---------- */
     function setupHotkeys() {
         window.addEventListener('keydown', e => {
-            if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') {
-                e.preventDefault();
-                openSearch();
+            const k = e.key.toLowerCase();
+            // Ctrl+F — search
+            if ((e.ctrlKey || e.metaKey) && k === 'f') {
+                e.preventDefault(); openSearch();
             }
-            if (e.key === 'Escape') {
+            // contributor:F2 — Ctrl+/  hotkeys overlay
+            else if ((e.ctrlKey || e.metaKey) && k === '/') {
+                e.preventDefault(); openHotkeysModal();
+            }
+            // contributor:F2 — Ctrl+Shift+P perf dashboard
+            else if ((e.ctrlKey || e.metaKey) && e.shiftKey && k === 'p') {
+                e.preventDefault(); openPerfModal();
+            }
+            // contributor:F2 — Ctrl+Shift+M MCP
+            else if ((e.ctrlKey || e.metaKey) && e.shiftKey && k === 'm') {
+                e.preventDefault(); openMcpModal();
+            }
+            // contributor:F2 — Ctrl+Shift+N new chat
+            else if ((e.ctrlKey || e.metaKey) && e.shiftKey && k === 'n') {
+                e.preventDefault(); createNewChat();
+            }
+            else if (e.key === 'Escape') {
+                if (state.slashOpen) { state.slashOpen = false; renderSlashPopup(); return; }
                 document.querySelectorAll('.modal-overlay.active').forEach(m => m.classList.remove('active'));
             }
+            // Slash navigation
+            else if (state.slashOpen) {
+                if (e.key === 'ArrowDown') { e.preventDefault(); state.slashIndex = Math.min(state.slashIndex+1, state.slashFiltered.length-1); renderSlashPopup(); }
+                else if (e.key === 'ArrowUp') { e.preventDefault(); state.slashIndex = Math.max(state.slashIndex-1, 0); renderSlashPopup(); }
+                else if (e.key === 'Tab' || (e.key === 'Enter' && state.slashFiltered.length > 0)) {
+                    e.preventDefault();
+                    pickSlashCommand(state.slashIndex);
+                }
+            }
         });
+    }
+
+    /* ============================================================
+       F2 EXTENSIONS BELOW (contributor:F2)
+       ============================================================ */
+
+    // ---------- F2: connection status / retry logic ----------
+    function setConnectionStatus(s, txt) {
+        state.connStatus = s;
+        const el = $('#connStatus');
+        if (!el) return;
+        el.className = 'connection-status ' + s;
+        $('#connStatusText').textContent = txt || tr(s) || s;
+    }
+
+    async function fetchWithRetry(url, opts, maxRetries = 3, retryAttempt = 0) {
+        try {
+            const res = await fetch(url, opts);
+            if (res.status >= 500 && res.status < 600 && retryAttempt < maxRetries) {
+                const delay = Math.min(1000 * Math.pow(2, retryAttempt), 8000);
+                setConnectionStatus('reconnecting', `Retry in ${delay/1000}s...`);
+                await new Promise(r => setTimeout(r, delay));
+                return fetchWithRetry(url, opts, maxRetries, retryAttempt + 1);
+            }
+            if (res.status === 401 || res.status === 403) {
+                showAuthBanner(res.status);
+            }
+            if (res.ok) setConnectionStatus('online', tr('online'));
+            return res;
+        } catch (err) {
+            if (retryAttempt < maxRetries) {
+                const delay = Math.min(1000 * Math.pow(2, retryAttempt), 8000);
+                setConnectionStatus('reconnecting', `Retry in ${delay/1000}s...`);
+                await new Promise(r => setTimeout(r, delay));
+                return fetchWithRetry(url, opts, maxRetries, retryAttempt + 1);
+            }
+            setConnectionStatus('offline', tr('offline'));
+            throw err;
+        }
+    }
+
+    function showAuthBanner(status) {
+        const banner = $('#authBanner');
+        if (!banner) return;
+        banner.classList.add('visible');
+        if (status === 403) banner.classList.add('error');
+        $('#authBannerText').textContent = status === 401
+            ? (state.lang==='ru' ? 'Требуется авторизация. Введите токен в настройках.' : 'Authentication required.')
+            : (state.lang==='ru' ? 'Доступ запрещён (403).' : 'Forbidden (403).');
+    }
+
+    function closeAuthBanner() {
+        $('#authBanner').classList.remove('visible');
+    }
+
+    // ---------- F2: model list cache + auto-refresh ----------
+    async function refreshModelsCache() {
+        const sel = $('#modelSelect');
+        try {
+            const res = await fetchWithRetry(`${API_BASE}/api/tags`, {}, 2);
+            const data = await res.json();
+            const models = (data.models || []).map(m => m.name || m.model || m);
+            state.modelsCache = { ts: Date.now(), list: models };
+
+            const cur = sel.value;
+            sel.innerHTML = '';
+            if (models.length === 0) {
+                sel.innerHTML = `<option value="">${state.lang==='ru'?'Нет моделей':'No models'}</option>`;
+            } else {
+                models.forEach(m => {
+                    const opt = document.createElement('option');
+                    opt.value = m;
+                    opt.textContent = m;
+                    sel.appendChild(opt);
+                });
+                const saved = localStorage.getItem(LS_KEY_MODEL);
+                if (cur && models.includes(cur)) sel.value = cur;
+                else if (saved && models.includes(saved)) sel.value = saved;
+            }
+            setConnectionStatus('online', tr('online'));
+        } catch (e) {
+            setConnectionStatus('offline', tr('offline'));
+            console.warn('refreshModelsCache failed', e);
+        }
+    }
+
+    // ---------- F2: workspaces ----------
+    function loadWorkspaces() {
+        try {
+            const ws = JSON.parse(localStorage.getItem(LS_KEY_WORKSPACES) || 'null');
+            if (ws && Object.keys(ws).length) state.workspaces = ws;
+        } catch {}
+        if (!state.workspaces.default) {
+            state.workspaces.default = { id: 'default', name: 'Default', systemPrompt: '' };
+        }
+        state.activeWorkspaceId = localStorage.getItem(LS_KEY_ACTIVE_WS) || 'default';
+        if (!state.workspaces[state.activeWorkspaceId]) state.activeWorkspaceId = 'default';
+    }
+
+    function persistWorkspaces() {
+        localStorage.setItem(LS_KEY_WORKSPACES, JSON.stringify(state.workspaces));
+        localStorage.setItem(LS_KEY_ACTIVE_WS, state.activeWorkspaceId);
+    }
+
+    function renderWorkspaceSelector() {
+        const sel = $('#workspaceSelect');
+        if (!sel) return;
+        sel.innerHTML = '';
+        Object.values(state.workspaces).forEach(w => {
+            const opt = document.createElement('option');
+            opt.value = w.id; opt.textContent = w.name;
+            if (w.id === state.activeWorkspaceId) opt.selected = true;
+            sel.appendChild(opt);
+        });
+        // contributor:F2 — accept dropped chat to move into target workspace
+        const selWrap = sel.parentElement;
+        selWrap.ondragover = e => { e.preventDefault(); selWrap.style.outline = '2px dashed var(--accent)'; };
+        selWrap.ondragleave = () => { selWrap.style.outline = ''; };
+        selWrap.ondrop = e => {
+            e.preventDefault(); selWrap.style.outline = '';
+            if (!state.dragChatId) return;
+            const targetWs = sel.value;
+            const ch = state.chats[state.dragChatId];
+            if (ch) {
+                ch.workspaceId = targetWs;
+                persistChats();
+                renderSidebar();
+                toast(`Перенесён в "${state.workspaces[targetWs].name}"`, 'success');
+            }
+            state.dragChatId = null;
+        };
+    }
+
+    function switchWorkspace(id) {
+        if (!state.workspaces[id]) return;
+        state.activeWorkspaceId = id;
+        persistWorkspaces();
+        renderSidebar();
+        renderChat();
+    }
+
+    function openWorkspaceModal() {
+        renderWorkspaceList();
+        const ws = state.workspaces[state.activeWorkspaceId];
+        $('#workspaceSystemPrompt').value = ws.systemPrompt || '';
+        $('#workspaceModal').classList.add('active');
+    }
+
+    function renderWorkspaceList() {
+        const wrap = $('#workspaceList');
+        wrap.innerHTML = '';
+        Object.values(state.workspaces).forEach(w => {
+            const row = document.createElement('div');
+            row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:8px;border:1px solid var(--border);border-radius:8px;margin-bottom:6px';
+            const isActive = w.id === state.activeWorkspaceId;
+            row.innerHTML = `
+                <span style="flex:1;font-weight:${isActive ? 600 : 400}">${escapeHTML(w.name)}</span>
+                ${isActive ? '<span style="font-size:11px;color:var(--accent)">active</span>' : ''}
+                ${w.id !== 'default' ? `<button class="btn" onclick="App.deleteWorkspace('${w.id}')" aria-label="Delete">×</button>` : ''}
+            `;
+            row.onclick = (e) => {
+                if (e.target.tagName === 'BUTTON') return;
+                switchWorkspace(w.id);
+                openWorkspaceModal();
+            };
+            wrap.appendChild(row);
+        });
+    }
+
+    function createWorkspace() {
+        const name = $('#newWorkspaceName').value.trim();
+        if (!name) return;
+        const id = 'ws_' + uid();
+        state.workspaces[id] = { id, name, systemPrompt: '' };
+        state.activeWorkspaceId = id;
+        $('#newWorkspaceName').value = '';
+        persistWorkspaces();
+        renderWorkspaceSelector();
+        renderWorkspaceList();
+        toast(`Workspace "${name}" создан`, 'success');
+    }
+
+    function deleteWorkspace(id) {
+        if (id === 'default') return;
+        if (!confirm(`Удалить workspace "${state.workspaces[id]?.name}"?`)) return;
+        delete state.workspaces[id];
+        // Move chats from deleted ws to default
+        Object.values(state.chats).forEach(c => {
+            if (c.workspaceId === id) c.workspaceId = 'default';
+        });
+        if (state.activeWorkspaceId === id) state.activeWorkspaceId = 'default';
+        persistWorkspaces();
+        persistChats();
+        renderWorkspaceSelector();
+        renderWorkspaceList();
+        renderSidebar();
+    }
+
+    function saveWorkspaceSettings() {
+        const ws = state.workspaces[state.activeWorkspaceId];
+        ws.systemPrompt = $('#workspaceSystemPrompt').value;
+        persistWorkspaces();
+        toast(state.lang==='ru'?'Сохранено':'Saved', 'success');
+    }
+
+    // ---------- F2: MCP UI (mock until backend) ----------
+    function loadMcpServers() {
+        try {
+            const m = JSON.parse(localStorage.getItem(LS_KEY_MCP) || '[]');
+            if (Array.isArray(m)) state.mcpServers = m;
+        } catch {}
+    }
+
+    function persistMcpServers() {
+        localStorage.setItem(LS_KEY_MCP, JSON.stringify(state.mcpServers));
+    }
+
+    function renderMcpServerList() {
+        const list = $('#mcpServerList');
+        if (!list) return;
+        list.innerHTML = '';
+        if (state.mcpServers.length === 0) {
+            list.innerHTML = `<div style="font-size:11px;color:var(--text-dark);padding:6px 8px">— нет серверов —</div>`;
+            return;
+        }
+        state.mcpServers.forEach(s => {
+            const row = document.createElement('div');
+            row.className = 'mcp-server-row';
+            const statusClass = s.enabled ? 'active' : 'inactive';
+            row.innerHTML = `
+                <span class="mcp-status-dot ${statusClass}" aria-label="${s.enabled ? 'enabled' : 'disabled'}"></span>
+                <span class="mcp-server-name">${escapeHTML(s.name)}</span>
+                <span class="mcp-tool-count">${(s.tools||[]).length}</span>
+            `;
+            row.onclick = () => openMcpDetail(s.id);
+            list.appendChild(row);
+        });
+    }
+
+    function openMcpModal() {
+        $('#mcpModal').classList.add('active');
+        renderMcpServerFull();
+        renderMcpPresets();
+        showMcpTab('servers');
+    }
+
+    function showMcpTab(name) {
+        $('#mcpTabServers').style.display = name === 'servers' ? 'block' : 'none';
+        $('#mcpTabPresets').style.display = name === 'presets' ? 'block' : 'none';
+        $('#mcpTabServersBtn').className = 'btn' + (name === 'servers' ? ' primary' : '');
+        $('#mcpTabPresetsBtn').className = 'btn' + (name === 'presets' ? ' primary' : '');
+    }
+
+    function renderMcpServerFull() {
+        const wrap = $('#mcpServersFull');
+        if (state.mcpServers.length === 0) {
+            wrap.innerHTML = `<div style="color:var(--text-muted);font-size:13px;padding:20px;text-align:center">
+                Серверы пока не подключены. Backend MCP клиент в разработке (см. <code>docs/research/AGENT_STACK_R2.md</code>).
+                UI заготовлен и готов к подключению.
+            </div>`;
+            return;
+        }
+        wrap.innerHTML = '';
+        state.mcpServers.forEach(s => {
+            const card = document.createElement('div');
+            card.style.cssText = 'padding:12px;border:1px solid var(--border);border-radius:8px;margin-bottom:10px';
+            card.innerHTML = `
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+                    <div style="display:flex;gap:8px;align-items:center">
+                        <span class="mcp-status-dot ${s.enabled?'active':'inactive'}"></span>
+                        <strong>${escapeHTML(s.name)}</strong>
+                    </div>
+                    <div style="display:flex;gap:4px">
+                        <button class="btn" onclick="App.toggleMcpServerById('${s.id}')">${s.enabled?'Off':'On'}</button>
+                        <button class="btn" onclick="App.removeMcpServerById('${s.id}')" style="color:var(--danger)">×</button>
+                    </div>
+                </div>
+                <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">
+                    <code>${escapeHTML(s.command || '')} ${escapeHTML((s.args||[]).join(' '))}</code>
+                </div>
+                <div style="font-size:11px;color:var(--text-muted)">Tools: ${(s.tools||[]).length}</div>
+                <div style="margin-top:6px">
+                    ${(s.tools||[]).map(t => `<label class="mcp-tool-item" style="cursor:pointer">
+                        <input type="checkbox" ${s.disabledTools && s.disabledTools.includes(t) ? '' : 'checked'} onchange="App.toggleMcpTool('${s.id}', '${escapeHTML(t)}', this.checked)">
+                        <div>
+                            <div class="mcp-tool-name">${escapeHTML(t)}</div>
+                        </div>
+                    </label>`).join('')}
+                </div>
+            `;
+            wrap.appendChild(card);
+        });
+    }
+
+    function renderMcpPresets() {
+        const wrap = $('#mcpPresetsList');
+        wrap.innerHTML = '';
+        MCP_PRESETS.forEach(p => {
+            const card = document.createElement('div');
+            card.className = 'mcp-preset';
+            card.innerHTML = `
+                <h4>${escapeHTML(p.name)}</h4>
+                <p>${escapeHTML(p.desc)}</p>
+                <div style="font-size:11px;color:var(--text-dark);margin-top:6px;font-family:var(--font-mono)">
+                    ${escapeHTML(p.command)} ${escapeHTML(p.args.join(' '))}
+                </div>
+                <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">
+                    ${p.tools.map(t => `<span style="font-size:10px;padding:2px 6px;background:var(--bg-panel);border-radius:4px;font-family:var(--font-mono)">${escapeHTML(t)}</span>`).join('')}
+                </div>
+                <button class="btn primary" style="margin-top:8px" onclick="App.addMcpPreset('${p.id}')">Добавить</button>
+            `;
+            wrap.appendChild(card);
+        });
+    }
+
+    function addMcpPreset(presetId) {
+        const p = MCP_PRESETS.find(x => x.id === presetId);
+        if (!p) return;
+        const server = {
+            id: 'mcp_' + uid(),
+            name: p.name,
+            command: p.command,
+            args: [...p.args],
+            env: { ...(p.env || {}) },
+            tools: [...p.tools],
+            disabledTools: [],
+            enabled: false,
+            status: 'ready',
+        };
+        state.mcpServers.push(server);
+        persistMcpServers();
+        renderMcpServerList();
+        renderMcpServerFull();
+        showMcpTab('servers');
+        toast(`MCP "${p.name}" добавлен (off — backend pending)`, 'info');
+    }
+
+    function toggleMcpServerById(id) {
+        const s = state.mcpServers.find(x => x.id === id); if (!s) return;
+        s.enabled = !s.enabled;
+        // Note: backend not connected — состояние сохраняется только локально
+        persistMcpServers();
+        renderMcpServerList();
+        renderMcpServerFull();
+        toast(`${s.name}: ${s.enabled ? 'enabled' : 'disabled'} (UI only)`, 'info');
+    }
+
+    function removeMcpServerById(id) {
+        if (!confirm('Удалить этот MCP server?')) return;
+        state.mcpServers = state.mcpServers.filter(x => x.id !== id);
+        persistMcpServers();
+        renderMcpServerList();
+        renderMcpServerFull();
+    }
+
+    function toggleMcpTool(serverId, tool, enabled) {
+        const s = state.mcpServers.find(x => x.id === serverId); if (!s) return;
+        s.disabledTools = s.disabledTools || [];
+        if (enabled) s.disabledTools = s.disabledTools.filter(t => t !== tool);
+        else if (!s.disabledTools.includes(tool)) s.disabledTools.push(tool);
+        persistMcpServers();
+    }
+
+    function openMcpDetail(id) {
+        state.mcpActiveId = id;
+        // For now just open full modal
+        openMcpModal();
+    }
+
+    function removeMcpServer() {
+        if (state.mcpActiveId) removeMcpServerById(state.mcpActiveId);
+        closeModal('mcpDetailModal');
+    }
+    function toggleMcpServer() {
+        if (state.mcpActiveId) toggleMcpServerById(state.mcpActiveId);
+        closeModal('mcpDetailModal');
+    }
+
+    // ---------- F2: slash commands ----------
+    function checkSlash(ta) {
+        const v = ta.value;
+        if (v.startsWith('/') && !v.includes('\n') && !v.includes(' ')) {
+            const q = v.toLowerCase();
+            state.slashFiltered = SLASH_COMMANDS.filter(c => c.cmd.toLowerCase().startsWith(q));
+            state.slashOpen = state.slashFiltered.length > 0;
+            state.slashIndex = 0;
+        } else {
+            state.slashOpen = false;
+        }
+        renderSlashPopup();
+    }
+
+    function renderSlashPopup() {
+        const popup = $('#slashPopup');
+        if (!popup) return;
+        popup.classList.toggle('open', state.slashOpen);
+        if (!state.slashOpen) { popup.innerHTML = ''; return; }
+        popup.innerHTML = state.slashFiltered.map((c, i) => `
+            <div class="slash-item ${i === state.slashIndex ? 'active' : ''}" data-idx="${i}" role="option" tabindex="-1" onmousedown="App.pickSlashCommand(${i})">
+                <span class="slash-cmd">${escapeHTML(c.cmd)}</span>
+                <span class="slash-desc">${escapeHTML(c.desc)}</span>
+            </div>
+        `).join('');
+    }
+
+    function pickSlashCommand(idx) {
+        const c = state.slashFiltered[idx]; if (!c) return;
+        const ta = $('#userInput');
+        // For commands with args — keep cursor after the command
+        ta.value = c.cmd + ' ';
+        state.slashOpen = false;
+        renderSlashPopup();
+        ta.focus();
+        // Если команда не требует аргументов — выполнить сразу
+        if (['/clear','/help','/save','/load','/hotkeys','/perf','/mcp','/branch'].includes(c.cmd)) {
+            ta.value = '';
+            executeSlashCommand(c.cmd, '');
+        }
+    }
+
+    function executeSlashCommand(cmd, rest) {
+        switch (cmd) {
+            case '/clear': {
+                const c = state.chats[state.activeChatId];
+                if (c && confirm('Очистить этот чат?')) {
+                    c.messages = []; persistChats(); renderChat();
+                }
+                return true;
+            }
+            case '/help':
+                openHotkeysModal(); return true;
+            case '/save':
+                exportChatMarkdown(); return true;
+            case '/load': {
+                const inp = document.createElement('input');
+                inp.type = 'file'; inp.accept = '.json,.md';
+                inp.onchange = ev => importChatFile(ev.target.files[0]);
+                inp.click(); return true;
+            }
+            case '/model': {
+                if (rest) {
+                    const sel = $('#modelSelect');
+                    const opt = Array.from(sel.options).find(o => o.value.includes(rest.trim()));
+                    if (opt) { sel.value = opt.value; localStorage.setItem(LS_KEY_MODEL, opt.value); toast(`Модель: ${opt.value}`, 'success'); }
+                    else toast(`Не найдено: ${rest}`, 'error');
+                }
+                return true;
+            }
+            case '/system':
+                if (rest) { state.settings.system = rest; persistSettings(); applySettingsToUI(); toast('System prompt обновлён', 'success'); }
+                return true;
+            case '/temp':
+                if (rest) { state.settings.temperature = parseFloat(rest); persistSettings(); applySettingsToUI(); }
+                return true;
+            case '/topp':
+                if (rest) { state.settings.top_p = parseFloat(rest); persistSettings(); applySettingsToUI(); }
+                return true;
+            case '/topk':
+                if (rest) { state.settings.top_k = parseInt(rest); persistSettings(); applySettingsToUI(); }
+                return true;
+            case '/maxtok':
+                if (rest) { state.settings.max_tokens = parseInt(rest); persistSettings(); applySettingsToUI(); }
+                return true;
+            case '/run':
+                toast(`MCP tool execution coming soon: ${rest}`, 'info'); return true;
+            case '/branch':
+                branchFromLastMessage(); return true;
+            case '/hotkeys':
+                openHotkeysModal(); return true;
+            case '/perf':
+                openPerfModal(); return true;
+            case '/mcp':
+                openMcpModal(); return true;
+        }
+        return false;
+    }
+
+    function importChatFile(file) {
+        if (!file) return;
+        const r = new FileReader();
+        r.onload = () => {
+            try {
+                const obj = JSON.parse(r.result);
+                if (obj && obj.messages) {
+                    obj.id = uid();
+                    obj.updatedAt = Date.now();
+                    obj.workspaceId = state.activeWorkspaceId;
+                    state.chats[obj.id] = obj;
+                    state.activeChatId = obj.id;
+                    persistChats(); renderSidebar(); renderChat();
+                    toast(state.lang==='ru'?'Импортировано':'Imported', 'success');
+                }
+            } catch (e) { toast('Invalid file: ' + e.message, 'error'); }
+        };
+        r.readAsText(file);
+    }
+
+    // ---------- F2: artifacts (sandboxed preview) ----------
+    function detectArtifactType(content, language) {
+        const lang = (language||'').toLowerCase();
+        const trimmed = (content||'').trim();
+        if (lang === 'html' || /^<!DOCTYPE html|^<html/i.test(trimmed)) return 'html';
+        if (lang === 'svg' || /^<svg/i.test(trimmed)) return 'svg';
+        if (lang === 'mermaid') return 'mermaid';
+        if (lang === 'jsx' || lang === 'tsx' || lang === 'react') return 'react';
+        if (lang === 'json') return 'json';
+        return null;
+    }
+
+    function openArtifact(content, language, title) {
+        const type = detectArtifactType(content, language) || 'code';
+        const id = 'art_' + uid();
+        const art = { id, type, title: title || (type.toUpperCase()), content, language: language || 'text' };
+        state.artifacts.push(art);
+        state.activeArtifactId = id;
+        state.artifactPanelOpen = true;
+        renderArtifactPanel();
+    }
+
+    function toggleArtifactPanel() {
+        state.artifactPanelOpen = !state.artifactPanelOpen;
+        renderArtifactPanel();
+    }
+
+    function renderArtifactPanel() {
+        const panel = $('#artifactPanel');
+        panel.classList.toggle('open', state.artifactPanelOpen);
+        if (!state.artifactPanelOpen) return;
+        const tabsEl = $('#artifactTabs');
+        tabsEl.innerHTML = '';
+        state.artifacts.forEach(a => {
+            const tab = document.createElement('div');
+            tab.className = 'artifact-tab' + (a.id === state.activeArtifactId ? ' active' : '');
+            tab.role = 'tab';
+            tab.tabIndex = 0;
+            tab.innerHTML = `
+                <span>${escapeHTML(a.title)}</span>
+                <span class="close" data-id="${a.id}">×</span>
+            `;
+            tab.onclick = (e) => {
+                if (e.target.classList.contains('close')) {
+                    state.artifacts = state.artifacts.filter(x => x.id !== a.id);
+                    if (state.activeArtifactId === a.id) {
+                        state.activeArtifactId = state.artifacts[0]?.id || null;
+                        if (!state.activeArtifactId) state.artifactPanelOpen = false;
+                    }
+                    renderArtifactPanel();
+                    return;
+                }
+                state.activeArtifactId = a.id;
+                renderArtifactPanel();
+            };
+            tabsEl.appendChild(tab);
+        });
+        // Render body
+        const body = $('#artifactBody');
+        body.innerHTML = '';
+        const a = state.artifacts.find(x => x.id === state.activeArtifactId);
+        if (!a) return;
+        $('#artifactTitle').textContent = a.title;
+        if (a.type === 'html') {
+            const iframe = document.createElement('iframe');
+            iframe.sandbox = 'allow-scripts';
+            iframe.srcdoc = a.content;
+            iframe.title = a.title;
+            body.appendChild(iframe);
+        } else if (a.type === 'svg') {
+            const iframe = document.createElement('iframe');
+            iframe.sandbox = 'allow-scripts';
+            iframe.srcdoc = `<!DOCTYPE html><html><body style="margin:0;background:white;display:flex;align-items:center;justify-content:center;height:100vh">${a.content}</body></html>`;
+            iframe.title = a.title;
+            body.appendChild(iframe);
+        } else if (a.type === 'mermaid') {
+            const iframe = document.createElement('iframe');
+            iframe.sandbox = 'allow-scripts';
+            iframe.srcdoc = `<!DOCTYPE html><html><body><pre class="mermaid">${escapeHTML(a.content)}</pre>
+                <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"><\/script>
+                <script>mermaid.initialize({startOnLoad:true,theme:'dark'});<\/script></body></html>`;
+            iframe.title = a.title;
+            body.appendChild(iframe);
+        } else if (a.type === 'react') {
+            const iframe = document.createElement('iframe');
+            iframe.sandbox = 'allow-scripts';
+            iframe.srcdoc = `<!DOCTYPE html><html><body><div id="root"></div>
+                <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"><\/script>
+                <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"><\/script>
+                <script src="https://unpkg.com/@babel/standalone/babel.min.js"><\/script>
+                <script type="text/babel">${a.content}\nif (typeof App !== 'undefined') ReactDOM.createRoot(document.getElementById('root')).render(<App />);<\/script>
+                </body></html>`;
+            iframe.title = a.title;
+            body.appendChild(iframe);
+        } else {
+            const pre = document.createElement('pre');
+            const code = document.createElement('code');
+            code.className = 'language-' + (a.language || 'text');
+            code.textContent = a.content;
+            pre.appendChild(code);
+            body.appendChild(pre);
+            try { hljs.highlightElement(code); } catch {}
+        }
+    }
+
+    function copyArtifact() {
+        const a = state.artifacts.find(x => x.id === state.activeArtifactId);
+        if (a) navigator.clipboard.writeText(a.content).then(() => toast(tr('copied'), 'success'));
+    }
+
+    function downloadArtifact() {
+        const a = state.artifacts.find(x => x.id === state.activeArtifactId);
+        if (!a) return;
+        const ext = { html: 'html', svg: 'svg', mermaid: 'mmd', react: 'jsx', json: 'json', code: 'txt' }[a.type] || 'txt';
+        const blob = new Blob([a.content], { type: 'text/plain' });
+        downloadBlob(blob, `${a.title.replace(/[^\w\-]+/g,'_')}.${ext}`);
+    }
+
+    // ---------- F2: branching ----------
+    function branchFromMessage(mid) {
+        const c = state.chats[state.activeChatId]; if (!c) return;
+        const idx = c.messages.findIndex(x => x.id === mid);
+        if (idx < 0) return;
+        const newId = uid();
+        const branched = {
+            id: newId,
+            title: c.title + ' (branch)',
+            messages: JSON.parse(JSON.stringify(c.messages.slice(0, idx + 1))),
+            updatedAt: Date.now(),
+            pinned: false,
+            workspaceId: c.workspaceId || 'default',
+            branchOf: c.id,
+            branchedAtMessage: mid,
+        };
+        c.branches = c.branches || [];
+        c.branches.push({ id: newId, at: mid });
+        state.chats[newId] = branched;
+        state.activeChatId = newId;
+        persistChats();
+        renderSidebar();
+        renderChat();
+        toast(state.lang==='ru'?'Ветка создана':'Branch created', 'success');
+    }
+
+    function branchFromLastMessage() {
+        const c = state.chats[state.activeChatId];
+        if (!c || c.messages.length === 0) return;
+        branchFromMessage(c.messages[c.messages.length - 1].id);
+    }
+
+    function renderBranchTree() {
+        const wrap = $('#branchTree');
+        const c = state.chats[state.activeChatId];
+        if (!c) { wrap.innerHTML = `<div style="font-size:12px;color:var(--text-muted);text-align:center;padding:20px 0;">${tr('branches_empty')}</div>`; return; }
+        // Find root chat
+        let root = c;
+        while (root.branchOf && state.chats[root.branchOf]) root = state.chats[root.branchOf];
+        function renderNode(chat, depth = 0) {
+            const isCurrent = chat.id === state.activeChatId;
+            let html = `<div class="branch-item ${isCurrent?'current':''}" onclick="App.selectChat('${chat.id}')" role="button" tabindex="0">
+                <span class="branch-dot"></span>
+                <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHTML(chat.title)}</span>
+                <span style="font-size:10px;color:var(--text-dark)">${(chat.messages||[]).length}</span>
+            </div>`;
+            const children = Object.values(state.chats).filter(c2 => c2.branchOf === chat.id);
+            if (children.length) {
+                html += '<div class="branch-tree">' + children.map(c2 => renderNode(c2, depth+1)).join('') + '</div>';
+            }
+            return html;
+        }
+        wrap.innerHTML = `<div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">Branches in this thread:</div>` + renderNode(root);
+    }
+
+    // ---------- F2: per-chat vs global settings ----------
+    function switchSettingsScope(scope) {
+        state.settingsScope = scope;
+        $$('.settings-scope-tab').forEach(t => t.classList.toggle('active', t.dataset.scope === scope));
+        applySettingsToUI();
+        $('#resetChatBtn').style.display = scope === 'chat' ? '' : 'none';
+    }
+
+    function getActiveSettings() {
+        if (state.settingsScope === 'chat') {
+            const c = state.chats[state.activeChatId];
+            if (c && c.settings) return c.settings;
+        }
+        return state.settings;
+    }
+
+    function saveAsDefault() {
+        const c = state.chats[state.activeChatId];
+        if (state.settingsScope === 'chat' && c && c.settings) {
+            state.settings = { ...c.settings };
+            persistSettings();
+            toast(state.lang==='ru'?'Сохранено как умолчания':'Saved as default', 'success');
+        } else {
+            // Save global to current settings
+            persistSettings();
+            toast(state.lang==='ru'?'Глобальные настройки сохранены':'Global settings saved', 'success');
+        }
+    }
+
+    function resetChatToGlobal() {
+        const c = state.chats[state.activeChatId];
+        if (c) { c.settings = null; persistChats(); applySettingsToUI(); }
+        toast(state.lang==='ru'?'Сброшено':'Reset', 'info');
+    }
+
+    // ---------- F2: hotkeys overlay ----------
+    function openHotkeysModal() {
+        const wrap = $('#hotkeysList');
+        wrap.innerHTML = '';
+        HOTKEYS.forEach(h => {
+            const keys = h.keys.map(k => `<kbd>${escapeHTML(k)}</kbd>`).join(' + ');
+            wrap.innerHTML += `<div class="keys">${keys}</div><div>${escapeHTML(h.desc)}</div>`;
+        });
+        $('#hotkeysModal').classList.add('active');
+    }
+
+    // ---------- F2: perf dashboard ----------
+    function recordPerf(p) {
+        state.perfHistory.unshift(p);
+        if (state.perfHistory.length > 50) state.perfHistory = state.perfHistory.slice(0, 50);
+        localStorage.setItem(LS_KEY_PERF_HIST, JSON.stringify(state.perfHistory));
+    }
+
+    function openPerfModal() {
+        const wrap = $('#perfDashBody');
+        const chats = Object.values(state.chats);
+        const totalMsgs = chats.reduce((a, c) => a + (c.messages||[]).length, 0);
+        const lsBytes = new Blob(Object.values(localStorage)).size;
+        const lsTotalEst = 5 * 1024 * 1024; // typical browser quota
+        const recent = state.perfHistory.slice(0, 10);
+        const avgTok = recent.length ? (recent.reduce((a, p) => a + parseFloat(p.tokSec), 0) / recent.length).toFixed(1) : '—';
+        const totalTokensEst = chats.reduce((a, c) =>
+            a + (c.messages||[]).reduce((b, m) => b + Math.ceil((m.content||'').length / 4), 0), 0);
+        const pctLs = Math.min(100, (lsBytes / lsTotalEst * 100));
+        wrap.innerHTML = `
+            <div class="perf-stat">
+                <span class="perf-label">Chats</span>
+                <span class="perf-value">${chats.length}</span>
+            </div>
+            <div class="perf-stat">
+                <span class="perf-label">Messages</span>
+                <span class="perf-value">${totalMsgs}</span>
+            </div>
+            <div class="perf-stat">
+                <span class="perf-label">Tokens (estimate)</span>
+                <span class="perf-value">${totalTokensEst.toLocaleString()}</span>
+            </div>
+            <div class="perf-stat" style="flex-direction:column;align-items:stretch;gap:6px">
+                <div style="display:flex;justify-content:space-between">
+                    <span class="perf-label">localStorage</span>
+                    <span class="perf-value">${fmtBytes(lsBytes)} / ~5 MB</span>
+                </div>
+                <div class="perf-bar"><div class="perf-bar-fill" style="width:${pctLs.toFixed(1)}%"></div></div>
+            </div>
+            <div class="perf-stat">
+                <span class="perf-label">Avg tok/s (last ${recent.length})</span>
+                <span class="perf-value">${avgTok}</span>
+            </div>
+            <div class="perf-stat">
+                <span class="perf-label">Workspaces</span>
+                <span class="perf-value">${Object.keys(state.workspaces).length}</span>
+            </div>
+            <div class="perf-stat">
+                <span class="perf-label">MCP Servers</span>
+                <span class="perf-value">${state.mcpServers.length} (${state.mcpServers.filter(s=>s.enabled).length} on)</span>
+            </div>
+            <div class="perf-stat">
+                <span class="perf-label">Artifacts open</span>
+                <span class="perf-value">${state.artifacts.length}</span>
+            </div>
+        `;
+        $('#perfModal').classList.add('active');
+    }
+
+    // ---------- F2: virtualized history (if > 100) ----------
+    function renderHistoryVirtual() {
+        // Currently F2 falls back to plain DOM render if < 100 chats.
+        // Beyond that we render only top-100 + "Load more" trigger.
+        // (full IntersectionObserver-virtualization could be added later.)
+        return Object.keys(state.chats).length > 100;
     }
 
     /* ---------- Init ---------- */
@@ -1998,10 +3613,19 @@ const App = (() => {
         marked.setOptions({ breaks: true, gfm: true });
 
         loadFromStorage();
+        // contributor:F2 — load extended state
+        loadWorkspaces();
+        loadMcpServers();
+        try {
+            state.perfHistory = JSON.parse(localStorage.getItem(LS_KEY_PERF_HIST) || '[]');
+        } catch { state.perfHistory = []; }
+
         applyTheme();
         applyI18n();
         applySettingsToUI();
+        renderWorkspaceSelector();
         renderSidebar();
+        renderMcpServerList();
         renderChat();
         setupDragDrop();
         setupVoice();
@@ -2010,7 +3634,14 @@ const App = (() => {
         // settings changes
         $('#setSystem').addEventListener('input', readSettingsFromUI);
 
-        await fetchModels();
+        // contributor:F2 — close slash popup on blur
+        $('#userInput').addEventListener('blur', () => {
+            setTimeout(() => { state.slashOpen = false; renderSlashPopup(); }, 200);
+        });
+
+        // contributor:F2 — auto-refresh models every 30 sec
+        await refreshModelsCache();
+        state.modelsRefreshTimer = setInterval(refreshModelsCache, 30000);
     }
 
     document.addEventListener('DOMContentLoaded', init);
@@ -2027,6 +3658,16 @@ const App = (() => {
         openFilePicker, handleFileSelect, removeAttachment,
         toggleVoice, toggleTheme, toggleLang,
         openSearch, runSearch, closeModal, maybeCloseModal,
+        // contributor:F2 — new exports
+        checkSlash, pickSlashCommand,
+        switchWorkspace, openWorkspaceModal, createWorkspace, deleteWorkspace, saveWorkspaceSettings,
+        openMcpModal, showMcpTab, addMcpPreset, toggleMcpServerById, removeMcpServerById, toggleMcpTool,
+        openMcpDetail, removeMcpServer, toggleMcpServer,
+        openHotkeysModal, openPerfModal,
+        switchSettingsScope, saveAsDefault, resetChatToGlobal,
+        branchFromMessage,
+        toggleArtifactPanel, copyArtifact, downloadArtifact,
+        closeAuthBanner,
     };
 })();
 </script>
