@@ -467,7 +467,16 @@ void init_tensor_bindings(py::module& m) {
 
         // Indexing
         .def("__getitem__", [](const at::Tensor& t, int64_t idx) {
-            if (idx < 0) idx += t.size(0);
+            int64_t n = t.size(0);
+            if (idx < 0) idx += n;
+            // КРИТИЧНО для list(tensor) / for x in tensor: Python iterator
+            // протоколу нужен IndexError, чтобы остановить цикл. RuntimeError
+            // из at::select() не ловится — for-loop падает наружу.
+            if (idx < 0 || idx >= n) {
+                throw py::index_error(
+                    "tensor index " + std::to_string(idx) +
+                    " out of range for dim 0 with size " + std::to_string(n));
+            }
             return t.select(0, idx);
         })
         .def("__getitem__", [](const at::Tensor& t, py::slice slice) {
