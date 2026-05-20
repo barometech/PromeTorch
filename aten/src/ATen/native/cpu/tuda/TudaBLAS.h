@@ -24,7 +24,7 @@
 // (E2S/4C) его не поддерживает корректно (всегда возвращает 0), даже когда
 // файл существует физически. Симптом: `cblas_sgemm undefined` на 4C хотя
 // /usr/include/eml/cblas.h на месте.
-#if defined(TUDA_E2K) && defined(PT_USE_EML_BLAS)
+#if defined(TUDA_E2K) && defined(PT_USE_EML_BLAS) && !defined(PT_USE_OPENBLAS_BLAS)
 #include <cstdlib>
 static inline bool eml_disabled() {
     static int cached = -1;
@@ -45,6 +45,54 @@ static inline bool eml_disabled() {
 #endif
 #include <eml/cblas.h>
 #include <omp.h>
+#endif
+
+// Когда PT_USE_OPENBLAS_BLAS=1, мы линкуемся с libopenblas вместо libeml_mt.
+// EML-специфичный `eml_disabled()` остаётся — он управляет env-флагом
+// PT_NO_EML для скрытия cblas_sgemm callsites (работает и для OpenBLAS).
+#if defined(TUDA_E2K) && defined(PT_USE_OPENBLAS_BLAS)
+#include <cstdlib>
+static inline bool eml_disabled() {
+    static int cached = -1;
+    if (cached < 0) {
+        const char* env = std::getenv("PT_NO_BLAS");
+        if (!env) env = std::getenv("PT_NO_EML");
+        cached = (env && env[0] == '1') ? 1 : 0;
+    }
+    return cached == 1;
+}
+// OpenBLAS использует /usr/include/cblas.h (не eml/cblas.h). Без header'а
+// функция cblas_sgemm объявлена inline в TudaBLAS.h выше (extern "C").
+#if __has_include(<cblas.h>)
+// Уже подключено выше в OpenBLAS блоке
+#endif
+#endif
+
+// OpenBLAS path для Эльбруса где EML недоступен (E16C: libeml_mt помечен
+// elbrus-2c3 → dynamic loader блокирует). libopenblas-0.3.27-alt1.e2kv6
+// собран нативно под v6 и работает. Использует тот же cblas_sgemm API.
+#if defined(TUDA_E2K) && defined(PT_USE_OPENBLAS_BLAS)
+#include <cstdlib>
+static inline bool openblas_disabled() {
+    static int cached = -1;
+    if (cached < 0) {
+        const char* env = std::getenv("PT_NO_BLAS");
+        cached = (env && env[0] == '1') ? 1 : 0;
+    }
+    return cached == 1;
+}
+// OpenBLAS header — система ставит cblas.h в /usr/include.
+// Тут НЕ MT_CBLAS_DEFS (это EML-специфичный define).
+#if __has_include(<cblas.h>)
+#include <cblas.h>
+#else
+// Inline declaration если header не нашли (link-time symbol достаточен)
+extern "C" void cblas_sgemm(int order, int transA, int transB,
+                            int M, int N, int K,
+                            float alpha, const float* A, int lda,
+                            const float* B, int ldb,
+                            float beta, float* C, int ldc);
+#endif
 #endif
 
 // System BLAS (MKL, OpenBLAS, etc.) for x86 — if available and not on Elbrus
