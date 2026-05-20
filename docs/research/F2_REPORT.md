@@ -95,8 +95,8 @@ promeserve/web/
 
 1. **PDF.js full-page preview.** Сейчас PDF показываются только как chip "📄 PDF · name · size". F3: подключить `pdfjs-dist` CDN, рендерить первую страницу в attachment chip + preview в сообщении.
 2. **wavesurfer.js waveform для audio.** Сейчас `<audio controls>` — браузерный плеер. F3: визуальная wave-form для лучшего UX (особенно при transcript playback).
-3. **MCP backend wiring.** `mcp.js` — stub. Когда appears `/api/mcp` endpoint в `promeserve/`, заменить mock методы на реальные fetch'и (см. `AGENT_STACK_R2.md` §1.3 для JSON-RPC payload). UI готов — только заменить bodies в `PromeMcp.*`.
-4. **Tool tools/list auto-discovery.** После backend подключения — при `enabled=true` server'а запросить `tools/list` и обновить `state.mcpServers[i].tools` автоматически.
+3. **~~MCP backend wiring~~ — ДОДЕЛАНО в F2.** Backend agent добавил `/api/mcp/{tools,servers,call}` (commit 7d48408). `mcp.js` теперь подключён к реальным endpoint'ам. Sidebar MCP list читает из `~/.promeserve/mcp.json`. `/run <tool>` работает через `/api/mcp/call`.
+4. **Tool tools/list auto-discovery.** F2 при init и openMcpModal fetch'ит servers+tools и merge'ит в `state.mcpServers`. Per-server tool filter (`t.server === s.name`) реализован.
 5. **Streaming-friendly markdown.** F1 known issue — при streaming внутри незакрытого code-block markdown временно ломается. F2 не починен — нужен incremental markdown parser (или preprocess: добавлять ` ``` ` если open code-block перед render).
 6. **Index.html разнести на app.js + style.css + workspaces.js + branching.js.** Сейчас 173 KB → есть смысл modularize для readability, но первое впечатление "open the file" страдает. Решение для F3.
 7. **Hotkey customization persistence.** UI overlay есть, но customize=read-only сейчас. F3: drag-rebind UI + LS persist.
@@ -125,9 +125,16 @@ promeserve/web/
 ## Commits в F2 (только в `promeserve/web/` + `docs/research/`)
 
 ```
+a7458b5 feat(web/F2): wire MCP UI к backend endpoints (/api/mcp/tools|servers|call)
+0495a97 docs(web/F2): итоговый отчёт F2 + минорный fix двойного style
 e3b04fa docs(web/F2): snapshot + screenshot для F2
 f4efee7 feat(web/F2): расширения второго прохода — MCP UI, workspaces, slash, artifacts, branching
 ```
+
+**Бонус во время F2:** параллельный backend agent доделал MCP клиент
+(commits 52b58ca, 7d48408, 0428eeb) — F2 UI пере-wire'нут к реальным
+endpoint'ам `/api/mcp/{tools,servers,call}` сразу. `/run <tool>` slash
+команда теперь рабочая, sidebar MCP list читается из `~/.promeserve/mcp.json`.
 
 Никаких force-push'ей. F1-метки `<contributor>` сохранены, F2 добавляет свои `contributor:F2`.
 
