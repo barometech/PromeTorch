@@ -3,6 +3,40 @@
 Полная история разработки проекта.
 Полный аудит инфраструктуры — в `INFRASTRUCTURE_AUDIT.md`.
 
+## 2026-05-20: PyPI ready + privacy scrub + F2/MCP агенты
+
+**Главное — `pip install prometorch` работает end-to-end:**
+- `_C_AVAILABLE: True`, `version: 0.2.0`, экспортов: 82
+- `pt.tensor([1,2,3])` / `(1,2,3)` / `3.14` / `np.array([...])` / `[[1,2],[3,4]]` — все типы
+- `list(pt.tensor([...]))`, `for x in t`, `a,b,c = t` — итерация без падений
+- factory: `pt.zeros/ones/rand/randn` OK
+- `nn.Linear`, арифметика `x+y`, `x*scalar` — OK
+
+**Закрытые baseline-баги (5 коммитов):**
+- `b9c25f5` — `sys.modules['prometorch._C']` stub при init fail (не reload через submodules)
+- `fcb18c5` — default `at::Tensor()` в `py::arg` ронял `Tensor.h:190 defined()` при импорте
+- `4c39f36 → 1f457d4` — `tensor()` теперь принимает Python list/tuple/scalar через `np.asarray` fallback
+- `86133c0` — `Tensor.__getitem__` бросает `py::index_error` для bounds (iterator protocol)
+
+**README — честные числа из исходников (`e92aaa3`):**
+- 119 → **112** backward functions (`grep '^(struct|class) *Backward'`)
+- 132 → **149** CUDA kernels (`grep '__global__'`)
+- 20 optimizers (L706) → 16 (соответствует L93 таблице)
+
+**Privacy/cleanup:**
+- `filter-repo --invert-paths "НТЦ МОДУЛЬ БЕСЕДЫ"` — папка с перепиской удалена из всей истории
+- `git push --force` (history rewritten, force-with-lease невозможен на переписанной)
+- CLAUDE.md уже untracked + в `.gitignore` (commit `6fca6ae`)
+- CLAUDE.md.bak / consult_gemini_rmsnorm.py / gemini_rmsnorm_response.md — не существуют
+
+**2 фоновых агента закрыли pending pieces:**
+- F2 (`c78c9ef`) — 12/12 чек-листа frontend pass 2 (MCP UI, workspaces, slash, artifacts, branching, multimodal, perf dashboard, hotkeys, 180 KB index.html)
+- Backend MCP (`0428eeb`) — `tool_call.h` +970 / `mcp_client.h` +1059 / 5 endpoints + parallel exec + audit jsonl + 8 builtin tools (write_file/read_file/list_dir/bash_safe/fetch_url/http_get/git/sqlite). 8/12 чек-листа MCP closed (MCP server для Claude Desktop отложен с планом в `docs/MCP_INTEGRATION.md` §8)
+
+**Сейчас в работе:** rebuild на Эльбрусе lemur-1 (e2k-8c2 v5, LCC 1.29.16, 32 ядра) для проверки T1-T8 fix'ов вживую + последующий запуск #78/#109/#129. NM Quad host (93.182.6.134:4079) недоступен — #114/#123/#128 ждут хоста.
+
+---
+
 ## 2026-05-19: hardcode sweep — ВСЕ scripts адаптивные под любую E2K машину
 
 После <contributor>ова второго лога (E16C v6 + E8C v4 — обе упали из-за моего
