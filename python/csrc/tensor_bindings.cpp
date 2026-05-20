@@ -1195,10 +1195,14 @@ void init_tensor_bindings(py::module& m) {
 
     py::class_<PackedSequence>(m, "PackedSequence")
         .def(py::init<>())
+        // ВАЖНО: default-construct at::Tensor() в py::arg(...) = at::Tensor()
+        // ломал module-init с PT_CHECK(defined()) — pybind11 eagerly зовёт
+        // __repr__ на default arg, который дёргает .numel() и т.д.
+        // Поэтому передаём ВСЕ 4 аргумента обязательными.
         .def(py::init<at::Tensor, at::Tensor, at::Tensor, at::Tensor>(),
              py::arg("data"), py::arg("batch_sizes"),
-             py::arg("sorted_indices") = at::Tensor(),
-             py::arg("unsorted_indices") = at::Tensor())
+             py::arg("sorted_indices"),
+             py::arg("unsorted_indices"))
         .def_readwrite("data", &PackedSequence::data)
         .def_readwrite("batch_sizes", &PackedSequence::batch_sizes)
         .def_readwrite("sorted_indices", &PackedSequence::sorted_indices)
