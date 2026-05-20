@@ -109,7 +109,8 @@ AVOIDRECURSION.md
 
 # Local debug backups + WIP files (not for public repo until ready)
 .backup_pre_bug12/
-promeserve/tool_call.h
+# promeserve/tool_call.h — теперь в репо (api_handlers.h его включает,
+# иначе promeserve вообще не собирается у внешних юзеров).
 promeserve/TOOL_CALL_PLAN.md
 scripts/_build_cpu_gan.bat
 scripts/run_cifar.bat
