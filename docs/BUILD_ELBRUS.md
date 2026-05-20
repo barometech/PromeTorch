@@ -149,7 +149,7 @@ loginctl enable-linger $USER
 ### Один-командный путь
 
 ```bash
-cd ~/promethorch
+cd ~/prometorch
 bash scripts/build-elbrus.sh
 ```
 

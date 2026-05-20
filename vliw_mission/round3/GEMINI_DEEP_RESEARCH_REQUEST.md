@@ -1,4 +1,4 @@
-# Gemini 3.1 Pro Deep Research — promethorch Round 3 (2026-04-27)
+# Gemini 3.1 Pro Deep Research — prometorch Round 3 (2026-04-27)
 
 > **Model**: `gemini-3.1-pro-preview`
 > **Mode**: Deep Research Max

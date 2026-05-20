@@ -81,7 +81,7 @@ from .._C.nn import (
 )
 
 # Alias for functional
-import promethorch.nn.functional as F
+import prometorch.nn.functional as F
 
 
 # ============================================================================

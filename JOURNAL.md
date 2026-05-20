@@ -3262,7 +3262,7 @@ Layer efficiency: L0=6.69x, L1=5.54x, L2=2.16x, L3=1.34x — все ACTIVE.
 
 ### PROMEPIR + Python API Expansion (2026-03-20)
 
-**PROMEPIR.py:** PIR 250M на PromeTorch (1339 строк). torch→promethorch.
+**PROMEPIR.py:** PIR 250M на PromeTorch (1339 строк). torch→prometorch.
 **Python API:** +2403 строк — cumsum, einsum, clamp, topk, sort, from_numpy, zeros_like, AdamW, compile(no-op), amp, nn.Module pure-Python, nn.init.orthogonal_.
 **_C.pyd:** собран (2MB), но DLL load issue на Windows сохраняется (preexisting).
 **Нужно:** тестировать на Эльбрусе через Python (Python 3.11 + LCC + pip install).
@@ -3551,7 +3551,7 @@ Option F инфраструктура (all_gather_inplace, split API, futex) о�
 для будущего weight sharding.
 
 Артефакты: commits `583bee8`, `e1db809`, `fecc370`. Bench: `scripts/tp_optionf.sh`,
-логи `~/promethorch/run_logs/optionf_*/`.
+логи `~/prometorch/run_logs/optionf_*/`.
 
 ### 2026-04-24 — Plateau analysis: 4.7-4.8 tok/s TP-4 стабильно на Эльбрусе
 

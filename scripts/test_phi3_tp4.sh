@@ -1,7 +1,7 @@
 #!/bin/bash
 # Verify phi3.5-mini TP-4 после d9dce9e mmap merged tensor fix.
 set -u
-cd ~/promethorch
+cd ~/prometorch
 
 loginctl enable-linger "$USER" 2>/dev/null || true
 

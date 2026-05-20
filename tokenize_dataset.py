@@ -7,18 +7,18 @@ import struct
 import os
 import sys
 
-SRC = r"C:\Users\USER\Desktop\promethorch\data_local\russian_mega.txt"
-DST = r"C:\Users\USER\Desktop\promethorch\data_local\russian_mega.tokens"
+SRC = r"C:\Users\USER\Desktop\prometorch\data_local\russian_mega.txt"
+DST = r"C:\Users\USER\Desktop\prometorch\data_local\russian_mega.tokens"
 TOK = r"C:\Users\USER\Desktop\RUKALLAMA V2\TOKENIZER_TESTS\trained_models\rukanizer_100k_v3.model"
 
 if not os.path.exists(SRC):
-    SRC = r"C:\Users\USER\Desktop\promethorch\PIR\pretrain_cache\..\..\data\russian_mega.txt"  # try
+    SRC = r"C:\Users\USER\Desktop\prometorch\PIR\pretrain_cache\..\..\data\russian_mega.txt"  # try
 
 # Use the file from server-side via local mirror or just generate locally
 # Use any russian text file we have
 candidates = [
-    r"C:\Users\USER\Desktop\promethorch\data_local\russian_mega.txt",
-    r"C:\Users\USER\Desktop\promethorch\data\russian_mega.txt",
+    r"C:\Users\USER\Desktop\prometorch\data_local\russian_mega.txt",
+    r"C:\Users\USER\Desktop\prometorch\data\russian_mega.txt",
     r"C:\Users\USER\Desktop\RUKALLAMA V2\data\corpus.txt",
 ]
 for c in candidates:

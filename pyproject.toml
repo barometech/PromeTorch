@@ -3,7 +3,7 @@ requires = ["scikit-build-core>=0.8", "pybind11>=2.11"]
 build-backend = "scikit_build_core.build"
 
 [project]
-name = "promethorch"
+name = "prometorch"
 version = "0.1.0a1"
 description = "Deep learning framework with native support for Russian CPUs (Эльбрус, Baikal) and accelerators (NM Card / NM Quad)"
 readme = "README.md"
@@ -72,8 +72,8 @@ logging.level = "INFO"
 # (Python extension) + его deps (c10, aten_cpu, torch_autograd, torch_data).
 build.targets = ["_C"]
 
-# Python package layout — где лежит `import promethorch`-овский код.
-wheel.packages = ["python/promethorch"]
+# Python package layout — где лежит `import prometorch`-овский код.
+wheel.packages = ["python/prometorch"]
 
 # Что включать в wheel install (.so/.dll/.pyd артефакты).
 install.components = ["python"]
@@ -99,7 +99,7 @@ skip = [
     "*-win32",              # 32-bit Windows — то же
     "pp*",                  # PyPy — отдельная сборка, требует доп. testing
 ]
-test-command = "python -c 'import promethorch; print(promethorch.__version__)'"
+test-command = "python -c 'import prometorch; print(prometorch.__version__)'"
 test-skip = ["*-macosx_arm64", "*-macosx_universal2:arm64"]
 archs = ["auto64"]
 

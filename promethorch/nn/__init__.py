@@ -2,7 +2,7 @@
 Neural network modules.
 
 Usage:
-    import promethorch as pt
+    import prometorch as pt
     model = pt.nn.Sequential(
         pt.nn.Linear(784, 256),
         pt.nn.ReLU(),
@@ -11,10 +11,10 @@ Usage:
 """
 
 try:
-    from promethorch._C.nn import *
+    from prometorch._C.nn import *
 except ImportError:
     try:
-        from promethorch._C import (
+        from prometorch._C import (
             Linear, Conv2d, BatchNorm2d,
             ReLU, Sigmoid, Tanh, Softmax,
             CrossEntropyLoss, MSELoss,

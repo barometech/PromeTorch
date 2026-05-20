@@ -16,7 +16,7 @@ env["INCLUDE"] = f"{msvc_include};{winsdk_include}\\ucrt;{winsdk_include}\\share
 env["LIB"] = f"{msvc_lib};{winsdk_lib}\\ucrt\\x64;{winsdk_lib}\\um\\x64"
 env["PATH"] = f"{msvc_bin};{winsdk_bin};C:\\ProgramData\\anaconda3;C:\\ProgramData\\anaconda3\\Library\\bin;" + env.get("PATH", "")
 
-build_dir = r"C:\Users\USER\Desktop\promethorch\build_pybind"
+build_dir = r"C:\Users\USER\Desktop\prometorch\build_pybind"
 
 # Delete old obj files to force recompilation
 obj_dir = os.path.join(build_dir, "CMakeFiles", "_C.dir", "python", "csrc")

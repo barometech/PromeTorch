@@ -1,7 +1,7 @@
 #!/bin/bash
 # Single-model wrapper, runs in foreground (caller wraps with nohup setsid).
 # Args: <model.gguf>
-cd /home/<user>/promethorch
+cd /home/<user>/prometorch
 MODEL="${1:-}"
 [ -z "$MODEL" ] && exit 1
 MPATH="$HOME/gguf_models/$MODEL"

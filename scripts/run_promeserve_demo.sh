@@ -1,7 +1,7 @@
 #!/bin/bash
 # All-in-one: start PromeServe, wait ready, run 4 HTML tasks, stop server.
 set -uo pipefail
-cd /home/<user>/promethorch
+cd /home/<user>/prometorch
 
 pkill -9 -f promeserve 2>/dev/null
 pkill -9 -f test_gguf 2>/dev/null

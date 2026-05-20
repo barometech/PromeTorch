@@ -1,7 +1,7 @@
 #!/bin/bash
 # Single ssh-window demo. Запускает PromeServe + 1 task → HTML.
 set -uo pipefail
-cd /home/<user>/promethorch
+cd /home/<user>/prometorch
 
 pkill -9 -f promeserve 2>/dev/null
 pkill -9 -f test_gguf 2>/dev/null

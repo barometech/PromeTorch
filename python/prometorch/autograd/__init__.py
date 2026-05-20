@@ -1,5 +1,5 @@
 """
-promethorch.autograd — forward-mode AD (jvp) + vmap.
+prometorch.autograd — forward-mode AD (jvp) + vmap.
 
 This submodule extends the base autograd (backward pass lives on tensors).
 """
@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import Callable, Tuple
 
 try:
-    from promethorch._C import autograd_fwd as _cpp
+    from prometorch._C import autograd_fwd as _cpp
     _HAS_CPP = True
 except (ImportError, AttributeError):
     _cpp = None
@@ -46,9 +46,9 @@ else:
     def vmap(f, input, in_dim: int = 0, out_dim: int = 0):
         """Fallback: slice the input along in_dim, call f, stack results."""
         try:
-            import promethorch as _pt
+            import prometorch as _pt
         except ImportError:
-            raise RuntimeError("vmap fallback needs promethorch")
+            raise RuntimeError("vmap fallback needs prometorch")
         n = input.size(in_dim) if hasattr(input, "size") else len(input)
         # Slice along in_dim
         results = []

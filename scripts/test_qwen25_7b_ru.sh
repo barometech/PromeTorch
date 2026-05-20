@@ -1,6 +1,6 @@
 #!/bin/bash
 # Test qwen2.5-7B Russian via single-process (TP-4 OOM fallback).
-cd /home/<user>/promethorch
+cd /home/<user>/prometorch
 pkill -9 -f test_gguf_inference 2>/dev/null
 rm -f /dev/shm/prometorch_ddp_*
 sleep 5

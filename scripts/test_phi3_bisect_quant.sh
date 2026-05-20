@@ -1,7 +1,7 @@
 #!/bin/bash
 # Bisect: phi3.5 quant path vs FP fallback. Если FP работает а quant нет —
 # bug в Q5_K kernel/split. Если оба broken — глубже.
-cd /home/<user>/promethorch
+cd /home/<user>/prometorch
 pkill -9 -f test_gguf_inference 2>/dev/null
 sleep 2
 

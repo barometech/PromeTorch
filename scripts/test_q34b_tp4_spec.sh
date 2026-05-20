@@ -1,6 +1,6 @@
 #!/bin/bash
 # qwen3-4B TP-4 with speculative decode (PT_SPEC_K=1) — recover 11.4 baseline.
-cd /home/<user>/promethorch
+cd /home/<user>/prometorch
 mkdir -p run_logs
 pkill -9 -f test_gguf_inference 2>/dev/null
 rm -f /dev/shm/prometorch* run_logs/q34b_spec_*.log

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Verify qwen3-14B TP-4 после rebuild18 (был OOM с прошлой сборки)
 set -u
-cd ~/promethorch
+cd ~/prometorch
 loginctl enable-linger "$USER" 2>/dev/null || true
 
 MODEL="$HOME/gguf_models/qwen3-14b-Q4_K_M.gguf"

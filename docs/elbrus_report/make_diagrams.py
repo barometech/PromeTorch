@@ -9,7 +9,7 @@ import matplotlib.patches as mp
 from matplotlib.patches import FancyBboxPatch, FancyArrowPatch
 import numpy as np
 
-OUT = "C:/Users/USER/Desktop/promethorch/docs/elbrus_report/figs"
+OUT = "C:/Users/USER/Desktop/prometorch/docs/elbrus_report/figs"
 import os
 os.makedirs(OUT, exist_ok=True)
 

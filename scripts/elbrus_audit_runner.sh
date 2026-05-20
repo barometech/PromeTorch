@@ -1,6 +1,6 @@
 #!/bin/bash
 # Wrapper to run full_russian_audit.sh in background reliably.
-cd /home/<user>/promethorch
+cd /home/<user>/prometorch
 pkill -9 -f test_gguf_inference 2>/dev/null
 sleep 3
 rm -f /tmp/audit2.done

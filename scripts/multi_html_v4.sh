@@ -2,7 +2,7 @@
 # Multi-HTML demo v4 — lenient parser (handles missing </tool_call> closing tag).
 # Use existing run_logs/ от v3b — модель УЖЕ сгенерировала tool_calls, нужно только распарсить.
 set -uo pipefail
-cd ~/promethorch
+cd ~/prometorch
 
 mkdir -p /tmp/promeserve_demo
 rm -f /tmp/promeserve_demo/*.html

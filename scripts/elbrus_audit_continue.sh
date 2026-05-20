@@ -1,6 +1,6 @@
 #!/bin/bash
 # Continue audit from where it stopped (qwen2.5-7b onwards).
-cd /home/<user>/promethorch
+cd /home/<user>/prometorch
 chmod +x scripts/elbrus_audit_one.sh
 
 for M in qwen2.5-7b-Q4_K_M.gguf llama3-8b-Q4_K_M.gguf gemma3-4b-Q4_K_M.gguf phi35-mini-Q4_K_M.gguf deepseek-coder-7b-Q4_K_M.gguf qwen3-14b-Q4_K_M.gguf; do

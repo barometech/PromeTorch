@@ -2,7 +2,7 @@
 # Run audit for ONE model with full cleanup before/after.
 # Usage: bash elbrus_audit_one.sh <model_filename>
 set -uo pipefail
-cd /home/<user>/promethorch
+cd /home/<user>/prometorch
 MODEL="${1:-qwen3-4b-Q4_K_M.gguf}"
 MPATH="$HOME/gguf_models/$MODEL"
 PROMPT="Расскажи про Москву одним предложением."

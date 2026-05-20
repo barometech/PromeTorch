@@ -1,6 +1,6 @@
 #!/bin/bash
 # Verify phi3.5-mini после LongRoPE + всех других gemma3/phi3 fixes.
-cd /home/<user>/promethorch
+cd /home/<user>/prometorch
 pkill -9 -f test_gguf_inference 2>/dev/null
 sleep 2
 

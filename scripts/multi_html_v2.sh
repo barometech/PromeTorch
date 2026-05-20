@@ -4,7 +4,7 @@
 # Каждый prompt → model emits <tool_call> → bash executes write_file →
 # Прокачивает ответ обратно → final answer. Loop max 3 iter.
 set -uo pipefail
-cd ~/promethorch
+cd ~/prometorch
 
 mkdir -p /tmp/promeserve_demo
 rm -f /tmp/promeserve_demo/*.html

@@ -596,7 +596,7 @@ private:
             if (total_loaded > 0) return map_weights_to_layers_();
         }
         // Last resort: pytorch_model.bin — requires pickle parser (not implemented here;
-        // use python/promethorch/safetensors_reader.py + transformers_compat.py instead).
+        // use python/prometorch/safetensors_reader.py + transformers_compat.py instead).
         return false;
     }
 

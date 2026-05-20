@@ -6,9 +6,9 @@ Usage:
 """
 
 try:
-    from promethorch._C.optim import *
+    from prometorch._C.optim import *
 except ImportError:
     try:
-        from promethorch._C import SGD, Adam, AdamW, RMSprop
+        from prometorch._C import SGD, Adam, AdamW, RMSprop
     except ImportError:
         pass

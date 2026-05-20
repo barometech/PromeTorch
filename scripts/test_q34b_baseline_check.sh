@@ -1,7 +1,7 @@
 #!/bin/bash
 # Identical conditions to legacy "11.4 tok/s" baseline test.
 # Single-process, 32 threads, --max-tokens 200, --temp 0.5
-cd /home/<user>/promethorch
+cd /home/<user>/prometorch
 pkill -9 -f test_gguf_inference 2>/dev/null
 rm -f /dev/shm/prometorch_ddp_*
 sleep 5

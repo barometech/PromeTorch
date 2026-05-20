@@ -17,7 +17,7 @@
 ### Команды для копирования в Developer Command Prompt:
 
 ```cmd
-cd C:\Users\USER\Desktop\promethorch
+cd C:\Users\USER\Desktop\prometorch
 
 :: Добавить CUDA
 set PATH=%PATH%;C:\ProgramData\anaconda3\Library\bin
@@ -75,7 +75,7 @@ set CMAKE_EXE="C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\Co
 set PATH=C:\ProgramData\anaconda3\Library\bin;C:\ProgramData\anaconda3\Scripts;%PATH%
 set CUDA_PATH=C:\ProgramData\anaconda3\Library
 
-cd /d C:\Users\USER\Desktop\promethorch
+cd /d C:\Users\USER\Desktop\prometorch
 
 :: Создаём/очищаем build директорию
 if exist build_cuda rmdir /s /q build_cuda
@@ -104,7 +104,7 @@ echo Build complete!
 
 Открыть **cmd.exe** и выполнить:
 ```cmd
-cd C:\Users\USER\Desktop\promethorch
+cd C:\Users\USER\Desktop\prometorch
 build_cuda.bat
 ```
 
@@ -126,9 +126,9 @@ build_cuda/
 
 ```batch
 @echo off
-set PATH=C:\Users\USER\Desktop\promethorch\build_cuda;C:\ProgramData\anaconda3\Library\bin;%PATH%
-cd /d C:\Users\USER\Desktop\promethorch\build_cuda\examples\mnist
-train_mnist_mlp.exe --data C:\Users\USER\Desktop\promethorch\data\mnist --device cuda --epochs 5 --batch_size 64
+set PATH=C:\Users\USER\Desktop\prometorch\build_cuda;C:\ProgramData\anaconda3\Library\bin;%PATH%
+cd /d C:\Users\USER\Desktop\prometorch\build_cuda\examples\mnist
+train_mnist_mlp.exe --data C:\Users\USER\Desktop\prometorch\data\mnist --device cuda --epochs 5 --batch_size 64
 ```
 
 ---
@@ -175,7 +175,7 @@ add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/W4>)
 
 ## ДАННЫЕ MNIST
 
-Путь: `C:\Users\USER\Desktop\promethorch\data\mnist\`
+Путь: `C:\Users\USER\Desktop\prometorch\data\mnist\`
 
 Файлы:
 - train-images-idx3-ubyte (60000 images)
@@ -190,7 +190,7 @@ add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/W4>)
 ```cmd
 :: 1. Открыть cmd.exe (НЕ bash!)
 :: 2. Запустить сборку
-cd C:\Users\USER\Desktop\promethorch
+cd C:\Users\USER\Desktop\prometorch
 build_cuda.bat
 
 :: 3. Запустить тренировку

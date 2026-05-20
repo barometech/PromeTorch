@@ -9,7 +9,7 @@ RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
     gcc-aarch64-linux-gnu g++-aarch64-linux-gnu && \
     rm -rf /var/lib/apt/lists/*
 
-WORKDIR /opt/promethorch
+WORKDIR /opt/prometorch
 COPY . .
 
 RUN mkdir -p build && cd build && \

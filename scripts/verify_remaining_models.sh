@@ -2,7 +2,7 @@
 # Verify оставшиеся модели после d9dce9e
 # qwen3-1.7B SP, qwen3-8B SP, qwen2.5-7B SP
 set -u
-cd ~/promethorch
+cd ~/prometorch
 loginctl enable-linger "$USER" 2>/dev/null || true
 
 BIN="./build_elbrus/examples/gguf/test_gguf_inference"

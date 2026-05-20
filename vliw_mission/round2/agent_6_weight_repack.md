@@ -13,12 +13,12 @@ Source of truth for this analysis:
   L3 distribution)
 - `vliw_mission/round2/_inputs/loop_vectorization.txt` (base SWP/vectorization
   method, lines 23-70)
-- `C:\Users\USER\Desktop\promethorch\torch\io\cpu_quant_gemv.h` lines 61-133
+- `C:\Users\USER\Desktop\prometorch\torch\io\cpu_quant_gemv.h` lines 61-133
   (`q4k_gemv_avx2_float` — the actual inner loop we are fixing)
-- `C:\Users\USER\Desktop\promethorch\torch\io\gguf_model.h` lines 1196-1263
+- `C:\Users\USER\Desktop\prometorch\torch\io\gguf_model.h` lines 1196-1263
   (`load_quantized_to_cpu()` — the repack hook point) and 1336-1375
   (`load_quantized_mmap()` — must be bypassed for repack path)
-- `C:\Users\USER\Desktop\promethorch\torch\io\numa_weight_replica.h`
+- `C:\Users\USER\Desktop\prometorch\torch\io\numa_weight_replica.h`
   (replication infrastructure we reuse per-field after split)
 
 ## 1. Why the current layout kills APB — quoted evidence

@@ -39,7 +39,7 @@ def load_pytorch(path: str) -> Dict[str, "Tensor"]:
     """Load a PyTorch .pt/.pth file into a name -> Tensor map.
 
     Works on files produced by standard ``torch.save`` as well as
-    ``promethorch.save_pytorch``. Unknown pickle classes are rejected.
+    ``prometorch.save_pytorch``. Unknown pickle classes are rejected.
     """
     return _load_pytorch(path)
 

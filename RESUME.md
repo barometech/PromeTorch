@@ -83,7 +83,7 @@ GPU занят, все тесты выполнять на CPU:
 
 ### Сборка (из bash):
 ```bash
-cd /path/to/promethorch
+cd /path/to/prometorch
 start //b rebuild_with_sdk.bat
 ```
 
@@ -91,14 +91,14 @@ start //b rebuild_with_sdk.bat
 ```batch
 call "C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64
 set PATH=C:\ProgramData\anaconda3\Library\bin;%PATH%
-cd C:\Users\USER\Desktop\promethorch\build_examples
+cd C:\Users\USER\Desktop\prometorch\build_examples
 nmake train_mnist_mlp
 ```
 
 ### Запуск:
 ```bash
-cd /path/to/promethorch/build_examples/examples/mnist
-PATH="/path/to/promethorch/build_examples:$PATH" ./train_mnist_mlp.exe --data /path/to/promethorch/data/mnist --epochs 5 --lr 0.001
+cd /path/to/prometorch/build_examples/examples/mnist
+PATH="/path/to/prometorch/build_examples:$PATH" ./train_mnist_mlp.exe --data /path/to/prometorch/data/mnist --epochs 5 --lr 0.001
 ```
 
 ---
@@ -131,12 +131,12 @@ PATH="/path/to/promethorch/build_examples:$PATH" ./train_mnist_mlp.exe --data /p
 
 ```bash
 # 1. Проверить текущий статус
-cd /path/to/promethorch
+cd /path/to/prometorch
 git status
 
 # 2. Запустить обучение MNIST (проверить что всё работает)
 cd build_examples/examples/mnist
-PATH="/path/to/promethorch/build_examples:$PATH" ./train_mnist_mlp.exe --data /path/to/promethorch/data/mnist --epochs 5
+PATH="/path/to/prometorch/build_examples:$PATH" ./train_mnist_mlp.exe --data /path/to/prometorch/data/mnist --epochs 5
 
 # 3. Для работы над новым оптимизатором:
 # - Изучить torch/optim/adam.h

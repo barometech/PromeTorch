@@ -15,7 +15,7 @@ Demo запускается **через bash orchestrator на test_gguf_infere
 ssh -p 8199 -i elbrusssh.ppk <user>@<elbrus-host>
 
 # 2. На эльбрусе, в окне SSH:
-cd ~/promethorch
+cd ~/prometorch
 chmod +x scripts/html_demo_via_tp4.sh
 bash scripts/html_demo_via_tp4.sh
 

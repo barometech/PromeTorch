@@ -556,7 +556,7 @@ inline std::string build_graph(const ExportContext& ctx,
                                 const std::string& output_name,
                                 const std::vector<int64_t>& output_shape) {
     std::string graph;
-    write_string(graph, 2, "promethorch_graph");          // GraphProto.name
+    write_string(graph, 2, "prometorch_graph");          // GraphProto.name
     for (auto& n : ctx.nodes)         write_submsg(graph, 1, n);
     for (auto& init : ctx.initializers) write_submsg(graph, 5, init);
     write_submsg(graph, 11, make_value_info_proto(input_name,  input_shape));
@@ -612,7 +612,7 @@ inline bool export_model(Module& model,
     //   8  OperatorSetIdProto[] opset_import
     std::string model_msg;
     detail::write_int64 (model_msg, 1, 7);                   // ir_version = 7
-    detail::write_string(model_msg, 2, "promethorch");       // producer_name
+    detail::write_string(model_msg, 2, "prometorch");       // producer_name
     detail::write_string(model_msg, 3, "0.1");                // producer_version
     detail::write_string(model_msg, 4, "");                   // domain
     detail::write_int64 (model_msg, 5, 1);                    // model_version

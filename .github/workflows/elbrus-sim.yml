@@ -38,12 +38,12 @@ jobs:
           docker build \
             --progress=plain \
             -f docker/Dockerfile.elbrus \
-            -t promethorch-elbrus-sim:ci \
+            -t prometorch-elbrus-sim:ci \
             . 2>&1 | tail -200
 
       - name: Verify ALL PASS marker
         run: |
-          docker run --rm promethorch-elbrus-sim:ci /bin/bash -c '
+          docker run --rm prometorch-elbrus-sim:ci /bin/bash -c '
             cd build && \
             ./tuda_tests_standalone && \
             ./tuda_tests

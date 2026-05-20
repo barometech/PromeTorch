@@ -149,7 +149,7 @@ EML (Elbrus Math Library) — проприетарная библиотека М
 ### Нативная сборка на Эльбрусе
 
 ```bash
-cd ~/promethorch
+cd ~/prometorch
 mkdir build_elbrus && cd build_elbrus
 cmake .. -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
@@ -175,8 +175,8 @@ docker-compose up elbrus  # scalar TUDA fallback, 34/34 тестов
 ### Python биндинги
 
 ```bash
-cd ~/promethorch/python
-PYTHONPATH=. python3 -c "import promethorch as pt; print(pt.randn(3,3))"
+cd ~/prometorch/python
+PYTHONPATH=. python3 -c "import prometorch as pt; print(pt.randn(3,3))"
 ```
 
 Артефакт: `_C.cpython-311-e2k-linux-gnu.so` (14 МБ)

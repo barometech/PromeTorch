@@ -1,7 +1,7 @@
 #!/bin/bash
 # Минимальный TP-4 bench только для qwen3-4B и qwen3-1.7B на чистом state.
 # Цель — подтвердить 11.4 tok/s baseline + русский.
-cd /home/<user>/promethorch
+cd /home/<user>/prometorch
 mkdir -p run_logs
 pkill -9 -f test_gguf_inference 2>/dev/null
 rm -f /dev/shm/prometorch_ddp_* /dev/shm/prometorch*

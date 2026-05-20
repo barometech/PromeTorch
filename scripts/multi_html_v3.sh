@@ -2,7 +2,7 @@
 # Multi-HTML demo v3 — qwen3-4B TP-4 (10.9 tok/s) + /no_think hint
 # для bypass CoT + max_tokens 1500 + timeout 360s.
 set -uo pipefail
-cd ~/promethorch
+cd ~/prometorch
 loginctl enable-linger "$USER" 2>/dev/null || true
 
 mkdir -p /tmp/promeserve_demo

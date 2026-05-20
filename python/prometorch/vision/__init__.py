@@ -1,11 +1,11 @@
 """
-promethorch.vision — torchvision-compatible datasets, transforms, models.
+prometorch.vision — torchvision-compatible datasets, transforms, models.
 """
 
 from __future__ import annotations
 
 try:
-    from promethorch._C import vision as _cpp
+    from prometorch._C import vision as _cpp
     _HAS_CPP = True
 except (ImportError, AttributeError):
     _cpp = None
@@ -63,7 +63,7 @@ else:
 
 def _load_pnm(path: str):
     """Minimal P5/P6 PPM/PGM reader (pure Python fallback)."""
-    import promethorch as _pt
+    import prometorch as _pt
     with open(path, "rb") as f:
         magic = f.readline().strip()
         if magic not in (b"P5", b"P6"):
@@ -77,7 +77,7 @@ def _load_pnm(path: str):
             header.extend(line.split())
         w, h, _max = int(header[0]), int(header[1]), int(header[2])
         data = f.read(w * h * channels)
-    # Return a simple tuple (data, shape) if promethorch tensors unavailable.
+    # Return a simple tuple (data, shape) if prometorch tensors unavailable.
     try:
         import numpy as np
         arr = np.frombuffer(data, dtype=np.uint8).reshape(h, w, channels)

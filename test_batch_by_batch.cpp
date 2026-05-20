@@ -107,7 +107,7 @@ int main() {
     std::cout << std::endl;
 
     // Load small subset of MNIST
-    std::string data_dir = "C:/Users/USER/Desktop/promethorch/data/mnist/";
+    std::string data_dir = "C:/Users/USER/Desktop/prometorch/data/mnist/";
     auto images = load_mnist_images(data_dir + "train-images-idx3-ubyte", 320);  // 10 batches of 32
     auto labels = load_mnist_labels(data_dir + "train-labels-idx1-ubyte", 320);
 

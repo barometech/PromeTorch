@@ -1,7 +1,7 @@
 #!/bin/bash
 # Russian audit single-process для 7B+ моделей (TP-4 OOM).
 set -uo pipefail
-cd /home/<user>/promethorch
+cd /home/<user>/prometorch
 > /tmp/sp_audit.csv
 
 PROMPT="Расскажи про Москву одним предложением."

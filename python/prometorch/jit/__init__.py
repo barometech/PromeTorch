@@ -1,5 +1,5 @@
 """
-promethorch.jit — Tracing JIT (prototype).
+prometorch.jit — Tracing JIT (prototype).
 
 `compile(fn, example_input)` returns a callable. If the C++ binding is
 unavailable the identity wrapper is returned (fn(...) == compile(fn)(...)),
@@ -13,7 +13,7 @@ from typing import Callable, Optional
 def compile(fn: Callable, example_input=None) -> Callable:
     """Return a compiled version of `fn`. Falls back to `fn` if unsupported."""
     try:
-        from promethorch._C import jit_compile as _cpp
+        from prometorch._C import jit_compile as _cpp
         return _cpp.compile(fn, example_input)
     except (ImportError, AttributeError):
         return fn

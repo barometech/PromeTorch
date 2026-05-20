@@ -237,6 +237,6 @@ docs/ADAM_KILLER_RESULTS.md     # Результаты эксперименто�
 
 **Начало работы:**
 ```bash
-cd /path/to/promethorch
+cd /path/to/prometorch
 # Создать adamkiller.h и начать с базовой реализации
 ```

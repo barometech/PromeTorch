@@ -1,6 +1,6 @@
 # Agent 1 — E2K Architecture Audit of Q4_K GEMV kernel
 
-Ref kernel: `C:\Users\USER\Desktop\promethorch\torch\io\cpu_quant_gemv.h`
+Ref kernel: `C:\Users\USER\Desktop\prometorch\torch\io\cpu_quant_gemv.h`
 Main Q4_K path: `q4k_gemv_avx2()` lines 311–473 (hot loop 350–457).
 Docs consulted: `docs/elbrus/E8C2_ARCHITECTURE.md`, `LCC_OPTIMIZATION.md`, `EML_BLAS_GUIDE.md`,
 `EML_THREADING_API.md`, `elbrus_prog_guide_v1.2.pdf`, `elbrus_loop_vectorization.pdf`,

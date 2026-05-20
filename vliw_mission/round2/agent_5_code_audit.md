@@ -506,7 +506,7 @@ Items 5-10 are cheap (<30 min each) and stack to another 3-5% in aggregate.
 
 ## Files to edit (absolute paths)
 
-- `C:\Users\USER\Desktop\promethorch\torch\io\cpu_quant_gemv.h`
-- `C:\Users\USER\Desktop\promethorch\torch\io\gguf_model.h`
+- `C:\Users\USER\Desktop\prometorch\torch\io\cpu_quant_gemv.h`
+- `C:\Users\USER\Desktop\prometorch\torch\io\gguf_model.h`
 
 No new files needed. No changes to `ThreadPool.h` or `ddp.cpp` recommended — both are sound.

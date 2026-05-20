@@ -99,7 +99,7 @@ for k in train_keys:
 # Also compare with PyTorch if available
 try:
     pt = load("results_pytorch.json")
-    pm = load("results_promethorch.json")
+    pm = load("results_prometorch.json")
     print(f"\n{'vs PyTorch (from main benchmark)':^80}")
     print("-" * 80)
     key_targets = [

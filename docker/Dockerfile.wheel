@@ -9,7 +9,7 @@ RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
 
 RUN pip install --no-cache-dir --retries 5 --timeout 60 numpy pybind11 wheel build
 
-WORKDIR /opt/promethorch
+WORKDIR /opt/prometorch
 COPY . .
 
 # Build C++ extension via cmake directly
@@ -27,19 +27,19 @@ RUN mkdir -p build_python && cd build_python && \
     cmake --build . --target c10 -j$(nproc)
 
 # Copy built extension to the right place
-RUN find / -name "_C*.so" -not -path "*/CMakeFiles/*" 2>/dev/null -exec cp {} promethorch/ \; && \
-    find build_python -name "libc10*" -type f -exec cp {} promethorch/ \; && \
-    ls -la promethorch/_C* promethorch/libc10*
+RUN find / -name "_C*.so" -not -path "*/CMakeFiles/*" 2>/dev/null -exec cp {} prometorch/ \; && \
+    find build_python -name "libc10*" -type f -exec cp {} prometorch/ \; && \
+    ls -la prometorch/_C* prometorch/libc10*
 
 # Install package
 RUN pip install -e . --no-build-isolation
 
 # Set LD path so _C.so can find libc10.so
-ENV LD_LIBRARY_PATH=/opt/promethorch/promethorch:$LD_LIBRARY_PATH
+ENV LD_LIBRARY_PATH=/opt/prometorch/prometorch:$LD_LIBRARY_PATH
 
 # Verify
 RUN python -c "\
-import promethorch as pt; \
+import prometorch as pt; \
 print(f'PromeTorch v{pt.__version__}'); \
 print(f'C++ extension loaded: {pt._C_LOADED}'); \
 print(f'CUDA available: {pt.cuda_is_available()}'); \

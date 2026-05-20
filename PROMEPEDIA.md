@@ -75,7 +75,7 @@ PromeTorch работает наоборот: **фреймворк адапти�
 
 ```
 ┌─────────────────────────────────────────────┐
-│             Python (promethorch)             │  pip install
+│             Python (prometorch)             │  pip install
 ├─────────────────────────────────────────────┤
 │          torch:: (NN, Optim, Data)          │  Высокоуровневый API
 ├─────────────────────────────────────────────┤
@@ -223,7 +223,7 @@ docker/                        Docker-контейнеры
   docker-compose.yml           Orchestration
   build-all.sh                 Build all platforms
 
-promethorch/                   Python package
+prometorch/                   Python package
   __init__.py                  Package init, device types
   nn/__init__.py               Neural network modules
   optim/__init__.py            Optimizers
@@ -606,7 +606,7 @@ pip install -e .
 ### Использование
 
 ```python
-import promethorch as pt
+import prometorch as pt
 
 # Создание тензора
 x = pt.tensor([1.0, 2.0, 3.0])
@@ -652,7 +652,7 @@ PT_USE_LINQ=1 pip install .    # С LinQ
 ```bash
 cmake .. -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/aarch64-baikal-m.cmake
 cmake --build . -j$(nproc)
-scp -r build/ user@baikal:/opt/promethorch/
+scp -r build/ user@baikal:/opt/prometorch/
 ```
 
 ---
@@ -679,8 +679,8 @@ docker/
 docker compose up --build
 
 # Конкретная платформа
-docker build -t promethorch-astra -f docker/Dockerfile.astra ..
-docker run promethorch-astra ./build_astra/tuda_tests
+docker build -t prometorch-astra -f docker/Dockerfile.astra ..
+docker run prometorch-astra ./build_astra/tuda_tests
 ```
 
 ---

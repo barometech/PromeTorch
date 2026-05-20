@@ -17,7 +17,7 @@ Prompt (или явного `vcvarsall.bat`).
 ```batch
 call "C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64
 
-cd /d C:\path\to\promethorch
+cd /d C:\path\to\prometorch
 mkdir build && cd build
 cmake .. -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release
 nmake

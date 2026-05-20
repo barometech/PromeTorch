@@ -174,10 +174,10 @@ These compound to the projected 17-22 tok/s ceiling. Mission #3's premise
 ---
 
 **Files referenced (absolute paths, all read-only this round):**
-- `C:\Users\USER\Desktop\promethorch\torch\io\numa_weight_replica.h`
-- `C:\Users\USER\Desktop\promethorch\torch\io\gguf_loader.h` (lines 240-323)
-- `C:\Users\USER\Desktop\promethorch\torch\io\gguf_model.h` (lines 1535-1588,
+- `C:\Users\USER\Desktop\prometorch\torch\io\numa_weight_replica.h`
+- `C:\Users\USER\Desktop\prometorch\torch\io\gguf_loader.h` (lines 240-323)
+- `C:\Users\USER\Desktop\prometorch\torch\io\gguf_model.h` (lines 1535-1588,
   4064-4344, 4620-4660)
-- `C:\Users\USER\Desktop\promethorch\vliw_mission\agent_3_numa_audit.md` (line 101 confirmation)
-- `C:\Users\USER\Desktop\promethorch\vliw_mission\round2\agent_3_cache_mem.md`
-- `C:\Users\USER\Desktop\promethorch\vliw_mission\round2\agent_9_numa_aggregate.md`
+- `C:\Users\USER\Desktop\prometorch\vliw_mission\agent_3_numa_audit.md` (line 101 confirmation)
+- `C:\Users\USER\Desktop\prometorch\vliw_mission\round2\agent_3_cache_mem.md`
+- `C:\Users\USER\Desktop\prometorch\vliw_mission\round2\agent_9_numa_aggregate.md`

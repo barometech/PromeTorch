@@ -416,7 +416,7 @@ while (1) {
 
 Сборка и запуск:
 ```bash
-cd /path/to/promethorch
+cd /path/to/prometorch
 cmake -DPT_USE_NMCARD=ON ...
 # из Developer Command Prompt
 cd build_nmcard

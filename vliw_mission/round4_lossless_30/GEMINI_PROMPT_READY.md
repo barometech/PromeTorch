@@ -1312,7 +1312,7 @@ Option F инфраструктура (all_gather_inplace, split API, futex) о�
 для будущего weight sharding.
 
 Артефакты: commits `583bee8`, `e1db809`, `fecc370`. Bench: `scripts/tp_optionf.sh`,
-логи `~/promethorch/run_logs/optionf_*/`.
+логи `~/prometorch/run_logs/optionf_*/`.
 
 ### 2026-04-24 — Plateau analysis: 4.7-4.8 tok/s TP-4 стабильно на Эльбрусе
 

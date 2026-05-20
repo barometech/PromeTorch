@@ -1,6 +1,6 @@
 #!/bin/bash
 # Полный тест после d9dce9e: phi3 + остальные 6 моделей не сломались
-cd /home/<user>/promethorch
+cd /home/<user>/prometorch
 pkill -9 -f test_gguf_inference 2>/dev/null
 sleep 2
 

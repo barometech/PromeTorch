@@ -8,7 +8,7 @@
 
 ## Содержание
 
-1. [Что такое PromeTorch](#1-что-такое-promethorch)
+1. [Что такое PromeTorch](#1-что-такое-prometorch)
 2. [Структура проекта](#2-структура-проекта)
 3. [Ядро c10/](#3-ядро-c10)
 4. [Тензорные операции aten/](#4-тензорные-операции-aten)
@@ -63,7 +63,7 @@
 ## 2. Структура проекта
 
 ```
-promethorch/
+prometorch/
 ├── c10/                          # Ядро фреймворка
 │   ├── core/                     # TensorImpl, Storage, Allocator, Device, ScalarType
 │   ├── macros/                   # Платформенные макросы (PT_HOST_DEVICE и др.)
@@ -89,7 +89,7 @@ promethorch/
 │   ├── utils/                    # checkpoint.h (gradient checkpointing)
 │   └── serialization.h          # Сериализация (формат PTOR)
 │
-├── python/                       # pybind11-обёртки, пакет promethorch
+├── python/                       # pybind11-обёртки, пакет prometorch
 │
 ├── examples/                     # Примеры обучения
 │   ├── mnist/                    # MNIST MLP
@@ -1044,12 +1044,12 @@ PromeTorch включает собственный runtime для инферен
 
 Файлы: `python/`
 
-Python-интерфейс через pybind11. Пакет `promethorch` (или `_C` как модуль расширения).
+Python-интерфейс через pybind11. Пакет `prometorch` (или `_C` как модуль расширения).
 
 ### Поддерживаемый API
 
 ```python
-import promethorch as pt
+import prometorch as pt
 
 # Создание тензоров
 x = pt.randn(3, 4)
@@ -1131,7 +1131,7 @@ nmake
 ### 15.5 Запуск примеров
 
 ```bash
-cd /path/to/promethorch
+cd /path/to/prometorch
 PATH="./build_final3:$PATH" ./build_final3/examples/mnist/train_mnist_mlp.exe --device cpu --epochs 5 --lr 0.001
 ```
 
