@@ -1,0 +1,564 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PromeTorch AI Chat — F2 Snapshot (demo)</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<style>
+:root{
+    --bg-main:#0f1117;--bg-sidebar:#16181c;--bg-panel:#1c1f26;--bg-hover:#272b36;
+    --bg-input:#1e212b;--bg-card:#15171d;
+    --accent:#6366f1;--accent-hover:#4f46e5;--accent-2:#a855f7;--accent-glow:rgba(99,102,241,.2);
+    --text-main:#ececf1;--text-muted:#9ca3af;--text-dark:#4b5563;
+    --border:#2d2f36;--danger:#ef4444;--success:#10b981;--warning:#f59e0b;--info:#38bdf8;
+    --font-sans:'Inter',system-ui,sans-serif;--font-mono:'JetBrains Mono',Consolas,monospace;
+    --sidebar-width:280px;--right-width:340px;--radius-lg:16px;--radius-md:12px;--radius-sm:8px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:var(--font-sans);background:var(--bg-main);color:var(--text-main);height:100vh;display:flex;overflow:hidden;-webkit-font-smoothing:antialiased}
+::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-thumb{background:var(--border);border-radius:10px}
+button{background:none;border:none;color:inherit;cursor:pointer;font-family:inherit}
+input,select,textarea{background:var(--bg-input);border:1px solid var(--border);color:var(--text-main);border-radius:var(--radius-sm);padding:8px 10px;font-family:inherit;font-size:13px;outline:none}
+input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-glow)}
+.icon{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.icon-sm{width:14px;height:14px}.icon-xs{width:12px;height:12px}
+
+/* ---- SIDEBAR ---- */
+.sidebar{width:var(--sidebar-width);background:var(--bg-sidebar);border-right:1px solid var(--border);display:flex;flex-direction:column;flex-shrink:0}
+.sidebar-header{padding:12px;display:flex;flex-direction:column;gap:10px;border-bottom:1px solid var(--border)}
+.brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:15px}
+.brand-logo{width:30px;height:30px;border-radius:9px;background:linear-gradient(135deg,var(--accent),var(--accent-2));display:flex;align-items:center;justify-content:center;color:#fff}
+.new-chat-btn{width:100%;display:flex;align-items:center;justify-content:center;gap:8px;background:var(--accent);color:#fff;padding:9px 14px;border-radius:var(--radius-md);font-weight:600;font-size:13px}
+
+.workspace-selector{padding:8px 12px;display:flex;align-items:center;gap:6px;border-bottom:1px solid var(--border);background:var(--bg-panel)}
+.workspace-selector select{flex:1;padding:5px 8px;font-size:12px}
+.workspace-selector button{padding:5px;border-radius:5px;color:var(--text-muted)}
+
+.sidebar-search{padding:8px 12px}
+.sidebar-search input{width:100%;padding:6px 8px;font-size:12px}
+
+.sidebar-section-title{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);padding:10px 14px 4px;font-weight:600}
+
+.pinned-list{display:flex;flex-direction:column;gap:2px;padding:0 8px 6px}
+.pin-entry{font-size:12px;padding:6px 10px;border-radius:6px;color:var(--text-muted);border-left:2px solid var(--warning);background:var(--bg-panel);display:flex;gap:6px;align-items:flex-start}
+.pin-entry .pin-text{flex:1;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+
+.chat-history{flex:1;overflow-y:auto;padding:0 8px;display:flex;flex-direction:column;gap:2px}
+.history-item{display:flex;align-items:center;justify-content:space-between;padding:8px 10px;border-radius:var(--radius-sm);font-size:13px;color:var(--text-muted);position:relative;cursor:pointer}
+.history-item:hover{background:var(--bg-hover);color:var(--text-main)}
+.history-item.active{background:var(--bg-panel);color:var(--text-main)}
+.history-item.active::before{content:'';position:absolute;left:0;top:6px;bottom:6px;width:3px;background:var(--accent);border-radius:3px}
+.history-item.pinned::after{content:'★';color:var(--warning);font-size:9px;position:absolute;left:14px;top:2px}
+.history-title{flex:1;padding-left:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* contributor:F2 — MCP section */
+.mcp-section{padding:6px 8px 8px;border-top:1px solid var(--border)}
+.mcp-section-header{display:flex;justify-content:space-between;align-items:center;padding:4px 6px;cursor:pointer}
+.mcp-section-header h3{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);font-weight:600}
+.mcp-server-row{display:flex;align-items:center;gap:6px;padding:5px 8px;font-size:12px;color:var(--text-muted);border-radius:var(--radius-sm)}
+.mcp-server-row:hover{background:var(--bg-hover);color:var(--text-main)}
+.mcp-status-dot{width:8px;height:8px;border-radius:50%}
+.mcp-status-dot.active{background:var(--success);box-shadow:0 0 6px var(--success)}
+.mcp-status-dot.inactive{background:var(--text-dark)}
+.mcp-server-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mcp-tool-count{font-size:10px;padding:1px 6px;border-radius:8px;background:var(--bg-main);color:var(--text-muted)}
+
+.sidebar-footer{padding:10px 12px;border-top:1px solid var(--border);display:flex;gap:6px;justify-content:space-between;align-items:center}
+.sidebar-footer .meta{font-size:11px;color:var(--text-muted)}
+.icon-btn{padding:7px;border-radius:var(--radius-sm);color:var(--text-muted);display:inline-flex;align-items:center;justify-content:center}
+.icon-btn:hover{background:var(--bg-hover);color:var(--text-main)}
+
+/* ---- MAIN ---- */
+.main-content{flex:1;display:flex;flex-direction:column;min-width:0;position:relative}
+.topbar{height:56px;padding:0 16px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border);background:color-mix(in srgb,var(--bg-main) 80%,transparent);z-index:10;gap:12px}
+.topbar-left{display:flex;align-items:center;gap:10px;min-width:0;flex:1}
+.model-selector select{background:transparent;border:1px solid var(--border);font-weight:600;font-size:14px;padding:6px 10px;border-radius:var(--radius-sm)}
+.topbar-title{font-weight:600;font-size:14px;color:var(--text-main);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:240px}
+.topbar-actions{display:flex;gap:4px;align-items:center}
+
+/* contributor:F2 — connection status */
+.connection-status{font-size:11px;padding:4px 10px;border-radius:999px;display:inline-flex;align-items:center;gap:5px;color:var(--text-muted);background:var(--bg-panel);border:1px solid var(--border)}
+.connection-status .dot{width:7px;height:7px;border-radius:50%}
+.connection-status.online .dot{background:var(--success)}
+
+.chat-container{flex:1;overflow-y:auto;display:flex;flex-direction:row}
+.chat-main{flex:1;min-width:0;display:flex;flex-direction:column}
+.chat-feed{max-width:880px;margin:0 auto;padding:24px 24px 160px;display:flex;flex-direction:column;gap:24px;width:100%}
+
+.message{display:flex;gap:14px}
+.avatar{width:32px;height:32px;border-radius:9px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.msg-user .avatar{background:var(--bg-panel);border:1px solid var(--border)}
+.msg-assistant .avatar{background:linear-gradient(135deg,var(--accent),var(--accent-2));color:white}
+.msg-body{flex:1;min-width:0}
+.msg-meta-top{display:flex;align-items:center;gap:8px;margin-bottom:4px;font-size:12px;color:var(--text-muted)}
+.msg-role{font-weight:600;color:var(--text-main)}
+.msg-content{line-height:1.65;font-size:15px;color:var(--text-main)}
+.msg-content p{margin:.6em 0}
+.msg-content h2{font-size:1.25em;margin:.7em 0 .4em}
+.msg-content ul,.msg-content ol{margin:.5em 0;padding-left:24px}
+.msg-content li{margin-bottom:3px}
+.msg-content :not(pre) > code{font-family:var(--font-mono);background:var(--bg-panel);padding:1px 6px;border-radius:4px;font-size:.9em;color:#f472b6;border:1px solid var(--border)}
+.msg-content table{border-collapse:collapse;margin:.8em 0;width:100%;font-size:.92em}
+.msg-content th,.msg-content td{border:1px solid var(--border);padding:5px 9px;text-align:left}
+.msg-content th{background:var(--bg-panel);font-weight:600}
+
+.table-wrapper{position:relative;margin:.8em 0}
+.table-csv-btn{position:absolute;top:4px;right:4px;padding:3px 8px;font-size:10px;background:var(--bg-panel);border:1px solid var(--border);border-radius:4px;color:var(--text-muted);opacity:.7}
+
+.code-block-wrapper{margin:10px 0;border-radius:var(--radius-md);overflow:hidden;border:1px solid var(--border);background:#0d0d12}
+.code-header{display:flex;justify-content:space-between;align-items:center;padding:5px 12px;background:var(--bg-panel);border-bottom:1px solid var(--border);font-size:11px;color:var(--text-muted)}
+.code-lang{text-transform:lowercase;font-weight:600}
+.code-actions{display:flex;gap:4px}
+.code-actions button{font-size:11px;color:var(--text-muted);padding:3px 6px;border-radius:5px;display:inline-flex;align-items:center;gap:4px}
+.open-artifact-btn{font-size:11px;color:var(--accent);padding:3px 6px;border-radius:5px;display:inline-flex;align-items:center;gap:4px;background:var(--accent-glow)}
+.msg-content pre{margin:0;padding:14px;overflow-x:auto;font-family:var(--font-mono);font-size:13px;line-height:1.5}
+.msg-content pre code{background:transparent;padding:0;color:inherit;border:none}
+
+.tool-call-card{margin:10px 0;border-radius:var(--radius-md);border:1px solid var(--accent);background:var(--bg-card);overflow:hidden}
+.tool-call-header{display:flex;justify-content:space-between;align-items:center;padding:9px 14px;background:linear-gradient(90deg,var(--accent-glow),transparent)}
+.tool-call-title{display:flex;align-items:center;gap:8px;font-weight:600;font-size:13px}
+.tool-call-title .badge{font-size:10px;padding:2px 8px;border-radius:8px;background:var(--accent);color:white;text-transform:uppercase;font-weight:700}
+.tool-call-body{padding:10px 14px;border-top:1px solid var(--border)}
+.tool-call-section{margin-bottom:8px}
+.tool-call-section-title{font-size:10px;text-transform:uppercase;color:var(--text-muted);margin-bottom:3px;font-weight:700}
+.tool-call-section pre{background:var(--bg-main);padding:9px;border-radius:var(--radius-sm);font-size:12px;border:1px solid var(--border)}
+
+.msg-attachments{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px;align-items:flex-start}
+.att-image{max-width:200px;max-height:160px;border-radius:var(--radius-sm);border:1px solid var(--border)}
+.att-pill{font-size:11px;padding:4px 10px;border-radius:999px;background:var(--bg-panel);border:1px solid var(--border);color:var(--text-muted);display:inline-flex;align-items:center;gap:5px}
+
+.msg-footer{margin-top:6px;display:flex;align-items:center;gap:8px;font-size:11px;color:var(--text-dark)}
+.tok-badge{background:var(--bg-panel);padding:2px 8px;border-radius:10px;border:1px solid var(--border);font-family:var(--font-mono)}
+
+.msg-actions{display:flex;gap:2px;margin-top:6px}
+.msg-actions button{padding:3px 8px;border-radius:var(--radius-sm);font-size:12px;color:var(--text-muted);display:inline-flex;align-items:center;gap:4px}
+.msg-actions button:hover{background:var(--bg-hover);color:var(--text-main)}
+
+/* ---- INPUT ---- */
+.input-container{position:absolute;bottom:0;left:0;right:0;background:linear-gradient(to top,var(--bg-main) 60%,transparent);padding:16px 24px;z-index:5}
+.input-box{max-width:800px;margin:0 auto;position:relative;display:flex;align-items:flex-end;gap:6px;background:var(--bg-input);border:1px solid var(--border);border-radius:var(--radius-lg);padding:8px 8px 8px 12px;box-shadow:0 10px 30px rgba(0,0,0,.25)}
+.input-actions{display:flex;gap:4px;margin-bottom:4px}
+.input-actions button{padding:6px;border-radius:8px;color:var(--text-muted)}
+.input-box textarea{flex:1;background:transparent;border:none;padding:8px 4px;resize:none;font-size:15px;line-height:1.5;color:var(--text-main)}
+.send-btn{width:32px;height:32px;border-radius:9px;background:var(--text-main);color:var(--bg-main);display:flex;align-items:center;justify-content:center;margin-bottom:4px}
+
+/* contributor:F2 — Slash popup */
+.slash-popup{position:absolute;bottom:100%;left:12px;right:12px;margin-bottom:6px;max-height:240px;overflow-y:auto;background:var(--bg-panel);border:1px solid var(--accent);border-radius:var(--radius-md);box-shadow:0 -8px 30px rgba(0,0,0,.4)}
+.slash-item{padding:8px 12px;display:flex;justify-content:space-between;gap:12px;font-size:13px;border-bottom:1px solid var(--border)}
+.slash-item:last-child{border-bottom:none}
+.slash-item.active{background:var(--bg-hover)}
+.slash-cmd{font-family:var(--font-mono);font-weight:600;color:var(--accent)}
+.slash-desc{color:var(--text-muted);font-size:12px}
+
+/* ---- RIGHT PANEL ---- */
+.right-panel{width:var(--right-width);background:var(--bg-sidebar);border-left:1px solid var(--border);display:flex;flex-direction:column;flex-shrink:0}
+.right-tabs{display:flex;border-bottom:1px solid var(--border)}
+.right-tab{flex:1;padding:11px 8px;font-size:13px;font-weight:600;color:var(--text-muted);text-align:center;cursor:pointer;border-bottom:2px solid transparent}
+.right-tab.active{color:var(--text-main);border-bottom-color:var(--accent)}
+.right-pane{flex:1;overflow-y:auto;padding:16px}
+
+/* settings */
+.settings-scope-tabs{display:flex;gap:4px;margin-bottom:12px;padding:3px;background:var(--bg-input);border-radius:var(--radius-sm)}
+.settings-scope-tab{flex:1;padding:5px;font-size:11px;text-align:center;border-radius:5px;color:var(--text-muted)}
+.settings-scope-tab.active{background:var(--bg-panel);color:var(--text-main)}
+.setting-group{display:flex;flex-direction:column;gap:6px;margin-bottom:14px}
+.setting-header{display:flex;justify-content:space-between;align-items:center}
+.setting-label{font-size:13px;font-weight:600;color:var(--text-main)}
+.setting-val{font-size:12px;color:var(--accent);font-family:var(--font-mono)}
+.setting-desc{font-size:11px;color:var(--text-muted);line-height:1.4}
+.setting-group textarea{font-size:13px;min-height:60px}
+input[type=range]{-webkit-appearance:none;width:100%;background:transparent;padding:0;border:none}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;height:14px;width:14px;border-radius:50%;background:var(--accent);cursor:pointer;margin-top:-5px}
+input[type=range]::-webkit-slider-runnable-track{width:100%;height:4px;background:var(--bg-hover);border-radius:2px}
+
+/* ---- ARTIFACTS PANEL ---- */
+.artifact-panel{width:420px;flex-shrink:0;background:var(--bg-sidebar);border-left:1px solid var(--border);display:flex;flex-direction:column;z-index:80}
+.artifact-tabs{display:flex;border-bottom:1px solid var(--border);background:var(--bg-panel)}
+.artifact-tab{padding:9px 14px;font-size:12px;border-right:1px solid var(--border);color:var(--text-muted);display:flex;gap:6px;align-items:center}
+.artifact-tab.active{color:var(--text-main);background:var(--bg-sidebar);border-bottom:2px solid var(--accent)}
+.artifact-tab .close{color:var(--text-dark)}
+.artifact-header{padding:8px 12px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--border);font-size:12px;color:var(--text-muted)}
+.artifact-body{flex:1;overflow:hidden;background:white}
+.artifact-body iframe{width:100%;height:100%;border:none}
+.artifact-actions{display:flex;gap:4px}
+.artifact-actions button{padding:4px 8px;font-size:11px;background:var(--bg-input);border:1px solid var(--border);border-radius:5px;color:var(--text-main)}
+
+/* perf bar */
+.perf-stat{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border)}
+.perf-label{color:var(--text-muted);font-size:13px}
+.perf-value{font-family:var(--font-mono);font-weight:600;color:var(--text-main);font-size:13px}
+.perf-bar{margin-top:4px;height:5px;background:var(--bg-input);border-radius:3px;overflow:hidden}
+.perf-bar-fill{height:100%;background:linear-gradient(90deg,var(--accent),var(--accent-2))}
+
+/* branch tree */
+.branch-tree{font-size:11px;padding-left:12px;border-left:2px solid var(--border)}
+.branch-item{padding:4px 8px;color:var(--text-muted);display:flex;align-items:center;gap:6px;border-radius:4px}
+.branch-item.current{color:var(--accent);font-weight:600}
+.branch-item .branch-dot{width:6px;height:6px;border-radius:50%;background:var(--text-dark);flex-shrink:0}
+.branch-item.current .branch-dot{background:var(--accent)}
+</style>
+</head>
+<body>
+
+<!-- ===== LEFT SIDEBAR ===== -->
+<aside class="sidebar">
+    <div class="sidebar-header">
+        <div class="brand">
+            <div class="brand-logo">
+                <svg class="icon" viewBox="0 0 24 24"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+            </div>
+            <span>PromeTorch</span>
+        </div>
+        <button class="new-chat-btn">
+            <svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+            <span>Новый чат</span>
+        </button>
+    </div>
+
+    <!-- contributor:F2 — workspace selector -->
+    <div class="workspace-selector">
+        <select>
+            <option>⚙ Default</option>
+            <option selected>📊 Research</option>
+            <option>🧪 Experiments</option>
+            <option>+ New workspace…</option>
+        </select>
+        <button class="icon-btn" title="Manage workspaces">
+            <svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+        </button>
+    </div>
+
+    <div class="sidebar-search">
+        <input type="text" placeholder="Поиск по истории..." value="">
+    </div>
+
+    <div class="sidebar-section-title">Закреплённые</div>
+    <div class="pinned-list">
+        <div class="pin-entry">
+            <svg class="icon icon-xs" style="color:var(--warning);margin-top:2px;flex-shrink:0" viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+            <span class="pin-text">Q4_K_M weights = mix of Q4_K + Q6_K. Need ttype dispatch...</span>
+        </div>
+    </div>
+
+    <div class="sidebar-section-title">История</div>
+    <div class="chat-history">
+        <div class="history-item active pinned"><div class="history-title">★ Q4_K quantization analysis</div></div>
+        <div class="history-item"><div class="history-title">PIR backward fix — main branch</div></div>
+        <div class="history-item"><div class="history-title">↪ PIR backward fix (branch A: scale)</div></div>
+        <div class="history-item"><div class="history-title">↪ PIR backward fix (branch B: residual)</div></div>
+        <div class="history-item"><div class="history-title">NM Quad 16-core debug</div></div>
+        <div class="history-item"><div class="history-title">GGUF inference TP-4 perf</div></div>
+        <div class="history-item"><div class="history-title">Elbrus rope.scale_linear</div></div>
+    </div>
+
+    <!-- contributor:F2 — MCP servers section -->
+    <div class="mcp-section">
+        <div class="mcp-section-header">
+            <h3>
+                <svg class="icon icon-xs" style="vertical-align:middle;display:inline-block;margin-right:4px" viewBox="0 0 24 24"><path d="M4 4h16v16H4z M4 12h16 M12 4v16"/></svg>
+                MCP Servers
+            </h3>
+            <button class="icon-btn"><svg class="icon icon-xs" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
+        </div>
+        <div class="mcp-server-row"><span class="mcp-status-dot active"></span><span class="mcp-server-name">filesystem</span><span class="mcp-tool-count">4</span></div>
+        <div class="mcp-server-row"><span class="mcp-status-dot active"></span><span class="mcp-server-name">github</span><span class="mcp-tool-count">8</span></div>
+        <div class="mcp-server-row"><span class="mcp-status-dot inactive"></span><span class="mcp-server-name">brave-search</span><span class="mcp-tool-count">1</span></div>
+        <div class="mcp-server-row"><span class="mcp-status-dot inactive"></span><span class="mcp-server-name">memory</span><span class="mcp-tool-count">5</span></div>
+    </div>
+
+    <div class="sidebar-footer">
+        <span class="meta">7 чатов · 4 MCP</span>
+        <div style="display:flex;gap:4px">
+            <button class="icon-btn" title="Тема">
+                <svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+            </button>
+            <button class="icon-btn" title="Язык">RU</button>
+        </div>
+    </div>
+</aside>
+
+<!-- ===== MAIN ===== -->
+<main class="main-content">
+    <header class="topbar">
+        <div class="topbar-left">
+            <div class="model-selector">
+                <select><option>qwen3:4b (TP-4)</option></select>
+            </div>
+            <span class="topbar-title">Q4_K quantization analysis</span>
+        </div>
+        <div class="topbar-actions">
+            <!-- contributor:F2 — connection status -->
+            <span class="connection-status online"><span class="dot"></span><span>online</span></span>
+            <button class="icon-btn" title="Search (Ctrl+F)"><svg class="icon" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg></button>
+            <button class="icon-btn" title="Hotkeys (Ctrl+/)"><svg class="icon" viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 12h.01M10 12h.01M14 12h.01M18 12h.01M7 16h10"/></svg></button>
+            <button class="icon-btn" title="Settings"><svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v2M12 20v2"/></svg></button>
+        </div>
+    </header>
+
+    <div class="chat-container">
+        <div class="chat-main">
+            <div class="chat-feed">
+
+                <!-- USER message with image attachment (F2 multimodal) -->
+                <div class="message msg-user">
+                    <div class="avatar">
+                        <svg class="icon" viewBox="0 0 24 24"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z"/></svg>
+                    </div>
+                    <div class="msg-body">
+                        <div class="msg-meta-top"><span class="msg-role">Вы</span></div>
+                        <div class="msg-attachments">
+                            <!-- contributor:F2 — image thumbnail preview -->
+                            <svg class="att-image" viewBox="0 0 200 130" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid slice" style="background:#1a1a2e">
+                                <defs><linearGradient id="g1" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#6366f1"/><stop offset="100%" stop-color="#a855f7"/></linearGradient></defs>
+                                <rect width="200" height="130" fill="url(#g1)"/>
+                                <text x="100" y="65" text-anchor="middle" fill="white" font-family="monospace" font-size="14" font-weight="600">tensor_layout.png</text>
+                                <text x="100" y="85" text-anchor="middle" fill="rgba(255,255,255,0.7)" font-family="monospace" font-size="10">Q4_K block diagram</text>
+                            </svg>
+                            <span class="att-pill">📄 PDF · spec.pdf · 2.4 MB</span>
+                            <span class="att-pill">📎 quant_test.c · 18.2 KB</span>
+                        </div>
+                        <div class="msg-content">Объясни как работает Q4_K квантизация. Прикрепил схему блока и тестовый код — нужны 6 super-block, 6-bit scales, рассмотри NMC4 совместимость.</div>
+                    </div>
+                </div>
+
+                <!-- ASSISTANT message with markdown + table + code + tool_call -->
+                <div class="message msg-assistant">
+                    <div class="avatar"><svg class="icon" viewBox="0 0 24 24"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg></div>
+                    <div class="msg-body">
+                        <div class="msg-meta-top"><span class="msg-role">Ассистент</span></div>
+                        <div class="msg-content">
+                            <h2>Q4_K блок-структура</h2>
+                            <p><strong>Q4_K</strong> — это блочная квантизация: 256 значений упакованы в 144 байта (~4.5 bpw). Структура одного super-block:</p>
+                            <div class="table-wrapper">
+                                <table>
+                                    <thead><tr><th>Поле</th><th>Размер</th><th>Назначение</th></tr></thead>
+                                    <tbody>
+                                        <tr><td>d</td><td>fp16 (2 B)</td><td>главный масштаб</td></tr>
+                                        <tr><td>dmin</td><td>fp16 (2 B)</td><td>минимум</td></tr>
+                                        <tr><td>scales[12]</td><td>96 bits</td><td>6 sub-block scales × 6 bits + 6 mins × 6 bits</td></tr>
+                                        <tr><td>qs[128]</td><td>1024 bits</td><td>256 квантованных 4-bit значений</td></tr>
+                                    </tbody>
+                                </table>
+                                <button class="table-csv-btn">Copy CSV</button>
+                            </div>
+                            <p>Для NMC4 ключевая инструкция — векторная распаковка nibble:</p>
+
+                            <!-- code block + Open in artifact -->
+                            <div class="code-block-wrapper">
+                                <div class="code-header">
+                                    <span class="code-lang">c</span>
+                                    <div class="code-actions">
+                                        <button>Copy</button>
+                                        <button class="open-artifact-btn">
+                                            <svg class="icon icon-xs" viewBox="0 0 24 24"><path d="M14 3h7v7M10 21H3v-7M14 3l-7 7M10 21l7-7"/></svg>
+                                            Open
+                                        </button>
+                                    </div>
+                                </div>
+<pre><code class="language-c">// Q4_K dequant — vfpu intrinsics dlot4-style
+static inline void dequant_q4k_block(
+    const block_q4_K* __restrict__ b,
+    float* __restrict__ out)
+{
+    const float d    = ggml_fp16_to_fp32(b-&gt;d);
+    const float dmin = ggml_fp16_to_fp32(b-&gt;dmin);
+    for (int j = 0; j &lt; QK_K/32; ++j) {
+        uint8_t sc, m;
+        get_scale_min_k4(j, b-&gt;scales, &amp;sc, &amp;m);
+        const float scale = d   * sc;
+        const float bias  = dmin * m;
+        // ... unpack 32 nibbles
+    }
+}</code></pre>
+                            </div>
+
+                            <!-- contributor:F2 — Tool-call card -->
+                            <div class="tool-call-card">
+                                <div class="tool-call-header">
+                                    <div class="tool-call-title">
+                                        <span class="badge">tool</span>
+                                        <span>fetch (MCP)</span>
+                                    </div>
+                                </div>
+                                <div class="tool-call-body">
+                                    <div class="tool-call-section">
+                                        <div class="tool-call-section-title">Arguments</div>
+<pre><code class="language-json">{
+  "url": "https://github.com/ggerganov/llama.cpp/blob/master/ggml-quants.c",
+  "extract": "block_q4_K"
+}</code></pre>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- contributor:F2 — full timing footer -->
+                        <div class="msg-footer">
+                            <span class="tok-badge">412 tokens in 36.1s (11.4 tok/s)</span>
+                        </div>
+                        <div class="msg-actions">
+                            <button>Copy</button>
+                            <button>Pin</button>
+                            <button>Branch</button>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+    </div>
+
+    <div class="input-container">
+        <div class="input-box">
+            <!-- contributor:F2 — Slash command popup OPEN -->
+            <div class="slash-popup" style="display:block;left:8px;right:8px">
+                <div class="slash-item active">
+                    <span class="slash-cmd">/branch</span>
+                    <span class="slash-desc">Создать ветку от последнего сообщения</span>
+                </div>
+                <div class="slash-item">
+                    <span class="slash-cmd">/brave</span>
+                    <span class="slash-desc">Web search через MCP</span>
+                </div>
+                <div class="slash-item">
+                    <span class="slash-cmd">/build</span>
+                    <span class="slash-desc">Run code build (filesystem MCP)</span>
+                </div>
+            </div>
+            <div class="input-actions">
+                <button title="Attach file"><svg class="icon" viewBox="0 0 24 24"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 17.93 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button>
+                <button title="Voice"><svg class="icon" viewBox="0 0 24 24"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3M8 22h8"/></svg></button>
+            </div>
+            <textarea rows="1" style="height:30px">/b</textarea>
+            <button class="send-btn"><svg class="icon" viewBox="0 0 24 24"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg></button>
+        </div>
+    </div>
+</main>
+
+<!-- ===== ARTIFACT PANEL (contributor:F2) ===== -->
+<aside class="artifact-panel">
+    <div class="artifact-header">
+        <span style="color:var(--text-main);font-weight:600">HTML preview · tensor_layout</span>
+        <div class="artifact-actions">
+            <button>Copy</button>
+            <button>Download</button>
+            <button>×</button>
+        </div>
+    </div>
+    <div class="artifact-tabs">
+        <div class="artifact-tab active">
+            <svg class="icon icon-xs" viewBox="0 0 24 24" stroke="currentColor" fill="none" stroke-width="2"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+            <span>tensor_layout.html</span>
+            <span class="close">×</span>
+        </div>
+        <div class="artifact-tab">
+            <span>flow.mmd</span>
+            <span class="close">×</span>
+        </div>
+    </div>
+    <div class="artifact-body" style="background:white">
+        <svg viewBox="0 0 400 540" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:100%;background:white;padding:20px;box-sizing:border-box">
+            <style>.lbl{font-family:monospace;font-size:11px;fill:#1f2937}.h{font-family:sans-serif;font-size:14px;font-weight:600;fill:#1f2937}.sc{fill:#a855f7;opacity:.8}.qs{fill:#6366f1;opacity:.85}.d{fill:#10b981}</style>
+            <text x="200" y="30" class="h" text-anchor="middle">Q4_K Super-Block (256 weights → 144 B)</text>
+            <!-- d, dmin -->
+            <rect x="20"  y="60" width="60" height="36" class="d"/>
+            <text x="50" y="82" class="lbl" text-anchor="middle" fill="white">d (fp16)</text>
+            <rect x="90"  y="60" width="60" height="36" class="d" opacity="0.7"/>
+            <text x="120" y="82" class="lbl" text-anchor="middle" fill="white">dmin (fp16)</text>
+            <!-- scales[12] -->
+            <text x="20" y="130" class="lbl">scales[12] — 6 sub-block × (6-bit scale + 6-bit min)</text>
+            <g>
+                <rect x="20"  y="140" width="30" height="40" class="sc"/>
+                <rect x="50"  y="140" width="30" height="40" class="sc"/>
+                <rect x="80"  y="140" width="30" height="40" class="sc"/>
+                <rect x="110" y="140" width="30" height="40" class="sc"/>
+                <rect x="140" y="140" width="30" height="40" class="sc"/>
+                <rect x="170" y="140" width="30" height="40" class="sc"/>
+                <rect x="200" y="140" width="30" height="40" class="sc" opacity="0.5"/>
+                <rect x="230" y="140" width="30" height="40" class="sc" opacity="0.5"/>
+                <rect x="260" y="140" width="30" height="40" class="sc" opacity="0.5"/>
+                <rect x="290" y="140" width="30" height="40" class="sc" opacity="0.5"/>
+                <rect x="320" y="140" width="30" height="40" class="sc" opacity="0.5"/>
+                <rect x="350" y="140" width="30" height="40" class="sc" opacity="0.5"/>
+            </g>
+            <!-- qs[128] -->
+            <text x="20" y="220" class="lbl">qs[128] — 256 × 4-bit nibbles</text>
+            <g>
+                <rect x="20" y="230" width="360" height="60" class="qs"/>
+                <text x="200" y="265" class="lbl" text-anchor="middle" fill="white">256 quantized weights (4-bit each = 128 bytes)</text>
+            </g>
+            <!-- arrow -->
+            <text x="20" y="320" class="lbl" font-size="13" font-weight="600">Dequant: w_i = d × scale[sb] × q_i + dmin × min[sb]</text>
+            <!-- output -->
+            <text x="20" y="360" class="lbl">256 × fp32 weights →</text>
+            <g>
+                <rect x="20" y="370" width="360" height="40" fill="#94a3b8"/>
+                <text x="200" y="395" class="lbl" text-anchor="middle" fill="white">FP32 output buffer (1024 B)</text>
+            </g>
+            <text x="20" y="450" class="lbl" font-size="10" fill="#64748b">NMC4 vfpu: 4 nibbles/cycle via dlot4_packed</text>
+            <text x="20" y="465" class="lbl" font-size="10" fill="#64748b">Q4_K_M mixes Q4_K + Q6_K based on ttype dispatch</text>
+            <text x="20" y="495" class="lbl" font-size="10" fill="#10b981">✓ commit 10a3cfa — ttype dispatch verified bit-exact</text>
+        </svg>
+    </div>
+</aside>
+
+<!-- ===== RIGHT PANEL (Branches tab active) ===== -->
+<aside class="right-panel">
+    <div class="right-tabs">
+        <div class="right-tab">Настройки</div>
+        <div class="right-tab">Оглавление</div>
+        <div class="right-tab active">Ветки</div>
+    </div>
+    <div class="right-pane">
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:12px">Branches in this thread:</div>
+        <div class="branch-item">
+            <span class="branch-dot"></span>
+            <span style="flex:1">PIR backward fix — main branch</span>
+            <span style="font-size:10px;color:var(--text-dark)">14</span>
+        </div>
+        <div class="branch-tree">
+            <div class="branch-item current">
+                <span class="branch-dot"></span>
+                <span style="flex:1">↪ branch A: scale variant</span>
+                <span style="font-size:10px;color:var(--text-dark)">8</span>
+            </div>
+            <div class="branch-item">
+                <span class="branch-dot"></span>
+                <span style="flex:1">↪ branch B: residual fix</span>
+                <span style="font-size:10px;color:var(--text-dark)">11</span>
+            </div>
+            <div class="branch-tree">
+                <div class="branch-item">
+                    <span class="branch-dot"></span>
+                    <span style="flex:1">↪↪ branch B' (refined)</span>
+                    <span style="font-size:10px;color:var(--text-dark)">3</span>
+                </div>
+            </div>
+        </div>
+        <div style="margin-top:24px;padding-top:14px;border-top:1px solid var(--border)">
+            <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px;text-transform:uppercase;letter-spacing:.06em;font-weight:600">Perf (last 10 chats)</div>
+            <div class="perf-stat">
+                <span class="perf-label">Avg tok/s</span>
+                <span class="perf-value">10.9</span>
+            </div>
+            <div class="perf-stat" style="flex-direction:column;align-items:stretch;gap:6px">
+                <div style="display:flex;justify-content:space-between">
+                    <span class="perf-label">localStorage</span>
+                    <span class="perf-value">412 KB / ~5 MB</span>
+                </div>
+                <div class="perf-bar"><div class="perf-bar-fill" style="width:8%"></div></div>
+            </div>
+            <div class="perf-stat">
+                <span class="perf-label">MCP servers</span>
+                <span class="perf-value">4 (2 on)</span>
+            </div>
+        </div>
+    </div>
+</aside>
+
+<script>
+document.querySelectorAll('pre code').forEach(b => { try { hljs.highlightElement(b); } catch(e){} });
+</script>
+</body>
+</html>
