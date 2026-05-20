@@ -47,6 +47,7 @@ data/cifar-100-*/
 # Output files
 *.png
 !docs/screenshots/**/*.png
+!promeserve/web/preview/**/*.png
 output.txt
 
 # Unused directories
