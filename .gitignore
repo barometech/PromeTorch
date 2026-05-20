@@ -68,12 +68,16 @@ compare_*.py
 debug_*.py
 exact_grad_compare.py
 verify_dequant*.py
-test_*.py
+/test_*.py            # только корневые scratch тесты, не tests/promeserve/...
 pytorch_*.py
 benchmark_*.py
 fix_*.py
-run_*.py
+/run_*.py
 vendor/
+
+# Exception: integration tests должны быть tracked
+!tests/promeserve/test_*.py
+!python/tests/test_*.py
 
 # Throwaway agent test artefacts
 promeserve_result.json
