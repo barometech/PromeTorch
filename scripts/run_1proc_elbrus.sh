@@ -50,12 +50,21 @@ mkdir -p run_logs
 TOTAL_CORES=$(nproc)
 OMP_THREADS="${PT_OMP_THREADS:-$(( TOTAL_CORES > 2 ? TOTAL_CORES - 2 : TOTAL_CORES ))}"
 
-echo "=== PromeTorch 1-proc inference (Эльбрус, OMP=$OMP_THREADS из $TOTAL_CORES, --interleave=all) ==="
+# numactl опционален. На VM/контейнерах (E16C виртуалка) его нет —
+# скрипт раньше падал. Сейчас: если есть → используем, иначе skip.
+if command -v numactl >/dev/null 2>&1; then
+    NUMA_PREFIX=(numactl --interleave=all)
+    NUMA_INFO="--interleave=all"
+else
+    NUMA_PREFIX=()
+    NUMA_INFO="(numactl недоступен — без NUMA-binding)"
+fi
+
+echo "=== PromeTorch 1-proc inference (Эльбрус, OMP=$OMP_THREADS из $TOTAL_CORES, $NUMA_INFO) ==="
 date +"Start: %F %T"
 
 OMP_NUM_THREADS=$OMP_THREADS \
-numactl --interleave=all \
-    "$BIN" "$MODEL" \
+    "${NUMA_PREFIX[@]}" "$BIN" "$MODEL" \
     --max-tokens $MAX_TOK $MODE \
     "$PROMPT" \
     2>&1 | tee run_logs/1proc_best.log
