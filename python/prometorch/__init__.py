@@ -2,88 +2,83 @@
 PromeTorch: A PyTorch-like Deep Learning Framework
 """
 
-from ._C import (
+# Локальный fallback версии — не зависит от _C, чтобы `pip show prometorch`
+# и базовый `import prometorch` работали даже когда _C extension падает
+# на module-init bug.
+__version__ = "0.1.0a1"
+
+# Список символов которые мы expose'им из _C extension. Если _C не загрузится,
+# каждый получит stub'ы что-то типа: вызов = понятное RuntimeError.
+_C_SYMBOLS = (
     # Types
-    Tensor,
-    device,
-    DeviceType,
-    dtype,
-    TensorOptions,
-
-    # Factory functions
-    tensor,
-    empty,
-    zeros,
-    ones,
-    full,
-    rand,
-    randn,
-    randint,
-    arange,
-    linspace,
-    eye,
-
-    # Operations
-    cat,
-    stack,
-    split,
-    chunk,
-    mm,
-    bmm,
-    matmul,
-    dot,
-    sum,
-    mean,
-    max,
-    min,
-    sqrt,
-    exp,
-    log,
-    sin,
-    cos,
-    tanh,
-    sigmoid,
-    relu,
-    softmax,
-    clamp,
-    where,
-
-    # New operations for PIR support
-    cumsum,
-    rsqrt,
-    norm,
-    topk,
-    sort,
-    zeros_like,
-    ones_like,
-    from_numpy,
-    nan_to_num,
-    isinf,
-    isnan,
-    isfinite,
-    multinomial,
-    einsum,
+    "Tensor", "device", "DeviceType", "dtype", "TensorOptions",
+    # Factory
+    "tensor", "empty", "zeros", "ones", "full", "rand", "randn", "randint",
+    "arange", "linspace", "eye",
+    # Ops
+    "cat", "stack", "split", "chunk", "mm", "bmm", "matmul", "dot",
+    "sum", "mean", "max", "min", "sqrt", "exp", "log", "sin", "cos",
+    "tanh", "sigmoid", "relu", "softmax", "clamp", "where",
+    "cumsum", "rsqrt", "norm", "topk", "sort", "zeros_like", "ones_like",
+    "from_numpy", "nan_to_num", "isinf", "isnan", "isfinite",
+    "multinomial", "einsum",
     # Autograd
-    no_grad as _CppNoGrad,
-    enable_grad as _CppEnableGrad,
-    is_grad_enabled,
-    set_grad_enabled,
-    backward,
-    grad,
-
+    "is_grad_enabled", "set_grad_enabled", "backward", "grad",
     # Serialization
-    save,
-    load,
-    save_state_dict,
-    load_state_dict,
-
+    "save", "load", "save_state_dict", "load_state_dict",
     # CUDA
-    cuda_is_available,
-    cuda_device_count,
-
-    # Version
-    __version__,
+    "cuda_is_available", "cuda_device_count",
 )
+
+# Defensive import: _C может упасть с RuntimeError на module-init из-за
+# pre-existing bug в pybind11 bindings (Tensor.h:190 Check failed: defined()).
+# В этом случае выдаём warning, но НЕ роняем `import prometorch` — pure-Python
+# части пакета остаются доступны.
+_C_AVAILABLE = False
+_C_ERROR = None
+try:
+    from . import _C as _C_module  # noqa: F401
+    # Pull all symbols into prometorch namespace
+    for _sym in _C_SYMBOLS:
+        if hasattr(_C_module, _sym):
+            globals()[_sym] = getattr(_C_module, _sym)
+    # Override __version__ from _C if it has one (canonical source)
+    if hasattr(_C_module, "__version__"):
+        __version__ = _C_module.__version__
+    # Internal aliases for grad context managers (Python wrappers ниже)
+    _CppNoGrad = getattr(_C_module, "no_grad", None)
+    _CppEnableGrad = getattr(_C_module, "enable_grad", None)
+    _C_AVAILABLE = True
+except (ImportError, RuntimeError) as _err:
+    _C_ERROR = str(_err)
+    import warnings as _w
+    _w.warn(
+        f"prometorch._C C++ extension failed to load: {_err}\n"
+        f"Pure-Python parts of prometorch остаются доступны, но операции "
+        f"над тензорами (prometorch.tensor, prometorch.zeros и т.д.) "
+        f"бросят RuntimeError при вызове. Чтобы починить — пересобери wheel:\n"
+        f"  pip install --force-reinstall --no-binary prometorch prometorch",
+        stacklevel=2,
+    )
+    # Stub'ы для всех _C symbols так чтобы `from prometorch import tensor`
+    # давало доступный объект который при вызове сообщает понятное сообщение.
+    def _make_stub(_name):
+        def _stub(*_a, **_kw):
+            raise RuntimeError(
+                f"prometorch.{_name}: _C extension недоступен ({_C_ERROR}). "
+                f"Пересобери wheel или ставь через `pip install --no-binary prometorch prometorch`."
+            )
+        _stub.__name__ = _name
+        return _stub
+    for _sym in _C_SYMBOLS:
+        globals().setdefault(_sym, _make_stub(_sym))
+    # Минимально нужны для остального кода файла
+    is_grad_enabled = globals().get("is_grad_enabled", lambda: False)
+    set_grad_enabled = globals().get("set_grad_enabled", lambda _x: None)
+    cuda_is_available = globals().get("cuda_is_available", lambda: False)
+    cuda_device_count = globals().get("cuda_device_count", lambda: 0)
+    _CppNoGrad = None
+    _CppEnableGrad = None
 
 # PyTorch-compatible .pt/.pth (ZIP+pickle) save/load — optional.
 try:
