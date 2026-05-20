@@ -121,3 +121,7 @@ scripts/run_cifar_smoke.bat
 РЕПОЗИТОРИЙ*ФИКСЫ*/
 ELBRUS_REPORT.pdf
 *.404
+
+# Локальные debug-scripts (не для open repo, добавлены случайно в 52c2d6a)
+nm_quad_qwen/
+tests/io/
