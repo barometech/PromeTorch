@@ -136,6 +136,12 @@ endif()
 # Elbrus E2K — LCC-specific optimization flags
 # ============================================================================
 
+# E2K intrinsic auto-detection. Реальный try_compile для каждого
+# критичного builtin'а — определяет что компилятор+arch реально умеет,
+# не только что __iset__ guard разрешает. См. cmake/E2KIntrinsicChecks.cmake
+# и docs/elbrus_isa/PERFORMANCE_BY_ISA.md.
+include(${CMAKE_CURRENT_LIST_DIR}/cmake/E2KIntrinsicChecks.cmake)
+
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "e2k|elbrus")
     message(STATUS "Elbrus E2K: enabling -O3, -ffast-math, LTO, EML BLAS")
 
@@ -652,6 +658,11 @@ target_link_libraries(aten_cpu PUBLIC c10)
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "e2k|elbrus")
     target_compile_options(aten_cpu PRIVATE -O3 -ffast-math -D_GNU_SOURCE)
     target_link_libraries(aten_cpu PUBLIC pthread)
+
+    # E2K intrinsic auto-detect — выставляет PT_HAVE_* defines на target
+    # на основе try_compile с current -march. См. cmake/E2KIntrinsicChecks.cmake.
+    pt_detect_e2k_intrinsics()
+    pt_apply_e2k_intrinsic_defines(aten_cpu)
 
     if(PT_USE_EML_BLAS)
         target_link_libraries(aten_cpu PUBLIC eml_mt)
