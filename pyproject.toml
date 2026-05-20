@@ -63,9 +63,14 @@ Documentation = "https://github.com/barometech/PromeTorch/blob/main/README.md"
 build-dir = "build/{wheel_tag}"
 cmake.version = ">=3.20"
 cmake.build-type = "Release"
-cmake.verbose = false
 build.verbose = false
 logging.level = "INFO"
+
+# КРИТИЧНО: ограничиваем что строить — иначе CMakeLists собирает все
+# examples/* exe (train_vit, train_mnist, train_gpt и т.д.), они падают
+# с разными external deps и убивают wheel build. Нам нужен только _C
+# (Python extension) + его deps (c10, aten_cpu, torch_autograd, torch_data).
+build.targets = ["_C"]
 
 # Python package layout — где лежит `import promethorch`-овский код.
 wheel.packages = ["python/promethorch"]
