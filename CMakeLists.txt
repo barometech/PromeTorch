@@ -1494,11 +1494,24 @@ if(PT_BUILD_PYTHON)
         target_compile_definitions(_C PRIVATE PT_USE_CUDA PT_USE_ROCM)
     endif()
 
-    # Set output directory for Python package
+    # Development build: output directly into python/promethorch для in-place testing.
     set_target_properties(_C PROPERTIES
         LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/python/promethorch
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/python/promethorch
     )
+
+    # Install rules для scikit-build-core wheel packaging.
+    # При `pip install .` scikit-build-core зовёт cmake --install,
+    # копируя _C.so + все shared libs в site-packages/promethorch/.
+    install(TARGETS _C
+            LIBRARY DESTINATION promethorch
+            RUNTIME DESTINATION promethorch)
+    # Shared libs (c10, aten, torch_*) — wheel должен быть самодостаточным.
+    install(TARGETS c10 aten_cpu torch_autograd torch_data
+            LIBRARY DESTINATION promethorch
+            RUNTIME DESTINATION promethorch
+            OPTIONAL)
+    # torch_nn / torch_optim — header-only (INTERFACE), install не нужен.
 
     message(STATUS "  Python: ${Python3_VERSION}")
     message(STATUS "  pybind11: Enabled")
