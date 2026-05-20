@@ -3064,8 +3064,33 @@ const App = (() => {
         });
     }
 
-    function openMcpModal() {
+    async function openMcpModal() {
         $('#mcpModal').classList.add('active');
+        // contributor:F2 — try fetch from backend /api/mcp (if available)
+        if (window.PromeMcp) {
+            try {
+                const [tools, servers] = await Promise.all([
+                    window.PromeMcp.listTools(),
+                    window.PromeMcp.listServers(),
+                ]);
+                if (Array.isArray(servers) && servers.length) {
+                    state.mcpServers = servers.map(s => ({
+                        id: 'be_' + (s.name || uid()),
+                        name: s.name || 'server',
+                        command: s.command || '',
+                        args: s.args || [],
+                        env: s.env || {},
+                        tools: (tools || []).filter(t => !t.server || t.server === s.name).map(t => t.name),
+                        disabledTools: [],
+                        enabled: !s.disabled,
+                        status: s.status || 'ready',
+                        backend: true, // contributor:F2 — flag из backend
+                    }));
+                    persistMcpServers();
+                    renderMcpServerList();
+                }
+            } catch (e) { console.warn('[MCP] modal fetch failed', e); }
+        }
         renderMcpServerFull();
         renderMcpPresets();
         showMcpTab('servers');
@@ -3288,8 +3313,30 @@ const App = (() => {
             case '/maxtok':
                 if (rest) { state.settings.max_tokens = parseInt(rest); persistSettings(); applySettingsToUI(); }
                 return true;
-            case '/run':
-                toast(`MCP tool execution coming soon: ${rest}`, 'info'); return true;
+            case '/run': {
+                // contributor:F2 — wire to /api/mcp/call (backend поддержка пришла в commit 7d48408)
+                if (!rest) { toast('Usage: /run <tool_name> {json args}', 'error'); return true; }
+                const sp = rest.indexOf(' ');
+                const tname = sp < 0 ? rest : rest.slice(0, sp);
+                let targs = {};
+                if (sp >= 0) { try { targs = JSON.parse(rest.slice(sp+1).trim() || '{}'); } catch (e) { toast('Bad JSON args', 'error'); return true; } }
+                if (!window.PromeMcp) { toast('MCP client not loaded', 'error'); return true; }
+                window.PromeMcp.callTool(tname, targs).then(res => {
+                    const txt = typeof res === 'string' ? res : JSON.stringify(res, null, 2);
+                    toast(`/${tname}: ${txt.slice(0, 60)}`, res && res.error ? 'error' : 'success');
+                    // append result to current chat as <tool_response>
+                    const c = state.chats[state.activeChatId];
+                    if (c) {
+                        c.messages.push({
+                            id: uid(), role: 'assistant',
+                            content: `<tool_response>${JSON.stringify(res)}</tool_response>`,
+                            createdAt: Date.now(),
+                        });
+                        persistChats(); renderChat();
+                    }
+                });
+                return true;
+            }
             case '/branch':
                 branchFromLastMessage(); return true;
             case '/hotkeys':
@@ -3642,6 +3689,36 @@ const App = (() => {
         // contributor:F2 — auto-refresh models every 30 sec
         await refreshModelsCache();
         state.modelsRefreshTimer = setInterval(refreshModelsCache, 30000);
+
+        // contributor:F2 — try to merge backend MCP servers into sidebar list on init
+        if (window.PromeMcp) {
+            try {
+                const servers = await window.PromeMcp.listServers();
+                if (Array.isArray(servers) && servers.length) {
+                    // Merge: keep local presets, add backend ones not yet known
+                    const tools = await window.PromeMcp.listTools();
+                    servers.forEach(s => {
+                        const exists = state.mcpServers.find(x => x.name === s.name);
+                        if (!exists) {
+                            state.mcpServers.push({
+                                id: 'be_' + (s.name || uid()),
+                                name: s.name || 'server',
+                                command: s.command || '',
+                                args: s.args || [],
+                                env: s.env || {},
+                                tools: (tools || []).filter(t => !t.server || t.server === s.name).map(t => t.name),
+                                disabledTools: [],
+                                enabled: !s.disabled,
+                                status: s.status || 'ready',
+                                backend: true,
+                            });
+                        }
+                    });
+                    persistMcpServers();
+                    renderMcpServerList();
+                }
+            } catch (e) { /* backend ещё может не уметь MCP */ }
+        }
     }
 
     document.addEventListener('DOMContentLoaded', init);
