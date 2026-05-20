@@ -2,7 +2,7 @@
 # Verify gemma3-4B TP-4 после ce41588 (post_attn_norm + post_ffw_norm wired)
 # Требует PT_TP_GATHER=1 (use_gather path для full vector RMSNorm).
 set -u
-cd ~/promethorch
+cd ~/prometorch
 loginctl enable-linger "$USER" 2>/dev/null || true
 
 MODEL="$HOME/gguf_models/gemma3-4b-Q4_K_M.gguf"

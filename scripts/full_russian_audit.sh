@@ -6,7 +6,7 @@
 # ============================================================================
 
 set -uo pipefail
-cd ~/promethorch
+cd ~/prometorch
 mkdir -p audit_results
 
 PROMPT="Расскажи про Москву одним предложением."

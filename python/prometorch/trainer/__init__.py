@@ -1,5 +1,5 @@
 """
-promethorch.trainer — Lightning-style training loop.
+prometorch.trainer — Lightning-style training loop.
 
 Subclass LightningModule, override `training_step`, `configure_optimizer`
 (and optionally `validation_step`), then call `Trainer(cfg).fit(module, loader)`.
@@ -15,7 +15,7 @@ import time
 from typing import Iterable, Optional
 
 try:
-    from promethorch._C import trainer as _cpp
+    from prometorch._C import trainer as _cpp
     _HAS_CPP = True
     _TrainerConfigCpp = _cpp.TrainerConfig
     _LightningModuleBase = _cpp.LightningModule
@@ -26,7 +26,7 @@ except (ImportError, AttributeError):
     # Fallback uses nn.Module as a base so `parameters()` / `state_dict()`
     # still work when running against a pre-existing _C.pyd.
     try:
-        from promethorch.nn import Module as _NnModule
+        from prometorch.nn import Module as _NnModule
         _LightningModuleBase = _NnModule
     except ImportError:
         class _LightningModuleBase:      # absolute last-resort stub
@@ -200,14 +200,14 @@ class Trainer:
 
     def save_checkpoint(self, module: LightningModule, path: str):
         try:
-            from promethorch import save_state_dict
+            from prometorch import save_state_dict
             save_state_dict(module.state_dict(), path)
         except Exception as e:
             raise RuntimeError(f"save_checkpoint failed: {e}")
 
     def load_checkpoint(self, module: LightningModule, path: str) -> bool:
         try:
-            from promethorch import load_state_dict
+            from prometorch import load_state_dict
             sd = load_state_dict(path)
             module.load_state_dict(sd, strict=False)
             return True

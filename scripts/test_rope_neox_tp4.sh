@@ -1,7 +1,7 @@
 #!/bin/bash
 # TP-4 RoPE NeoX bench: tok/s + Russian quality на всех затронутых моделях.
 # Это hot path 11.4 tok/s. Если регрессия — РОЛБЭК.
-cd /home/<user>/promethorch
+cd /home/<user>/prometorch
 mkdir -p run_logs
 
 run_tp4() {

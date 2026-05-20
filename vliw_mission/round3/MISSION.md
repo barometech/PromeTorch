@@ -32,7 +32,7 @@ Compute peak per core = 72 GFLOPS (Trushkin). Effective = ~12 GOPS = **17%**.
 ## Миссия Round 3
 
 10 опус-агентов работают параллельно по разным направлениям. Каждый получает:
-- путь к репо: C:\Users\paper\Desktop\promethorch
+- путь к репо: C:\Users\paper\Desktop\prometorch
 - журнал: JOURNAL.md (последние записи Round 2 + plateau + Q8_0)
 - predecessor agents: vliw_mission/round2/agent_*.md
 - профайлер цифры выше

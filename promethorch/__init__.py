@@ -5,7 +5,7 @@ Supported backends: CPU (TUDA), CUDA, NMCard, LinQ
 Supported hardware: Intel/AMD (AVX2), Baikal-M/S (NEON), Elbrus (E2K), NM Card Mini, LinQ H1M
 
 Usage:
-    import promethorch as pt
+    import prometorch as pt
     x = pt.tensor([1.0, 2.0, 3.0])
     y = pt.zeros(3, 4)
     z = x.mm(y)
@@ -16,8 +16,8 @@ __version__ = "0.1.0"
 # Try to import C++ extension
 _C_LOADED = False
 try:
-    from promethorch._C import *
-    from promethorch._C import (
+    from prometorch._C import *
+    from prometorch._C import (
         __version__ as _cpp_version,
         cuda_is_available,
         cuda_device_count,
@@ -84,5 +84,5 @@ linq = device("linq")
 
 
 # Submodules
-from promethorch import nn
-from promethorch import optim
+from prometorch import nn
+from prometorch import optim

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Master night runner: audit + llama bench sequentially.
-cd /home/<user>/promethorch
+cd /home/<user>/prometorch
 pkill -9 -f test_gguf_inference 2>/dev/null
 pkill -9 -f llama-bench 2>/dev/null
 sleep 3

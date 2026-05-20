@@ -259,8 +259,8 @@ hardware, no new code paths.
 ---
 
 **Files referenced (absolute paths):**
-- `C:\Users\paper\Desktop\promethorch\torch\io\gguf_model.h` (514-577, 4060-4344, 4408-4966)
-- `C:\Users\paper\Desktop\promethorch\torch\io\cpu_quant_gemv.h` (1500-1562)
-- `C:\Users\paper\Desktop\promethorch\torch\distributed\ddp.cpp` (all_reduce_inplace at 517)
-- `C:\Users\paper\Desktop\promethorch\vliw_mission\round2\agent_9_numa_aggregate.md` (§4-5)
-- `C:\Users\paper\Desktop\promethorch\vliw_mission\round3\agent_3_shm_weights.md` (§1, §6 confirmation)
+- `C:\Users\paper\Desktop\prometorch\torch\io\gguf_model.h` (514-577, 4060-4344, 4408-4966)
+- `C:\Users\paper\Desktop\prometorch\torch\io\cpu_quant_gemv.h` (1500-1562)
+- `C:\Users\paper\Desktop\prometorch\torch\distributed\ddp.cpp` (all_reduce_inplace at 517)
+- `C:\Users\paper\Desktop\prometorch\vliw_mission\round2\agent_9_numa_aggregate.md` (§4-5)
+- `C:\Users\paper\Desktop\prometorch\vliw_mission\round3\agent_3_shm_weights.md` (§1, §6 confirmation)

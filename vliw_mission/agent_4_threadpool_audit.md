@@ -394,7 +394,7 @@ chunk rounding (P2). The 217-dispatch-per-token issue (Q4/P5) is real but
 second order until P1-P3 are done.
 
 File paths referenced:
-- `C:\Users\paper\Desktop\promethorch\c10\util\ThreadPool.h`
-- `C:\Users\paper\Desktop\promethorch\torch\io\cpu_quant_gemv.h`
-- `C:\Users\paper\Desktop\promethorch\torch\io\gguf_model.h`
-- `C:\Users\paper\Desktop\promethorch\torch\distributed\ddp.cpp`
+- `C:\Users\paper\Desktop\prometorch\c10\util\ThreadPool.h`
+- `C:\Users\paper\Desktop\prometorch\torch\io\cpu_quant_gemv.h`
+- `C:\Users\paper\Desktop\prometorch\torch\io\gguf_model.h`
+- `C:\Users\paper\Desktop\prometorch\torch\distributed\ddp.cpp`

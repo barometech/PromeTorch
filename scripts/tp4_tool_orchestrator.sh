@@ -16,7 +16,7 @@
 # ============================================================================
 
 set -uo pipefail
-cd ~/promethorch
+cd ~/prometorch
 
 MODEL="${PT_MODEL:-$HOME/gguf_models/mistral-7b-Q4_K_M.gguf}"
 TOOL_ROOT="${PROMESERVE_TOOL_ROOT:-/tmp/promeserve}"

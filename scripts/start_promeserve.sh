@@ -1,5 +1,5 @@
 #!/bin/bash
 # Start PromeServe with mistral-7b in foreground (caller wraps with nohup setsid).
-cd /home/<user>/promethorch
+cd /home/<user>/prometorch
 exec ./build_elbrus/promeserve/promeserve --port 11500 --device cpu \
     --model /home/<user>/gguf_models/mistral-7b-Q4_K_M.gguf

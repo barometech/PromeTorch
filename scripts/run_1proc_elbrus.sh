@@ -24,7 +24,7 @@
 # Usage: ./run_1proc_elbrus.sh [--greedy|--sample] [prompt]
 
 set -u
-cd ~/promethorch
+cd ~/prometorch
 
 loginctl enable-linger "$USER" 2>/dev/null || true
 

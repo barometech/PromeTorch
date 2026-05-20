@@ -2,7 +2,7 @@
 # Tool-call HTML demo через test_gguf_inference TP-4 (без PromeServe HTTP).
 # 1 запрос пользователя → bash оркестрирует tool-call loop вокруг binary.
 set -uo pipefail
-cd /home/<user>/promethorch
+cd /home/<user>/prometorch
 mkdir -p /tmp/promeserve
 
 MODEL="$HOME/gguf_models/mistral-7b-Q4_K_M.gguf"

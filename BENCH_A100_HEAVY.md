@@ -147,4 +147,4 @@ traffic.
   caused by Ollama's 3-model keep-alive cache, not a PromeTorch loader limit.
 - **Concurrent training did not measurably affect inference throughput.**
 
-Logs directory: `C:\Users\paper\Desktop\promethorch\run_logs\bench_a100_heavy\`.
+Logs directory: `C:\Users\paper\Desktop\prometorch\run_logs\bench_a100_heavy\`.

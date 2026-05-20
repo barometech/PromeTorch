@@ -1,6 +1,6 @@
 #!/bin/bash
 # Direct audit без вложенных bash subshells (избегает fork OOM на 7B+).
-cd /home/<user>/promethorch
+cd /home/<user>/prometorch
 mkdir -p audit_results
 
 PROMPT="Расскажи про Москву одним предложением."

@@ -91,7 +91,7 @@ TP requires inter % nprocs == 0, q_dim % nprocs == 0; llama3-8B inter=14336,
 ## BUG-4: PromeServe не build на Эльбрусе (или не deploy'ed для test'а)
 
 **Symptom.** Юзер просил "запустить на promeserve" — на сервере есть
-исходники в `~/promethorch/promeserve/`, но binary не build'ed.
+исходники в `~/prometorch/promeserve/`, но binary не build'ed.
 
 **Diagnosis.** `build_elbrus/` собрал только `test_gguf_inference`, не
 `promeserve`. CMake target `promeserve` не включён в обычный пайплайн.

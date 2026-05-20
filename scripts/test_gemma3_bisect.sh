@@ -1,7 +1,7 @@
 #!/bin/bash
 # Bisect: per-layer SWA vs PT_FORCE_ALL_GLOBAL для gemma3-4B.
 # Если ALL_GLOBAL даёт тот же результат что и per-layer — bug не в SWA.
-cd /home/<user>/promethorch
+cd /home/<user>/prometorch
 pkill -9 -f test_gguf_inference 2>/dev/null
 sleep 2
 

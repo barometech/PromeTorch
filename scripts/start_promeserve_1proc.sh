@@ -5,7 +5,7 @@
 # After this exits, server is running in background; logs in /tmp/promeserve.log.
 
 set -eu
-cd "$HOME/promethorch"
+cd "$HOME/prometorch"
 
 # Kill any prior instance
 pkill -f promeserve 2>/dev/null || true
@@ -16,7 +16,7 @@ loginctl enable-linger "$USER" 2>/dev/null || true
 # Use tmux detached session — survives SSH disconnect reliably on Elbrus.
 tmux kill-session -t promeserve 2>/dev/null || true
 tmux new-session -d -s promeserve \
-    "cd ~/promethorch && \
+    "cd ~/prometorch && \
      OMP_NUM_THREADS=${PT_OMP_THREADS:-$(($(nproc)>2?$(nproc)-2:$(nproc)))} OMP_PLACES=cores OMP_PROC_BIND=close \
      numactl --interleave=all \
      ./build_elbrus/promeserve/promeserve \

@@ -1,7 +1,7 @@
 #!/bin/bash
 # llama.cpp 32-thread baseline для phi3.5-mini
 set -u
-cd ~/promethorch
+cd ~/prometorch
 
 echo "=== llama.cpp 32t baseline для phi3.5-mini Q4_K_M ==="
 date +"Start: %F %T"

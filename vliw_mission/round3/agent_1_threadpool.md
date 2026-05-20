@@ -203,11 +203,11 @@ Estimate **3–6 µs** vs current ~100 µs ⇒ **~95 µs × 200 = 19 ms/tok save
 
 ## 7. Files referenced
 
-- `C:\Users\paper\Desktop\promethorch\c10\util\ThreadPool.h:140` — current
+- `C:\Users\paper\Desktop\prometorch\c10\util\ThreadPool.h:140` — current
   fork/join implementation to replace.
-- `C:\Users\paper\Desktop\promethorch\torch\distributed\ddp.cpp:550-572` —
+- `C:\Users\paper\Desktop\prometorch\torch\distributed\ddp.cpp:550-572` —
   futex helpers to lift into `c10/util/Futex.h`.
-- `C:\Users\paper\Desktop\promethorch\torch\io\cpu_quant_gemv.h` — 17
+- `C:\Users\paper\Desktop\prometorch\torch\io\cpu_quant_gemv.h` — 17
   callsites, unchanged.
-- `C:\Users\paper\Desktop\promethorch\torch\io\gguf_model.h:2551,2762,2870,
+- `C:\Users\paper\Desktop\prometorch\torch\io\gguf_model.h:2551,2762,2870,
   3393,3442,3483,3517` — 7 callsites, unchanged.

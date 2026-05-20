@@ -96,37 +96,37 @@ except ImportError:
 
 # Import submodules. These may fail on stale builds where the C extension is
 # missing newer symbols (e.g. BatchNorm1d). We swallow the error so that
-# core ops and helpers like ``promethorch.transformers_compat`` remain
-# usable; ``promethorch.nn`` will simply be unavailable until the C
+# core ops and helpers like ``prometorch.transformers_compat`` remain
+# usable; ``prometorch.nn`` will simply be unavailable until the C
 # extension is rebuilt.
 try:
     from . import nn
 except ImportError as _e:
     import warnings as _w
-    _w.warn(f"promethorch.nn unavailable: {_e}. Rebuild the _C extension.")
+    _w.warn(f"prometorch.nn unavailable: {_e}. Rebuild the _C extension.")
 try:
     from . import optim
 except ImportError as _e:
     import warnings as _w
-    _w.warn(f"promethorch.optim unavailable: {_e}. Rebuild the _C extension.")
+    _w.warn(f"prometorch.optim unavailable: {_e}. Rebuild the _C extension.")
 try:
     from . import data
 except ImportError as _e:
     import warnings as _w
-    _w.warn(f"promethorch.data unavailable: {_e}. Rebuild the _C extension.")
+    _w.warn(f"prometorch.data unavailable: {_e}. Rebuild the _C extension.")
 
 # ----------------------------------------------------------------------------
 # New submodules: lazy imports so a pre-existing _C.pyd without
-# bindings_new.cpp still lets `import promethorch` succeed. Each submodule
+# bindings_new.cpp still lets `import prometorch` succeed. Each submodule
 # provides its own Python-level fallback for the missing C++ symbols.
 # ----------------------------------------------------------------------------
 def _lazy_import(_name: str):
     import importlib as _il
     try:
-        return _il.import_module(f"promethorch.{_name}")
+        return _il.import_module(f"prometorch.{_name}")
     except Exception as _e:
         import warnings as _w
-        _w.warn(f"promethorch.{_name} unavailable: {_e}")
+        _w.warn(f"prometorch.{_name} unavailable: {_e}")
         return None
 
 # Eagerly attach each as an attribute so `pt.nn.parallel` etc. work without
@@ -138,40 +138,40 @@ for _sub in ("distributed", "trainer", "onnx", "mlir", "mobile",
         globals()[_sub] = _mod
 
 # nn.parallel attaches to the nn submodule. On stale _C builds where
-# promethorch.nn's own __init__.py fails, create a lightweight placeholder
+# prometorch.nn's own __init__.py fails, create a lightweight placeholder
 # module so pt.nn.parallel remains accessible.
 try:
     import importlib as _il
     import types as _types
     import sys as _sys
     if "nn" not in globals() or globals().get("nn") is None:
-        _nn_stub = _types.ModuleType("promethorch.nn")
+        _nn_stub = _types.ModuleType("prometorch.nn")
         _nn_stub.__path__ = [__import__('os').path.join(
             __import__('os').path.dirname(__file__), "nn")]
-        _sys.modules.setdefault("promethorch.nn", _nn_stub)
+        _sys.modules.setdefault("prometorch.nn", _nn_stub)
         globals()["nn"] = _nn_stub
     try:
-        _parallel = _il.import_module("promethorch.nn.parallel")
+        _parallel = _il.import_module("prometorch.nn.parallel")
         setattr(globals()["nn"], "parallel", _parallel)
     except Exception as _pe:
         import warnings as _w
-        _w.warn(f"promethorch.nn.parallel unavailable: {_pe}")
+        _w.warn(f"prometorch.nn.parallel unavailable: {_pe}")
 except Exception as _e:
     import warnings as _w
-    _w.warn(f"promethorch.nn.parallel setup failed: {_e}")
+    _w.warn(f"prometorch.nn.parallel setup failed: {_e}")
 
 # Replace the base `autograd` namespace with the new submodule that offers
 # jvp / vmap / forward-mode AD alongside the existing backward helpers.
 try:
     import importlib as _il
-    autograd = _il.import_module("promethorch.autograd")
+    autograd = _il.import_module("prometorch.autograd")
     # Re-expose low-level backward/grad for convenience.
     from ._C import backward as _cpp_backward, grad as _cpp_grad  # noqa: F401
     setattr(autograd, "backward", _cpp_backward)
     setattr(autograd, "grad", _cpp_grad)
 except Exception as _e:
     import warnings as _w
-    _w.warn(f"promethorch.autograd extended API unavailable: {_e}")
+    _w.warn(f"prometorch.autograd extended API unavailable: {_e}")
 
 # Convenience
 cuda = type('cuda', (), {
@@ -245,10 +245,10 @@ class no_grad(_GradModeContextDecorator):
 
     Examples::
 
-        with promethorch.no_grad():
+        with prometorch.no_grad():
             y = model(x)            # no graph built
 
-        @promethorch.no_grad()
+        @prometorch.no_grad()
         def predict(model, x):
             return model(x)
     """
@@ -261,8 +261,8 @@ class enable_grad(_GradModeContextDecorator):
 
     Example::
 
-        with promethorch.no_grad():
-            with promethorch.enable_grad():
+        with prometorch.no_grad():
+            with prometorch.enable_grad():
                 y = model(x)        # graph IS built here
     """
     _target_mode = True

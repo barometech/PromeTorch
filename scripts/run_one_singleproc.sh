@@ -1,6 +1,6 @@
 #!/bin/bash
 # Single-process fallback для 7B+ моделей (TP-4 OOM на 125GB / 4 NUMA).
-cd /home/<user>/promethorch
+cd /home/<user>/prometorch
 MODEL="${1:-}"
 [ -z "$MODEL" ] && exit 1
 MPATH="$HOME/gguf_models/$MODEL"

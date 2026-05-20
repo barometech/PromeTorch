@@ -41,8 +41,8 @@ class CMakeBuild(build_ext):
             return
 
         extdir = Path(self.get_ext_fullpath(ext.name)).parent.resolve()
-        # _C goes into promethorch/
-        extdir = extdir / "promethorch"
+        # _C goes into prometorch/
+        extdir = extdir / "prometorch"
         extdir.mkdir(parents=True, exist_ok=True)
 
         cmake_args = [
@@ -124,13 +124,13 @@ class CMakeBuild(build_ext):
 
 
 setup(
-    name="promethorch",
+    name="prometorch",
     version="0.1.0",
     description="Russian hardware-native deep learning framework",
     author="PromeTorch Team",
     python_requires=">=3.8",
-    packages=["promethorch", "promethorch.nn", "promethorch.optim"],
+    packages=["prometorch", "prometorch.nn", "prometorch.optim"],
     install_requires=["numpy>=1.20"],
-    ext_modules=[CMakeExtension("promethorch._C")],
+    ext_modules=[CMakeExtension("prometorch._C")],
     cmdclass={"build_ext": CMakeBuild},
 )

@@ -2,7 +2,7 @@
 # v5 — bulletproof extractor: regex-based content extraction даже при truncated JSON.
 # Извлекает path + content прямо из текста, не пытаясь parse JSON.
 set -uo pipefail
-cd ~/promethorch
+cd ~/prometorch
 
 mkdir -p /tmp/promeserve_demo
 rm -f /tmp/promeserve_demo/*.html

@@ -58,4 +58,4 @@ cmake --build . -j$(nproc)
 
 echo ""
 echo "=== Cross-build complete: $BUILD_DIR ==="
-echo "Copy to target and run: scp -r $BUILD_DIR user@baikal:/opt/promethorch/"
+echo "Copy to target and run: scp -r $BUILD_DIR user@baikal:/opt/prometorch/"

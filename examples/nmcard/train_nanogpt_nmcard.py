@@ -360,7 +360,7 @@ def main():
     # Load data
     data_path = os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'tiny_shakespeare.txt')
     if not os.path.exists(data_path):
-        data_path = r'C:\Users\paper\Desktop\promethorch\data\tiny_shakespeare.txt'
+        data_path = r'C:\Users\paper\Desktop\prometorch\data\tiny_shakespeare.txt'
     with open(data_path, 'r') as f:
         text = f.read()
 
@@ -382,7 +382,7 @@ def main():
     disp_path = os.path.join(os.path.dirname(__file__), '..', '..',
                              'aten', 'src', 'ATen', 'nmcard', 'nmc_programs', 'dispatcher_mc.abs')
     if not os.path.exists(disp_path):
-        disp_path = r'C:\Users\paper\Desktop\promethorch\aten\src\ATen\nmcard\nmc_programs\dispatcher_mc.abs'
+        disp_path = r'C:\Users\paper\Desktop\prometorch\aten\src\ATen\nmcard\nmc_programs\dispatcher_mc.abs'
 
     try:
         alive = card.init_all_cores(disp_path)

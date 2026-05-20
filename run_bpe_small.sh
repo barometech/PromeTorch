@@ -1,8 +1,8 @@
 #!/bin/bash
-cd ~/promethorch
+cd ~/prometorch
 rm -f /dev/shm/pir_w_* /dev/shm/pir_sync_init
-rm -f ~/promethorch/logs/pir_bpe_*.log
-mkdir -p ~/promethorch/logs ~/promethorch/checkpoints_bpe
+rm -f ~/prometorch/logs/pir_bpe_*.log
+mkdir -p ~/prometorch/logs ~/prometorch/checkpoints_bpe
 NPROCS=${PT_NPROCS:-4}; for ((node=0; node<NPROCS; node++)); do
   PT_NO_NUMA_POOL=1 OMP_NUM_THREADS=${PT_OMP_PER_RANK:-$(($(nproc)/4))} OMP_PLACES=cores OMP_PROC_BIND=close \
   numactl --cpunodebind=$node --preferred=$node \
@@ -12,8 +12,8 @@ NPROCS=${PT_NPROCS:-4}; for ((node=0; node<NPROCS; node++)); do
     --save_interval 200 --save_dir checkpoints_bpe \
     --grad_accum 20 --seed $((42+node)) \
     --lr 0.0006 \
-    --data data/russian_mega.tokens > ~/promethorch/logs/pir_bpe_$node.log 2>&1 &
+    --data data/russian_mega.tokens > ~/prometorch/logs/pir_bpe_$node.log 2>&1 &
   sleep 15
 done
 wait
-echo ALL_DONE > ~/promethorch/logs/pir_bpe_done
+echo ALL_DONE > ~/prometorch/logs/pir_bpe_done

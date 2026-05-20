@@ -3,7 +3,7 @@ FROM rockylinux:9-minimal
 
 RUN microdnf install -y gcc gcc-c++ cmake make git && microdnf clean all
 
-WORKDIR /opt/promethorch
+WORKDIR /opt/prometorch
 COPY . .
 
 RUN mkdir -p build && cd build && \

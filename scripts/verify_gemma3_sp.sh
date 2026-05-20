@@ -1,7 +1,7 @@
 #!/bin/bash
 # Verify gemma3-4B SP after d9dce9e (no regression check)
 set -u
-cd ~/promethorch
+cd ~/prometorch
 pkill -9 -f test_gguf_inference 2>/dev/null
 sleep 2
 

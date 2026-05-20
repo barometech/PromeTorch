@@ -2,7 +2,7 @@
 # Multi-step tool-call demo через mistral-7B TP-4 — 3 dense HTML проекта
 # в одной session, каждый через write_file tool с loop'ом до 5 итераций.
 set -uo pipefail
-cd ~/promethorch
+cd ~/prometorch
 
 mkdir -p /tmp/promeserve_demo
 rm -f /tmp/promeserve_demo/*.html

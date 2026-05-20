@@ -27,7 +27,7 @@ RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries && \
 # для x86, только для CMAKE_SYSTEM_PROCESSOR=e2k|elbrus). Так что просто
 # не trip EML find_path.
 
-WORKDIR /opt/promethorch
+WORKDIR /opt/prometorch
 COPY . .
 
 RUN mkdir -p build && cd build && \

@@ -2,7 +2,7 @@
 # Generate one extra dense HTML via mistral-7B TP-4 (no CoT, cleaner output).
 # Demonstrate that mistral instruction-following also works with same tool-call format.
 set -uo pipefail
-cd ~/promethorch
+cd ~/prometorch
 loginctl enable-linger "$USER" 2>/dev/null || true
 
 mkdir -p /tmp/promeserve_demo

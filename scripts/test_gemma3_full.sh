@@ -1,6 +1,6 @@
 #!/bin/bash
 # Полный тест gemma3-4B + регрессия проверка остальных моделей.
-cd /home/<user>/promethorch
+cd /home/<user>/prometorch
 pkill -9 -f test_gguf_inference 2>/dev/null
 rm -f /dev/shm/prometorch_ddp_*
 sleep 3

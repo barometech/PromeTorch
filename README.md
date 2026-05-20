@@ -644,7 +644,7 @@ GGUF qwen3:4b ~82 tok/s greedy on A100 (re-measured 2026-04-20, BENCH_A100_HEAVY
   fusion + optional C++ codegen via subprocess + dlopen. 2× speedup на мелких тензорах.
 
 ### Ecosystem shims (new)
-- **HuggingFace Transformers compat** (`python/promethorch/transformers_compat.py`) —
+- **HuggingFace Transformers compat** (`python/prometorch/transformers_compat.py`) —
   AutoModel.from_pretrained для Bert/GPT2/Llama, safetensors reader, pytorch_model.bin
   restricted unpickler. 9/9 smoke tests pass.
 - **torchvision**: ImageFolder + 7 transforms + MobileNetV2.
@@ -796,7 +796,7 @@ CPU-portable, compile на Elbrus LCC. Плюс EMA + clip_grad_norm_ (`torch/op
 
 ```bash
 git clone https://github.com/barometech/PromeTorch.git
-cd promethorch
+cd prometorch
 cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DPT_USE_TUDA=ON
 cmake --build build -j$(nproc)
 ctest --test-dir build --output-on-failure  # 720+ tests
@@ -821,8 +821,8 @@ API guarded). На Windows есть [отдельный гайд сборки](d
 ```bash
 # Подключение к серверу + сборка одной командой
 ssh -p <port> -i <key>.ppk <user>@<elbrus-host>
-git clone https://github.com/barometech/PromeTorch.git ~/promethorch
-cd ~/promethorch
+git clone https://github.com/barometech/PromeTorch.git ~/prometorch
+cd ~/prometorch
 ./scripts/build-elbrus.sh    # ~15-25 мин на 32 ядрах
 
 # Запуск (TP-4 для моделей ≤7B):
@@ -848,9 +848,9 @@ cmake --build . -j$(nproc)
 ### Сборка для российских ОС (Docker)
 
 ```bash
-docker build -t promethorch-astra -f docker/Dockerfile.astra ..
-docker build -t promethorch-elbrus -f docker/Dockerfile.elbrus ..
-docker build -t promethorch-redos -f docker/Dockerfile.redos ..
+docker build -t prometorch-astra -f docker/Dockerfile.astra ..
+docker build -t prometorch-elbrus -f docker/Dockerfile.elbrus ..
+docker build -t prometorch-redos -f docker/Dockerfile.redos ..
 ```
 
 ---
@@ -1152,7 +1152,7 @@ Backend для нейропроцессора [NM Card Mini](https://www.module.
 ### Python API
 
 ```python
-import promethorch as pt
+import prometorch as pt
 
 # Создание тензоров
 x = pt.randn([3, 4])

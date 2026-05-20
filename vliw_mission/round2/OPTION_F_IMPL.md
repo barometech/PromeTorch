@@ -74,7 +74,7 @@ and `N = H_local`. No new kernel needed.
 
 ```bash
 # Build new ddp.cpp + gguf_model.h on Elbrus
-cd /home/$USER/promethorch/build_mt  # or wherever TP build lives
+cd /home/$USER/prometorch/build_mt  # or wherever TP build lives
 cmake --build . --target gguf_tp_bench -j
 
 # Baseline (legacy AllReduce, spin+yield) — should match 6.5 tok/s from last session

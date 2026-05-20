@@ -5,7 +5,7 @@ Goal
 ----
 Let users do::
 
-    from promethorch.transformers_compat import AutoModel, AutoTokenizer
+    from prometorch.transformers_compat import AutoModel, AutoTokenizer
     model = AutoModel.from_pretrained("./my_hf_model_dir")
     out = model(input_ids)
 
@@ -27,7 +27,7 @@ Design
 ------
 We do **not** try to reuse the framework's C++ transformer modules — they
 expect their own state-dict layout. Instead we build the forward pass in pure
-Python using ``promethorch._C`` ops (``mm``, ``softmax``, ``cat`` …) and load
+Python using ``prometorch._C`` ops (``mm``, ``softmax``, ``cat`` …) and load
 HF weights directly into Tensor parameters. That keeps the mapping from HF
 parameter names to our internal storage explicit and easy to audit.
 
@@ -54,9 +54,9 @@ import numpy as np
 
 # Import the C extension directly. The shim only needs core tensor ops, which
 # are stable across builds. Two scenarios are supported:
-#   1. ``promethorch`` package is the canonical one under ``python/`` — then
+#   1. ``prometorch`` package is the canonical one under ``python/`` — then
 #      ``from . import _C`` finds the ``_C.pyd`` next to this file.
-#   2. The top-level repo ``promethorch/`` package shadowed it (no _C.pyd) —
+#   2. The top-level repo ``prometorch/`` package shadowed it (no _C.pyd) —
 #      we then locate _C on disk and load it as a sibling module manually.
 try:  # noqa: SIM105
     from . import _C  # type: ignore
@@ -66,13 +66,13 @@ except ImportError:
     _here_candidates = [
         os.path.join(os.path.dirname(os.path.abspath(__file__))),
         os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                      "..", "..", "python", "promethorch")),
+                                      "..", "..", "python", "prometorch")),
     ]
     _C = None
     for _d in _here_candidates:
         for _pyd in _glob.glob(os.path.join(_d, "_C*.pyd")) + \
                     _glob.glob(os.path.join(_d, "_C*.so")):
-            _spec = _ilu.spec_from_file_location("promethorch._C", _pyd)
+            _spec = _ilu.spec_from_file_location("prometorch._C", _pyd)
             _mod = _ilu.module_from_spec(_spec)
             try:
                 _spec.loader.exec_module(_mod)
@@ -84,7 +84,7 @@ except ImportError:
             break
     if _C is None:
         raise ImportError(
-            "Could not locate promethorch._C extension. Build it with "
+            "Could not locate prometorch._C extension. Build it with "
             "`pip install -e .` from the repo root."
         )
 
@@ -98,7 +98,7 @@ except ImportError:
     if not os.path.isfile(_sr_path):
         _sr_path = os.path.normpath(os.path.join(
             os.path.dirname(os.path.abspath(__file__)),
-            "..", "..", "python", "promethorch", "safetensors_reader.py"))
+            "..", "..", "python", "prometorch", "safetensors_reader.py"))
     _spec = _ilu.spec_from_file_location("_pt_safetensors_reader", _sr_path)
     _mod = _ilu.module_from_spec(_spec)
     _spec.loader.exec_module(_mod)

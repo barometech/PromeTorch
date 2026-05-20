@@ -1,5 +1,5 @@
 #!/bin/bash
-cd /home/<user>/promethorch
+cd /home/<user>/prometorch
 pkill -9 -f test_gguf_inference 2>/dev/null
 sleep 2
 touch examples/gguf/test_gguf_inference.cpp

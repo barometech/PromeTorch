@@ -19,7 +19,7 @@ Header JSON example::
     }
 
 This module returns a dict ``{name: numpy.ndarray}`` so callers can convert to
-PromeTorch tensors via ``promethorch.from_numpy``. It also provides a lazy
+PromeTorch tensors via ``prometorch.from_numpy``. It also provides a lazy
 ``SafeTensorsFile`` class that mmaps the file and reads tensors on demand —
 useful for large checkpoints where loading every tensor at once would OOM.
 

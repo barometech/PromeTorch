@@ -1,6 +1,6 @@
 #!/bin/bash
 # Run remaining models one by one with cleanup. qwen3-0.6b/1.7b/4b уже сделаны.
-cd /home/<user>/promethorch
+cd /home/<user>/prometorch
 chmod +x scripts/elbrus_audit_one.sh
 > /tmp/audit_summary.csv
 

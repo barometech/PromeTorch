@@ -1,11 +1,11 @@
 """
-promethorch.quantization — Quantization-Aware Training (QAT) + INT8 helpers.
+prometorch.quantization — Quantization-Aware Training (QAT) + INT8 helpers.
 """
 
 from __future__ import annotations
 
 try:
-    from promethorch._C import quantization as _cpp
+    from prometorch._C import quantization as _cpp
     _HAS_CPP = True
 except (ImportError, AttributeError):
     _cpp = None

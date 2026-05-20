@@ -510,7 +510,7 @@ endif()
 call "C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\VC\Auxiliary\Build\vcvarsall.bat" x64
 set NM_QUAD=C:\Module\NM_Quad
 set PATH=%NM_QUAD%\bin;C:\Module\NMCSDK\bin;%PATH%
-cd /d C:\Users\paper\Desktop\promethorch\build_nmquad
+cd /d C:\Users\paper\Desktop\prometorch\build_nmquad
 cmake .. -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release -DPT_USE_NMQUAD=ON
 nmake
 ```
@@ -518,7 +518,7 @@ nmake
 ### NMC Program Build (separate step)
 
 ```batch
-cd /d C:\Users\paper\Desktop\promethorch\aten\src\ATen\nmquad\nmc_programs
+cd /d C:\Users\paper\Desktop\prometorch\aten\src\ATen\nmquad\nmc_programs
 set PATH=C:\Module\NMCSDK\bin;C:\Module\NM_Quad\bin;%PATH%
 nmc-g++ -o dispatcher_nmquad.abs dispatcher_nmquad.cpp ^
     -I C:\Module\NM_Quad\include ^

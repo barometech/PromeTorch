@@ -1,9 +1,9 @@
 """
-promethorch.nn.parallel — Tensor + pipeline parallelism.
+prometorch.nn.parallel — Tensor + pipeline parallelism.
 
 C++ bindings come from `_C.parallel`. If the extension was built without
 bindings_new.cpp (older .pyd) we expose a minimal Python fallback so that
-`import promethorch.nn.parallel` still succeeds.
+`import prometorch.nn.parallel` still succeeds.
 
 API:
     TPConfig(rank, world_size, sync_dir=..., timeout_us=...)
@@ -16,7 +16,7 @@ API:
 from __future__ import annotations
 
 try:
-    from promethorch._C import parallel as _cpp
+    from prometorch._C import parallel as _cpp
     _HAS_CPP = True
 except (ImportError, AttributeError):
     _cpp = None
@@ -33,7 +33,7 @@ if _HAS_CPP:
     tp_all_reduce_sum     = _cpp.tp_all_reduce_sum
 else:
     # ---- Python fallback: single-rank TP is the identity pass-through ----
-    # We deliberately avoid importing promethorch.nn here because that
+    # We deliberately avoid importing prometorch.nn here because that
     # submodule may fail to load on stale _C builds (e.g. missing BatchNorm1d).
     # The fallback TP layers use pure-Python placeholders that record their
     # configuration and let the user swap in real nn.Linear manually.
@@ -62,7 +62,7 @@ else:
             self.has_bias = bias
             # Try to use a real nn.Linear when available, else a stub.
             try:
-                from promethorch.nn import Linear as _Linear
+                from prometorch.nn import Linear as _Linear
                 self._inner = _Linear(in_features, out_features, bias=bias)
             except Exception:
                 self._inner = None
@@ -71,7 +71,7 @@ else:
             if self._inner is not None:
                 return self._inner(x)
             raise RuntimeError(
-                "Fallback TP layer cannot forward without promethorch.nn.Linear")
+                "Fallback TP layer cannot forward without prometorch.nn.Linear")
 
         __call__ = forward
 

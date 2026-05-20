@@ -19,7 +19,7 @@
 #   PT_Q8_SOA         override (default 1; 0 = legacy decode-only path)
 
 set -u
-cd ~/promethorch
+cd ~/prometorch
 
 # Safety: systemd must not kill processes on SSH disconnect.
 loginctl enable-linger "$USER" 2>/dev/null || true

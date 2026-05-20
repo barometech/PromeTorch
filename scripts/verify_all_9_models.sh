@@ -3,7 +3,7 @@
 # Используется после major load-path / forward-path изменений.
 # 2026-05-03: создан после d9dce9e (phi3 mmap split fix).
 set -u
-cd ~/promethorch
+cd ~/prometorch
 loginctl enable-linger "$USER" 2>/dev/null || true
 
 BIN="./build_elbrus/examples/gguf/test_gguf_inference"

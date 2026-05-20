@@ -1,7 +1,7 @@
 #!/bin/bash
 # deepseek-coder-7B retest после commit 81a79bd (legacy rope.scale_linear)
 set -u
-cd ~/promethorch
+cd ~/prometorch
 pkill -9 -f test_gguf_inference 2>/dev/null
 sleep 2
 

@@ -1,4 +1,4 @@
-# Packaging — `pip install promethorch`
+# Packaging — `pip install prometorch`
 
 ## Текущее состояние
 
@@ -21,14 +21,14 @@ python -m build --wheel
 
 # Результат — в dist/
 ls -la dist/
-# promethorch-0.1.0a1-cp312-cp312-win_amd64.whl
+# prometorch-0.1.0a1-cp312-cp312-win_amd64.whl
 ```
 
 ## Локальный install + test
 
 ```bash
-pip install dist/promethorch-0.1.0a1-cp312-cp312-win_amd64.whl
-python -c "import promethorch; print(promethorch.__version__)"
+pip install dist/prometorch-0.1.0a1-cp312-cp312-win_amd64.whl
+python -c "import prometorch; print(prometorch.__version__)"
 ```
 
 ## Multi-platform через cibuildwheel (локально)
@@ -49,7 +49,7 @@ cibuildwheel --platform macos    # на macOS
 1. Настрой **PyPI Trusted Publishing** на pypi.org:
    - https://pypi.org/manage/account/publishing/
    - Add a new pending publisher:
-     - Project name: `promethorch`
+     - Project name: `prometorch`
      - Owner: `barometech`
      - Repository name: `PromeTorch`
      - Workflow name: `wheels.yml`
@@ -60,12 +60,12 @@ cibuildwheel --platform macos    # на macOS
 3. **Smoke-тест на TestPyPI:**
    - GitHub → Actions → "Build & Publish wheels" → Run workflow
    - publish_target = `test-pypi`
-   - После прохождения: `pip install -i https://test.pypi.org/simple/ promethorch`
+   - После прохождения: `pip install -i https://test.pypi.org/simple/ prometorch`
 
 4. **Релиз на PyPI:**
    - `git tag v0.1.0a1 && git push --tags`
    - Workflow автоматически запустится, соберёт wheels, опубликует на PyPI
-   - Через 5 минут: `pip install promethorch` работает у всех
+   - Через 5 минут: `pip install prometorch` работает у всех
 
 ### Вручную через twine (если CI сломан)
 
@@ -82,7 +82,7 @@ twine upload dist/*                         # потом main PyPI
 
 | Что | Почему | Где брать |
 |-----|--------|-----------|
-| CUDA backend | Wheel >100MB (PyPI limit) + binding к конкретной CUDA версии | Отдельный wheel `promethorch-cu121` через external index URL (как `torch+cu121`) |
+| CUDA backend | Wheel >100MB (PyPI limit) + binding к конкретной CUDA версии | Отдельный wheel `prometorch-cu121` через external index URL (как `torch+cu121`) |
 | NMCard / NMQuad | Нужен SDK который не open-source | Сборка из исходников с `-DPT_USE_NMQUAD=ON` |
 | Elbrus E2K | LCC компилятор not on PyPI workers | Сборка на самой машине через `./scripts/build-elbrus.sh` |
 | LinQ H1M | Не stable backend | TODO |

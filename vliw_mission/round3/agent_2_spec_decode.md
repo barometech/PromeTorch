@@ -66,18 +66,18 @@ Push α to 0.8 (achievable on chat templates) → **10.5 tok/s**. **Target met.*
 
 Files to modify (all paths absolute):
 
-1. `C:\Users\paper\Desktop\promethorch\torch\io\speculative_draft.h`
+1. `C:\Users\paper\Desktop\prometorch\torch\io\speculative_draft.h`
    - Replace `predict` with `predict_pld(history, K, max_ngram=3, min_ngram=1)` returning `std::vector<int64_t>` of K continuation tokens. Search forward over **full** `history`, not ring-buffered `buf_`. Drop the 2048 cap.
    - Lines 63–97 entirely rewritten; signature `int64_t predict(...)` kept as thin wrapper for back-compat.
 
-2. `C:\Users\paper\Desktop\promethorch\torch\io\gguf_model.h`
+2. `C:\Users\paper\Desktop\prometorch\torch\io\gguf_model.h`
    - **Add** `forward_decode_cpu_tp_batched(const int64_t* tokens, int K, float* logits_out)` mirroring `forward_decode_cpu_batched` but using `tp_.kv_seq_len`, `tp_.q_local_buf`, all-reduce/all-gather barriers (lines ~4408–4960 as template). Approx 350 LOC.
    - **Modify** `spec_decode_step_cpu` (3564–3674) to call `forward_decode_cpu_tp_batched` when `tp_.enabled`, else current `forward_decode_cpu_batched`.
    - **Modify** generate-loop (3722–3925): drop `can_spec_verify = ... && !use_cuda_ && use_quant_gemv_` to also cover `tp_.enabled` path. Currently disables spec-verify when TP is on.
    - **KV rollback for TP:** mirror line 3663 `kv_cache.seq_len -= rewind` with `tp_.kv_seq_len -= rewind`. Confirmed straightforward — TP cache is per-rank but rewind is a scalar counter, no per-rank state. Already verified by the symmetric `tp_.kv_seq_len = 0` reset at 4985.
    - **Spec-K bump:** allow `PT_SPEC_K=6` (clamp at 6 already in `speculative_verify.h:39`).
 
-3. `C:\Users\paper\Desktop\promethorch\torch\io\cpu_quant_gemv.h`
+3. `C:\Users\paper\Desktop\prometorch\torch\io\cpu_quant_gemv.h`
    - Add `cpu_quant_gemv_batched_qkv` K-transpose path (Round 2 Agent 5 finding 11e, ~200 LOC). Vocab-sized output benefits most.
 
 4. New helper in `gguf_model.h`: `flash_attn_cpu_online_softmax(...)` (~150 LOC), called from both `forward_decode_cpu_batched` and the new TP variant.

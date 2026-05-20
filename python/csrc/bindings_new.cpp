@@ -2,7 +2,7 @@
 // PromeTorch Python Bindings — New Modules
 // ----------------------------------------------------------------------------
 // Exposes the following C++ subsystems as pybind11 submodules on the
-// top-level ``promethorch._C`` extension:
+// top-level ``prometorch._C`` extension:
 //
 //   _C.parallel          torch::nn::parallel (TP, pipeline)
 //   _C.distributed       torch::distributed  (DDP, FSDP, launcher)
@@ -17,7 +17,7 @@
 //   _C.serve             minimal LLM engine scaffold (Python-side filled in)
 //
 // Each submodule binds the key classes/functions. Python-side wrappers in
-// ``promethorch.<module>`` provide higher-level APIs and pure-Python
+// ``prometorch.<module>`` provide higher-level APIs and pure-Python
 // fallbacks when the C++ symbols aren't available in the built _C module
 // (e.g. while running against an older .pyd).
 //
@@ -64,7 +64,7 @@ namespace py = pybind11;
 namespace {
 
 // Safely unwrap a Python Module-like into std::shared_ptr<nn::Module>.
-// Supports both direct promethorch.nn.Module instances and objects that
+// Supports both direct prometorch.nn.Module instances and objects that
 // expose a ._module attribute (for LightningModule trampolines, etc.).
 std::shared_ptr<torch::nn::Module> to_module_ptr(py::object obj) {
     try {
@@ -425,7 +425,7 @@ void init_onnx_bindings(py::module& m) {
     }, py::arg("model"), py::arg("example_input"), py::arg("path"),
        py::arg("input_name") = std::string("input"),
        py::arg("output_name") = std::string("output"),
-       "Export a promethorch.nn.Module to an ONNX file. Returns True on success.");
+       "Export a prometorch.nn.Module to an ONNX file. Returns True on success.");
 
     m.def("self_test", &torch::onnx::onnx_self_test,
           py::arg("tmp_path") = std::string("/tmp/test.onnx"));
@@ -618,7 +618,7 @@ void init_autograd_extra_bindings(py::module& m) {
 // We don't have a dedicated torch::serve C++ namespace yet, so this submodule
 // just exposes a thin ModelRunner that loads a state dict and runs a
 // user-supplied forward. The full LLMEngine (prompt caching, batching,
-// tokenization) lives Python-side in promethorch/serve/engine.py and uses
+// tokenization) lives Python-side in prometorch/serve/engine.py and uses
 // this as its low-level executor.
 void init_serve_bindings(py::module& m) {
     m.def("_load_state_dict", [](const std::string& path) {

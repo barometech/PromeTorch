@@ -1,5 +1,5 @@
 """
-promethorch.serve — Minimal LLM inference engine.
+prometorch.serve — Minimal LLM inference engine.
 
 The heavy lifting (prompt caching, KV-cache, batched sampling) lives in
 Python and calls down to the _C primitives for tensor ops and state-dict
@@ -36,11 +36,11 @@ class LLMEngine:
         model_path = os.path.join(model_dir, "model.ptor")
         if os.path.isfile(model_path):
             try:
-                from promethorch._C import serve as _cpp
+                from prometorch._C import serve as _cpp
                 self._state_dict = _cpp._load_state_dict(model_path)
             except (ImportError, AttributeError):
                 try:
-                    from promethorch import load_state_dict
+                    from prometorch import load_state_dict
                     self._state_dict = load_state_dict(model_path)
                 except Exception:
                     self._state_dict = None
@@ -75,7 +75,7 @@ class LLMEngine:
     @staticmethod
     def _sample(logits, temperature: float, top_k: int):
         try:
-            import promethorch as _pt
+            import prometorch as _pt
             if hasattr(logits, "argmax"):
                 return int(logits.argmax().item())
         except Exception:

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Single-task HTML proof. Mistral-7B TP-4 → moscow.html через write_file tool.
 set -uo pipefail
-cd /home/<user>/promethorch
+cd /home/<user>/prometorch
 mkdir -p /tmp/promeserve
 rm -f /tmp/promeserve/moscow.html /tmp/proof.done
 

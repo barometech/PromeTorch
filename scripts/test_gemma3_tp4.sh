@@ -1,6 +1,6 @@
 #!/bin/bash
 # Verify gemma3-4B на TP-4 path после всех fix (per-layer SWA + post_norm + GeGLU).
-cd /home/<user>/promethorch
+cd /home/<user>/prometorch
 mkdir -p run_logs
 pkill -9 -f test_gguf_inference 2>/dev/null
 rm -f /dev/shm/prometorch* run_logs/gemma3_tp4_*.log

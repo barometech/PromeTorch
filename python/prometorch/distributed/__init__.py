@@ -1,5 +1,5 @@
 """
-promethorch.distributed — multi-rank training primitives.
+prometorch.distributed — multi-rank training primitives.
 
 API:
     init_process_group(backend='shared_memory', rank=0, world_size=1,
@@ -19,7 +19,7 @@ from __future__ import annotations
 from typing import Callable, Optional
 
 try:
-    from promethorch._C import distributed as _cpp
+    from prometorch._C import distributed as _cpp
     _HAS_CPP = True
 except (ImportError, AttributeError):
     _cpp = None

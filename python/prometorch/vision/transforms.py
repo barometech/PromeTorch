@@ -1,5 +1,5 @@
 """
-promethorch.vision.transforms — torchvision-compatible image transforms.
+prometorch.vision.transforms — torchvision-compatible image transforms.
 
 Compose([...]) wraps a list of callables. Transforms are callable objects
 taking a Tensor (uint8 HWC or float CHW) and returning a Tensor.
@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Callable, List
 
 try:
-    from promethorch._C import vision as _cpp_vision
+    from prometorch._C import vision as _cpp_vision
     _tm = _cpp_vision.transforms
     _HAS_CPP = True
 except (ImportError, AttributeError):
@@ -49,7 +49,7 @@ else:
                     arr = arr.astype(np.float32) / 255.0
                 if arr.ndim == 3 and arr.shape[-1] in (1, 3, 4):
                     arr = arr.transpose(2, 0, 1)   # HWC -> CHW
-                import promethorch as _pt
+                import prometorch as _pt
                 return _pt.from_numpy(arr) if hasattr(_pt, "from_numpy") else arr
             except Exception:
                 return x

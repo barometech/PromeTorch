@@ -12,7 +12,7 @@ export PATH="$MSVC_BIN:$WINSDK_BIN:$PATH"
 
 CMAKE_EXE="C:/Program Files (x86)/Microsoft Visual Studio/2019/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe"
 
-cd C:/Users/paper/Desktop/promethorch/build_final3
+cd C:/Users/paper/Desktop/prometorch/build_final3
 
 echo "=== Reconfiguring CMake ==="
 "$CMAKE_EXE" .. -G "NMake Makefiles" -DCMAKE_BUILD_TYPE=Release -DPT_USE_CUDA=OFF -DPT_BUILD_TESTS=OFF 2>&1

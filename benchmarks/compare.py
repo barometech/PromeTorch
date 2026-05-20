@@ -1,6 +1,6 @@
 """
 Compare PromeTorch vs PyTorch benchmark results
-Reads results_pytorch.json and results_promethorch.json
+Reads results_pytorch.json and results_prometorch.json
 """
 import json
 import os
@@ -14,7 +14,7 @@ def load(name):
         return json.load(f)
 
 pt = load("results_pytorch.json")
-pm = load("results_promethorch.json")
+pm = load("results_prometorch.json")
 
 categories = [
     ("Tensor Creation", lambda k: k.startswith(("randn_", "zeros_", "ones_"))),

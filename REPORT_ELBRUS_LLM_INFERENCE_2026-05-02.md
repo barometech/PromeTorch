@@ -262,7 +262,7 @@ Sweep (decode-only, 100 токенов):
 
 ### Repo / артефакты
 
-- Главный репо: `https://github.com/<user>/promethorch` (~93k LoC C++)
+- Главный репо: `https://github.com/<user>/prometorch` (~93k LoC C++)
 - Q8 SoA4 kernel: `torch/io/q8_soa_repack.h`
 - TP forward path: `torch/io/gguf_model.h::forward_decode_cpu_tp`
 - ThreadPool: `c10/util/ThreadPool.h`
@@ -276,7 +276,7 @@ Sweep (decode-only, 100 токенов):
 
 ```bash
 # На Эльбрусе после loginctl enable-linger:
-cd ~/promethorch
+cd ~/prometorch
 cmake --build build_elbrus --target test_gguf_inference -j 16
 PT_Q8_SOA=1 bash scripts/run_tp_elbrus.sh --greedy \
     "Write a short haiku about artificial intelligence"

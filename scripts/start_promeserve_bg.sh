@@ -1,6 +1,6 @@
 #!/bin/bash
 # Start PromeServe в background, выживает после ssh disconnect.
-cd /home/<user>/promethorch
+cd /home/<user>/prometorch
 pkill -9 -f promeserve 2>/dev/null
 pkill -9 -f test_gguf 2>/dev/null
 sleep 3

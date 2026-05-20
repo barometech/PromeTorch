@@ -4,7 +4,7 @@
 // for a measurable speedup.
 //
 // Compile:
-//   l++ -std=c++17 -O2 -mavx2 -I$HOME/promethorch examples/benchmarks/q4k_e2k_kernel_probe.cpp -o /tmp/q4kprobe -lpthread
+//   l++ -std=c++17 -O2 -mavx2 -I$HOME/prometorch examples/benchmarks/q4k_e2k_kernel_probe.cpp -o /tmp/q4kprobe -lpthread
 //
 // Run:
 //   /tmp/q4kprobe          (default K=2560 N=9728 iters=20, mirrors ffn_gate shape)

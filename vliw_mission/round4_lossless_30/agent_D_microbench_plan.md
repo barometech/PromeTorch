@@ -31,7 +31,7 @@ NOT in CMakeLists. First step: wire it up.
 
 ### Build (Эльбрус)
 ```bash
-cd ~/promethorch
+cd ~/prometorch
 # Add to examples/benchmarks/CMakeLists.txt:
 #   add_executable(bench_threadpool_overhead threadpool_overhead_bench.cpp)
 #   target_link_libraries(bench_threadpool_overhead PRIVATE c10 pthread)
@@ -103,7 +103,7 @@ for (int kg = 0; kg < 4; kg++) {  // 4 K-groups × 8 K = 32 K-elements / block
 
 ### Build (Эльбрус)
 ```bash
-cd ~/promethorch/vliw_mission/e2k_vnni
+cd ~/prometorch/vliw_mission/e2k_vnni
 lcc -O3 -ffast -march=elbrus-v5 -mtune=elbrus-8c2 -faligned -fprefetch \
     -frestrict-all -fswp-maxopers=800 -I/usr/include/eml \
     q4_soa4_microbench.c -leml_algebra_mt -lm -o q4_soa4_microbench
@@ -196,7 +196,7 @@ end-to-end tok/s improvement matches microbench prediction.
 
 ### Run
 ```bash
-cd ~/promethorch
+cd ~/prometorch
 ./scripts/run_tp_elbrus.sh --greedy "The history of Russia begins" --tokens 100
 # expect output median tok/s reported by harness
 ```
@@ -285,7 +285,7 @@ loginctl enable-linger $USER  # MUST after every reboot
 tmux new -s round4
 
 # 3. Build round4 once
-cd ~/promethorch && mkdir -p build_round4 && cd build_round4
+cd ~/prometorch && mkdir -p build_round4 && cd build_round4
 cmake .. -DCMAKE_BUILD_TYPE=Release -DPT_BUILD_BENCHMARKS=ON
 make -j8 bench_threadpool_overhead bench_fused_qkv_soa \
         bench_allreduce_topology bench_quant_activation \
