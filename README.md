@@ -703,7 +703,7 @@ CPU-portable, compile на Elbrus LCC. Плюс EMA + clip_grad_norm_ (`torch/op
 
 ### Работает + протестировано на всех поддерживаемых backend'ах
 - Core autograd (119 backward + hooks + anomaly + create_graph)
-- 20 optimizers
+- 16 optimizers (как в строке 93 таблицы выше — без повтора кол-ва из разных мест)
 - CPU SIMD (AVX2/NEON/E2K)
 - Эльбрус VLIW + NM Card Mini emulator (Q16.16)
 - Distributed: DDP / FSDP / TP / Pipeline на CPU через TCP + /dev/shm
