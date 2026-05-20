@@ -4,6 +4,7 @@
 // Comprehensive test suite for torch::nn module functionality
 // ============================================================================
 
+#include <algorithm>
 #include <iostream>
 #include <cassert>
 #include <cmath>
@@ -78,8 +79,14 @@ TEST(module_parameter_registration) {
 
     auto named = linear->named_parameters();
     assert(named.size() == 2);
-    assert(named.count("weight") == 1);
-    assert(named.count("bias") == 1);
+    // named_parameters() returns std::vector<std::pair<std::string,Parameter*>>,
+    // не unordered_map — поэтому std::find_if вместо .count().
+    auto has_name = [&](const std::string& n) {
+        return std::find_if(named.begin(), named.end(),
+            [&](const auto& kv) { return kv.first == n; }) != named.end();
+    };
+    assert(has_name("weight"));
+    assert(has_name("bias"));
 }
 
 TEST(module_train_eval_mode) {

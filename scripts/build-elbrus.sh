@@ -258,15 +258,26 @@ detect_e2k_march() {
     if [ -n "${PT_E2K_MARCH:-}" ]; then
         echo "$PT_E2K_MARCH"; return
     fi
-    # lcc --target-name → "lcc:1.29.15:Oct--5-2025:e2k-v4-linux"
+    # LCC version string может содержать ДВА разных формата:
+    #   старый: "lcc:1.29.15:Oct--5-2025:e2k-v4-linux"  (ISA-версия e2k-vN)
+    #   новый:  "lcc:1.29.16:Jan-22-2026:e2k-8c2-linux" (модель e2k-Nc*)
+    # Без матча обоих форматов мы падали на safe-default elbrus-v4 на 8C2,
+    # что давало __iset__=4 → выключало PT_E2K_VNNI → ломало qpmaddubsh →
+    # TP-4 qwen3-4b деградировал 11.4 → 5.0 tok/s (real-world 2026-05-20).
     if command -v lcc >/dev/null 2>&1; then
         local t
         t="$(lcc --version 2>&1 | head -1)"
         case "$t" in
+            # Формат ISA-версии — наиболее точный
             *e2k-v6*) echo "elbrus-v6"; return ;;
             *e2k-v5*) echo "elbrus-v5"; return ;;
             *e2k-v4*) echo "elbrus-v4"; return ;;
             *e2k-v3*) echo "elbrus-v3"; return ;;
+            # Формат модели — мапим в ISA: 16C → v6, 8C2/8СВ → v5, 8C → v4
+            *e2k-16c*)                echo "elbrus-v6"; return ;;
+            *e2k-8c2*|*e2k-8cb*)      echo "elbrus-v5"; return ;;
+            *e2k-8c*)                 echo "elbrus-v4"; return ;;
+            *e2k-4c*|*e2k-2c*)        echo "elbrus-v3"; return ;;
         esac
     fi
     # lscpu fallback
