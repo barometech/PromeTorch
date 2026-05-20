@@ -323,8 +323,13 @@ void init_tensor_bindings(py::module& m) {
             t.set_requires_grad(true);
         })
 
-        // is_contiguous as method (also exists as property above)
-        .def("is_contiguous", [](const at::Tensor& t) { return t.is_contiguous(); })
+        // is_contiguous уже зарегистрирован как property выше (line 159).
+        // pybind11 запрещает overload property с method'ом с тем же
+        // именем — иначе import падает с
+        // "Cannot overload existing non-function object". В PyTorch
+        // is_contiguous() это метод, у нас оставим property для совместимости
+        // с большинством tests; кто хочет method-form — вызвать как
+        // `t.is_contiguous` без скобок (property всё равно вернёт bool).
 
         // Copy
         .def("copy_", [](at::Tensor& t, const at::Tensor& src) {
