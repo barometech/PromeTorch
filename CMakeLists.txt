@@ -231,22 +231,36 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "e2k|elbrus")
         find_library(_PT_EML_LIB NAMES eml_mt eml
             HINTS /opt/mcst/eml/lib /opt/mcst/lib64 /usr/lib64 /usr/lib)
         if(_PT_EML_HDR AND _PT_EML_LIB)
-            # Runtime ELF compatibility — try_run actually load the library
-            try_run(_PT_EML_RUN_RESULT _PT_EML_COMPILE_RESULT
-                ${CMAKE_BINARY_DIR}/_eml_probe
-                ${CMAKE_CURRENT_LIST_DIR}/cmake/eml_runtime_probe.cpp
-                LINK_LIBRARIES ${_PT_EML_LIB}
-                COMPILE_OUTPUT_VARIABLE _PT_EML_CO
-                RUN_OUTPUT_VARIABLE _PT_EML_RO)
-            if(_PT_EML_COMPILE_RESULT AND _PT_EML_RUN_RESULT EQUAL 0)
+            # Runtime ELF compatibility check. CMake считает E2K на E2K-хосте
+            # cross-compile в редких случаях (некоторые distros). try_run там
+            # падает с 'try_run() invoked in cross-compiling mode'. Защита:
+            # 1) если CMAKE_CROSSCOMPILING — assume EML недоступен, OpenBLAS
+            # 2) override через -DPT_EML_RUNTIME_OK=ON если знаешь что работает
+            if(PT_EML_RUNTIME_OK)
                 set(_PT_BLAS_PROVIDER "eml")
                 add_compile_definitions(PT_USE_EML_BLAS)
-                message(STATUS "BLAS: EML — runtime probe OK")
-            else()
-                message(WARNING "BLAS: EML headers/lib найдены, но runtime load FAIL "
-                                "(вероятно ELF ISA mismatch — например libeml_mt помечен "
-                                "elbrus-2c3 на E16C v6). Trying OpenBLAS.")
+                message(STATUS "BLAS: EML — forced via -DPT_EML_RUNTIME_OK=ON")
+            elseif(CMAKE_CROSSCOMPILING)
+                message(STATUS "BLAS: cross-compile mode — skip EML runtime probe, "
+                               "trying OpenBLAS. Override: -DPT_EML_RUNTIME_OK=ON")
                 set(PT_USE_EML_BLAS OFF)
+            else()
+                try_run(_PT_EML_RUN_RESULT _PT_EML_COMPILE_RESULT
+                    ${CMAKE_BINARY_DIR}/_eml_probe
+                    ${CMAKE_CURRENT_LIST_DIR}/cmake/eml_runtime_probe.cpp
+                    LINK_LIBRARIES ${_PT_EML_LIB}
+                    COMPILE_OUTPUT_VARIABLE _PT_EML_CO
+                    RUN_OUTPUT_VARIABLE _PT_EML_RO)
+                if(_PT_EML_COMPILE_RESULT AND _PT_EML_RUN_RESULT EQUAL 0)
+                    set(_PT_BLAS_PROVIDER "eml")
+                    add_compile_definitions(PT_USE_EML_BLAS)
+                    message(STATUS "BLAS: EML — runtime probe OK")
+                else()
+                    message(WARNING "BLAS: EML lib найдена, runtime load FAIL "
+                                    "(ELF ISA mismatch на E16C v6 — libeml_mt помечен "
+                                    "elbrus-2c3). Switching to OpenBLAS.")
+                    set(PT_USE_EML_BLAS OFF)
+                endif()
             endif()
         else()
             message(STATUS "BLAS: EML headers/lib не найдены, trying OpenBLAS")
