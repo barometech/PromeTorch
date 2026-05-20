@@ -234,7 +234,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "e2k|elbrus")
             # Runtime ELF compatibility — try_run actually load the library
             try_run(_PT_EML_RUN_RESULT _PT_EML_COMPILE_RESULT
                 ${CMAKE_BINARY_DIR}/_eml_probe
-                ${CMAKE_CURRENT_LIST_DIR}/cmake/eml_runtime_probe.c
+                ${CMAKE_CURRENT_LIST_DIR}/cmake/eml_runtime_probe.cpp
                 LINK_LIBRARIES ${_PT_EML_LIB}
                 COMPILE_OUTPUT_VARIABLE _PT_EML_CO
                 RUN_OUTPUT_VARIABLE _PT_EML_RO)
