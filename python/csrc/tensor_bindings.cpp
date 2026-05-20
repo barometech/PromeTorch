@@ -500,6 +500,32 @@ void init_tensor_bindings(py::module& m) {
             return t.size(0);
         })
 
+        // 0-D tensor → Python scalar (для float(t), int(t), bool(t))
+        .def("__float__", [](const at::Tensor& t) -> double {
+            if (t.numel() != 1) {
+                throw py::type_error(
+                    "only 1-element tensors can be converted to Python scalars");
+            }
+            at::Tensor tc = t.contiguous().to(c10::ScalarType::Double);
+            return *static_cast<const double*>(tc.data_ptr());
+        })
+        .def("__int__", [](const at::Tensor& t) -> int64_t {
+            if (t.numel() != 1) {
+                throw py::type_error(
+                    "only 1-element tensors can be converted to Python scalars");
+            }
+            at::Tensor tc = t.contiguous().to(c10::ScalarType::Long);
+            return *static_cast<const int64_t*>(tc.data_ptr());
+        })
+        .def("__bool__", [](const at::Tensor& t) -> bool {
+            if (t.numel() != 1) {
+                throw py::value_error(
+                    "Boolean value of Tensor with more than one element is ambiguous");
+            }
+            at::Tensor tc = t.contiguous().to(c10::ScalarType::Bool);
+            return *static_cast<const bool*>(tc.data_ptr());
+        })
+
         // cumsum
         .def("cumsum", [](const at::Tensor& t, int64_t dim) {
             return at::native::cumsum(t, dim);
