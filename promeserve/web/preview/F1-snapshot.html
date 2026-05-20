@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PromeTorch AI Chat — F1 Snapshot (demo)</title>
+
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+
+    <style>
+:root{
+    --bg-main:#0f1117;--bg-sidebar:#16181c;--bg-panel:#1c1f26;--bg-hover:#272b36;
+    --bg-input:#1e212b;--bg-card:#15171d;
+    --accent:#6366f1;--accent-2:#a855f7;--accent-glow:rgba(99,102,241,.2);
+    --text-main:#ececf1;--text-muted:#9ca3af;--text-dark:#4b5563;
+    --border:#2d2f36;--danger:#ef4444;--success:#10b981;--warning:#f59e0b;--info:#38bdf8;
+    --font-sans:'Inter',system-ui,sans-serif;--font-mono:'JetBrains Mono',Consolas,monospace;
+    --sidebar-width:280px;--right-width:340px;--radius-lg:16px;--radius-md:12px;--radius-sm:8px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:var(--font-sans);background:var(--bg-main);color:var(--text-main);height:100vh;display:flex;overflow:hidden;-webkit-font-smoothing:antialiased}
+::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-thumb{background:var(--border);border-radius:10px}
+button{background:none;border:none;color:inherit;cursor:pointer;font-family:inherit;transition:all .18s}
+input,select,textarea{background:var(--bg-input);border:1px solid var(--border);color:var(--text-main);border-radius:var(--radius-sm);padding:10px 14px;font-family:inherit;font-size:14px;outline:none}
+input:focus,select:focus,textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-glow)}
+.icon{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.icon-sm{width:14px;height:14px}.icon-xs{width:12px;height:12px}
+
+/* sidebar */
+.sidebar{width:var(--sidebar-width);background:var(--bg-sidebar);border-right:1px solid var(--border);display:flex;flex-direction:column}
+.sidebar-header{padding:14px;display:flex;flex-direction:column;gap:10px;border-bottom:1px solid var(--border)}
+.brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:15px}
+.brand-logo{width:30px;height:30px;border-radius:9px;background:linear-gradient(135deg,var(--accent),var(--accent-2));display:flex;align-items:center;justify-content:center;color:#fff}
+.new-chat-btn{width:100%;display:flex;align-items:center;justify-content:center;gap:8px;background:var(--accent);color:#fff;padding:10px 14px;border-radius:var(--radius-md);font-weight:600;font-size:14px}
+.sidebar-search{padding:10px 14px 0}.sidebar-search input{width:100%;padding:8px 10px;font-size:13px}
+.sidebar-section-title{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);padding:14px 18px 6px;font-weight:600}
+.chat-history{flex:1;overflow-y:auto;padding:0 8px 8px;display:flex;flex-direction:column;gap:2px}
+.history-item{display:flex;align-items:center;justify-content:space-between;padding:9px 10px;border-radius:var(--radius-sm);cursor:pointer;font-size:13px;color:var(--text-muted);position:relative}
+.history-item:hover{background:var(--bg-hover);color:var(--text-main)}
+.history-item.active{background:var(--bg-panel);color:var(--text-main)}
+.history-item.active::before{content:'';position:absolute;left:0;top:6px;bottom:6px;width:3px;background:var(--accent);border-radius:3px}
+.history-item.pinned .pin-icon{display:inline-block;color:var(--warning)}
+.pin-icon{display:none}
+.history-title{flex:1;padding-left:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pinned-list{display:flex;flex-direction:column;gap:2px;padding:0 8px 8px}
+.pin-entry{font-size:12px;padding:6px 10px;border-radius:6px;color:var(--text-muted);cursor:pointer;border-left:2px solid var(--warning);background:var(--bg-panel);display:flex;gap:6px;align-items:flex-start}
+.pin-entry .pin-text{flex:1;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.sidebar-footer{padding:10px 14px;border-top:1px solid var(--border);display:flex;gap:6px;justify-content:space-between;align-items:center}
+.sidebar-footer .meta{font-size:11px;color:var(--text-muted)}
+.icon-btn{padding:8px;border-radius:var(--radius-sm);color:var(--text-muted);display:inline-flex;align-items:center;justify-content:center}
+.icon-btn:hover{background:var(--bg-hover);color:var(--text-main)}
+
+/* main */
+.main-content{flex:1;display:flex;flex-direction:column;min-width:0;position:relative}
+.topbar{height:56px;padding:0 18px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border);background:color-mix(in srgb,var(--bg-main) 80%,transparent);z-index:10;gap:12px}
+.topbar-left{display:flex;align-items:center;gap:10px;min-width:0;flex:1}
+.model-selector select{background:transparent;border:1px solid var(--border);font-weight:600;font-size:14px;cursor:pointer;padding:6px 10px;border-radius:var(--radius-sm)}
+.topbar-title{font-weight:600;font-size:14px;color:var(--text-main);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:240px}
+.topbar-actions{display:flex;gap:4px}
+
+.chat-container{flex:1;overflow-y:auto;display:flex;flex-direction:row}
+.chat-main{flex:1;min-width:0;display:flex;flex-direction:column}
+.chat-feed{max-width:880px;margin:0 auto;padding:32px 24px 160px;display:flex;flex-direction:column;gap:26px;width:100%}
+
+.message{display:flex;gap:16px}
+.avatar{width:34px;height:34px;border-radius:10px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.msg-user .avatar{background:var(--bg-panel);border:1px solid var(--border)}
+.msg-assistant .avatar{background:linear-gradient(135deg,var(--accent),var(--accent-2));color:#fff}
+.msg-body{flex:1;min-width:0}
+.msg-meta-top{display:flex;align-items:center;gap:8px;margin-bottom:4px;font-size:12px;color:var(--text-muted)}
+.msg-role{font-weight:600;color:var(--text-main)}
+.msg-content{line-height:1.65;font-size:15px;color:var(--text-main);word-wrap:break-word}
+.msg-content p{margin:.6em 0}
+.msg-content h2{font-size:1.3em;margin:1em 0 .5em;font-weight:700}
+.msg-content h3{font-size:1.15em;margin:.9em 0 .4em;font-weight:700}
+.msg-content :not(pre) > code{font-family:var(--font-mono);background:var(--bg-panel);padding:1px 6px;border-radius:4px;font-size:.9em;color:#f472b6;border:1px solid var(--border)}
+.msg-content ul{margin:.6em 0;padding-left:24px}
+.msg-content a{color:var(--accent);text-decoration:none;border-bottom:1px dotted var(--accent)}
+.msg-content strong{font-weight:700;color:var(--text-main)}
+.msg-actions{display:flex;gap:2px;margin-top:6px}
+.msg-actions button{padding:4px 8px;border-radius:var(--radius-sm);font-size:12px;color:var(--text-muted);display:inline-flex;align-items:center;gap:4px}
+.msg-actions button.pinned{color:var(--warning)}
+.msg-footer{margin-top:6px;display:flex;align-items:center;gap:8px;font-size:11px;color:var(--text-dark)}
+.tok-badge{background:var(--bg-panel);padding:2px 8px;border-radius:10px;border:1px solid var(--border);font-family:var(--font-mono)}
+.msg-attachments{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px}
+.msg-attachments .att-pill{font-size:11px;padding:3px 8px;border-radius:999px;background:var(--bg-panel);border:1px solid var(--border);color:var(--text-muted)}
+
+/* code block */
+.code-block-wrapper{margin:12px 0;border-radius:var(--radius-md);overflow:hidden;border:1px solid var(--border);background:#0d0d12}
+.code-header{display:flex;justify-content:space-between;align-items:center;padding:6px 12px;background:var(--bg-panel);border-bottom:1px solid var(--border);font-size:11px;color:var(--text-muted)}
+.code-lang{text-transform:lowercase;letter-spacing:.04em;font-weight:600}
+.code-actions{display:flex;gap:4px}.code-actions button{display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--text-muted);padding:3px 6px;border-radius:5px}
+.code-actions button:hover{background:var(--bg-hover);color:var(--text-main)}
+.msg-content pre{margin:0;padding:14px;overflow-x:auto;font-family:var(--font-mono);font-size:13px;line-height:1.5}
+.msg-content pre code{background:transparent;padding:0;color:inherit;border:none}
+
+/* tool call */
+.tool-call-card{margin:12px 0;border-radius:var(--radius-md);border:1px solid var(--accent);background:var(--bg-card);overflow:hidden}
+.tool-call-header{display:flex;justify-content:space-between;align-items:center;padding:10px 14px;cursor:pointer;background:linear-gradient(90deg,var(--accent-glow),transparent)}
+.tool-call-title{display:flex;align-items:center;gap:8px;font-weight:600;font-size:13px;color:var(--text-main)}
+.tool-call-title .badge{font-size:10px;padding:2px 8px;border-radius:8px;background:var(--accent);color:#fff;text-transform:uppercase;font-weight:700;letter-spacing:.06em}
+.tool-call-toggle{color:var(--text-muted);transition:transform .2s}
+.tool-call-card.expanded .tool-call-toggle{transform:rotate(90deg)}
+.tool-call-body{padding:12px 14px;border-top:1px solid var(--border);display:none}
+.tool-call-card.expanded .tool-call-body{display:block}
+.tool-call-section{margin-bottom:12px}.tool-call-section:last-child{margin-bottom:0}
+.tool-call-section-title{font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);margin-bottom:4px;font-weight:700}
+.tool-call-section pre{background:var(--bg-main);padding:10px;border-radius:var(--radius-sm);font-size:12px;overflow-x:auto;border:1px solid var(--border)}
+.tool-result-ok{color:var(--success);font-weight:600}
+
+/* input */
+.input-container{position:absolute;bottom:0;left:0;right:0;background:linear-gradient(to top,var(--bg-main) 60%,transparent);padding:18px 24px 20px}
+.input-box{max-width:800px;margin:0 auto;display:flex;align-items:flex-end;gap:6px;background:var(--bg-input);border:1px solid var(--border);border-radius:var(--radius-lg);padding:8px 8px 8px 12px;box-shadow:0 10px 30px rgba(0,0,0,.25)}
+.input-actions{display:flex;gap:4px;align-items:center;margin-bottom:4px}
+.input-actions button{padding:7px;border-radius:8px;color:var(--text-muted)}
+.input-box textarea{flex:1;background:transparent;border:none;padding:8px 4px;max-height:220px;resize:none;font-size:15px;line-height:1.5}
+.send-btn{width:34px;height:34px;border-radius:9px;background:var(--text-main);color:var(--bg-main);display:flex;align-items:center;justify-content:center;margin-bottom:4px}
+.input-hint{max-width:800px;margin:6px auto 0;font-size:11px;color:var(--text-muted);text-align:center}
+.input-hint kbd{background:var(--bg-panel);border:1px solid var(--border);border-radius:4px;padding:1px 5px;font-family:var(--font-mono);font-size:10.5px}
+.attachments-row{display:flex;flex-wrap:wrap;gap:6px;padding:6px 0 0;max-width:800px;margin:0 auto}
+.attachment-chip{display:inline-flex;align-items:center;gap:6px;background:var(--bg-panel);border:1px solid var(--border);border-radius:var(--radius-sm);padding:4px 8px;font-size:12px;color:var(--text-main)}
+.attachment-chip .att-size{color:var(--text-muted);font-size:11px}
+
+/* right panel */
+.right-panel{width:var(--right-width);background:var(--bg-sidebar);border-left:1px solid var(--border);display:flex;flex-direction:column;flex-shrink:0}
+.right-tabs{display:flex;border-bottom:1px solid var(--border)}
+.right-tab{flex:1;padding:12px 8px;font-size:13px;font-weight:600;color:var(--text-muted);text-align:center;cursor:pointer;border-bottom:2px solid transparent}
+.right-tab.active{color:var(--text-main);border-bottom-color:var(--accent)}
+.right-pane{flex:1;overflow-y:auto;padding:16px}
+.setting-group{display:flex;flex-direction:column;gap:6px;margin-bottom:16px}
+.setting-header{display:flex;justify-content:space-between;align-items:center}
+.setting-label{font-size:13px;font-weight:600;color:var(--text-main)}
+.setting-val{font-size:12px;color:var(--accent);font-family:var(--font-mono)}
+.setting-desc{font-size:11px;color:var(--text-muted);line-height:1.4}
+input[type=range]{-webkit-appearance:none;width:100%;background:transparent;padding:0;border:none}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;height:14px;width:14px;border-radius:50%;background:var(--accent);cursor:pointer;margin-top:-5px}
+input[type=range]::-webkit-slider-runnable-track{width:100%;height:4px;cursor:pointer;background:var(--bg-hover);border-radius:2px}
+.reset-btn{width:100%;padding:9px;border-radius:var(--radius-sm);background:var(--bg-hover);color:var(--text-main);font-size:13px;font-weight:600;margin-top:8px}
+    </style>
+</head>
+<body>
+
+<aside class="sidebar">
+    <div class="sidebar-header">
+        <div class="brand">
+            <div class="brand-logo">
+                <svg class="icon" viewBox="0 0 24 24"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+            </div>
+            <span>PromeTorch</span>
+        </div>
+        <button class="new-chat-btn">
+            <svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+            Новый чат
+        </button>
+    </div>
+
+    <div class="sidebar-search"><input type="text" placeholder="Поиск по истории..."></div>
+
+    <div class="sidebar-section-title">Закреплённые</div>
+    <div class="pinned-list">
+        <div class="pin-entry" title="закреплённое сообщение">
+            <svg class="icon icon-xs" style="color:var(--warning);flex-shrink:0;margin-top:2px" viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+            <span class="pin-text">Q4_K квантизация: 256 элементов в супер-блоке, 16 sub-блоков по 16, два уровня масштабирования (super-scale d, six-bit per-block scales).</span>
+        </div>
+    </div>
+
+    <div class="sidebar-section-title">История</div>
+    <div class="chat-history">
+        <div class="history-item active pinned">
+            <span class="pin-icon"><svg class="icon icon-xs" viewBox="0 0 24 24"><path d="M12 17v5M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16h14v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg></span>
+            <div class="history-title">Q4_K на Эльбрусе</div>
+        </div>
+        <div class="history-item"><div class="history-title">Сортировка массива Python</div></div>
+        <div class="history-item"><div class="history-title">PIR backward derivation</div></div>
+        <div class="history-item"><div class="history-title">GGUF mmap layout</div></div>
+        <div class="history-item"><div class="history-title">Qwen3 RoPE NeoX root cause</div></div>
+    </div>
+
+    <div class="sidebar-footer">
+        <span class="meta">5 чатов</span>
+        <div style="display:flex;gap:4px">
+            <button class="icon-btn" title="Тема"><svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg></button>
+            <button class="icon-btn">RU</button>
+        </div>
+    </div>
+</aside>
+
+<main class="main-content">
+    <header class="topbar">
+        <div class="topbar-left">
+            <div class="model-selector"><select>
+                <option>qwen3:4b (TP-4)</option>
+                <option>qwen3:1.7b</option>
+                <option>mistral:7b</option>
+                <option>llama3:8b</option>
+            </select></div>
+            <span class="topbar-title">Q4_K на Эльбрусе</span>
+        </div>
+        <div class="topbar-actions">
+            <button class="icon-btn" title="Поиск"><svg class="icon" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg></button>
+            <button class="icon-btn" title="Скачать .md"><svg class="icon" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg></button>
+            <button class="icon-btn" title="Копировать"><svg class="icon" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
+            <button class="icon-btn" title="Настройки"><svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 1v6M12 17v6M4.22 4.22l4.24 4.24M15.54 15.54l4.24 4.24M1 12h6M17 12h6"/></svg></button>
+        </div>
+    </header>
+
+    <div class="chat-container">
+        <div class="chat-main">
+            <div class="chat-feed">
+
+<!-- ============ MOCK MESSAGES ============ -->
+
+<div class="message msg-user">
+    <div class="avatar"><svg class="icon" viewBox="0 0 24 24"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z"/></svg></div>
+    <div class="msg-body">
+        <div class="msg-meta-top"><span class="msg-role">Вы</span></div>
+        <div class="msg-attachments">
+            <span class="att-pill">📎 quantization-notes.md · 4.2 KB</span>
+        </div>
+        <div class="msg-content"><div class="markdown-body">
+            <p>Объясни как работает <strong>Q4_K</strong> квантизация в GGUF и почему она работает быстрее на Эльбрусе E8C2.</p>
+        </div></div>
+        <div class="msg-actions">
+            <button><svg class="icon icon-xs" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>Копировать</button>
+            <button><svg class="icon icon-xs" viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>Закрепить</button>
+            <button><svg class="icon icon-xs" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 9-9M3 3v6h6"/></svg>Повторить</button>
+        </div>
+    </div>
+</div>
+
+<div class="message msg-assistant">
+    <div class="avatar"><svg class="icon" viewBox="0 0 24 24"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg></div>
+    <div class="msg-body">
+        <div class="msg-meta-top"><span class="msg-role">Ассистент</span></div>
+        <div class="msg-content"><div class="markdown-body">
+            <h2>Q4_K квантизация в GGUF</h2>
+            <p>В формате <code>Q4_K</code> каждый <strong>супер-блок</strong> содержит <code>256</code> весов и хранится как:</p>
+            <ul>
+                <li><strong>d</strong> (fp16) — общий масштаб супер-блока</li>
+                <li><strong>dmin</strong> (fp16) — общий минимум</li>
+                <li><strong>scales[12]</strong> — 6-битные scale/min на каждый из 8 sub-блоков по 32 веса</li>
+                <li><strong>qs[128]</strong> — 4-битные нибблы значений (256 × 4 bit = 128 байт)</li>
+            </ul>
+            <p>Формула декода: <code>w[i] = d * scale[sub] * q[i] + dmin * min[sub]</code>.</p>
+
+            <h3>Почему быстро на Эльбрусе</h3>
+            <ol>
+                <li><strong>FMA в SIMD</strong>: одна операция <code>fma_pack4</code> делает 4 умножения с накоплением — идеально подходит для деквант+dot.</li>
+                <li><strong>NUMA-aware sharding</strong>: 4 NUMA-домена × 8 ядер = 32 потока, веса дробятся по строкам матрицы.</li>
+                <li><strong>2.5 GB/pass</strong> вместо 5.9 GB у FP16 → bandwidth-bound decode упирается в кэш L2/L3.</li>
+            </ol>
+
+            <div class="code-block-wrapper">
+                <div class="code-header">
+                    <span class="code-lang">c</span>
+                    <div class="code-actions">
+                        <button>
+                            <svg class="icon icon-xs" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                            Copy
+                        </button>
+                    </div>
+                </div>
+                <pre><code class="language-c">// Dequant one Q4_K super-block on Elbrus E2K
+void dequant_q4k_block(const block_q4_K* b, float* out) {
+    const float d = GGML_FP16_TO_FP32(b->d);
+    const float dmin = GGML_FP16_TO_FP32(b->dmin);
+    for (int j = 0; j &lt; 8; ++j) {
+        uint8_t sc, m;
+        get_scale_min_k4(j, b->scales, &amp;sc, &amp;m);
+        const float d_sub = d * sc;
+        const float m_sub = dmin * m;
+        for (int k = 0; k &lt; 32; ++k) {
+            const uint8_t q = b->qs[j*16 + (k >> 1)];
+            const int nib = (k &amp; 1) ? (q >> 4) : (q &amp; 0x0F);
+            out[j*32 + k] = d_sub * nib - m_sub;
+        }
+    }
+}</code></pre>
+            </div>
+
+            <p>На реальных тестах <strong>qwen3-4B TP-4</strong> = <code>10.9 tok/s</code> что в ×6 быстрее llama.cpp 32t — см. <a href="#">JOURNAL.md</a>.</p>
+
+            <div class="tool-call-card expanded">
+                <div class="tool-call-header">
+                    <div class="tool-call-title">
+                        <span class="badge">tool</span>
+                        <span>benchmark_model</span>
+                    </div>
+                    <span class="tool-call-toggle"><svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M9 18l6-6-6-6"/></svg></span>
+                </div>
+                <div class="tool-call-body">
+                    <div class="tool-call-section">
+                        <div class="tool-call-section-title">Arguments</div>
+                        <pre><code class="language-json">{
+  "model": "qwen3-4b",
+  "backend": "TP-4",
+  "prompt_tokens": 256,
+  "n_predict": 128
+}</code></pre>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tool-call-card expanded" style="border-color:var(--success)">
+                <div class="tool-call-header" style="background:linear-gradient(90deg,rgba(16,185,129,.12),transparent)">
+                    <div class="tool-call-title">
+                        <span class="badge" style="background:var(--success)">result</span>
+                        <span class="tool-result-ok">✓ result</span>
+                    </div>
+                    <span class="tool-call-toggle"><svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M9 18l6-6-6-6"/></svg></span>
+                </div>
+                <div class="tool-call-body">
+                    <div class="tool-call-section">
+                        <div class="tool-call-section-title">Output</div>
+                        <pre><code>{
+  "tok_per_sec": 10.9,
+  "ttft_ms": 412,
+  "vs_llamacpp_32t": "x6.0",
+  "memory_mb": 2486
+}</code></pre>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+        <div class="msg-footer">
+            <span class="tok-badge">10.9 tok/s</span><span>11.78s</span>
+        </div>
+        </div>
+        <div class="msg-actions">
+            <button><svg class="icon icon-xs" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>Копировать</button>
+            <button class="pinned"><svg class="icon icon-xs" viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>Снять</button>
+        </div>
+    </div>
+</div>
+
+<div class="message msg-user">
+    <div class="avatar"><svg class="icon" viewBox="0 0 24 24"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z"/></svg></div>
+    <div class="msg-body">
+        <div class="msg-meta-top"><span class="msg-role">Вы</span></div>
+        <div class="msg-content"><div class="markdown-body">
+            <p>А почему <em>Q6_K</em> работает заметно медленнее, ведь там тоже супер-блок 256 элементов?</p>
+        </div></div>
+    </div>
+</div>
+
+<div class="message msg-assistant">
+    <div class="avatar"><svg class="icon" viewBox="0 0 24 24"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg></div>
+    <div class="msg-body">
+        <div class="msg-meta-top"><span class="msg-role">Ассистент</span></div>
+        <div class="msg-content"><div class="markdown-body">
+            <h3>Q6_K vs Q4_K — разница в пропускной</h3>
+            <ul>
+                <li><strong>Q6_K</strong> = <code>6 bit / weight</code> → <code>210 B / block</code> (vs 144 у Q4_K)</li>
+                <li>Distill для decode: <strong>3.4 GB/pass</strong> на 4B параметрах vs 2.5 GB у Q4_K — ×1.36</li>
+                <li>Unpack 6-битных значений сложнее: нибл + 2 бита из <code>qh</code>. Shift-формулы:
+                    <code>ql shift = 4*((i//64)%2)</code>, <code>qh shift = 2*((i//32)%4)</code>.</li>
+            </ul>
+            <p>На Эльбрусе мы реально измерили <strong>2840 rows/sec</strong> на Q6_K K=2560 (16 ядер). См. <code>nm_quad_qwen/nmc_q6k_gemv_orig.c</code>.</p>
+            <blockquote>На Qwen3-4B Q4_K_M смешивает Q4_K и Q6_K: <code>attn_v</code> и <code>ffn_down</code> ≈каждый 3-й слой — Q6_K, остальные — Q4_K. Dispatch только через <code>ttype</code>, hardcode даёт NaN с layer 4.</blockquote>
+        </div>
+        <div class="msg-footer">
+            <span class="tok-badge">9.7 tok/s</span><span>6.42s</span>
+        </div>
+        </div>
+    </div>
+</div>
+
+            </div>
+        </div>
+
+        <div class="input-container">
+            <div class="input-box">
+                <div class="input-actions">
+                    <button title="Прикрепить файл"><svg class="icon" viewBox="0 0 24 24"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 17.93 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg></button>
+                    <button title="Голосовой ввод"><svg class="icon" viewBox="0 0 24 24"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3M8 22h8"/></svg></button>
+                </div>
+                <textarea rows="1" placeholder="Отправьте сообщение или перетащите файл..."></textarea>
+                <button class="send-btn"><svg class="icon" viewBox="0 0 24 24"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg></button>
+            </div>
+            <div class="attachments-row"></div>
+            <div class="input-hint"><kbd>Enter</kbd> отправить, <kbd>Shift+Enter</kbd> новая строка, <kbd>Ctrl+F</kbd> поиск</div>
+        </div>
+    </div>
+</main>
+
+<aside class="right-panel">
+    <div class="right-tabs">
+        <div class="right-tab active">Настройки</div>
+        <div class="right-tab">Оглавление</div>
+    </div>
+    <div class="right-pane">
+        <div class="setting-group">
+            <label class="setting-label">System Prompt</label>
+            <textarea style="min-height:70px">You are PromeTorch — a fast local AI assistant running on Elbrus E8C2. Be concise.</textarea>
+            <div class="setting-desc">Инструкция, определяющая поведение модели.</div>
+        </div>
+        <div class="setting-group">
+            <div class="setting-header"><label class="setting-label">Temperature</label><span class="setting-val">0.7</span></div>
+            <input type="range" min="0" max="2" step="0.1" value="0.7">
+            <div class="setting-desc">Выше = креативнее, ниже = точнее.</div>
+        </div>
+        <div class="setting-group">
+            <div class="setting-header"><label class="setting-label">Top P</label><span class="setting-val">0.9</span></div>
+            <input type="range" min="0" max="1" step="0.05" value="0.9">
+        </div>
+        <div class="setting-group">
+            <div class="setting-header"><label class="setting-label">Top K</label><span class="setting-val">40</span></div>
+            <input type="range" min="1" max="100" step="1" value="40">
+        </div>
+        <div class="setting-group">
+            <div class="setting-header"><label class="setting-label">Max Tokens</label><span class="setting-val">2048</span></div>
+            <input type="range" min="256" max="8192" step="256" value="2048">
+        </div>
+        <button class="reset-btn">Сбросить настройки</button>
+    </div>
+</aside>
+
+<script>document.querySelectorAll('pre code').forEach(b => { try{ hljs.highlightElement(b); }catch{} });</script>
+
+</body>
+</html>
