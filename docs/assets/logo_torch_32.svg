@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" shape-rendering="crispEdges" width="512" height="512">
+  <title>PromeTorch — Pixel Torch (32x32, gradient flame)</title>
+  <!-- 32x32 detailed pixel art с градиентом + угольки (sparks).
+       Не «Prometheus+Torch», а Prome + Torch. Огонь Прометея. -->
+
+  <!-- Sparks (3 free-floating embers above flame) -->
+  <rect x="10" y="0"  width="1" height="1" fill="#FFB000" opacity="0.7"/>
+  <rect x="22" y="1"  width="1" height="1" fill="#FF6A00" opacity="0.6"/>
+  <rect x="6"  y="3"  width="1" height="1" fill="#FFEC58" opacity="0.8"/>
+  <rect x="26" y="4"  width="1" height="1" fill="#FFB000" opacity="0.7"/>
+
+  <!-- Outermost flame layer (deep red shell) -->
+  <rect x="14" y="2"  width="1" height="1" fill="#A82600"/>
+  <rect x="16" y="2"  width="1" height="1" fill="#A82600"/>
+  <rect x="18" y="2"  width="1" height="1" fill="#A82600"/>
+  <rect x="13" y="3"  width="6" height="1" fill="#D63600"/>
+  <rect x="12" y="4"  width="8" height="1" fill="#D63600"/>
+  <rect x="11" y="5"  width="10" height="1" fill="#D63600"/>
+  <rect x="10" y="6"  width="12" height="1" fill="#D63600"/>
+  <rect x="10" y="7"  width="12" height="1" fill="#D63600"/>
+  <rect x="9"  y="8"  width="14" height="1" fill="#D63600"/>
+  <rect x="9"  y="9"  width="14" height="1" fill="#D63600"/>
+  <rect x="8"  y="10" width="16" height="1" fill="#D63600"/>
+  <rect x="8"  y="11" width="16" height="1" fill="#D63600"/>
+  <rect x="9"  y="12" width="14" height="1" fill="#D63600"/>
+  <rect x="9"  y="13" width="14" height="1" fill="#D63600"/>
+  <rect x="10" y="14" width="12" height="1" fill="#D63600"/>
+  <rect x="11" y="15" width="10" height="1" fill="#D63600"/>
+
+  <!-- Mid flame (bright orange) -->
+  <rect x="14" y="4"  width="4" height="1" fill="#FF6A00"/>
+  <rect x="13" y="5"  width="6" height="1" fill="#FF6A00"/>
+  <rect x="12" y="6"  width="8" height="1" fill="#FF6A00"/>
+  <rect x="11" y="7"  width="10" height="1" fill="#FF6A00"/>
+  <rect x="11" y="8"  width="10" height="1" fill="#FF6A00"/>
+  <rect x="10" y="9"  width="12" height="1" fill="#FF6A00"/>
+  <rect x="10" y="10" width="12" height="1" fill="#FF6A00"/>
+  <rect x="10" y="11" width="12" height="1" fill="#FF6A00"/>
+  <rect x="10" y="12" width="12" height="1" fill="#FF6A00"/>
+  <rect x="11" y="13" width="10" height="1" fill="#FF6A00"/>
+  <rect x="12" y="14" width="8" height="1" fill="#FF6A00"/>
+
+  <!-- Inner flame (yellow) -->
+  <rect x="14" y="6"  width="4" height="1" fill="#FFB000"/>
+  <rect x="13" y="7"  width="6" height="1" fill="#FFB000"/>
+  <rect x="13" y="8"  width="6" height="1" fill="#FFB000"/>
+  <rect x="12" y="9"  width="8" height="1" fill="#FFB000"/>
+  <rect x="12" y="10" width="8" height="1" fill="#FFB000"/>
+  <rect x="12" y="11" width="8" height="1" fill="#FFB000"/>
+  <rect x="13" y="12" width="6" height="1" fill="#FFB000"/>
+  <rect x="13" y="13" width="6" height="1" fill="#FFB000"/>
+
+  <!-- Core flame (yellow-white) -->
+  <rect x="14" y="8"  width="4" height="1" fill="#FFEC58"/>
+  <rect x="14" y="9"  width="4" height="1" fill="#FFEC58"/>
+  <rect x="14" y="10" width="4" height="1" fill="#FFEC58"/>
+  <rect x="14" y="11" width="4" height="1" fill="#FFEC58"/>
+
+  <!-- White hot spot -->
+  <rect x="15" y="9"  width="2" height="1" fill="#FFFFFF"/>
+  <rect x="15" y="10" width="2" height="1" fill="#FFFFFF"/>
+
+  <!-- Cup / brazier (metal ring above handle) -->
+  <rect x="10" y="16" width="12" height="1" fill="#7A4818"/>
+  <rect x="10" y="17" width="1"  height="1" fill="#5A2F12"/>
+  <rect x="11" y="17" width="10" height="1" fill="#C28A3E"/>
+  <rect x="21" y="17" width="1"  height="1" fill="#5A2F12"/>
+  <rect x="11" y="18" width="10" height="1" fill="#7A4818"/>
+
+  <!-- Wooden handle -->
+  <rect x="13" y="19" width="6" height="1" fill="#6B3F1B"/>
+  <rect x="13" y="20" width="1" height="1" fill="#5A2F12"/>
+  <rect x="14" y="20" width="4" height="1" fill="#8B5A2B"/>
+  <rect x="18" y="20" width="1" height="1" fill="#5A2F12"/>
+  <rect x="13" y="21" width="6" height="1" fill="#6B3F1B"/>
+  <rect x="13" y="22" width="1" height="1" fill="#5A2F12"/>
+  <rect x="14" y="22" width="4" height="1" fill="#8B5A2B"/>
+  <rect x="18" y="22" width="1" height="1" fill="#5A2F12"/>
+  <rect x="13" y="23" width="6" height="1" fill="#6B3F1B"/>
+  <rect x="13" y="24" width="1" height="1" fill="#5A2F12"/>
+  <rect x="14" y="24" width="4" height="1" fill="#8B5A2B"/>
+  <rect x="18" y="24" width="1" height="1" fill="#5A2F12"/>
+  <rect x="13" y="25" width="6" height="1" fill="#6B3F1B"/>
+  <rect x="13" y="26" width="1" height="1" fill="#5A2F12"/>
+  <rect x="14" y="26" width="4" height="1" fill="#8B5A2B"/>
+  <rect x="18" y="26" width="1" height="1" fill="#5A2F12"/>
+  <rect x="13" y="27" width="6" height="1" fill="#6B3F1B"/>
+  <rect x="13" y="28" width="1" height="1" fill="#5A2F12"/>
+  <rect x="14" y="28" width="4" height="1" fill="#8B5A2B"/>
+  <rect x="18" y="28" width="1" height="1" fill="#5A2F12"/>
+  <rect x="13" y="29" width="6" height="1" fill="#6B3F1B"/>
+  <rect x="13" y="30" width="6" height="1" fill="#3F2008"/>
+</svg>

@@ -33,21 +33,38 @@ namespace torch {
 namespace io {
 namespace cpu_quant {
 
-// __builtin_e2k_qpmaddubsh + qp*fp intrinsics are v5+ only (E8C2 onwards).
-// LCC defines __iset__ = 3/4/5/6 for elbrus-v3/v4/v5/v6.
-// Without the version guard, lcc on E8C (v4) errors out with
-// "built-in function not supported for current cpu mode". Scalar fallback
-// path below handles all older E2K cores.
+// E2K SIMD INT path detection — три уровня:
+//   v5+ (E8C2 / E16C): qpmaddubsh = 4-lane × 4 i8 pairs (16 bytes register)
+//                       → PT_E2K_VNNI=1, основной fast path
+//   v4   (E8C):        pmaddubsh  = 2-lane × 4 i8 pairs (8 bytes register)
+//                       → PT_E2K_VNNI_HALF=1, half-width fast path (новое 2026-05-20)
+//   v3   (E2S / E4C):  нет integer SIMD mul-add → scalar fallback
+//
+// Документация по intrinsics-by-ISA: docs/elbrus_isa/PERFORMANCE_BY_ISA.md
 #if defined(__e2k__) && defined(__iset__) && __iset__ >= 5
 #define PT_E2K_VNNI 1
+#define PT_E2K_VNNI_HALF 0
+#elif defined(__e2k__) && defined(__iset__) && __iset__ >= 4
+#define PT_E2K_VNNI 0
+#define PT_E2K_VNNI_HALF 1
 #else
 #define PT_E2K_VNNI 0
+#define PT_E2K_VNNI_HALF 0
 #endif
 
 #if PT_E2K_VNNI
 typedef long long v2di __attribute__((vector_size(16)));
 static const v2di SOA4_ONES16 = {0x0001000100010001LL, 0x0001000100010001LL};
 static const v2di SOA4_SHIFT128 = {0x0000008000000080LL, 0x0000008000000080LL};
+#endif
+
+#if PT_E2K_VNNI_HALF
+// v4 path. 8-byte registers, 4 i16 lanes per pmaddubsh.
+// Layout group = 4 rows × 32 elements per kg-block. Per kg iteration
+// обрабатываем 2 pmaddubsh: rows 0,1 (first 8B) + rows 2,3 (second 8B).
+typedef long long v1di __attribute__((vector_size(8)));
+static const v1di SOA2_ONES16 = 0x0001000100010001LL;  // 4×i16
+static const v1di SOA2_SHIFT128 = 0x0000008000000080LL; // 2×i32
 #endif
 
 #define SOA4_GROUP_BYTES 176
@@ -494,7 +511,67 @@ inline void q8_soa4_gemv(const Q8SoA4* w,
             y[g*4 + 3] = lanes[3];
         }
     }, 1);
+#elif PT_E2K_VNNI_HALF
+    // v4 (E8C) path. pmaddubsh — 2 i16 lanes per op (8-byte register).
+    // Group layout остаётся 4 rows × 32 elements per kg-block. Per kg делаем
+    // 2 pmaddubsh: первые 8 bytes (rows 0,1) + вторые 8 bytes (rows 2,3).
+    // Каждый block weight = 128 bytes = 16 bytes × 8 kg-iterations.
+    // Эстиматный speedup vs scalar fallback: ~3-4×.
+    c10::get_thread_pool().parallel_for(0, gpr, [&](int64_t g_start, int64_t g_end) {
+        for (int64_t g = g_start; g < g_end; g++) {
+            const uint8_t* gp = w->mem + g * w->group_stride;
+            // Два i32-аккумулятора по 2 lane: low (rows 0,1) и high (rows 2,3)
+            int32_t acc_i32[4] = {0, 0, 0, 0};
+            float fp_acc[4] = {0,0,0,0};
+
+            for (int64_t b = 0; b < bpr; b++) {
+                const uint8_t* sb = gp + b * SOA4_GROUP_BYTES;
+                const float* scales = (const float*)(sb + 0);
+                const float* dmins  = (const float*)(sb + 16);
+                const int32_t* sum_q = (const int32_t*)(sb + 32);
+                const uint8_t* W = sb + 48;
+                const uint8_t* A = a_b16 + b*128;
+
+                v1di acc_lo = 0;  // 4 i16 lanes — низ (rows 0,1 × 2 pairs each)
+                v1di acc_hi = 0;
+                _Pragma("loop count(8)") _Pragma("ivdep")
+                for (int kg = 0; kg < 8; kg++) {
+                    // W_lo = bytes[kg*16 .. kg*16+7]  → rows 0,1
+                    // W_hi = bytes[kg*16+8 .. kg*16+15] → rows 2,3
+                    v1di W_lo = *(const v1di*)(W + kg*16 + 0);
+                    v1di W_hi = *(const v1di*)(W + kg*16 + 8);
+                    v1di A_lo = *(const v1di*)(A + kg*16 + 0);
+                    v1di A_hi = *(const v1di*)(A + kg*16 + 8);
+                    // pmaddubsh: 2 lane × (4 byte pairs accumulated to i16)
+                    v1di p_lo = __builtin_e2k_pmaddubsh(W_lo, A_lo);
+                    v1di p_hi = __builtin_e2k_pmaddubsh(W_hi, A_hi);
+                    // pmaddh: 4 i16 lanes → 2 i32 lanes (multiply-add by 1)
+                    v1di q_lo = __builtin_e2k_pmaddh(p_lo, SOA2_ONES16);
+                    v1di q_hi = __builtin_e2k_pmaddh(p_hi, SOA2_ONES16);
+                    acc_lo = __builtin_e2k_paddw(acc_lo, q_lo);
+                    acc_hi = __builtin_e2k_paddw(acc_hi, q_hi);
+                }
+                // Извлекаем 2 i32 lanes из каждого аккумулятора
+                std::memcpy(&acc_i32[0], &acc_lo, 8);  // rows 0,1
+                std::memcpy(&acc_i32[2], &acc_hi, 8);  // rows 2,3
+
+                float sa_b = per_block ? scale_a_or_array[b] : scale_a_scalar;
+                for (int r = 0; r < 4; r++) {
+                    int dot_signed = acc_i32[r] - 128 * sum_q[r];
+                    fp_acc[r] += sa_b * (scales[r] * (float)dot_signed
+                                            - dmins[r] * (float)sum_a_per_block[b]);
+                    acc_i32[r] = 0;
+                }
+            }
+            y[g*4 + 0] = fp_acc[0];
+            y[g*4 + 1] = fp_acc[1];
+            y[g*4 + 2] = fp_acc[2];
+            y[g*4 + 3] = fp_acc[3];
+        }
+    }, 1);
 #else
+    // v3 (E2S/E4C) и не-E2K: pure scalar fallback. Integer SIMD mul-add нет
+    // на v3 архитектуре. Авто-vectorize LCC может найти что-то, но без VNNI.
     c10::get_thread_pool().parallel_for(0, gpr, [&](int64_t g_start, int64_t g_end) {
         for (int64_t g = g_start; g < g_end; g++) {
             const uint8_t* gp = w->mem + g * w->group_stride;
