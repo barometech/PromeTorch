@@ -1,0 +1,31 @@
+PromeTorch
+Copyright 2026 PromeTorch Contributors
+
+This product includes software developed by the PromeTorch Contributors
+(https://github.com/barometech/PromeTorch).
+
+Licensed under the Apache License, Version 2.0. See LICENSE for details.
+
+================================================================================
+Third-party code attribution
+================================================================================
+
+This project incorporates code from the following projects:
+
+* llama.cpp (https://github.com/ggerganov/llama.cpp)
+  - GGUF format readers, Q4_K / Q6_K dequantization kernels
+  - Original license: MIT
+  - Files: torch/io/gguf_*.h, torch/io/gguf_dequant.h,
+           aten/src/ATen/cuda/CUDAQuantGemv.cu (CUDA port)
+
+* ggml (https://github.com/ggerganov/ggml)
+  - Reference quantization formats
+  - Original license: MIT
+
+* PyTorch (https://github.com/pytorch/pytorch)
+  - API surface inspiration (Tensor, Autograd, nn.Module patterns)
+  - Original license: BSD-3-Clause (Modified by Meta)
+  - We are API-compatible at the source level but share no code.
+
+Trademarks: PromeTorch is a trademark of the PromeTorch project.
+See TRADEMARKS.md for trademark usage guidelines.
