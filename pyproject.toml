@@ -75,8 +75,9 @@ build.targets = ["_C"]
 # Python package layout — где лежит `import prometorch`-овский код.
 wheel.packages = ["python/prometorch"]
 
-# Что включать в wheel install (.so/.dll/.pyd артефакты).
-install.components = ["python"]
+# install.components — НЕ задаём (берём default). Раньше было ["python"], но
+# install() rules в CMakeLists не помечены COMPONENT python → _C.pyd
+# не попадал в wheel (только pure .py файлы, 78 KB вместо нужных ~5 MB).
 
 [tool.scikit-build.cmake.define]
 PT_BUILD_PYTHON = "ON"
