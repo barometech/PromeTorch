@@ -436,7 +436,7 @@ TEST(DataLoaderMultiWorker, SameTotalsAsSingleThreaded) {
     for (auto& batch : loader_sync) {
         ++batches_sync;
         items_sync += batch.size;
-        float* p = batch.data.mutable_data_ptr<float>();
+        float* p = batch.data.data_ptr<float>();
         for (size_t i = 0; i < batch.size; ++i) {
             seen_sync.insert(static_cast<int64_t>(p[i]));
         }
@@ -455,7 +455,7 @@ TEST(DataLoaderMultiWorker, SameTotalsAsSingleThreaded) {
     for (auto& batch : loader_mt) {
         ++batches_mt;
         items_mt += batch.size;
-        float* p = batch.data.mutable_data_ptr<float>();
+        float* p = batch.data.data_ptr<float>();
         for (size_t i = 0; i < batch.size; ++i) {
             seen_mt.insert(static_cast<int64_t>(p[i]));
         }
