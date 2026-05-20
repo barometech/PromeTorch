@@ -3,6 +3,65 @@
 Полная история разработки проекта.
 Полный аудит инфраструктуры — в `INFRASTRUCTURE_AUDIT.md`.
 
+## 2026-05-20 (продолжение): multi-arch Elbrus + 10 audit agents + E16C OpenBLAS
+
+**Новые платформы добавлены сегодня:**
+* **Темикс 8C v4** — впервые увидели реальное v4 железо. Раньше нет
+  оптимизации → 1 tok/s scalar. Добавил `PT_E2K_VNNI_HALF` macro и
+  v4 SIMD path в `q8_soa4_gemv` через `pmaddubsh`/`pmaddh`/`paddw`
+  (2-lane vs 4-lane на v5+). Commit `597d0a9`. Не валидирован — нет
+  ssh к Темиксу машине.
+* **E16C v6** (e16c.ru:22014) — впервые подключили. VM 8/16 cores,
+  1-NUMA, disk 99%. EML library помечена `elbrus-2c3` → loader
+  блокирует. **OpenBLAS НАЙДЕН** — `libopenblas-0.3.27-alt1.e2kv6`
+  нативно собран. Добавил CMake auto-detect (try_run probe +
+  cross-compile guard). Commits `8261c85` `a5eb408` `c305eeb`.
+  TUDA fallback дал 2.1 tok/s (вtourdiff). OpenBLAS rebuild не
+  валидирован (сессия закрыта).
+
+**TP-4 регрессия 8C2 — root cause найден и закрыт.**
+Bisect выявил: `detect_e2k_march()` парсил LCC version по pattern
+`e2k-vN`, но LCC 1.29.16 выдаёт `e2k-8c2-linux` (модель, не ISA).
+Safe-default = elbrus-v4 → `__iset__=4` → `PT_E2K_VNNI=0` →
+qpmaddubsh отключён → scalar fallback → 5.0 tok/s вместо 10.9.
+Fix `d00f13f`: добавил case `*e2k-{16c,8c2,8cb,8c,4c,2c}*`. После
+rebuild на 8C2 lemur-1: **10.9 tok/s — baseline восстановлен**.
+
+**CMake intrinsic auto-detect (commit `45f9acf`):**
+`cmake/E2KIntrinsicChecks.cmake` — try_compile для 16 E2K intrinsics
+(QPMADDUBSH..QPFMAS + PMADDUBSH..PFADDS). Выставляет `PT_HAVE_*`
+defines на основе реального capability компилятора, не на основе
+`__iset__` guard который не всегда точен.
+
+**10 Opus agents аудит репо — отчёты в `docs/audit/2026-05-20_*.md`:**
+* docs_vs_code: 41 claim → 15 TRUE / 16 PARTIAL / 8 FALSE
+* stubs_claimed_done: 26 stub functions claimed DONE (7 critical)
+* test_gaps: PromeServe 6354 LoC / 0 tests (закрыли `tests/promeserve/`)
+* dead_code: 115 orphan C++/CUDA файлов (~18k LoC)
+* promeserve_security: 4 CRITICAL — path traversal → RCE chain MCP
+* error_handling: Engine race condition (silent incorrect gradients!)
+* build_ci: 35 находок (CI скрывает падения за `|| true`)
+* python_api: реально 25-30%, не 35-45% (amp/jit/compile silent stubs)
+* perf_review: путь к 30 tok/s — parallel attention +12-18%, FP16 KV +10-15%
+* nmcard_nmquad: NM Quad 3 tok/s физически недостижим (BW ceiling 1.25)
+* `_SUMMARY.md` — сводный отчёт с топ-10 критичных
+
+**Также:**
+* `tests/promeserve/` — pytest battery (conftest + 2 файла)
+* `docs/elbrus_isa/PERFORMANCE_BY_ISA.md` — таблица intrinsics × ISA × runtime
+* `docs/assets/logo_torch_{16,32}.svg` — pixel art факел
+* README cleanup: 119→112 backward, 132→149 CUDA, 10→16 optimizers, 9→16 schedulers
+* `scripts/run_1proc_elbrus.sh` — numactl опционален (E16C VM)
+
+**Открытые задачи на следующую сессию:**
+1. E16C OpenBLAS rebuild валидация (cross-compile guard `c305eeb` сделан)
+2. Темикс 8C v4 — валидация `pmaddubsh` SIMD path (~4-6 tok/s эстимат)
+3. MCP tool-call demo на E16C
+4. 10 audit reports — critical bugs ВСЕ открыты (Engine race, path traversal, PT_ASSERT)
+5. Темы light/dark + screenshots в README
+
+---
+
 ## 2026-05-20: PyPI ready + privacy scrub + F2/MCP агенты
 
 **Главное — `pip install prometorch` работает end-to-end:**
