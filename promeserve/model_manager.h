@@ -209,20 +209,44 @@ public:
             return true;
         }
 
-        // Resolve path
+        // Resolve path. [коллега] попросил поддержку direct GGUF путей:
+        //   ./promeserve --model ~/gguf_models/qwen3-4b-Q4_K_M.gguf
+        // Раньше fallback на fs::exists был, но ~/... не расширялось.
+        // Теперь: если строка похожа на путь (содержит '/' '\' или '.gguf')
+        // → расширяем '~' и проверяем fs::exists ПЕРВЫМ. Иначе → ollama.
         std::string gguf_path;
-        auto it = models_.find(name);
-        if (it != models_.end()) {
-            gguf_path = it->second.gguf_path;
+        auto looks_like_path = [](const std::string& s) {
+            return s.find('/') != std::string::npos
+                || s.find('\\') != std::string::npos
+                || s.find(".gguf") != std::string::npos;
+        };
+        auto expand_tilde = [](const std::string& p) -> std::string {
+            if (!p.empty() && p[0] == '~') {
+                const char* home = std::getenv("HOME");
+#ifdef _WIN32
+                if (!home) home = std::getenv("USERPROFILE");
+#endif
+                if (home) return std::string(home) + p.substr(1);
+            }
+            return p;
+        };
+
+        if (looks_like_path(name)) {
+            std::string expanded = expand_tilde(name);
+            if (fs::exists(expanded)) {
+                gguf_path = expanded;
+            } else {
+                std::cerr << "[ModelManager] GGUF file not found: " << expanded << std::endl;
+                return false;
+            }
         } else {
-            // Try direct resolution
-            try {
-                gguf_path = torch::io::ollama::resolve_model(name);
-            } catch (...) {
-                // Try as file path
-                if (fs::exists(name)) {
-                    gguf_path = name;
-                } else {
+            auto it = models_.find(name);
+            if (it != models_.end()) {
+                gguf_path = it->second.gguf_path;
+            } else {
+                try {
+                    gguf_path = torch::io::ollama::resolve_model(name);
+                } catch (...) {
                     std::cerr << "[ModelManager] Model not found: " << name << std::endl;
                     return false;
                 }
@@ -267,6 +291,29 @@ public:
 
             loaded_model_name_ = name;
             loaded_model_ = std::move(model);
+
+            // Если модель пришла как файловый путь — регистрируем её в models_
+            // под basename'ом без .gguf, чтобы /api/tags и UI её видели. [коллега]
+            // попросил: --model ~/gguf_models/qwen3-4b-Q4_K_M.gguf должен
+            // делать модель доступной в списке.
+            if (looks_like_path(name)) {
+                ModelInfo info;
+                std::string base = gguf_path;
+                auto slash = base.find_last_of("/\\");
+                if (slash != std::string::npos) base = base.substr(slash + 1);
+                if (base.size() > 5 && base.substr(base.size() - 5) == ".gguf") {
+                    base = base.substr(0, base.size() - 5);
+                }
+                info.name = base;
+                info.family = base;
+                info.tag = "local";
+                info.gguf_path = gguf_path;
+                try {
+                    info.size_bytes = static_cast<int64_t>(fs::file_size(gguf_path));
+                } catch (...) {}
+                models_[base] = info;
+                loaded_model_name_ = base;  // показываем basename, не путь
+            }
 
             auto t_end = std::chrono::high_resolution_clock::now();
             double ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
