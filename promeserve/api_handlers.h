@@ -18,10 +18,12 @@
 #include "promeserve/http_server.h"
 #include "promeserve/model_manager.h"
 #include "promeserve/tool_call.h"
+#include "promeserve/mcp_client.h"
 
 #include <string>
 #include <vector>
 #include <map>
+#include <memory>
 #include <sstream>
 #include <ctime>
 #include <chrono>
@@ -30,6 +32,7 @@
 #include <fstream>
 #include <iostream>
 #include <mutex>
+#include <thread>
 
 namespace promeserve {
 
@@ -341,11 +344,35 @@ inline std::string duration_ns_str(double seconds) {
 
 class ApiHandlers {
 public:
-    ApiHandlers(ModelManager& models) : models_(models), server_timeout_ms_(60000) {}
+    ApiHandlers(ModelManager& models)
+        : models_(models),
+          server_timeout_ms_(60000),
+          shared_tool_registry_(std::make_shared<ToolRegistry>()),
+          mcp_manager_(std::make_unique<MCPManager>(*shared_tool_registry_)) {
+        // Поднять MCP-сервера из ~/.promeserve/mcp.json в фоне — не блокировать
+        // startup. Любой fail в одном сервере — изолирован.
+        std::thread([this]() {
+            try {
+                mcp_manager_->start_all();
+            } catch (const std::exception& e) {
+                std::cerr << "[MCP] start_all error: " << e.what() << std::endl;
+            } catch (...) {
+                std::cerr << "[MCP] start_all unknown error" << std::endl;
+            }
+        }).detach();
+    }
+
+    ~ApiHandlers() {
+        if (mcp_manager_) mcp_manager_->shutdown();
+    }
 
     // Set per-request generation timeout (milliseconds). 0 = no timeout.
     void set_timeout_ms(int ms) { server_timeout_ms_ = ms; }
     int timeout_ms() const { return server_timeout_ms_; }
+
+    // Доступ к глобальному tool registry / MCP manager (для tests + MCP server).
+    ToolRegistry& tool_registry() { return *shared_tool_registry_; }
+    MCPManager& mcp_manager() { return *mcp_manager_; }
 
     // Register all routes on the given server
     void register_routes(HttpServer& server) {
@@ -390,6 +417,25 @@ public:
         });
         server.route("GET", "/api/embeddings", [this](const HttpRequest& req) -> HttpResponse {
             return handle_embeddings(req);
+        });
+
+        // ====================================================================
+        // MCP integration endpoints (Этап 2)
+        // ====================================================================
+        server.route("GET", "/api/mcp/servers", [this](const HttpRequest& req) -> HttpResponse {
+            return handle_mcp_servers(req);
+        });
+        server.route("GET", "/api/mcp/tools", [this](const HttpRequest& req) -> HttpResponse {
+            return handle_mcp_tools(req);
+        });
+        server.route("POST", "/api/mcp/reconnect", [this](const HttpRequest& req) -> HttpResponse {
+            return handle_mcp_reconnect(req);
+        });
+        server.route("POST", "/api/mcp/call", [this](const HttpRequest& req) -> HttpResponse {
+            return handle_mcp_call(req);
+        });
+        server.route("GET", "/api/mcp/audit", [this](const HttpRequest& req) -> HttpResponse {
+            return handle_mcp_audit(req);
         });
     }
 
@@ -515,6 +561,162 @@ private:
     }
 
     // ========================================================================
+    // GET /api/mcp/servers — list MCP servers with status + tool counts
+    // ========================================================================
+    HttpResponse handle_mcp_servers(const HttpRequest&) {
+        HttpResponse resp;
+        auto statuses = mcp_manager_->list_status();
+        std::ostringstream oss;
+        oss << "{\"config_path\":\"" << json_escape(mcp_manager_->config_path()) << "\","
+            << "\"servers\":[";
+        bool first = true;
+        for (auto& s : statuses) {
+            if (!first) oss << ",";
+            first = false;
+            oss << "{\"name\":\"" << json_escape(s.name) << "\","
+                << "\"available\":" << (s.available ? "true" : "false") << ","
+                << "\"tool_count\":" << s.tool_count << ","
+                << "\"command\":\"" << json_escape(s.command) << "\","
+                << "\"last_error\":\"" << json_escape(s.last_error) << "\"}";
+        }
+        oss << "]}";
+        resp.set_json(oss.str());
+        return resp;
+    }
+
+    // ========================================================================
+    // GET /api/mcp/tools — full tool catalog (built-in + MCP)
+    // ========================================================================
+    HttpResponse handle_mcp_tools(const HttpRequest&) {
+        HttpResponse resp;
+        std::ostringstream oss;
+        oss << "{\"tools\":[";
+        bool first = true;
+        for (auto& t : shared_tool_registry_->list_all()) {
+            if (!first) oss << ",";
+            first = false;
+            const char* kind =
+                t.kind == ToolKind::MCP ? "mcp" :
+                t.kind == ToolKind::EXTERNAL ? "external" : "builtin";
+            oss << "{\"name\":\"" << json_escape(t.name) << "\","
+                << "\"description\":\"" << json_escape(t.description) << "\","
+                << "\"kind\":\"" << kind << "\"";
+            if (t.kind == ToolKind::MCP) {
+                oss << ",\"server\":\"" << json_escape(t.mcp_route.server_name) << "\","
+                    << "\"remote_name\":\"" << json_escape(t.mcp_route.remote_tool_name) << "\"";
+            }
+            oss << "}";
+        }
+        oss << "]}";
+        resp.set_json(oss.str());
+        return resp;
+    }
+
+    // ========================================================================
+    // POST /api/mcp/reconnect — body {"server":"name"} — force reconnect
+    // ========================================================================
+    HttpResponse handle_mcp_reconnect(const HttpRequest& req) {
+        HttpResponse resp;
+        auto body = json::parse(req.body);
+        std::string name = body["server"].as_string();
+        if (name.empty()) {
+            resp.status = 400;
+            resp.set_json("{\"error\":\"server name required\"}");
+            return resp;
+        }
+        bool ok = mcp_manager_->reconnect(name);
+        std::ostringstream oss;
+        oss << "{\"ok\":" << (ok ? "true" : "false")
+            << ",\"server\":\"" << json_escape(name) << "\"}";
+        resp.set_json(oss.str());
+        return resp;
+    }
+
+    // ========================================================================
+    // POST /api/mcp/call — debug: execute a tool directly. Body:
+    //   {"name":"mcp__filesystem__read_file","arguments":{"path":"/x"}}
+    // ========================================================================
+    HttpResponse handle_mcp_call(const HttpRequest& req) {
+        HttpResponse resp;
+        auto body = json::parse(req.body);
+        std::string name = body["name"].as_string();
+        if (name.empty()) {
+            resp.status = 400;
+            resp.set_json("{\"error\":\"name required\"}");
+            return resp;
+        }
+        // Сериализуем arguments как JSON-строку:
+        std::string args_json = "{}";
+        if (body.has("arguments")) {
+            // мы не имеем serialize JsonValue в этом файле — используем
+            // подложенный raw substring через query: body содержит arguments
+            // в исходном req.body, найдём и извлечём.
+            args_json = extract_arguments_field_(req.body);
+            if (args_json.empty()) args_json = "{}";
+        }
+        std::string result = shared_tool_registry_->execute(name, args_json);
+        resp.set_json("{\"result\":" + result + "}");
+        return resp;
+    }
+
+    // ========================================================================
+    // GET /api/mcp/audit?n=50 — last N audit log entries
+    // ========================================================================
+    HttpResponse handle_mcp_audit(const HttpRequest& req) {
+        HttpResponse resp;
+        int n = 50;
+        // Parse query string ?n=NN
+        if (!req.query_string.empty()) {
+            size_t p = req.query_string.find("n=");
+            if (p != std::string::npos) {
+                try { n = std::stoi(req.query_string.substr(p + 2)); } catch (...) {}
+                if (n < 1) n = 1;
+                if (n > 1000) n = 1000;
+            }
+        }
+        auto entries = AuditLog::instance().tail(n);
+        std::ostringstream oss;
+        oss << "{\"entries\":[";
+        bool first = true;
+        for (auto& line : entries) {
+            if (!first) oss << ",";
+            first = false;
+            oss << line;
+        }
+        oss << "]}";
+        resp.set_json(oss.str());
+        return resp;
+    }
+
+    // Helper: вытащить raw JSON-substring "arguments":{...} из body. Минимум
+    // дублирования; полноценный round-trip parse+serialize не доступен в этом
+    // мини-парсере, так что вырезаем substring по brace-matching.
+    static std::string extract_arguments_field_(const std::string& body) {
+        size_t p = body.find("\"arguments\"");
+        if (p == std::string::npos) return "";
+        size_t lb = body.find('{', p);
+        if (lb == std::string::npos) return "";
+        int depth = 1;
+        size_t i = lb + 1;
+        while (i < body.size() && depth > 0) {
+            char c = body[i];
+            if (c == '{') depth++;
+            else if (c == '}') depth--;
+            else if (c == '"') {
+                // skip string literal
+                i++;
+                while (i < body.size() && body[i] != '"') {
+                    if (body[i] == '\\' && i + 1 < body.size()) i++;
+                    i++;
+                }
+            }
+            i++;
+        }
+        if (depth != 0) return "";
+        return body.substr(lb, i - lb);
+    }
+
+    // ========================================================================
     // POST /api/generate — text generation (streaming NDJSON)
     // ========================================================================
     HttpResponse handle_generate(const HttpRequest& req, StreamWriter& writer) {
@@ -593,7 +795,7 @@ private:
                                prompt.find("[INST]") == std::string::npos);
 
         try {
-            generate_streaming(model, model_name, prompt, needs_template,
+            generate_streaming(model.get(), model_name, prompt, needs_template,
                               max_tokens, temperature, top_k, top_p, repeat_penalty,
                               stream, writer, t_total_start);
         } catch (const std::exception& e) {
@@ -704,7 +906,7 @@ private:
         const bool tools_mode = body.has("tools") && body["tools"].is_array();
         if (tools_mode) {
             try {
-                handle_chat_with_tools(model, model_name, body, formatted_prompt,
+                handle_chat_with_tools(model.get(), model_name, body, formatted_prompt,
                                        max_tokens, temperature, top_k, top_p,
                                        repeat_penalty, writer, t_total_start);
             } catch (const std::exception& e) {
@@ -720,7 +922,7 @@ private:
 
         // For chat, the prompt is already formatted with chat template
         try {
-            generate_streaming_chat(model, model_name, formatted_prompt,
+            generate_streaming_chat(model.get(), model_name, formatted_prompt,
                                    max_tokens, temperature, top_k, top_p, repeat_penalty,
                                    stream, writer, t_total_start);
         } catch (const std::exception& e) {
@@ -1191,9 +1393,10 @@ private:
                                 std::chrono::high_resolution_clock::time_point /*t_total_start*/) {
         std::string created_at = iso8601_now();
 
-        // Build registry: built-ins (write_file, read_file, list_dir, bash_safe).
-        // TODO Phase 2: подгружать tools[] из request body тоже.
-        ToolRegistry registry;
+        // Используем shared registry — built-ins + MCP tools уже зарегистрированы.
+        // Создание fresh registry для каждого request'а добавило бы оверхед на
+        // re-register builtins, и потеряло бы MCP-tools.
+        ToolRegistry& registry = *shared_tool_registry_;
 
         // Inject tools description в system prompt:
         // build a fresh prompt с тем же arch chat-template, но первым
@@ -1227,7 +1430,7 @@ private:
             }
         }
 
-        const int max_iters = 5;
+        const int max_iters = max_tool_iter();
         std::string final_text;
         std::string tool_log;  // accumulated tool exchanges for client visibility
 
@@ -1254,38 +1457,69 @@ private:
                 break;
             }
 
-            // Detect tool_call
-            ToolCall tc = detect_tool_call(response);
-            if (!tc.valid) {
-                // No tool call — это финальный ответ модели.
-                // Чистим any trailing assistant-end markers.
+            // Detect all <tool_call> blocks (parallel calls supported).
+            auto calls = detect_all_tool_calls(response);
+            if (calls.empty()) {
+                // No tool call — финальный ответ модели.
                 final_text = response;
                 break;
             }
 
-            // Execute tool
-            std::string tool_text = response.substr(0, tc.end_pos);
-            std::string tool_result = registry.execute(tc.name, tc.args_json);
-            tool_log += "[iter " + std::to_string(it) + "] "
-                      + tc.name + " args=" + tc.args_json
-                      + " result=" + tool_result.substr(0, 200) + "\n";
+            // Если любой из tools — external (client-supplied), агент loop
+            // не может его исполнить локально. Отдаём partial response + tool
+            // call наружу и завершаем цикл.
+            bool any_external = false;
+            for (auto& c : calls) {
+                if (registry.is_external(c.name)) { any_external = true; break; }
+            }
+            if (any_external) {
+                final_text = response;  // отдаём как есть
+                tool_log += "[iter " + std::to_string(it) + "] external tool — returning\n";
+                break;
+            }
 
-            // Append assistant turn (тулколл) + tool_response. Зависит от arch.
+            // Parallel execute (max 4 in flight).
+            auto results = parallel_execute(registry, calls, 4);
+
+            // Текст до первого tool_call'а — это natural-language "комментарий"
+            // модели; сохраняем как часть assistant turn.
+            std::string tool_text = response.substr(0, calls.back().end_pos);
+
+            // Лог
+            for (size_t i = 0; i < calls.size(); i++) {
+                tool_log += "[iter " + std::to_string(it) + "][" + std::to_string(i) + "] "
+                          + results[i].name + " args=" + results[i].args_json
+                          + " (" + std::to_string(static_cast<int>(results[i].duration_ms)) + "ms)"
+                          + " result=" + results[i].result_json.substr(0, 200) + "\n";
+            }
+
+            // Сшиваем tool_response блок. Параллельные результаты — отдаём
+            // как несколько подряд <tool_response> блоков в одном tool-turn.
+            auto build_tool_responses = [&](const std::string& opener,
+                                            const std::string& closer) {
+                std::string out;
+                for (auto& r : results) {
+                    out += opener + r.result_json + closer;
+                }
+                return out;
+            };
+
             std::string tool_response_block;
             if (arch == "qwen3") {
                 tool_response_block = tool_text + "<|im_end|>\n"
-                                    + "<|im_start|>tool\n<tool_response>\n"
-                                    + tool_result + "\n</tool_response>\n<|im_end|>\n"
+                                    + "<|im_start|>tool\n"
+                                    + build_tool_responses("<tool_response>\n", "\n</tool_response>\n")
+                                    + "<|im_end|>\n"
                                     + "<|im_start|>assistant\n";
             } else if (arch == "llama") {
                 tool_response_block = tool_text + "<|eot_id|>"
                                     + "<|start_header_id|>tool<|end_header_id|>\n\n"
-                                    + "<tool_response>\n" + tool_result + "\n</tool_response>"
+                                    + build_tool_responses("<tool_response>\n", "\n</tool_response>")
                                     + "<|eot_id|>"
                                     + "<|start_header_id|>assistant<|end_header_id|>\n\n";
             } else {
-                tool_response_block = tool_text
-                                    + "\n<tool_response>" + tool_result + "</tool_response>\n";
+                tool_response_block = tool_text + "\n"
+                                    + build_tool_responses("<tool_response>", "</tool_response>\n");
             }
             prompt += tool_response_block;
         }
@@ -1375,6 +1609,11 @@ private:
     ModelManager& models_;
     std::mutex generate_mutex_;  // Serialize generation (one at a time)
     int server_timeout_ms_;      // Per-request generation timeout (ms); 0 = none
+
+    // Shared tool registry — built-in tools + MCP-bridged tools (mcp__*).
+    // shared_ptr чтобы lifetime пережил детачнутую init-нить MCP.
+    std::shared_ptr<ToolRegistry> shared_tool_registry_;
+    std::unique_ptr<MCPManager> mcp_manager_;
 };
 
 }  // namespace promeserve
