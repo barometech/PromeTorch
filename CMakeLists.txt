@@ -200,32 +200,78 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "e2k|elbrus")
     # Fix: removed all pthread/std::thread NUMA wrappers. EML handles NUMA via OMP internally.
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -lpthread")
     add_compile_definitions(TUDA_E2K)
-    # PT_USE_EML_BLAS теперь option (default ON). OFF полезен на машинах где
-    # libeml_mt.so собран под несовместимую ISA (МЦСТ bugzilla #10075 на
-    # E16C: /lib64/libeml_mt.so помечен elbrus-2c3, dynamic loader блокирует
-    # загрузку в v6 процесс). При OFF fallback на TUDA 6×6 микроядро в
-    # tuda::blas::sgemm — медленнее ~30× но запускается везде.
-    option(PT_USE_EML_BLAS "Link EML BLAS (libeml_mt) for cblas_sgemm" ON)
+    # BLAS strategy на Эльбрусе — **три** провайдера в порядке предпочтения:
+    #
+    #   1. EML (libeml_mt.so / libeml.so) — Эльбрус Math Library от MCST.
+    #      Лучший вариант где работает (8C2: 1840 GFLOPS на 4 NUMA).
+    #      ПРОБЛЕМА: на E16C v6 /lib64/libeml*.so ВСЕ помечены elbrus-2c3
+    #      → dynamic loader блокирует runtime load. До исправления у MCST —
+    #      на E16C EML недоступен.
+    #
+    #   2. OpenBLAS — libopenblas-0.3.27-alt1.e2kv6 НАТИВНО собран под E2K v6.
+    #      Установлен в /usr/lib64/libopenblas.so. cblas_sgemm symbol есть.
+    #      Это правильный путь для E16C — НЕ TUDA fallback (юзер 2026-05-20).
+    #
+    #   3. TUDA 6×6 микроядро — последний fallback. ~30× медленнее, но не
+    #      зависит от системных libs. Через `--no-eml --no-openblas`.
+    #
+    # Auto-detection: пытаемся try_compile+try_run для EML, если runtime fail
+    # (несовместимая ISA) — switch на OpenBLAS. Если OpenBLAS нет — TUDA.
 
-    # Автодетект: если headers ИЛИ libeml_mt отсутствуют — выключаем EML
-    # (избегаем compile/link error на машинах без полного eml-devel пакета,
-    # например на E2S/4C где только libeml.so без _mt).
+    option(PT_USE_EML_BLAS "Link EML BLAS (libeml_mt) — preferred on 8C2" ON)
+    option(PT_USE_OPENBLAS "Link OpenBLAS (libopenblas) — fallback for E16C" ON)
+
+    set(_PT_BLAS_PROVIDER "tuda")  # default: TUDA microkernel
+
+    # --- Try EML first (with runtime ELF compatibility check) ---
     if(PT_USE_EML_BLAS)
         find_path(_PT_EML_HDR eml/cblas.h
             HINTS /opt/mcst/eml/include /usr/include /usr/local/include
             PATH_SUFFIXES include)
         find_library(_PT_EML_LIB NAMES eml_mt eml
             HINTS /opt/mcst/eml/lib /opt/mcst/lib64 /usr/lib64 /usr/lib)
-        if(NOT _PT_EML_HDR OR NOT _PT_EML_LIB)
-            message(WARNING "  EML headers/lib не найдены — PT_USE_EML_BLAS=OFF "
-                            "auto. Override: -DPT_USE_EML_BLAS=ON и установи "
-                            "пакет eml-devel.")
+        if(_PT_EML_HDR AND _PT_EML_LIB)
+            # Runtime ELF compatibility — try_run actually load the library
+            try_run(_PT_EML_RUN_RESULT _PT_EML_COMPILE_RESULT
+                ${CMAKE_BINARY_DIR}/_eml_probe
+                ${CMAKE_CURRENT_LIST_DIR}/cmake/eml_runtime_probe.c
+                LINK_LIBRARIES ${_PT_EML_LIB}
+                COMPILE_OUTPUT_VARIABLE _PT_EML_CO
+                RUN_OUTPUT_VARIABLE _PT_EML_RO)
+            if(_PT_EML_COMPILE_RESULT AND _PT_EML_RUN_RESULT EQUAL 0)
+                set(_PT_BLAS_PROVIDER "eml")
+                add_compile_definitions(PT_USE_EML_BLAS)
+                message(STATUS "BLAS: EML — runtime probe OK")
+            else()
+                message(WARNING "BLAS: EML headers/lib найдены, но runtime load FAIL "
+                                "(вероятно ELF ISA mismatch — например libeml_mt помечен "
+                                "elbrus-2c3 на E16C v6). Trying OpenBLAS.")
+                set(PT_USE_EML_BLAS OFF)
+            endif()
+        else()
+            message(STATUS "BLAS: EML headers/lib не найдены, trying OpenBLAS")
             set(PT_USE_EML_BLAS OFF)
         endif()
     endif()
 
-    if(PT_USE_EML_BLAS)
-        add_compile_definitions(PT_USE_EML_BLAS)
+    # --- Try OpenBLAS if EML failed ---
+    if(NOT PT_USE_EML_BLAS AND PT_USE_OPENBLAS)
+        find_library(_PT_OPENBLAS_LIB NAMES openblas openblas_pthreads openblas_genericp-r0.3.27
+            HINTS /usr/lib64 /usr/lib /opt/openblas/lib)
+        if(_PT_OPENBLAS_LIB)
+            set(_PT_BLAS_PROVIDER "openblas")
+            add_compile_definitions(PT_USE_OPENBLAS_BLAS)
+            # OpenBLAS пакет ставит свой cblas.h в /usr/include
+            find_path(_PT_OPENBLAS_HDR cblas.h HINTS /usr/include /usr/local/include)
+            if(_PT_OPENBLAS_HDR)
+                message(STATUS "BLAS: OpenBLAS — lib=${_PT_OPENBLAS_LIB} hdr=${_PT_OPENBLAS_HDR}/cblas.h")
+            else()
+                message(STATUS "BLAS: OpenBLAS lib=${_PT_OPENBLAS_LIB} (без header — declare inline)")
+            endif()
+        else()
+            set(PT_USE_OPENBLAS OFF)
+            message(STATUS "BLAS: OpenBLAS не найден — fallback TUDA 6x6 microkernel")
+        endif()
     endif()
 
     # NUMA support for multi-chip Elbrus (4-chip E8C2: 1840 GFLOPS with NUMA-aware GEMM)
@@ -687,9 +733,22 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "e2k|elbrus")
                             "/opt/mcst/eml/include. Альтернатива: "
                             "-DPT_USE_EML_BLAS=OFF (fallback на TUDA 6×6 микроядро).")
         endif()
+    elseif(PT_USE_OPENBLAS AND _PT_OPENBLAS_LIB)
+        # OpenBLAS fallback. На E16C libopenblas-0.3.27-alt1.e2kv6 нативно
+        # собран под v6 — единственный рабочий cblas_sgemm provider там.
+        target_link_libraries(aten_cpu PUBLIC ${_PT_OPENBLAS_LIB})
+        if(_PT_OPENBLAS_HDR)
+            target_include_directories(aten_cpu PUBLIC ${_PT_OPENBLAS_HDR})
+        endif()
+        # OpenBLAS API совместим с EML (тот же cblas_*). Переиспользуем
+        # PT_USE_EML_BLAS define чтобы НЕ дублировать каждый #if в hot_loops.
+        # PT_USE_OPENBLAS_BLAS — дополнительный маркер для TudaBLAS.h header
+        # include (другой путь к cblas.h, без MT_CBLAS_DEFS).
+        target_compile_definitions(aten_cpu PUBLIC PT_USE_EML_BLAS PT_USE_OPENBLAS_BLAS)
+        message(STATUS "  BLAS provider: OpenBLAS (link=${_PT_OPENBLAS_LIB})")
     else()
-        message(STATUS "  EML BLAS: OFF — fallback на TUDA 6×6 микроядро "
-                       "(медленнее ~30× в GEMM, но не зависит от libeml).")
+        message(STATUS "  BLAS provider: TUDA 6×6 микроядро (~30× медленнее GEMM, "
+                       "но не зависит от внешних libs).")
     endif()
 
 endif()
