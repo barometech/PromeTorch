@@ -1,0 +1,125 @@
+name: Build & Publish wheels
+
+# Запускается на:
+#   - tag v* — публичный релиз на PyPI
+#   - manual workflow_dispatch — для тестового билда без публикации
+#   - push в main → собирает sdist+test wheels (не публикует)
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      publish_target:
+        description: "Куда публиковать (none | test-pypi | pypi)"
+        required: true
+        default: "none"
+        type: choice
+        options:
+          - none
+          - test-pypi
+          - pypi
+
+jobs:
+  # ==========================================================================
+  # SDIST — source distribution (просто tar.gz исходников + pyproject.toml).
+  # Это fallback для платформ где нет prebuilt wheel — pip соберёт из sources.
+  # ==========================================================================
+  build_sdist:
+    name: Build source distribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { submodules: recursive }
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - name: Install build
+        run: pip install build
+      - name: Build sdist
+        run: python -m build --sdist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  # ==========================================================================
+  # WHEELS — prebuilt binary distributions через cibuildwheel.
+  # Matrix: 3 OS × 5 Python = 15 wheels.
+  # ==========================================================================
+  build_wheels:
+    name: Wheel for ${{ matrix.os }} / ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2022, macos-13]
+        python: ["cp39", "cp310", "cp311", "cp312", "cp313"]
+    steps:
+      - uses: actions/checkout@v4
+        with: { submodules: recursive }
+
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+
+      - name: Build wheel with cibuildwheel
+        uses: pypa/cibuildwheel@v2.21
+        env:
+          CIBW_BUILD: ${{ matrix.python }}-*
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}-${{ matrix.python }}
+          path: wheelhouse/*.whl
+
+  # ==========================================================================
+  # PUBLISH — отправка на PyPI / TestPyPI через Trusted Publishing (OIDC).
+  # Без долгосрочных API-tokens — авторизация через GitHub identity.
+  # ==========================================================================
+  publish_pypi:
+    name: Publish to PyPI
+    needs: [build_sdist, build_wheels]
+    runs-on: ubuntu-latest
+    if: |
+      startsWith(github.ref, 'refs/tags/v') ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_target == 'pypi')
+    environment:
+      name: pypi
+      url: https://pypi.org/p/promethorch
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: ls -la dist/
+      - name: Publish via Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          # repository-url для main PyPI берётся по умолчанию.
+
+  publish_testpypi:
+    name: Publish to TestPyPI (smoke test)
+    needs: [build_sdist, build_wheels]
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'workflow_dispatch' &&
+      github.event.inputs.publish_target == 'test-pypi'
+    environment:
+      name: test-pypi
+      url: https://test.pypi.org/p/promethorch
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          repository-url: https://test.pypi.org/legacy/

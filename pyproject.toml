@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=64", "wheel", "pybind11>=2.11", "cmake>=3.20"]
-build-backend = "setuptools.build_meta"
+requires = ["scikit-build-core>=0.8", "pybind11>=2.11"]
+build-backend = "scikit_build_core.build"
 
 [project]
 name = "promethorch"
@@ -44,7 +44,7 @@ classifiers = [
 dependencies = ["numpy>=1.20"]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.0", "numpy"]
+dev = ["pytest>=7.0", "numpy", "build>=1.0", "twine>=4.0"]
 docs = ["sphinx>=5.0", "sphinx-rtd-theme"]
 
 [project.urls]
@@ -53,6 +53,57 @@ Repository = "https://github.com/barometech/PromeTorch"
 Issues = "https://github.com/barometech/PromeTorch/issues"
 Documentation = "https://github.com/barometech/PromeTorch/blob/main/README.md"
 
-[tool.setuptools]
-packages = ["promethorch"]
-package-dir = {"promethorch" = "python/promethorch"}
+# ============================================================================
+# scikit-build-core configuration
+# ============================================================================
+[tool.scikit-build]
+# CMake → wheel pipeline. Дёргает корневой CMakeLists.txt с включённым
+# PT_BUILD_PYTHON=ON. Все остальные опции (CUDA, NMCard и т.д.) выключены —
+# wheel в PyPI это CPU-only baseline. CUDA / Elbrus / NMCard builds — это
+# отдельные dist-каналы (см. docs/PACKAGING.md в будущем).
+build-dir = "build/{wheel_tag}"
+cmake.version = ">=3.20"
+cmake.build-type = "Release"
+cmake.verbose = false
+build.verbose = false
+logging.level = "INFO"
+
+# Python package layout — где лежит `import promethorch`-овский код.
+wheel.packages = ["python/promethorch"]
+
+# Что включать в wheel install (.so/.dll/.pyd артефакты).
+install.components = ["python"]
+
+[tool.scikit-build.cmake.define]
+PT_BUILD_PYTHON = "ON"
+PT_BUILD_TESTS = "OFF"
+PT_USE_CUDA = "OFF"
+PT_USE_NMCARD = "OFF"
+PT_USE_LINQ = "OFF"
+PT_USE_NMQUAD = "OFF"
+PT_BUILD_SHARED_LIBS = "ON"
+
+# ============================================================================
+# cibuildwheel — производит manylinux2014 + Windows + macOS wheels.
+# Activated через `pip install cibuildwheel && cibuildwheel` либо CI.
+# ============================================================================
+[tool.cibuildwheel]
+build = ["cp39-*", "cp310-*", "cp311-*", "cp312-*", "cp313-*"]
+skip = [
+    "*-musllinux_*",        # Alpine Linux — редко, скипаем для скорости
+    "*-manylinux_i686",     # 32-bit x86 — не поддерживаем
+    "*-win32",              # 32-bit Windows — то же
+    "pp*",                  # PyPy — отдельная сборка, требует доп. testing
+]
+test-command = "python -c 'import promethorch; print(promethorch.__version__)'"
+test-skip = ["*-macosx_arm64", "*-macosx_universal2:arm64"]
+archs = ["auto64"]
+
+[tool.cibuildwheel.linux]
+manylinux-x86_64-image = "manylinux_2_28"
+before-all = "yum install -y cmake gcc-c++ git || apt-get install -y cmake g++ git"
+environment = { CXXFLAGS = "-O2", CMAKE_BUILD_PARALLEL_LEVEL = "4" }
+
+[tool.cibuildwheel.windows]
+before-all = "echo Windows build"
+environment = { CMAKE_BUILD_PARALLEL_LEVEL = "4" }
