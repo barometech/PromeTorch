@@ -12,7 +12,7 @@
 [![Docker](https://img.shields.io/badge/Docker-Astra%20%7C%20ALT%20%7C%20RED%20%7C%20Elbrus-informational.svg)](docker/)
 
 > **Single-dev PyTorch rewrite.** Native Эльбрус E8C2 VLIW + NM Card Mini +
-> NVIDIA A100. Real autograd (119 backward ops), 16 optimizers, ONNX export,
+> NVIDIA A100. Real autograd (112 backward ops), 16 optimizers, ONNX export,
 > PyTorch-compatible `.pt` I/O. ~35-45 % PyTorch practical surface. 137K строк.
 >
 > 📊 **[RESULTS.md](RESULTS.md) — single-page canonical benchmarks.**
@@ -22,7 +22,7 @@
 > On NM Card Mini emulator: MNIST 88.94 %.
 
 > PyTorch-совместимый обучающий фреймворк на C++17/CUDA с широкой dtype-поддержкой.
-> Real autograd (119 backward ops + gradient hooks + anomaly mode + create_graph
+> Real autograd (112 backward ops + gradient hooks + anomaly mode + create_graph
 > double-bwd), **16 optimizers** (SGD/Adam/AdamW/RMSprop + Lion/Sophia/LAMB/
 > Adafactor/NAdam/RAdam/Adagrad/Adadelta/Adamax/AdamKiller/ASGD/LBFGS),
 > **16 LR schedulers**, CPU SIMD + CUDA (cuBLAS/cuDNN 8/FP16 kernels),
@@ -702,7 +702,7 @@ CPU-portable, compile на Elbrus LCC. Плюс EMA + clip_grad_norm_ (`torch/op
 ## Known Limitations — честный gap от PyTorch
 
 ### Работает + протестировано на всех поддерживаемых backend'ах
-- Core autograd (119 backward + hooks + anomaly + create_graph)
+- Core autograd (112 backward + hooks + anomaly + create_graph)
 - 16 optimizers (как в строке 93 таблицы выше — без повтора кол-ва из разных мест)
 - CPU SIMD (AVX2/NEON/E2K)
 - Эльбрус VLIW + NM Card Mini emulator (Q16.16)
@@ -987,7 +987,7 @@ PromeTorch предоставляет API, максимально приближ
 * **Gradient computation:** `torch::autograd::backward()`, `NoGradGuard`, `EnableGradGuard`.
 * **Custom Functions:** `torch::autograd::Function<Derived>` + `FunctionCtx` + `save_for_backward()`.
 * **Gradient Checkpointing:** `torch::utils::checkpoint(fn, inputs)`.
-* **119 backward functions** для всех операций.
+* **112 backward functions** для всех операций.
 
 ### 5. Загрузка данных (`torch::data`)
 * **Датасеты:** `Dataset`, `TensorDataset`, `MapDataset`, `ConcatDataset`, `SubsetDataset`, `random_split`.
@@ -1024,7 +1024,7 @@ Web UI с streaming chat, markdown rendering, syntax highlighting.
 │  90 модулей   16 opt    DataLoader  GradScaler  PTOR   │
 ├─────────────────────────────────────────────────────────┤
 │                  torch/csrc/autograd/                   │
-│  Engine   Node   Edge   119 backward функций           │
+│  Engine   Node   Edge   112 backward функций           │
 ├─────────────────────────────────────────────────────────┤
 │                aten/src/ATen/ (операции)                │
 │  MathOps  ReduceOps  LinearAlgebra  ShapeOps  IndexOps │
@@ -1059,7 +1059,7 @@ Web UI с streaming chat, markdown rendering, syntax highlighting.
 
 ### Операции (ATen) — ~18,000 строк
 
-149 тензорных операций с SIMD-оптимизацией + 132 CUDA ядра:
+149 тензорных операций с SIMD-оптимизацией + 149 CUDA ядра:
 - **Математика** — 20 unary (exp, log, sin, cos, tanh, sigmoid...) + 12 binary (add, mul, div, pow...)
 - **Редукции** — sum, mean, max, min, var, std, argmax, argmin, norm, prod (с dim и keepdim)
 - **Линейная алгебра** — mm, bmm, mv, dot, outer, addmm, LU, QR, SVD, Cholesky, solve, det
@@ -1072,7 +1072,7 @@ Web UI с streaming chat, markdown rendering, syntax highlighting.
 
 Reverse-mode автоматическое дифференцирование:
 - **Engine** — топологическая сортировка, cached GraphTask (reuse между backward)
-- **119 backward-функций** — Math(46) + LinAlg(13) + Shape(21) + Reduce(16) + Index(2) + Fused(4) + Conv(4) + AccumulateGrad
+- **112 backward-функций** — Math + LinAlg + Shape + Reduce + Index + Fused + Conv + AccumulateGrad
 - **Fused backward** — FusedLinearRelu (4 nodes → 1), FusedMLP (12 nodes → 1), PrecomputedGrad (zero-compute backward)
 - **NodePool** — thread-local object pool для backward nodes (zero malloc в hot path)
 - **SmallEdgeList<4>** — inline edges без heap allocation (99% ops)
@@ -1293,7 +1293,7 @@ c10/                          Ядро: Allocator, Device, Storage, TensorImpl, 
   nmcard/                     NMCardAllocator (caching, PrivateUse1)
   linq/                       LinQAllocator (caching, PrivateUse2)
 
-aten/src/ATen/                Операции (120+ CPU, 132 CUDA ядра)
+aten/src/ATen/                Операции (120+ CPU, 149 CUDA ядра)
   core/                       Tensor.h, TensorFactory.h
   native/cpu/                 MathOps, ReduceOps, LinearAlgebra, ShapeOps, IndexOps
     tuda/                     TUDA: VecF, TudaBLAS, TudaMath, TudaConfig
@@ -1306,7 +1306,7 @@ aten/src/ATen/                Операции (120+ CPU, 132 CUDA ядра)
   nmcard/                     NMCardEmulator, NMCardOps, NMCardHardware
 
 torch/                        Фреймворк
-  csrc/autograd/              Engine, Node, Edge, 119 backward функций
+  csrc/autograd/              Engine, Node, Edge, 112 backward функций
   nn/modules/                 64+ NN модулей (16 файлов)
   optim/                      16 оптимизаторов + 16 LR schedulers + EMA + clip_grad
   data/                       Dataset, DataLoader, Samplers, Transforms
