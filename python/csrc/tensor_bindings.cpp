@@ -664,17 +664,18 @@ void init_tensor_bindings(py::module& m) {
     // Раньше signature был только py::array → tensor([1,2,3]) с Python list
     // падал на pybind11 overload resolution: "incompatible function arguments".
     m.def("tensor", [](py::object data, py::object dtype, py::object device, bool requires_grad) {
-        at::Tensor t;
-        // 1. Уже at::Tensor — копируем + переводим
-        if (py::isinstance<at::Tensor>(data)) {
-            t = data.cast<at::Tensor>().clone();
-            if (requires_grad) t.set_requires_grad(true);
-        } else {
-            // 2. Конвертируем что угодно через numpy — list/tuple/scalar/array
+        // Универсальный путь: всё → numpy.asarray → numpy_to_tensor.
+        // Поддерживает: list, tuple, scalar (int/float/bool), numpy array.
+        py::array arr;
+        try {
+            // Если уже numpy — без копии
+            arr = py::cast<py::array>(data);
+        } catch (const py::cast_error&) {
+            // list/tuple/scalar → np.asarray
             py::module np = py::module::import("numpy");
-            py::array arr = np.attr("asarray")(data);
-            t = numpy_to_tensor(arr, requires_grad);
+            arr = py::cast<py::array>(np.attr("asarray")(data));
         }
+        at::Tensor t = numpy_to_tensor(arr, requires_grad);
         if (!dtype.is_none()) {
             t = t.to(dtype.cast<c10::ScalarType>());
         }
