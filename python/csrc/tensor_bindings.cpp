@@ -522,8 +522,10 @@ void init_tensor_bindings(py::module& m) {
                 throw py::value_error(
                     "Boolean value of Tensor with more than one element is ambiguous");
             }
-            at::Tensor tc = t.contiguous().to(c10::ScalarType::Bool);
-            return *static_cast<const bool*>(tc.data_ptr());
+            // Tensor::to(Bool) — отдельный baseline bug ('Unsupported dtype: Bool').
+            // Конвертим в Double и сравниваем с 0.0 — корректная Python-bool семантика.
+            at::Tensor tc = t.contiguous().to(c10::ScalarType::Double);
+            return *static_cast<const double*>(tc.data_ptr()) != 0.0;
         })
 
         // cumsum
