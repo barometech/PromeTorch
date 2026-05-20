@@ -4,9 +4,9 @@
  *
  * См. CMakeLists.txt: BLAS strategy.
  */
-extern void cblas_sgemm(int, int, int, int, int, int,
-                        float, const float*, int,
-                        const float*, int, float, float*, int);
+extern "C" void cblas_sgemm(int, int, int, int, int, int,
+                            float, const float*, int,
+                            const float*, int, float, float*, int);
 
 int main(void) {
     float a[4] = {1, 2, 3, 4};
