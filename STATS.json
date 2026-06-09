@@ -1,0 +1,11 @@
+{
+  "head": "59822c7",
+  "backward_functions": 119,
+  "cuda_kernels": 149,
+  "optimizers": 15,
+  "lr_schedulers": 16,
+  "tests": 833,
+  "lines_cpp_h": 159862,
+  "lines_cuda": 7553,
+  "lines_python": 15829
+}
