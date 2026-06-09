@@ -1,0 +1,124 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "CMAKE_CXX_STANDARD": "17"
+      }
+    },
+
+    {
+      "name": "linux-x86_64",
+      "inherits": "base",
+      "displayName": "Linux x86_64 (gcc, AVX2/FMA)",
+      "cacheVariables": {
+        "PT_USE_AVX2": "ON",
+        "PT_USE_OPENMP": "ON",
+        "PT_USE_CUDA": "OFF"
+      }
+    },
+    {
+      "name": "cuda",
+      "inherits": "linux-x86_64",
+      "displayName": "Linux x86_64 + CUDA",
+      "cacheVariables": {
+        "PT_USE_CUDA": "ON",
+        "CMAKE_CUDA_ARCHITECTURES": "75;80;89"
+      }
+    },
+
+    {
+      "name": "windows-cpu",
+      "inherits": "base",
+      "displayName": "Windows x64 (MSVC, CPU)",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "cacheVariables": {
+        "PT_USE_AVX2": "ON",
+        "PT_USE_OPENMP": "OFF",
+        "PT_USE_CUDA": "OFF"
+      }
+    },
+    {
+      "name": "windows-cuda",
+      "inherits": "windows-cpu",
+      "displayName": "Windows x64 + CUDA (cuDNN)",
+      "cacheVariables": {
+        "PT_USE_CUDA": "ON",
+        "PT_USE_CUDNN": "ON"
+      }
+    },
+
+    {
+      "name": "elbrus",
+      "inherits": "base",
+      "displayName": "Elbrus E2K (lcc, auto-detect ISA + BLAS)",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/e2k-elbrus.cmake",
+      "cacheVariables": {
+        "PT_USE_TUDA": "ON",
+        "PT_USE_CUDA": "OFF"
+      }
+    },
+    {
+      "name": "elbrus-no-eml",
+      "inherits": "elbrus",
+      "displayName": "Elbrus E2K без EML (форсит OpenBLAS→TUDA fallback)",
+      "cacheVariables": {
+        "PT_USE_EML_BLAS": "OFF"
+      }
+    },
+
+    {
+      "name": "alt-x86_64",
+      "inherits": "base",
+      "displayName": "ALT Linux x86_64",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/x86_64-alt.cmake"
+    },
+    {
+      "name": "astra-x86_64",
+      "inherits": "base",
+      "displayName": "Astra Linux x86_64",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/x86_64-astra.cmake"
+    },
+    {
+      "name": "redos-x86_64",
+      "inherits": "base",
+      "displayName": "RED OS x86_64",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/x86_64-redos.cmake"
+    },
+
+    {
+      "name": "baikal-m",
+      "inherits": "base",
+      "displayName": "Baikal-M (aarch64, NEON, cross from x86)",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/aarch64-baikal-m.cmake"
+    },
+    {
+      "name": "baikal-s",
+      "inherits": "base",
+      "displayName": "Baikal-S (aarch64 server, cross from x86)",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/aarch64-baikal-s.cmake"
+    }
+  ],
+
+  "buildPresets": [
+    { "name": "linux-x86_64", "configurePreset": "linux-x86_64", "configuration": "Release" },
+    { "name": "cuda",         "configurePreset": "cuda",         "configuration": "Release" },
+    { "name": "windows-cpu",  "configurePreset": "windows-cpu",  "configuration": "Release" },
+    { "name": "windows-cuda", "configurePreset": "windows-cuda", "configuration": "Release" },
+    { "name": "elbrus",       "configurePreset": "elbrus",       "configuration": "Release" },
+    { "name": "elbrus-no-eml","configurePreset": "elbrus-no-eml","configuration": "Release" },
+    { "name": "alt-x86_64",   "configurePreset": "alt-x86_64",   "configuration": "Release" },
+    { "name": "astra-x86_64", "configurePreset": "astra-x86_64", "configuration": "Release" },
+    { "name": "redos-x86_64", "configurePreset": "redos-x86_64", "configuration": "Release" },
+    { "name": "baikal-m",     "configurePreset": "baikal-m",     "configuration": "Release" },
+    { "name": "baikal-s",     "configurePreset": "baikal-s",     "configuration": "Release" }
+  ]
+}
