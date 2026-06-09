@@ -30,21 +30,43 @@ jobs:
       - name: Build c10 + aten_cpu + torch_autograd
         run: cmake --build build --target torch_autograd -j $(nproc)
 
-      - name: Build examples (MNIST, transformer, ViT, Shakespeare, PIR)
-        run: |
-          cmake --build build --target train_mnist_mlp -j $(nproc) || true
-          cmake --build build --target train_transformer -j $(nproc) || true
-          cmake --build build --target train_vit -j $(nproc) || true
-          cmake --build build --target shakespeare_train -j $(nproc) || true
-          cmake --build build --target train_pir -j $(nproc) || true
-
+      # Core unit tests — БЕЗ `|| true`. Это контракт: ядро обязано проходить
+      # тесты, иначе badge краснеет (audit 2026-05-20 _build_ci #6 / 2026-06-02).
       - name: Run c10 unit tests
         working-directory: build
-        run: ctest --output-on-failure -R c10_tests || true
+        run: ctest --output-on-failure -R c10_tests
 
       - name: Run ATen unit tests
         working-directory: build
-        run: ctest --output-on-failure -R aten_tests || true
+        run: ctest --output-on-failure -R aten_tests
+
+  # Examples собираются отдельной advisory-job: видны в списке проверок, но
+  # НЕ валят основной build (они зависят от per-platform toolchain, часть —
+  # known-broken, например train_mnist_cnn 12.55% random acc). Раньше были
+  # `|| true` внутри основной job — это маскировало и реальные регрессии ядра.
+  examples-advisory:
+    runs-on: ubuntu-latest
+    name: Examples build (advisory, non-blocking)
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build libomp-dev
+      - name: Configure
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPT_USE_CUDA=OFF -DPT_USE_OPENMP=ON \
+            -DPT_USE_AVX2=ON -DPT_BUILD_TESTS=OFF
+      - name: Build examples (advisory)
+        run: |
+          for t in train_mnist_mlp train_transformer train_vit shakespeare_train train_pir; do
+            echo "::group::$t"
+            cmake --build build --target "$t" -j "$(nproc)" || echo "::warning::example $t failed to build"
+            echo "::endgroup::"
+          done
 
   build-windows-cpu:
     runs-on: windows-latest

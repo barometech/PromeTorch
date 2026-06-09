@@ -250,6 +250,9 @@ PYBIND11_MODULE(_C, m) {
 #endif
     }, "Check if Apple MPS backend is available");
 
-    // Version info
-    m.attr("__version__") = "0.2.0";
+    // Version info. ДОЛЖНА совпадать с pyproject.toml [project].version
+    // (single source of truth для PEP440-строки). Numeric C++ версия —
+    // в c10/macros/Macros.h (PT_VERSION_STRING="0.1.0", без alpha-суффикса,
+    // т.к. CMake project() VERSION принимает только major.minor.patch).
+    m.attr("__version__") = "0.1.0a1";
 }

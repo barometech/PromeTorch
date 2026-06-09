@@ -45,7 +45,50 @@ jobs:
     - name: Build core
       run: cmake --build build --config Release --target torch_autograd -j 4
 
+    # Tests must really pass — раньше тут стоял continue-on-error: true,
+    # из-за чего зелёный badge ничего не гарантировал (audit 2026-05-20
+    # _build_ci #6). Если ядро не проходит тесты — CI обязан краснеть.
     - name: Run C++ Tests
       working-directory: build
-      continue-on-error: true
       run: ctest --output-on-failure -C Release
+
+  # STATS drift gate — STATS.md/json должны совпадать с реальным кодом.
+  # Ловит расхождения числовых claim'ов (audit 2026-06-02 _claims_drift:
+  # backward 112/119/121, CUDA 92/99/149 в разных местах README).
+  stats-check:
+    name: STATS drift check
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    - name: Verify STATS.md/json up to date
+      run: python scripts/gen_stats.py --check
+
+  # PromeServe integration tests (tests/promeserve/). Раньше гонялись только
+  # вручную через scripts/test_promeserve_tools.sh — самый ценный незакрытый
+  # CI-gap (audit 2026-06-02 _cicd). Здесь — без continue-on-error: security
+  # regression (path traversal) ОБЯЗАНА проходить.
+  promeserve-pytest:
+    name: PromeServe integration tests
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    - name: Install deps
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake ninja-build libomp-dev
+        python -m pip install --upgrade pip pytest
+    - name: Build promeserve
+      run: |
+        cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+          -DPT_USE_CUDA=OFF -DPT_BUILD_TESTS=OFF
+        cmake --build build --target promeserve -j "$(nproc)"
+    - name: Run PromeServe pytest battery
+      env:
+        PROMESERVE_BIN: ${{ github.workspace }}/build/promeserve/promeserve
+      run: pytest -v tests/promeserve/
