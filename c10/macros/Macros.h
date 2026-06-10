@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <string>
 #include <sstream>
@@ -32,15 +32,12 @@
     #define PT_COMPILER_UNKNOWN 1
 #endif
 
-// Export/Import macros for shared libraries
+// Export/Import macros.
+// Windows AMD CPU local build: static libraries, no DLL import/export.
 #if defined(PT_PLATFORM_WINDOWS)
-    #if defined(PT_BUILD_SHARED_LIBS)
-        #define PT_API __declspec(dllexport)
-    #else
-        #define PT_API __declspec(dllimport)
-    #endif
+#define PT_API
 #else
-    #define PT_API __attribute__((visibility("default")))
+#define PT_API __attribute__((visibility("default")))
 #endif
 
 // Force inline
@@ -212,3 +209,4 @@ constexpr size_t pt_array_size(const T (&)[N]) noexcept {
 #else
     #define PT_OMP_ENABLED 0
 #endif
+
