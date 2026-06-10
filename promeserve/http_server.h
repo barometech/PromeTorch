@@ -303,7 +303,19 @@ public:
         struct sockaddr_in addr;
         std::memset(&addr, 0, sizeof(addr));
         addr.sin_family = AF_INET;
-        addr.sin_addr.s_addr = INADDR_ANY;
+        // SECURITY (audit 2026-06-02 _security #9): по умолчанию bind на
+        // 127.0.0.1, НЕ 0.0.0.0. Сервер с tool-calling/MCP на LAN без auth =
+        // RCE-вектор. Явное открытие наружу — через PROMESERVE_HOST=0.0.0.0
+        // (осознанное решение оператора, а не дефолт).
+        const char* host_env = std::getenv("PROMESERVE_HOST");
+        const char* bind_host = host_env ? host_env : "127.0.0.1";
+        if (::inet_pton(AF_INET, bind_host, &addr.sin_addr) != 1) {
+            // Невалидный хост → безопасный fallback на loopback.
+            std::cerr << "[PromeServe] invalid PROMESERVE_HOST='" << bind_host
+                      << "', binding 127.0.0.1" << std::endl;
+            ::inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+            bind_host = "127.0.0.1";
+        }
         addr.sin_port = htons(static_cast<uint16_t>(port));
 
         if (::bind(listen_sock_, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) != 0) {
@@ -335,10 +347,14 @@ public:
             workers_.emplace_back([this]() { worker_loop(); });
         }
 
-        std::cout << "[PromeServe] Listening on http://0.0.0.0:" << port
+        std::cout << "[PromeServe] Listening on http://" << bind_host << ":" << port
                   << " (workers=" << n_workers
                   << " queue=" << config_.max_queue_depth
                   << " timeout=" << config_.server_timeout_ms << "ms)" << std::endl;
+        if (std::string(bind_host) == "127.0.0.1") {
+            std::cout << "[PromeServe] bound to loopback only — для доступа извне: "
+                      << "PROMESERVE_HOST=0.0.0.0 (только в доверенной сети!)" << std::endl;
+        }
 
         accept_loop();
     }

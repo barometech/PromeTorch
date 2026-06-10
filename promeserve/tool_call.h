@@ -37,6 +37,7 @@
 #include <sstream>
 #include <regex>
 #include <cstdlib>
+#include <filesystem>
 #include <cstring>
 #include <cctype>
 #include <chrono>
@@ -515,14 +516,39 @@ public:
         return root;
     }
 
+    // Hardened sandbox: leading-slash strip + ".." reject + weakly_canonical
+    // prefix-check. Последнее закрывает symlink-escape (файл внутри root,
+    // указывающий наружу) и любые edge-cases нормализации — итоговый
+    // реальный путь ОБЯЗАН лежать под root (audit 2026-06-02 _security #1,
+    // RCE chain: write_file ../../.promeserve/mcp.json → MCP exec).
     static std::string sandbox_path(const std::string& user_path) {
+        namespace fs = std::filesystem;
         std::string root = get_tool_root();
         std::string p = user_path;
         while (!p.empty() && (p[0] == '/' || p[0] == '\\')) p.erase(0, 1);
         if (p.find("..") != std::string::npos) {
-            throw std::runtime_error("path traversal denied");
+            throw std::runtime_error("path traversal denied (.. component)");
         }
-        return root + "/" + p;
+        fs::path full = fs::path(root) / p;
+        // weakly_canonical резолвит существующие компоненты (включая
+        // симлинки), не требуя существования хвоста (для write_file).
+        std::error_code ec;
+        fs::path canon_root = fs::weakly_canonical(fs::path(root), ec);
+        fs::path canon_full = fs::weakly_canonical(full, ec);
+        if (ec) {
+            // Не удалось нормализовать — безопаснее отказать.
+            throw std::runtime_error("path resolution failed");
+        }
+        // Проверяем что canon_full под canon_root (по компонентам, чтобы
+        // /root-evil не прошёл префикс /root).
+        auto rb = canon_root.begin(), re = canon_root.end();
+        auto fb = canon_full.begin();
+        for (; rb != re; ++rb, ++fb) {
+            if (fb == canon_full.end() || *fb != *rb) {
+                throw std::runtime_error("path escapes sandbox root");
+            }
+        }
+        return canon_full.string();
     }
 
 private:
