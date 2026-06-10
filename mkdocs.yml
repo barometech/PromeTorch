@@ -1,0 +1,56 @@
+site_name: PromeTorch
+site_description: Deep learning framework с нативной поддержкой российских CPU (Эльбрус, Baikal) и ускорителей (NM Card)
+site_author: PromeTorch Contributors
+repo_url: https://github.com/barometech/PromeTorch
+repo_name: barometech/PromeTorch
+docs_dir: docs
+site_dir: site
+
+theme:
+  name: material
+  language: ru
+  palette:
+    - scheme: default
+      primary: deep orange
+      accent: orange
+      toggle:
+        icon: material/weather-night
+        name: Тёмная тема
+    - scheme: slate
+      primary: deep orange
+      accent: orange
+      toggle:
+        icon: material/weather-sunny
+        name: Светлая тема
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - search.suggest
+
+markdown_extensions:
+  - admonition
+  - tables
+  - fenced_code
+  - codehilite
+  - toc:
+      permalink: true
+
+# User-facing навигация. AI-internal файлы (CLAUDE.md, JOURNAL.md,
+# AVOIDRECURSION.md, docs/audit|research|strategy) НЕ включены — это
+# dev-заметки, не для пользователей (docs consolidation plan 2026-06-03).
+nav:
+  - Главная: index.md
+  - Сборка:
+      - Единый вход: BUILD.md
+      - Эльбрус (E2K): BUILD_ELBRUS.md
+      - Windows: BUILD_WINDOWS.md
+      - Упаковка / PyPI: PACKAGING.md
+  - Платформы:
+      - ISA × intrinsics × BLAS: elbrus_isa/PERFORMANCE_BY_ISA.md
+      - ROCm/HIP: ROCM.md
+  - Квантизация:
+      - pre-SINQ GGUF: SINQ_INTEGRATION.md
+  - Сравнение с PyTorch: COMPARISON_VS_PYTORCH_RU.md
+  - PromeServe (LLM сервер):
+      - MCP интеграция: MCP_INTEGRATION.md
