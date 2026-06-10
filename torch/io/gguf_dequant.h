@@ -473,52 +473,66 @@ inline void dequantize_q2_k(const void* src, float* dst, int64_t n) {
 // Super-block: hmask[32] + qs[64] + scales[12] + d(fp16) = 110B per 256 values
 // ============================================================================
 
+// Bit-exact с GGML reference dequantize_row_q3_K (ggml-quants.c).
+// block_q3_K (110 байт, QK_K=256): hmask[32] | qs[64] | scales[12] | d(fp16,2).
+//   * 16 6-битных scales упакованы в 12 байт через kmask1/kmask2-трюк,
+//     каждый смещён на -32.
+//   * Веса: 2 низких бита из qs (shift 0/2/4/6) + 1 высокий бит из hmask
+//     (инвертированный: бит установлен → 0, иначе → 4), итог в диапазоне [-4..3].
+// Прошлая версия была помечена "Q3_K stub — full unpack TBD" и содержала
+// 4 бага (qs[%64], hmask[%32], неверный scales packing, hm<<=1 не там) →
+// silently garbage на любой Q3_K модели (DeepSeek/Mistral-Large). audit
+// 2026-06-02 _quant_correctness CRITICAL.
 inline void dequantize_q3_k(const void* src, float* dst, int64_t n) {
     const int nb = static_cast<int>(n / QK_K);
     const uint8_t* data = static_cast<const uint8_t*>(src);
 
+    const uint32_t kmask1 = 0x03030303u;
+    const uint32_t kmask2 = 0x0f0f0f0fu;
+
     for (int i = 0; i < nb; ++i) {
         const uint8_t* block = data + i * 110;
-
-        const uint8_t* hmask = block;              // 32 bytes
-        const uint8_t* qs = block + 32;            // 64 bytes
-        const uint8_t* scales_raw = block + 96;    // 12 bytes
+        const uint8_t* hm_base = block;            // hmask[32]
+        const uint8_t* q_base  = block + 32;       // qs[64]
+        const uint8_t* sc_raw  = block + 96;       // scales[12]
 
         uint16_t d_bits;
         std::memcpy(&d_bits, block + 108, 2);
-        const float d = fp16_to_fp32(d_bits);
+        const float d_all = fp16_to_fp32(d_bits);
 
-        // Decode 16 scales from 12 bytes (each 6-bit, stored packed)
-        int8_t scales[16];
-        for (int j = 0; j < 8; ++j) {
-            scales[j] = static_cast<int8_t>((scales_raw[j % 6 < 4 ? j % 4 : j % 4 + 4]) & 0x3F);
-        }
-        // Simplified: for initial correctness, use direct byte reads
-        // Scales packing for Q3_K is complex; approximate with low bits
-        for (int j = 0; j < 4; ++j) {
-            scales[j + 0] = static_cast<int8_t>((scales_raw[j] & 0xF) | ((scales_raw[j + 8] & 0x03) << 4)) - 32;
-            scales[j + 4] = static_cast<int8_t>((scales_raw[j] >> 4)  | ((scales_raw[j + 8] & 0x0C) << 2)) - 32;
-            scales[j + 8] = static_cast<int8_t>((scales_raw[j + 4] & 0xF) | ((scales_raw[j + 8] & 0x30) >> 0)) - 32;
-            scales[j +12] = static_cast<int8_t>((scales_raw[j + 4] >> 4)  | ((scales_raw[j + 8] & 0xC0) >> 2)) - 32;
-        }
+        // Распаковка 16 6-битных scales (kmask-трюк из GGML).
+        uint32_t aux[4];
+        std::memcpy(aux, sc_raw, 12);
+        const uint32_t tmp = aux[2];
+        aux[2] = ((aux[0] >> 4) & kmask2) | (((tmp >> 4) & kmask1) << 4);
+        aux[3] = ((aux[1] >> 4) & kmask2) | (((tmp >> 6) & kmask1) << 4);
+        aux[0] = ( aux[0]       & kmask2) | (((tmp >> 0) & kmask1) << 4);
+        aux[1] = ( aux[1]       & kmask2) | (((tmp >> 2) & kmask1) << 4);
+        const int8_t* scales = reinterpret_cast<const int8_t*>(aux);
 
         float* y = dst + i * QK_K;
+        const uint8_t* q = q_base;
+        const uint8_t* hm = hm_base;
+        uint8_t m = 1;
+        int is = 0;
 
-        int qi = 0;
-        uint8_t hm = 1;
-        for (int j = 0; j < QK_K; j += 16) {
-            int is = j / 16;
-            float dl = d * scales[is];
-            for (int l = 0; l < 16; ++l) {
-                int byte_idx = qi + l / 2;
-                // 2-bit base from qs (Q3_K stub — full unpack TBD)
-                uint8_t q2 = (qs[byte_idx % 64] >> (2 * (l % 4))) & 3;
-                // High bit from hmask
-                int h = (hmask[(j + l) % 32] & hm) ? 0 : 4;
-                y[j + l] = dl * (static_cast<int>(q2) + h - 4);
+        for (int nn = 0; nn < QK_K; nn += 128) {
+            int shift = 0;
+            for (int j = 0; j < 4; ++j) {
+                float dl = d_all * (scales[is++] - 32);
+                for (int l = 0; l < 16; ++l) {
+                    *y++ = dl * (static_cast<int8_t>((q[l + 0] >> shift) & 3)
+                                 - ((hm[l + 0] & m) ? 0 : 4));
+                }
+                dl = d_all * (scales[is++] - 32);
+                for (int l = 0; l < 16; ++l) {
+                    *y++ = dl * (static_cast<int8_t>((q[l + 16] >> shift) & 3)
+                                 - ((hm[l + 16] & m) ? 0 : 4));
+                }
+                shift += 2;
             }
-            qi += 8;
-            if (j % 32 == 16) hm <<= 1;
+            q += 32;
+            m <<= 1;
         }
     }
 }
