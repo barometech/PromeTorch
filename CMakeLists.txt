@@ -1,5 +1,12 @@
 ﻿cmake_minimum_required(VERSION 3.18)
 
+
+# Windows/MSVC runtime policy.
+# PromeTorch Windows AMD CPU build uses /MD runtime.
+# External C++ code linking these .lib files must also use /MD.
+if(MSVC)
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+endif()
 project(PromeTorch
     VERSION 0.1.0
     DESCRIPTION "Deep Learning Framework from Scratch"
@@ -1723,5 +1730,6 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "e2k|elbrus")
     endif()
 endif()
 message(STATUS "")
+
 
 
