@@ -4443,26 +4443,78 @@ public:
                     float local_scores[8192];
                     float* scores = (total_seq <= 8192) ? local_scores
                                                          : new float[total_seq];
+                    // Q·K dot product → scores[t]. Раньше скалярный — теперь
+                    // AVX2 FMA (prefill attention был полностью скалярным,
+                    // в отличие от decode-пути).
                     for (int64_t t = 0; t < total_seq; ++t) {
                         const float* kh = k_cache_ro + t * kv_dim + kv_h * head_dim;
+#ifdef __AVX2__
+                        __m256 acc = _mm256_setzero_ps();
+                        int64_t d = 0;
+                        for (; d + 7 < head_dim; d += 8)
+                            acc = _mm256_fmadd_ps(_mm256_loadu_ps(q_head + d),
+                                                  _mm256_loadu_ps(kh + d), acc);
+                        float dot = cpu_quant::hsum_avx(acc);
+                        for (; d < head_dim; ++d) dot += q_head[d] * kh[d];
+#else
                         float dot = 0.0f;
                         for (int64_t d = 0; d < head_dim; ++d) dot += q_head[d] * kh[d];
+#endif
                         scores[t] = dot * scale;
                     }
                     float mx = scores[0];
                     for (int64_t t = 1; t < total_seq; ++t) if (scores[t] > mx) mx = scores[t];
+                    // softmax exp+sum — векторный exp256_ps (был скалярный std::exp).
                     float sm = 0.0f;
+#ifdef __AVX2__
+                    {
+                        __m256 vmx = _mm256_set1_ps(mx);
+                        __m256 vsum = _mm256_setzero_ps();
+                        int64_t t = 0;
+                        for (; t + 7 < total_seq; t += 8) {
+                            __m256 v = at::native::vec::exp256_ps(
+                                _mm256_sub_ps(_mm256_loadu_ps(scores + t), vmx));
+                            _mm256_storeu_ps(scores + t, v);
+                            vsum = _mm256_add_ps(vsum, v);
+                        }
+                        sm = at::native::vec::hsum_avx2(vsum);
+                        for (; t < total_seq; ++t) { scores[t] = std::exp(scores[t] - mx); sm += scores[t]; }
+                    }
+#else
                     for (int64_t t = 0; t < total_seq; ++t) {
                         scores[t] = std::exp(scores[t] - mx);
                         sm += scores[t];
                     }
+#endif
                     float inv = 1.0f / (sm + 1e-10f);
+#ifdef __AVX2__
+                    {
+                        __m256 vinv = _mm256_set1_ps(inv);
+                        int64_t t = 0;
+                        for (; t + 7 < total_seq; t += 8)
+                            _mm256_storeu_ps(scores + t,
+                                _mm256_mul_ps(_mm256_loadu_ps(scores + t), vinv));
+                        for (; t < total_seq; ++t) scores[t] *= inv;
+                    }
+#else
                     for (int64_t t = 0; t < total_seq; ++t) scores[t] *= inv;
+#endif
                     std::fill(out_head, out_head + head_dim, 0.0f);
+                    // V-weighted sum — AVX2 FMA (был скалярный).
                     for (int64_t t = 0; t < total_seq; ++t) {
                         const float* vh = v_cache_ro + t * kv_dim + kv_h * head_dim;
                         float w = scores[t];
+#ifdef __AVX2__
+                        __m256 vw = _mm256_set1_ps(w);
+                        int64_t d = 0;
+                        for (; d + 7 < head_dim; d += 8)
+                            _mm256_storeu_ps(out_head + d,
+                                _mm256_fmadd_ps(vw, _mm256_loadu_ps(vh + d),
+                                                _mm256_loadu_ps(out_head + d)));
+                        for (; d < head_dim; ++d) out_head[d] += w * vh[d];
+#else
                         for (int64_t d = 0; d < head_dim; ++d) out_head[d] += w * vh[d];
+#endif
                     }
                     if (total_seq > 8192) delete[] scores;
                 }
