@@ -1535,6 +1535,21 @@ inline void cpu_quant_gemv_k_slice(
                 local_blocks * 256, N, local_row_stride_bytes);
 #endif
             break;
+        case 13: // Q5_K
+            // Q5_K: 256-element super-blocks, 176 bytes/block (как Q6_K по
+            // структуре «K/256 = local_blocks»). q5k_gemv работает на любом
+            // (data, K, N, row_stride). Sliced layout = compact subset блоков
+            // per row, row_stride = local_blocks*176. Partial sum → AllReduce.
+            // Нужно для pre-SINQ GGUF (Huawei), где ffn_down = Q5_K — раньше
+            // падал в replicated fallback (8.1 вместо 10.5 tok/s на 8C2).
+#ifdef __AVX2__
+            q5k_gemv_avx2(sliced_weight, x_local, y,
+                local_blocks * 256, N, local_row_stride_bytes);
+#else
+            q5k_gemv_scalar(sliced_weight, x_local, y,
+                local_blocks * 256, N, local_row_stride_bytes);
+#endif
+            break;
         case 8: // Q8_0
             // Q8_0 has 32-element blocks (vs 256 for Q4_K/Q6_K). Sliced
             // layout = compact subset of blocks per row, identical layout,
@@ -1559,7 +1574,8 @@ inline void cpu_quant_gemv_k_slice(
 }
 
 inline bool cpu_quant_gemv_k_slice_supported(uint32_t quant_type) {
-    return quant_type == 12 || quant_type == 14 || quant_type == 8; // Q4_K, Q6_K, Q8_0
+    return quant_type == 12 || quant_type == 14 || quant_type == 13
+        || quant_type == 8; // Q4_K, Q6_K, Q5_K, Q8_0
 }
 
 // ============================================================================

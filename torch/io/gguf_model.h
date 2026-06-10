@@ -5287,6 +5287,7 @@ public:
             constexpr uint32_t PT8_NATIVE_Q8_SOA4_K = 0x100u | PT8_TYPE_Q8_0_SOA4;
             if (full.quant_type == 12)      { bytes_per_block = 144; elems_per_block = 256; }
             else if (full.quant_type == 14) { bytes_per_block = 210; elems_per_block = 256; }
+            else if (full.quant_type == 13) { bytes_per_block = 176; elems_per_block = 256; }  // Q5_K (pre-SINQ ffn_down)
             else if (full.quant_type ==  8) { bytes_per_block =  34; elems_per_block =  32; }
             else if (full.quant_type == PT8_NATIVE_Q8_SOA4_K) {
                 // PT8 Q8_SoA4 K-slice has non-row-major super-block headers
