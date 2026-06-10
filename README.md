@@ -619,9 +619,12 @@ GGUF qwen3:4b ~82 tok/s greedy on A100 (re-measured 2026-04-20, BENCH_A100_HEAVY
 - **Autograd**: `create_graph=True` wired (double backward), gradient hooks + anomaly mode,
   forward-mode AD (dual numbers + JVP, `d(exp(2x))/dx=5.44` verified), vmap (single-axis
   bit-exact vs sequential).
-- **dtype dispatch расширен**: `PT_DISPATCH_FLOATING_TYPES_HALF` / `PT_DISPATCH_COMPLEX_TYPES` —
-  теперь ops поддерживают Half/BFloat16/Float8_e4m3fn/Float8_e5m2/Complex64/Complex128
-  (opt-in чтобы не ломать templated linear-algebra код который assumes Float/Double).
+- **dtype dispatch макросы объявлены**: `PT_DISPATCH_FLOATING_TYPES_HALF` /
+  `PT_DISPATCH_COMPLEX_TYPES` (Half/BFloat16/Float8/Complex). ⚠ Честно: в
+  hot-path CPU ops пока 0 callsites — реальные вычисления идут Float/Double
+  (`PT_DISPATCH_FLOATING_TYPES`). Half/Complex тензоры создаются, но операции
+  над ними не диспетчатся. Подключение макросов к ops — future work
+  (audit 2026-06-02 _claims_drift).
 - **ChannelsLast preservation**: Conv2d NHWC input → NHWC output (internal compute NCHW —
   true NHWC-native kernel = future work).
 
@@ -1342,7 +1345,7 @@ scripts/                      Build-скрипты для российских �
 | Средний | FlashAttention wiring | Headers есть, 6 known bugs, 0 callsites в `sdpa_forward_cuda`. TEST_PLAN §5.5. |
 | Средний (DONE) | ~~Conv3d forward real implementation~~ | Реализован 2026-04-18 (OpenMP-parallel 7-loop direct conv). TEST_PLAN §5.6. |
 | Средний | cuDNN 9 RNN (v8 API) | Legacy API guarded под `CUDNN_VERSION < 9000` (35969dc). Нужен port на `cudnnRNNForward` + `cudnnRNNBackwardData_v8` + `cudnnRNNBackwardWeights_v8`. |
-| Низкий | `create_graph=True` (double backward, higher-order grads) | Flag есть в backward signature, но engine игнорирует. TEST_PLAN §5.8. |
+| Низкий | Higher-order grads (hessian, grad-of-vmap) | `create_graph=True` подключён в engine (double backward работает), но полный functorch (hessian/grad-of-vmap) отсутствует. TEST_PLAN §5.8. |
 | Низкий | `torch.compile` production (TorchInductor + Triton) | Сейчас trace-based prototype. ~200K строк для полноценной реализации. Out of scope. |
 | Низкий | Sparse tensors, FX graph mode, torch.distributions | Отдельные большие subsystems. |
 
