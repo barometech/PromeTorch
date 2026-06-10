@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.18)
+﻿cmake_minimum_required(VERSION 3.18)
 
 project(PromeTorch
     VERSION 0.1.0
@@ -12,6 +12,9 @@ project(PromeTorch
 
 option(PT_BUILD_SHARED_LIBS "Build shared libraries" ON)
 option(PT_BUILD_TESTS "Build tests" ON)
+option(PT_BUILD_EXAMPLES "Build examples" OFF)
+option(PT_BUILD_BENCHMARKS "Build benchmarks" OFF)
+option(PT_BUILD_TOOLS "Build tools/promeserve" OFF)
 option(PT_USE_CUDA "Enable CUDA support" OFF)
 option(PT_USE_ROCM "Enable AMD ROCm/HIP backend (hipify CUDA sources)" OFF)
 option(PT_USE_OPENMP "Enable OpenMP for CPU parallelization" OFF)
@@ -1604,26 +1607,10 @@ endif()
 # ============================================================================
 # Examples
 # ============================================================================
-
-# All example subdirs are optional — guarded by `if(EXISTS ...)` so a
-# partial clone / missing sub-CMakeLists.txt doesn't break the whole build.
-foreach(_ex_dir mnist vae mobile jit mlir rnn transformer vit cifar pir gguf gan shakespeare)
-    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/examples/${_ex_dir}/CMakeLists.txt")
-        add_subdirectory(examples/${_ex_dir})
-    endif()
-endforeach()
-if(PT_USE_NMCARD)
-    add_subdirectory(examples/nmcard)
-endif()
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/benchmarks/CMakeLists.txt")
-    add_subdirectory(benchmarks)
-endif()
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/promeserve/CMakeLists.txt")
-    add_subdirectory(promeserve)
-endif()
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/CMakeLists.txt")
-    add_subdirectory(tools)
-endif()
+# Disabled for Windows AMD CPU build.
+# The upstream CMakeLists.txt unconditionally adds examples including examples/pir,
+# and examples/pir currently requires missing diagnostics.h.
+# For RX 6600 on Windows this Elbrus/PIR path is not needed.
 
 # ============================================================================
 # Installation
@@ -1736,3 +1723,5 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "e2k|elbrus")
     endif()
 endif()
 message(STATUS "")
+
+
