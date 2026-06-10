@@ -3742,14 +3742,13 @@ public:
                     for (; j + 7 < e; j += 8) {
                         __m256 g = _mm256_loadu_ps(sp.gate_buf + j);
                         __m256 u = _mm256_loadu_ps(sp.up_buf + j);
+                        // SiLU(g)*u = g·σ(g)·u, σ(g)=1/(1+exp(-g)).
+                        // ВЕКТОРНЫЙ exp256_ps (Cephes, ~1e-7) вместо 8×
+                        // скалярного std::exp — раньше тут выгружали в tmp[8]
+                        // и звали libm поэлементно (главный SiLU-хотспот:
+                        // inter×слои exp/токен). exp256_ps сам клампит [-88,88].
                         __m256 neg_g = _mm256_sub_ps(_mm256_setzero_ps(), g);
-                        neg_g = _mm256_max_ps(neg_g, _mm256_set1_ps(-88.0f));
-                        neg_g = _mm256_min_ps(neg_g, _mm256_set1_ps(88.0f));
-                        float tmp[8];
-                        _mm256_storeu_ps(tmp, neg_g);
-                        __m256 exp_neg_g = _mm256_set_ps(
-                            std::exp(tmp[7]), std::exp(tmp[6]), std::exp(tmp[5]), std::exp(tmp[4]),
-                            std::exp(tmp[3]), std::exp(tmp[2]), std::exp(tmp[1]), std::exp(tmp[0]));
+                        __m256 exp_neg_g = at::native::vec::exp256_ps(neg_g);
                         __m256 sigmoid = _mm256_div_ps(one, _mm256_add_ps(one, exp_neg_g));
                         __m256 silu = _mm256_mul_ps(g, sigmoid);
                         _mm256_storeu_ps(sp.gate_buf + j, _mm256_mul_ps(silu, u));
