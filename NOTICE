@@ -27,5 +27,13 @@ This project incorporates code from the following projects:
   - Original license: BSD-3-Clause (Modified by Meta)
   - We are API-compatible at the source level but share no code.
 
+* SINQ — Sinkhorn-Normalized Quantization (https://github.com/huawei-csl/SINQ)
+  - Huawei Computing Systems Lab, arXiv:2509.22944, ICML 2026
+  - Original license: Apache-2.0
+  - PromeTorch consumes pre-SINQ GGUF models (standard GGUF format,
+    weights Sinkhorn-conditioned before quantization). No SINQ source is
+    vendored into PromeTorch; we load the resulting GGUF unchanged.
+  - See docs/SINQ_INTEGRATION.md.
+
 Trademarks: PromeTorch is a trademark of the PromeTorch project.
 See TRADEMARKS.md for trademark usage guidelines.
