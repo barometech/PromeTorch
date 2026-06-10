@@ -32,4 +32,23 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/main.cpp")
     if(OpenMP_CXX_FOUND)
         target_link_libraries(promeserve PRIVATE OpenMP::OpenMP_CXX)
     endif()
+
+    # Install rules — для "скачал и запустил" release asset (бинарь + web UI).
+    # CPack/release.yml пакуют этот компонент. Web-ассеты ставятся рядом —
+    # handle_health ищет web/index.html по относительным путям (см.
+    # api_handlers.h paths list).
+    option(PT_INSTALL_PROMESERVE "Install promeserve binary + web UI" ON)
+    if(PT_INSTALL_PROMESERVE)
+        install(TARGETS promeserve
+                RUNTIME DESTINATION bin
+                COMPONENT promeserve)
+        if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/web")
+            install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/web/"
+                    DESTINATION share/promeserve/web
+                    COMPONENT promeserve
+                    FILES_MATCHING
+                    PATTERN "*.html" PATTERN "*.js" PATTERN "*.css"
+                    PATTERN "preview" EXCLUDE)
+        endif()
+    endif()
 endif()

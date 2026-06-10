@@ -6,6 +6,33 @@ on:
       - 'v*'
 
 jobs:
+  # PromeServe «скачал-запустил» asset — самостоятельный CPU-бинарь + web UI
+  # для Linux x86_64. Пользователю не нужен toolchain: распаковал, ./bin/promeserve.
+  promeserve-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build libomp-dev
+      - name: Build + install promeserve (CPU)
+        run: |
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DPT_USE_CUDA=OFF -DPT_BUILD_TESTS=OFF \
+            -DCMAKE_INSTALL_PREFIX=stage
+          cmake --build build --target promeserve -j "$(nproc)"
+          cmake --install build --component promeserve
+      - name: Package
+        run: |
+          cp README.md LICENSE NOTICE stage/ 2>/dev/null || true
+          tar -C stage -czf promeserve-${{ github.ref_name }}-linux-x86_64.tar.gz .
+      - name: Upload asset
+        uses: softprops/action-gh-release@v1
+        with:
+          files: promeserve-${{ github.ref_name }}-linux-x86_64.tar.gz
+          generate_release_notes: false
+
   release:
     runs-on: ubuntu-latest
     steps:
