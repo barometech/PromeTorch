@@ -13,6 +13,7 @@
 #include <functional>
 #include <stdexcept>
 #include <utility>
+#include <mutex>
 
 namespace torch {
 namespace autograd {
@@ -120,6 +121,17 @@ private:
 
     // FIX 1.2: removed cached_task_ member — data race on singleton.
     // Now thread_local in execute().
+
+    // Engine — singleton (get_default_engine). execute() мутирует ПОЛЯ
+    // самих Node (visited_/dependency_count_/accumulated_grad_), которые
+    // живут на разделяемом графе, не на Engine. Два параллельных
+    // loss.backward() из разных потоков → гонка на этих полях → silently
+    // НЕВЕРНЫЕ градиенты (audit 2026-06-02 _critical_followup #A, без
+    // симптома). Сериализуем backward: lock на входе execute(). Это не даёт
+    // параллельный backward (как per-GraphTask state в PyTorch), но делает
+    // конкурентный backward КОРРЕКТНЫМ. Для нас обучение single-thread на
+    // процесс (multi-process через Local SGD) — сериализация безопасна.
+    std::mutex execute_mutex_;
 
     // Count dependencies for all nodes
     void compute_dependencies(
@@ -336,6 +348,14 @@ inline variable_list Engine::execute(
     bool create_graph,
     const edge_list& inputs
 ) {
+    // Сериализуем backward (см. execute_mutex_ комментарий) — конкурентные
+    // backward не должны переплетать мутацию Node-полей. lock_guard на весь
+    // execute; рекурсивный create_graph backward вызывается ИЗ этого же
+    // потока ПОСЛЕ освобождения (execute не вызывает execute рекурсивно под
+    // локом — double-backward идёт отдельным top-level вызовом), поэтому
+    // не-рекурсивный mutex корректен.
+    std::lock_guard<std::mutex> _engine_lock(execute_mutex_);
+
     validate_inputs(roots, grad_outputs);
 
     // FIX: stack-local GraphTask (thread_local broke re-entrancy for double backward)
