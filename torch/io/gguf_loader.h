@@ -42,6 +42,16 @@ static constexpr uint32_t GGUF_MAGIC = 0x46554747; // "GGUF" as little-endian ui
 static constexpr uint32_t GGUF_VERSION_3 = 3;
 static constexpr size_t GGUF_DEFAULT_ALIGNMENT = 32;
 
+// Anti-DoS upper bounds. Malformed/hostile GGUF (например с HF mirror)
+// мог задать tensor_count/kv_count/array_count = UINT64_MAX → цикл
+// push_back до OOM (audit 2026-06-02 _memory_safety #21, _error_handling).
+// Значения с большим запасом над реальными моделями (qwen3-14B ~440
+// тензоров, ~30 kv-ключей, ≤4 dims; array — vocab/merges до ~256K).
+static constexpr uint64_t GGUF_MAX_TENSORS = 1u << 20;   // 1M тензоров
+static constexpr uint64_t GGUF_MAX_KV      = 1u << 16;   // 65536 kv-ключей
+static constexpr uint64_t GGUF_MAX_DIMS    = 8;          // GGML_MAX_DIMS
+static constexpr uint64_t GGUF_MAX_ARRAY   = 1u << 24;   // 16M элементов
+
 // ============================================================================
 // GGUF Value Types
 // ============================================================================
@@ -733,6 +743,16 @@ private:
 
         tensor_count = read_val<uint64_t>(f);
         metadata_kv_count = read_val<uint64_t>(f);
+        if (tensor_count > GGUF_MAX_TENSORS) {
+            throw std::runtime_error("GGUF: tensor_count=" + std::to_string(tensor_count)
+                + " exceeds limit " + std::to_string(GGUF_MAX_TENSORS)
+                + " (corrupt/hostile file?)");
+        }
+        if (metadata_kv_count > GGUF_MAX_KV) {
+            throw std::runtime_error("GGUF: metadata_kv_count=" + std::to_string(metadata_kv_count)
+                + " exceeds limit " + std::to_string(GGUF_MAX_KV)
+                + " (corrupt/hostile file?)");
+        }
     }
 
     // ========================================================================
@@ -783,7 +803,12 @@ private:
             case GGUFValueType::ARRAY: {
                 GGUFValueType elem_type = static_cast<GGUFValueType>(read_val<uint32_t>(f));
                 uint64_t count = read_val<uint64_t>(f);
-                val.arr.reserve(static_cast<size_t>((std::min)(count, uint64_t(1000000))));
+                if (count > GGUF_MAX_ARRAY) {
+                    throw std::runtime_error("GGUF: array count=" + std::to_string(count)
+                        + " exceeds limit " + std::to_string(GGUF_MAX_ARRAY)
+                        + " (corrupt/hostile file?)");
+                }
+                val.arr.reserve(static_cast<size_t>(count));
                 for (uint64_t i = 0; i < count; ++i) {
                     val.arr.push_back(read_value(f, elem_type));
                 }
@@ -816,6 +841,11 @@ private:
             t.name = read_string(f);
 
             uint32_t n_dims = read_val<uint32_t>(f);
+            if (n_dims > GGUF_MAX_DIMS) {
+                throw std::runtime_error("GGUF: tensor '" + t.name + "' n_dims="
+                    + std::to_string(n_dims) + " exceeds GGML_MAX_DIMS="
+                    + std::to_string(GGUF_MAX_DIMS) + " (corrupt file?)");
+            }
             t.dims.resize(n_dims);
             for (uint32_t d = 0; d < n_dims; ++d) {
                 t.dims[d] = read_val<uint64_t>(f);
