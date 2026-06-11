@@ -121,8 +121,11 @@ if(PT_USE_TUDA)
         if(MSVC)
             # MSVC doesn't define __AVX2__/__FMA__ unless /arch:AVX2 is passed.
             # Required for TUDA_AVX2 path (TudaConfig.h:41) to activate.
-            add_compile_options(/arch:AVX2)
-            add_compile_definitions(__AVX2__ __FMA__)
+            # CXX-only: a bare /arch:AVX2 leaks into the nvcc command line and
+            # nvcc treats it as a stray input file ("A single input file is
+            # required for a non-link phase") — guard with COMPILE_LANGUAGE:CXX.
+            add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/arch:AVX2>)
+            add_compile_definitions($<$<COMPILE_LANGUAGE:CXX>:__AVX2__> $<$<COMPILE_LANGUAGE:CXX>:__FMA__>)
             # NOMINMAX prevents <windows.h> from defining min/max as macros,
             # which breaks std::min/std::max calls in headers.
             add_compile_definitions(NOMINMAX)

@@ -1645,6 +1645,46 @@ inline void q5_0_gemv_scalar(const void* __restrict weight_data,
 }
 
 // ============================================================================
+// F16 (GGML_TYPE_F16, type 1) GEMV — some GGUF quant mixes keep attn_v / a few
+// tensors in raw fp16 (e.g. Ollama qwen3:4b Q4_K_M stores blk.*.attn_v as F16).
+// Without an F16 path cpu_quant_gemv hit `default:` and silently produced y=0,
+// which zeroed the V projection in the decode hot path → coherent prefill but
+// garbage generation. matmul_q() avoided this by falling back to dense matmul;
+// forward_decode_cpu() calls cpu_quant_gemv directly, so it needs the type here.
+// Weight layout: row-major [N, K], 2 bytes/elem, row n at base + n*row_stride.
+// ============================================================================
+inline void qf16_gemv_scalar(const void* weight_data, const float* x, float* y,
+                             int64_t K, int64_t N, int64_t row_stride_bytes) {
+    const uint8_t* base = static_cast<const uint8_t*>(weight_data);
+    for (int64_t n = 0; n < N; ++n) {
+        const uint16_t* w = reinterpret_cast<const uint16_t*>(base + n * row_stride_bytes);
+        float acc = 0.0f;
+        for (int64_t k = 0; k < K; ++k) acc += x[k] * gguf::fp16_to_fp32(w[k]);
+        y[n] = acc;
+    }
+}
+
+#if defined(__AVX2__) && defined(__F16C__)
+inline void qf16_gemv_avx2(const void* weight_data, const float* x, float* y,
+                           int64_t K, int64_t N, int64_t row_stride_bytes) {
+    const uint8_t* base = static_cast<const uint8_t*>(weight_data);
+    for (int64_t n = 0; n < N; ++n) {
+        const uint16_t* w = reinterpret_cast<const uint16_t*>(base + n * row_stride_bytes);
+        __m256 acc = _mm256_setzero_ps();
+        int64_t k = 0;
+        for (; k + 7 < K; k += 8) {
+            __m128i wh = _mm_loadu_si128(reinterpret_cast<const __m128i*>(w + k));
+            __m256 wf = _mm256_cvtph_ps(wh);
+            acc = _mm256_fmadd_ps(_mm256_loadu_ps(x + k), wf, acc);
+        }
+        float s = hsum_avx(acc);
+        for (; k < K; ++k) s += x[k] * gguf::fp16_to_fp32(w[k]);
+        y[n] = s;
+    }
+}
+#endif
+
+// ============================================================================
 // Dispatch function: auto-selects AVX2 or scalar based on quant type
 // ============================================================================
 
@@ -1696,6 +1736,13 @@ inline void cpu_quant_gemv(uint32_t quant_type,
             break;
         case 6: // GGML_TYPE_Q5_0
             q5_0_gemv_scalar(weight_data, x, y, K, N, row_stride_bytes);
+            break;
+        case 1: // GGML_TYPE_F16 (e.g. attn_v in Ollama qwen3:4b Q4_K_M)
+#if defined(__AVX2__) && defined(__F16C__)
+            qf16_gemv_avx2(weight_data, x, y, K, N, row_stride_bytes);
+#else
+            qf16_gemv_scalar(weight_data, x, y, K, N, row_stride_bytes);
+#endif
             break;
         default:
             // Unsupported quant type — caller should fall back to dequant+sgemv
