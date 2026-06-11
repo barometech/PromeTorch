@@ -3,6 +3,58 @@
 Полная история разработки проекта.
 Полный аудит инфраструктуры — в `INFRASTRUCTURE_AUDIT.md`.
 
+## 2026-06-11: PromeServe «мусор на длинной генерации» — ДВА root cause (CPU + GPU)
+
+Жалоба: PromeServe на qwen3:4b выдаёт мусор. Диагностика показала **два
+независимых бага** (короткие промпты работали, ловилось только на длинной
+генерации), оба закрыты.
+
+**Метод диагностики (повторяемый):**
+* Честный baseline: Ollama qwen3:4b на 100% GPU = **168 tok/s** (а не «45» —
+  тот замер был кривой: Ollama раздулся до 43 ГБ с ctx 32K и ушёл 17% в CPU).
+* CLI completion-режим (без chat-шаблона) изолировал, что модель сама ок, а
+  мусор — в decode hot-path. `--tensors` показал типы весов. `PT_DUMP_HIDDEN`
+  дамп hidden-state по слоям; `PT_NO_QUANT_GEMV=1` (decode через matmul_q),
+  `PT_DECODE_VIA_FORWARD=1`, `PT_NO_FUSE=1`, `PT_NO_GRAPH=1` — env-тогглы для
+  быстрого bisect путей. Быстрый CPU-цикл сборки в `build_final3` (~3 мин).
+
+### Баг 1 — CPU: F16 attn_v → V=0 (commit `a42d2ac`)
+Ollama qwen3:4b Q4_K_M хранит `blk.*.attn_v.weight` как **F16 (GGML type 1)**,
+а attn_q/k — Q4_K. `cpu_quant_gemv()` не имел case для type 1 → попадал в
+`default:` → молча НЕ писал выход → **V-проекция = 0** во всём
+`forward_decode_cpu`. Префилл (matmul_q) был корректен, т.к. проверяет
+`cpu_quant_gemv_supported()` и при F16 падает на dense matmul. Декод эту
+проверку не делал. Симптом: короткий промпт ок (префилл-V доминирует),
+длинная генерация деградирует — каждый decoded токен пишет V=0 в KV-cache,
+потеря инфо компаундит. Диагностика: V-буфер L0 = нули, attn-выход в 37×
+больше эталона. Fix: добавлен `qf16_gemv` (scalar + AVX2/F16C) + case 1 в
+`cpu_quant_gemv()`. Проверено: qwen3:4b CPU 80 ток связно.
+
+Туда же — **CMakeLists `/arch:AVX2` → CXX-only** (`$<$<COMPILE_LANGUAGE:CXX>:...>`).
+Голый флаг протекал в nvcc и валил CUDA-сборку («A single input file is
+required for a non-link phase»). Был known-паттерн из CLAUDE.md.
+
+### Баг 2 — GPU: interleaved-vs-NeoX RoPE (commit `d25b95b`)
+GPU деградировал в повторы → CJK-мусор после ~25 токенов. Это **НЕ F16-V**
+(GPU считает V корректно через `gemv_scratch`→`launch_fp16_gemv`, kernel
+верный; дамп `buf_v` на устройстве = ненулевой). Причина — все три GPU
+rope-кернела (`rope_kernel` в CUDAInference.cu, `fused_qknorm_rope_kvwrite_kernel`
+и `..._graph_kernel` в FlashDecoding.cu) **хардкодили interleaved пары
+`(2d, 2d+1)`** (GPT-J/«NORM»), а qwen3 (и любая NEOX-модель) требует пары
+`(d, d+half_dim)`. CPU учитывал `config.rope_neox`, GPU игнорировал. На малых
+позициях углы RoPE малы → interleaved≈neox → связно; с ростом позиции
+расхождение растёт → мусор. `PT_NO_GRAPH=1` (eager) дал тот же мусор → не
+CUDA-graph, а сами кернелы. Fix: добавлен `bool neox` во все три кернела +
+launch-функции + `aten_cuda_exports.def` (новые mangled-имена), протащен
+`config.rope_neox` из call-sites. Проверено: qwen3:4b GPU 110+ ток связно
+(«the Roman Republic ... transformed into an empire in 27 BCE ... divided
+into the Western Empire and the Eastern Empire»). CUDA-graph по-прежнему ловится.
+
+**Открыто:** чистый замер скорости GPU не сделан — A100 был занят на 97%
+сторонним процессом. Прежний baseline 91-103 vs Ollama 168. Перемерить (и
+гнать 14b/27b) когда GPU свободен. CUDA-бинарь требует co-located DLL
+(рассинхрон CUDA v12.4 кэша vs anaconda 12.9).
+
 ## 2026-05-20 (продолжение): multi-arch Elbrus + 10 audit agents + E16C OpenBLAS
 
 **Новые платформы добавлены сегодня:**
