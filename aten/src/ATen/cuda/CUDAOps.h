@@ -391,7 +391,7 @@ ATEN_CUDA_API void launch_per_head_rms_norm(
 
 ATEN_CUDA_API void launch_rope(
     float* data, int seq_len, int n_heads, int head_dim,
-    int position_offset, float freq_base,
+    int position_offset, float freq_base, bool neox = false,
     cudaStream_t stream = nullptr);
 
 ATEN_CUDA_API void launch_causal_attention(
@@ -566,7 +566,7 @@ ATEN_CUDA_API void launch_fused_qknorm_rope_kvwrite(
     float* K_cache, float* V_cache,
     int n_heads, int n_kv_heads, int head_dim,
     int position, float rope_freq_base, float eps, bool add_one,
-    int64_t cache_offset_row,
+    int64_t cache_offset_row, bool neox = false,
     cudaStream_t stream = nullptr);
 
 // ============================================================================
@@ -656,7 +656,7 @@ ATEN_CUDA_API void launch_fused_qknorm_rope_kvwrite_graph(
     float* K_cache, float* V_cache,
     int n_heads, int n_kv_heads, int head_dim,
     const int64_t* d_past_len, float rope_freq_base, float eps, bool add_one,
-    cudaStream_t stream = nullptr);
+    bool neox = false, cudaStream_t stream = nullptr);
 
 ATEN_CUDA_API void launch_flash_decode_graph(
     const float* Q, const float* K_cache, const float* V_cache,

@@ -263,7 +263,7 @@ __global__ void fused_qknorm_rope_kvwrite_kernel(
     float* __restrict__ V_cache,    // [max_seq, n_kv_heads * head_dim]
     int n_heads, int n_kv_heads, int head_dim,
     int position, float rope_freq_base, float eps, bool add_one,
-    int64_t cache_offset_row)
+    int64_t cache_offset_row, bool neox)
 {
     // Grid: (max(n_heads, n_kv_heads),)
     // Each block processes one head: QK-norm + RoPE
@@ -306,10 +306,12 @@ __global__ void fused_qknorm_rope_kvwrite_kernel(
             float theta = position * freq;
             float cos_t = cosf(theta);
             float sin_t = sinf(theta);
-            float x0 = q_head[2 * d];
-            float x1 = q_head[2 * d + 1];
-            q_head[2 * d]     = x0 * cos_t - x1 * sin_t;
-            q_head[2 * d + 1] = x0 * sin_t + x1 * cos_t;
+            int i0 = neox ? d : (2 * d);
+            int i1 = neox ? (d + half_dim) : (2 * d + 1);
+            float x0 = q_head[i0];
+            float x1 = q_head[i1];
+            q_head[i0] = x0 * cos_t - x1 * sin_t;
+            q_head[i1] = x0 * sin_t + x1 * cos_t;
         }
     }
 
@@ -349,10 +351,12 @@ __global__ void fused_qknorm_rope_kvwrite_kernel(
             float theta = position * freq;
             float cos_t = cosf(theta);
             float sin_t = sinf(theta);
-            float x0 = k_head[2 * d];
-            float x1 = k_head[2 * d + 1];
-            k_head[2 * d]     = x0 * cos_t - x1 * sin_t;
-            k_head[2 * d + 1] = x0 * sin_t + x1 * cos_t;
+            int i0 = neox ? d : (2 * d);
+            int i1 = neox ? (d + half_dim) : (2 * d + 1);
+            float x0 = k_head[i0];
+            float x1 = k_head[i1];
+            k_head[i0] = x0 * cos_t - x1 * sin_t;
+            k_head[i1] = x0 * sin_t + x1 * cos_t;
         }
         __syncthreads();
 
@@ -375,7 +379,7 @@ ATEN_CUDA_API void launch_fused_qknorm_rope_kvwrite(
     float* K_cache, float* V_cache,
     int n_heads, int n_kv_heads, int head_dim,
     int position, float rope_freq_base, float eps, bool add_one,
-    int64_t cache_offset_row,
+    int64_t cache_offset_row, bool neox,
     cudaStream_t stream)
 {
     int num_blocks = n_heads > n_kv_heads ? n_heads : n_kv_heads;
@@ -391,7 +395,7 @@ ATEN_CUDA_API void launch_fused_qknorm_rope_kvwrite(
     fused_qknorm_rope_kvwrite_kernel<<<num_blocks, block_size, shared_mem, stream>>>(
         Q, K, V, q_norm_w, k_norm_w, K_cache, V_cache,
         n_heads, n_kv_heads, head_dim,
-        position, rope_freq_base, eps, add_one, cache_offset_row);
+        position, rope_freq_base, eps, add_one, cache_offset_row, neox);
 }
 
 // ============================================================================
@@ -644,7 +648,7 @@ __global__ void fused_qknorm_rope_kvwrite_graph_kernel(
     float* __restrict__ K_cache, float* __restrict__ V_cache,
     int n_heads, int n_kv_heads, int head_dim,
     const int64_t* __restrict__ d_past_len,
-    float rope_freq_base, float eps, bool add_one)
+    float rope_freq_base, float eps, bool add_one, bool neox)
 {
     int64_t past_len = *d_past_len;
     int position = (int)past_len;
@@ -679,9 +683,11 @@ __global__ void fused_qknorm_rope_kvwrite_graph_kernel(
             float freq = 1.0f / powf(rope_freq_base, 2.0f * d / head_dim);
             float theta = position * freq;
             float cos_t = cosf(theta), sin_t = sinf(theta);
-            float x0 = q_head[2*d], x1 = q_head[2*d+1];
-            q_head[2*d]   = x0 * cos_t - x1 * sin_t;
-            q_head[2*d+1] = x0 * sin_t + x1 * cos_t;
+            int i0 = neox ? d : (2*d);
+            int i1 = neox ? (d + half_dim) : (2*d + 1);
+            float x0 = q_head[i0], x1 = q_head[i1];
+            q_head[i0] = x0 * cos_t - x1 * sin_t;
+            q_head[i1] = x0 * sin_t + x1 * cos_t;
         }
     }
 
@@ -712,9 +718,11 @@ __global__ void fused_qknorm_rope_kvwrite_graph_kernel(
             float freq = 1.0f / powf(rope_freq_base, 2.0f * d / head_dim);
             float theta = position * freq;
             float cos_t = cosf(theta), sin_t = sinf(theta);
-            float x0 = k_head[2*d], x1 = k_head[2*d+1];
-            k_head[2*d]   = x0 * cos_t - x1 * sin_t;
-            k_head[2*d+1] = x0 * sin_t + x1 * cos_t;
+            int i0 = neox ? d : (2*d);
+            int i1 = neox ? (d + half_dim) : (2*d + 1);
+            float x0 = k_head[i0], x1 = k_head[i1];
+            k_head[i0] = x0 * cos_t - x1 * sin_t;
+            k_head[i1] = x0 * sin_t + x1 * cos_t;
         }
         __syncthreads();
         for (int d = tid; d < head_dim; d += blockDim.x) {
@@ -733,14 +741,14 @@ ATEN_CUDA_API void launch_fused_qknorm_rope_kvwrite_graph(
     float* K_cache, float* V_cache,
     int n_heads, int n_kv_heads, int head_dim,
     const int64_t* d_past_len, float rope_freq_base, float eps, bool add_one,
-    cudaStream_t stream)
+    bool neox, cudaStream_t stream)
 {
     int num_blocks = n_heads > n_kv_heads ? n_heads : n_kv_heads;
     int block_size = head_dim > 128 ? 256 : 128;
     int shared_mem = block_size * sizeof(float);
     fused_qknorm_rope_kvwrite_graph_kernel<<<num_blocks, block_size, shared_mem, stream>>>(
         Q, K, V, q_norm_w, k_norm_w, K_cache, V_cache,
-        n_heads, n_kv_heads, head_dim, d_past_len, rope_freq_base, eps, add_one);
+        n_heads, n_kv_heads, head_dim, d_past_len, rope_freq_base, eps, add_one, neox);
 }
 
 // Flash decode with device pointer past_len (CUDA Graph compatible)

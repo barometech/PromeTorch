@@ -2649,7 +2649,11 @@ public:
         // HGEMV path sets its own stream per call (see launch_cublas_hgemv), which is
         // capture-friendly on CUDA 11.1+. Disable for first token (warmup) so scratch
         // buffers are stable; capture on 2nd token, then replay for the rest.
-        capturing = (d_past_len_ && !graph_captured_ && graph_token_id_ > 0);
+        // PT_NO_GRAPH=1 — diagnostic: never capture/replay the CUDA graph, run
+        // every decode token eagerly. Isolates CUDA-graph capture bugs from the
+        // kernels themselves (graph bakes some state at capture time).
+        static const bool no_graph = []{ const char* e = std::getenv("PT_NO_GRAPH"); return e && e[0]=='1'; }();
+        capturing = (d_past_len_ && !graph_captured_ && graph_token_id_ > 0 && !no_graph);
         if (capturing) {
             // Ensure cuBLAS handle is bound to our capture stream before any cuBLAS call
             // inside the captured region (redundant with per-call SetStream, but safe).
@@ -2793,7 +2797,7 @@ public:
                     static_cast<int>(n_heads), static_cast<int>(n_kv_heads),
                     static_cast<int>(head_dim),
                     d_past_len_, config.rope_freq_base,
-                    eps, add_one, s);
+                    eps, add_one, config.rope_neox, s);
             } else {
                 at::cuda::launch_fused_qknorm_rope_kvwrite(
                     sp.buf_q.mutable_data_ptr<float>(),
@@ -2806,7 +2810,7 @@ public:
                     static_cast<int>(n_heads), static_cast<int>(n_kv_heads),
                     static_cast<int>(head_dim),
                     static_cast<int>(past_len), config.rope_freq_base,
-                    eps, add_one, past_len, s);
+                    eps, add_one, past_len, config.rope_neox, s);
             }
             PROF_END(profiler, "fused_qknorm_rope_kv");
 
@@ -7528,7 +7532,8 @@ public:
                 x.mutable_data_ptr<float>(),
                 static_cast<int>(seq_len), static_cast<int>(n_heads),
                 static_cast<int>(head_dim),
-                static_cast<int>(position_offset), freq_base, nullptr);
+                static_cast<int>(position_offset), freq_base,
+                config.rope_neox, nullptr);
             return;
         }
 #endif
