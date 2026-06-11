@@ -27,7 +27,8 @@ call "$vcvars" x64 ^
 && cl /nologo /EHsc /std:c++17 /MD smoke\load_linear_model_params_smoke.cpp /Fe:build\smoke\load_linear_model_params_smoke.exe ^
 && cl /nologo /EHsc /std:c++17 /MD smoke\linear_model_inference_smoke.cpp /Fe:build\smoke\linear_model_inference_smoke.exe ^
 && cl /nologo /EHsc /std:c++17 /MD /I. smoke\prometorch_linear_model_e2e_smoke.cpp build\c10.lib build\aten_cpu.lib build\torch_autograd.lib /Fe:build\smoke\prometorch_linear_model_e2e_smoke.exe ^
-&& cl /nologo /EHsc /std:c++17 /MD smoke\linear_model_batch_inference_smoke.cpp /Fe:build\smoke\linear_model_batch_inference_smoke.exe
+&& cl /nologo /EHsc /std:c++17 /MD smoke\linear_model_batch_inference_smoke.cpp /Fe:build\smoke\linear_model_batch_inference_smoke.exe ^
+&& cl /nologo /EHsc /std:c++17 /MD /I. smoke\prometorch_multifeature_batch_training_smoke.cpp build\c10.lib build\aten_cpu.lib build\torch_autograd.lib /Fe:build\smoke\prometorch_multifeature_batch_training_smoke.exe
 "@
 
 cmd /d /s /c $compile
@@ -41,7 +42,8 @@ $tests = @(
     ".\build\smoke\load_linear_model_params_smoke.exe",
     ".\build\smoke\linear_model_inference_smoke.exe",
     ".\build\smoke\prometorch_linear_model_e2e_smoke.exe",
-    ".\build\smoke\linear_model_batch_inference_smoke.exe"
+    ".\build\smoke\linear_model_batch_inference_smoke.exe",
+    ".\build\smoke\prometorch_multifeature_batch_training_smoke.exe"
 )
 
 foreach ($test in $tests) {
@@ -56,3 +58,4 @@ foreach ($test in $tests) {
 
 Write-Host ""
 Write-Host "OK: all linear model smoke tests passed"
+
