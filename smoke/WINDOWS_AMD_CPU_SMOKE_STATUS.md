@@ -28,6 +28,7 @@ https://github.com/egorKara/PromeTorch
 | windows-amd-cpu-build-ok | Windows AMD CPU build works |
 | windows-amd-cpu-api-smoke-ok | external API smoke works |
 | windows-amd-cpu-api-smoke-md-ok | external API smoke works with /MD |
+| windows-amd-cpu-final-ok | final Windows AMD CPU smoke checkpoint |
 | windows-amd-cpu-sum-smoke-ok | sum/reduction works |
 | windows-amd-cpu-elementwise-smoke-ok | elementwise arithmetic works |
 | windows-amd-cpu-matmul-smoke-ok | matmul works |
@@ -63,3 +64,4 @@ Tensor API
 -> load w,b
 -> inference
 -> batch inference
+
