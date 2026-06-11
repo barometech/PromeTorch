@@ -149,14 +149,15 @@ ATEN_CUDA_API void launch_per_head_rms_norm(
 __global__ void rope_kernel(
     float* __restrict__ data,   // [seq_len, n_heads * head_dim]
     int seq_len, int n_heads, int head_dim,
-    int position_offset, float freq_base)
+    int position_offset, float freq_base, bool neox)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total_pairs = seq_len * n_heads * (head_dim / 2);
     if (idx >= total_pairs) return;
 
-    int d = idx % (head_dim / 2);
-    int tmp = idx / (head_dim / 2);
+    int half_dim = head_dim / 2;
+    int d = idx % half_dim;
+    int tmp = idx / half_dim;
     int h = tmp % n_heads;
     int s = tmp / n_heads;
 
@@ -166,24 +167,28 @@ __global__ void rope_kernel(
     float cos_t = cosf(theta);
     float sin_t = sinf(theta);
 
-    int offset = s * (n_heads * head_dim) + h * head_dim + 2 * d;
-    float x0 = data[offset];
-    float x1 = data[offset + 1];
+    // NeoX (qwen3/llama-NEOX): rotate pairs (d, d+half_dim).
+    // GPT-J / "NORM": rotate interleaved pairs (2d, 2d+1).
+    int base = s * (n_heads * head_dim) + h * head_dim;
+    int o0 = neox ? (base + d) : (base + 2 * d);
+    int o1 = neox ? (base + d + half_dim) : (base + 2 * d + 1);
+    float x0 = data[o0];
+    float x1 = data[o1];
 
-    data[offset]     = x0 * cos_t - x1 * sin_t;
-    data[offset + 1] = x0 * sin_t + x1 * cos_t;
+    data[o0] = x0 * cos_t - x1 * sin_t;
+    data[o1] = x0 * sin_t + x1 * cos_t;
 }
 
 ATEN_CUDA_API void launch_rope(
     float* data, int seq_len, int n_heads, int head_dim,
-    int position_offset, float freq_base,
+    int position_offset, float freq_base, bool neox,
     cudaStream_t stream)
 {
     int total_pairs = seq_len * n_heads * (head_dim / 2);
     int block_size = 256;
     int num_blocks = (total_pairs + block_size - 1) / block_size;
     rope_kernel<<<num_blocks, block_size, 0, stream>>>(
-        data, seq_len, n_heads, head_dim, position_offset, freq_base);
+        data, seq_len, n_heads, head_dim, position_offset, freq_base, neox);
 }
 
 // ============================================================================

@@ -43,8 +43,8 @@ EXPORTS
 ?launch_floor@cuda@at@@YAXPEBMPEAM_JPEAUCUstream_st@@@Z
 ?launch_fp16_gemv@cuda@at@@YAXPEBXPEBMPEAMHHPEAUCUstream_st@@@Z
 ?launch_fp16_kv_cache_write@cuda@at@@YAXPEBMPEAX_J22PEAUCUstream_st@@@Z
-?launch_fused_qknorm_rope_kvwrite@cuda@at@@YAXPEAM0PEBM1100HHHHMM_N_JPEAUCUstream_st@@@Z
-?launch_fused_qknorm_rope_kvwrite_graph@cuda@at@@YAXPEAM0PEBM1100HHHPEB_JMM_NPEAUCUstream_st@@@Z
+?launch_fused_qknorm_rope_kvwrite@cuda@at@@YAXPEAM0PEBM1100HHHHMM_N_J2PEAUCUstream_st@@@Z
+?launch_fused_qknorm_rope_kvwrite_graph@cuda@at@@YAXPEAM0PEBM1100HHHPEB_JMM_N3PEAUCUstream_st@@@Z
 ?launch_ge@cuda@at@@YAXPEBM0PEAM_JPEAUCUstream_st@@@Z
 ?launch_ge_scalar@cuda@at@@YAXPEBMMPEAM_JPEAUCUstream_st@@@Z
 ?launch_gelu@cuda@at@@YAXPEBMPEAM_JPEAUCUstream_st@@@Z
@@ -109,7 +109,7 @@ EXPORTS
 ?launch_relu_fp16@cuda@at@@YAXPEBU__half@@PEAU3@_JPEAUCUstream_st@@@Z
 ?launch_rms_norm@cuda@at@@YAXPEBM0PEAMHHM_NPEAUCUstream_st@@@Z
 ?launch_rmsnorm_fp16@cuda@at@@YAXPEBU__half@@0PEAU3@HHM_NPEAUCUstream_st@@@Z
-?launch_rope@cuda@at@@YAXPEAMHHHHMPEAUCUstream_st@@@Z
+?launch_rope@cuda@at@@YAXPEAMHHHHM_NPEAUCUstream_st@@@Z
 ?launch_rotary_embedding@cuda@at@@YAXPEBM00PEAM_J222PEAUCUstream_st@@@Z
 ?launch_round@cuda@at@@YAXPEBMPEAM_JPEAUCUstream_st@@@Z
 ?launch_rsqrt@cuda@at@@YAXPEBMPEAM_JPEAUCUstream_st@@@Z
