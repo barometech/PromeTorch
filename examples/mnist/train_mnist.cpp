@@ -22,7 +22,7 @@
 #include <stdlib.h>
 #define bswap32(x) _byteswap_ulong(x)
 #else
-#define bswap32(x) bswap32(x)
+#define bswap32(x) __builtin_bswap32(x)
 #endif
 
 using namespace torch;
