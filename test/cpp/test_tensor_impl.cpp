@@ -72,7 +72,8 @@ TEST(IntArrayRefTest, FromVector) {
 }
 
 TEST(IntArrayRefTest, FromInitializerList) {
-    IntArrayRef ref{2, 3, 4};
+	auto il = {2l, 3l, 4l};
+    IntArrayRef ref{il};
     EXPECT_EQ(ref.size(), 3);
     EXPECT_EQ(ref.front(), 2);
     EXPECT_EQ(ref.back(), 4);
@@ -87,7 +88,8 @@ TEST(IntArrayRefTest, FromSmallVector) {
 }
 
 TEST(IntArrayRefTest, ToVector) {
-    IntArrayRef ref{1, 2, 3};
+	const int64_t arr1[3] = {1,2,3};
+    IntArrayRef ref{arr1, 3};
     std::vector<int64_t> vec = ref.vec();
 
     EXPECT_EQ(vec.size(), 3);
@@ -95,11 +97,14 @@ TEST(IntArrayRefTest, ToVector) {
 }
 
 TEST(IntArrayRefTest, Comparison) {
-    IntArrayRef ref1{1, 2, 3};
-    IntArrayRef ref2{1, 2, 3};
-    IntArrayRef ref3{1, 2, 4};
-    IntArrayRef ref4{1, 2};
-
+	const int64_t arr1[3] = {1,2,3};
+	const int64_t arr2[3] = {1,2,3};
+	const int64_t arr3[3] = {1,2,4};
+	const int64_t arr4[2] = {1,2};
+    IntArrayRef ref1{arr1, 3};
+    IntArrayRef ref2{arr2, 3};
+    IntArrayRef ref3{arr3, 3};
+    IntArrayRef ref4{arr4, 2};
     EXPECT_EQ(ref1, ref2);
     EXPECT_NE(ref1, ref3);
     EXPECT_NE(ref1, ref4);
