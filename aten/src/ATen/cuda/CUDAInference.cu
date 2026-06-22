@@ -396,22 +396,33 @@ __global__ void silu_mul_kernel(
     const float* __restrict__ gate,
     const float* __restrict__ up,
     float* __restrict__ output,
-    int64_t n)
+    int64_t n, bool gelu)
 {
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= n) return;
     float g = gate[idx];
-    output[idx] = (g / (1.0f + expf(-g))) * up[idx];
+    float act;
+    if (gelu) {
+        // GeGLU (Gemma family): GELU tanh-approx of gate. Matches the CPU
+        // forward_decode_cpu path (0.7978845608 = sqrt(2/pi)).
+        const float c = 0.7978845608028654f;
+        float x3 = g * g * g;
+        act = 0.5f * g * (1.0f + tanhf(c * (g + 0.044715f * x3)));
+    } else {
+        // SwiGLU (LLaMA/Qwen/Mistral): SiLU of gate.
+        act = g / (1.0f + expf(-g));
+    }
+    output[idx] = act * up[idx];
 }
 
 ATEN_CUDA_API void launch_silu_mul(
     const float* gate, const float* up, float* output,
-    int64_t n, cudaStream_t stream)
+    int64_t n, bool gelu, cudaStream_t stream)
 {
     int block_size = 256;
     int num_blocks = (int)((n + block_size - 1) / block_size);
     if (num_blocks > 65535) num_blocks = 65535;
-    silu_mul_kernel<<<num_blocks, block_size, 0, stream>>>(gate, up, output, n);
+    silu_mul_kernel<<<num_blocks, block_size, 0, stream>>>(gate, up, output, n, gelu);
 }
 
 // ============================================================================

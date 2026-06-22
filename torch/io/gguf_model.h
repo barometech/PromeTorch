@@ -2989,7 +2989,7 @@ public:
             PROF_BEGIN(profiler, "silu_mul");
             at::cuda::launch_silu_mul(
                 sp.buf_gate.data_ptr<float>(), sp.buf_up.data_ptr<float>(),
-                sp.buf_silu.mutable_data_ptr<float>(), inter, s);
+                sp.buf_silu.mutable_data_ptr<float>(), inter, config.ffn_gelu, s);
             PROF_END(profiler, "silu_mul");
 
             // -- Down projection with fused residual add --
@@ -7588,7 +7588,7 @@ public:
             PROF_BEGIN(profiler, "silu_mul");
             auto hidden = at::empty_cuda(gate.sizes().vec(), gate.dtype(), gate.device().index());
             at::cuda::launch_silu_mul(gate.data_ptr<float>(), up.data_ptr<float>(),
-                                       hidden.mutable_data_ptr<float>(), gate.numel(), nullptr);
+                                       hidden.mutable_data_ptr<float>(), gate.numel(), config.ffn_gelu, nullptr);
             PROF_END(profiler, "silu_mul");
             PROF_BEGIN(profiler, "ffn_down");
             Tensor result = matmul_q(hidden, layer.ffn_down, layer.q_ffn_down, true);
@@ -7600,6 +7600,18 @@ public:
             int64_t n = gate.numel();
             float* gate_data = gate.mutable_data_ptr<float>();
             const float* up_data = up.data_ptr<float>();
+            // GeGLU (Gemma): GELU tanh-approx of gate × up. The AVX2 path below
+            // is SiLU-only; for the Gemma family use a scalar GELU pass.
+            if (config.ffn_gelu) {
+                const float c = 0.7978845608028654f;
+                for (int64_t i = 0; i < n; ++i) {
+                    float g = gate_data[i];
+                    float t = std::tanh(c * (g + 0.044715f * g * g * g));
+                    gate_data[i] = 0.5f * g * (1.0f + t) * up_data[i];
+                }
+                Tensor result = matmul_q(gate, layer.ffn_down, layer.q_ffn_down, true);
+                return result;
+            }
 #ifdef __AVX2__
             // AVX2 fused SiLU-Mul: silu(g) * u = g * sigmoid(g) * u
             // Fast exp approximation via polynomial (good enough for inference)

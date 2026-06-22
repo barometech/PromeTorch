@@ -415,7 +415,7 @@ ATEN_CUDA_API void launch_kv_cache_write(
 // Fused SiLU(gate) * up: out[i] = silu(gate[i]) * up[i]
 ATEN_CUDA_API void launch_silu_mul(
     const float* gate, const float* up, float* output,
-    int64_t n, cudaStream_t stream = nullptr);
+    int64_t n, bool gelu = false, cudaStream_t stream = nullptr);
 
 // Inference GEMV: y[n] = sum_k x[k] * W[k * N + n], for [1,K] @ [K,N] = [1,N]
 // W is row-major [K, N] (pre-transposed weights)

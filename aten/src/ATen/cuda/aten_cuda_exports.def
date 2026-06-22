@@ -118,7 +118,7 @@ EXPORTS
 ?launch_sign@cuda@at@@YAXPEBMPEAM_JPEAUCUstream_st@@@Z
 ?launch_silu@cuda@at@@YAXPEBMPEAM_JPEAUCUstream_st@@@Z
 ?launch_silu_fp16@cuda@at@@YAXPEBU__half@@PEAU3@_JPEAUCUstream_st@@@Z
-?launch_silu_mul@cuda@at@@YAXPEBM0PEAM_JPEAUCUstream_st@@@Z
+?launch_silu_mul@cuda@at@@YAXPEBM0PEAM_J_NPEAUCUstream_st@@@Z
 ?launch_sin@cuda@at@@YAXPEBMPEAM_JPEAUCUstream_st@@@Z
 ?launch_softmax@cuda@at@@YAXPEBMPEAM_J22PEAUCUstream_st@@@Z
 ?launch_softmax_fp16@cuda@at@@YAXPEBU__half@@PEAU3@_J22PEAUCUstream_st@@@Z
