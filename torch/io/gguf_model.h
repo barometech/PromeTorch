@@ -3121,22 +3121,35 @@ public:
     void gemv_scratch(const QuantizedWeight& qw, const Tensor& float_w,
                       const float* x, float* y, int64_t N,
                       cudaStream_t stream = nullptr) {
+        bool handled = false;
         if (use_quant_gemv_ && qw.valid) {
             int K = static_cast<int>(qw.cols);
             int Nr = static_cast<int>(qw.rows);
             if (use_llama_gemv_ && qw.is_q4k() && qw.gpu_data) {
                 at::cuda::launch_q4km_persistent_gemv_v2(qw.gpu_data, x, y, K, Nr, qw.row_stride_bytes, stream);
+                handled = true;
             } else if (qw.is_q4k() && qw.gpu_data) {
                 at::cuda::launch_q4km_persistent_gemv(qw.gpu_data, x, y, K, Nr, qw.row_stride_bytes, stream);
+                handled = true;
             } else if (qw.is_q6k() && qw.gpu_data) {
                 at::cuda::launch_q6k_gemv(qw.gpu_data, x, y, K, Nr, qw.row_stride_bytes, stream);
+                handled = true;
             } else if (qw.is_q5k() && qw.gpu_data) {
                 at::cuda::launch_q5k_gemv(qw.gpu_data, x, y, K, Nr, qw.row_stride_bytes, stream);
+                handled = true;
             } else if (qw.is_f16() && qw.gpu_data) {
                 // FP16 weight: use simple FP16→FP32 dequant GEMV
                 at::cuda::launch_fp16_gemv(qw.gpu_data, x, y, K, Nr, stream);
+                handled = true;
             }
-        } else if (float_w.defined()) {
+            // Guard: quant type not covered above (e.g. Q8_0/Q5_0/Q3_K) would
+            // otherwise leave `y` UNFILLED silently (same class as the F16→V=0
+            // bug). Fall back to the float weight if present; else assert loudly.
+            if (!handled && !float_w.defined()) {
+                assert(false && "gemv_scratch: unsupported quant_type and no float fallback");
+            }
+        }
+        if (!handled && float_w.defined()) {
             int K = static_cast<int>(float_w.size(0));
             int Ni = static_cast<int>(float_w.size(1));
             at::cuda::launch_inference_gemv(x, float_w.data_ptr<float>(), y, K, Ni, stream);
@@ -4129,10 +4142,16 @@ public:
                 if (H > 8192) std::free(xn);
             }
 
-            // SiLU(gate) * up
-            for (int64_t j = 0; j < inter; ++j) {
-                float g = sp.gate_buf[j];
-                sp.gate_buf[j] = (g / (1.0f + std::exp(-g))) * sp.up_buf[j];
+            // SiLU/GeGLU(gate) * up (config.ffn_gelu → GELU для Gemma-семейства)
+            {
+                const bool gelu_ = config.ffn_gelu;
+                for (int64_t j = 0; j < inter; ++j) {
+                    float g = sp.gate_buf[j];
+                    float a = gelu_
+                        ? 0.5f * g * (1.0f + std::tanh(0.7978845608028654f * (g + 0.044715f * g * g * g)))
+                        : (g / (1.0f + std::exp(-g)));
+                    sp.gate_buf[j] = a * sp.up_buf[j];
+                }
             }
 
             // Down projection (with sparse GEMV)
@@ -4577,9 +4596,19 @@ public:
             // just wasn't ported to the batched path.
             {
                 const int64_t total = (int64_t)K * inter;
+                const bool gelu_ = config.ffn_gelu;
                 c10::get_thread_pool().parallel_for(0, total,
                     [&](int64_t start, int64_t end) {
                     int64_t j = start;
+                    if (gelu_) {
+                        // GeGLU (Gemma): scalar GELU tanh-approx (AVX2 path is SiLU-only).
+                        for (; j < end; ++j) {
+                            float g = gate[j];
+                            float a = 0.5f * g * (1.0f + std::tanh(0.7978845608028654f * (g + 0.044715f * g * g * g)));
+                            siluup[j] = a * up_b[j];
+                        }
+                        return;
+                    }
 #ifdef __AVX2__
                     for (; j + 7 < end; j += 8) {
                         __m256 g = _mm256_loadu_ps(gate.data() + j);
@@ -6352,14 +6381,22 @@ public:
             }
             if (tp_sec_timers_.on) tp_sec_timers_.gateup_ms += _tp_elapsed();
 
-            // --- SiLU(gate) * up + ffn_down ---
+            // --- SiLU/GeGLU(gate) * up + ffn_down ---
+            // config.ffn_gelu → GELU (Gemma). ffn_act() выбирает нелинейность
+            // для всех TP-подветок ниже.
+            const bool gelu_ = config.ffn_gelu;
+            auto ffn_act = [gelu_](float g) -> float {
+                return gelu_
+                    ? 0.5f * g * (1.0f + std::tanh(0.7978845608028654f * (g + 0.044715f * g * g * g)))
+                    : (g / (1.0f + std::exp(-g)));
+            };
             if (use_gather) {
                 // Option F: write local silu into silu_full_buf at rank's
                 // offset, all-gather to get full inter-vector on every rank,
                 // then compute N-slice of ffn_down.
                 for (int64_t j = 0; j < tp_.inter_local; ++j) {
                     float g = gate_l[j];
-                    tp_.silu_full_buf[tp_.inter_offset + j] = (g / (1.0f + std::exp(-g))) * up_l[j];
+                    tp_.silu_full_buf[tp_.inter_offset + j] = ffn_act(g) * up_l[j];
                 }
                 if (tp_sec_timers_.on) tp_sec_timers_.gateup_ms += _tp_elapsed();
 
@@ -6456,7 +6493,7 @@ public:
                     const char* e = std::getenv("PT_NO_FFN_SOA");
                     return e && e[0] == '1';
                 }();
-                if (!ffn_no_soa && tl.q_ffn_down.q8_soa.valid) {
+                if (!gelu_ && !ffn_no_soa && tl.q_ffn_down.q8_soa.valid) {
                     // Round 4 Item 2: fused SiLU + Q8 SoA4 quant in
                     // q8_soa_repack.h (out-of-line so LCC can optimize it).
                     // 2 passes vs old 5 + per-call vector<uint8_t>(K) alloc.
@@ -6474,7 +6511,7 @@ public:
                     std::vector<float>& silu_local = tp_.silu_scratch_buf;
                     for (int64_t j = 0; j < tp_.inter_local; ++j) {
                         float g = gate_l[j];
-                        silu_local[j] = (g / (1.0f + std::exp(-g))) * up_l[j];
+                        silu_local[j] = ffn_act(g) * up_l[j];
                     }
                     int64_t local_blocks = tl.ffn_down_k_end - tl.ffn_down_k_start;
                     cpu_quant::cpu_quant_gemv_k_slice(
@@ -6489,7 +6526,7 @@ public:
                     std::fill(tp_.silu_full_buf.begin(), tp_.silu_full_buf.end(), 0.0f);
                     for (int64_t j = 0; j < tp_.inter_local; ++j) {
                         float g = gate_l[j];
-                        tp_.silu_full_buf[tp_.inter_offset + j] = (g / (1.0f + std::exp(-g))) * up_l[j];
+                        tp_.silu_full_buf[tp_.inter_offset + j] = ffn_act(g) * up_l[j];
                     }
                     cpu_quant::cpu_quant_gemv(
                         layer.q_ffn_down.quant_type, layer.q_ffn_down.cpu_data,
