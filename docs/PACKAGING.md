@@ -5,7 +5,7 @@
 | Файл | Назначение |
 |------|-----------|
 | `pyproject.toml` | scikit-build-core build backend + project metadata |
-| `LICENSE` | Apache 2.0 |
+| `LICENSE` | PromeTorch License (модифицированная BSD 3-Clause + атрибуция и запрет перепродажи фреймворка) |
 | `NOTICE` | Copyright + third-party attribution |
 | `TRADEMARKS.md` | Trademark policy |
 | `.github/workflows/wheels.yml` | CI: builds wheels for Linux/Win/Mac × Python 3.9-3.13 |

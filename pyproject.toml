@@ -7,7 +7,7 @@ name = "prometorch"
 version = "0.1.0a1"
 description = "Deep learning framework with native support for Russian CPUs (Эльбрус, Baikal) and accelerators (NM Card / NM Quad)"
 readme = "README.md"
-license = "Apache-2.0"
+license = "LicenseRef-PromeTorch"
 license-files = ["LICENSE", "NOTICE"]
 requires-python = ">=3.9"
 authors = [{name = "PromeTorch Contributors"}]

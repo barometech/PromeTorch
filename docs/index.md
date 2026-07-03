@@ -58,7 +58,9 @@
 
 ## Лицензия
 
-Apache-2.0. См. [LICENSE](https://github.com/barometech/PromeTorch/blob/main/LICENSE)
+PromeTorch License — модифицированная BSD 3-Clause + два условия (атрибуция в
+коммерческих продуктах и запрет перепродажи самого фреймворка). См.
+[LICENSE](https://github.com/barometech/PromeTorch/blob/main/LICENSE)
 и [NOTICE](https://github.com/barometech/PromeTorch/blob/main/NOTICE)
 (сторонние: llama.cpp/ggml MIT, SINQ Apache-2.0, PyTorch API-вдохновение).
 Торговая марка — [TRADEMARKS.md](https://github.com/barometech/PromeTorch/blob/main/TRADEMARKS.md).
