@@ -762,6 +762,12 @@ private:
             return resp;
         }
 
+        // Lock FIRST, then ensure the model UNDER the lock. Otherwise a
+        // concurrent request for a different model can swap the loaded model
+        // between ensure_model_loaded() and get_loaded_model() → generation
+        // runs on the wrong model (model-select race).
+        std::lock_guard<std::mutex> lock(generate_mutex_);
+
         // Load model if needed
         if (!ensure_model_loaded(model_name)) {
             std::cerr << "[Generate] ERROR: failed to load model: " << model_name << std::endl;
@@ -771,9 +777,6 @@ private:
         }
 
         auto t_total_start = std::chrono::high_resolution_clock::now();
-
-        // We need a lock since the model is shared
-        std::lock_guard<std::mutex> lock(generate_mutex_);
 
         auto model = models_.get_loaded_model();
         if (!model) {
@@ -869,6 +872,11 @@ private:
             return resp;
         }
 
+        // Lock FIRST, then ensure the model UNDER the lock (model-select race:
+        // a concurrent request for a different model must not swap it between
+        // ensure_model_loaded() and get_loaded_model()).
+        std::lock_guard<std::mutex> lock(generate_mutex_);
+
         // Load model if needed
         if (!ensure_model_loaded(model_name)) {
             std::cerr << "[Chat] ERROR: failed to load model: " << model_name << std::endl;
@@ -878,7 +886,6 @@ private:
         }
 
         auto t_total_start = std::chrono::high_resolution_clock::now();
-        std::lock_guard<std::mutex> lock(generate_mutex_);
 
         auto model = models_.get_loaded_model();
         if (!model) {
