@@ -905,7 +905,7 @@ __global__ void q6k_gemv_kernel(
     const uint8_t* row_data = weights + (int64_t)n * row_stride_bytes;
     const int num_blocks_per_row = K / 256;
 
-    float sum = 0.0f;
+    float sum = 0.0f, sum2 = 0.0f;
 
     for (int blk = 0; blk < num_blocks_per_row; ++blk) {
         const uint8_t* block_ptr = row_data + blk * 210;
@@ -941,14 +941,16 @@ __global__ void q6k_gemv_kernel(
                 float x3 = x_shared[k_base + l + 64];
                 float x4 = x_shared[k_base + l + 96];
 
-                sum += d * scales[is + 0] * q1 * x1;
-                sum += d * scales[is + 2] * q2 * x2;
-                sum += d * scales[is + 4] * q3 * x3;
-                sum += d * scales[is + 6] * q4 * x4;
+                // Split в 2 аккумулятора → ILP (скрывает FMA-латентность).
+                sum  += d * scales[is + 0] * q1 * x1;
+                sum2 += d * scales[is + 2] * q2 * x2;
+                sum  += d * scales[is + 4] * q3 * x3;
+                sum2 += d * scales[is + 6] * q4 * x4;
             }
         }
     }
 
+    sum += sum2;
     // Warp shuffle reduction
     #pragma unroll
     for (int offset = 16; offset > 0; offset >>= 1) {
