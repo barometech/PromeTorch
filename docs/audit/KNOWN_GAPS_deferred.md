@@ -4,7 +4,7 @@
 прогона на GPU — отложены, НЕ забыты. Все code-фиксы, не требовавшие GPU, уже
 закоммичены (GeGLU×3, gemv_scratch guard, promeserve race, license, tok/s).
 
-## 1. YaRN / LongRoPE attn_factor на GPU decode/prefill (MED, узкий)
+## 1. YaRN / LongRoPE attn_factor на GPU decode/prefill (MED) — ✅ ЗАКРЫТО 2026-07-21 (build_cudnn_q40, `39e795c`)
 - **Что:** `config.rope_attn_factor` (YaRN mscale) применяется в 3 CPU-спотах
   (gguf_model.h:3480/4440/6001), но GPU rope-кернелы его НЕ получают (в
   `aten/src/ATen/cuda/*.cu` нет attn_factor/mscale).
@@ -22,27 +22,25 @@
   фикс НЕ НА ЧЕМ: единственная доступная LongRoPE-модель (phi3) — Q4_0, а
   GPU-путь её не грузит (см. gap #4 ниже, зависает). GigaChat3-модели локально
   нет. qwen3/gemma3/deepseek — все attn_factor=1, фикс на них no-op.
-- **Статус:** заблокировано НЕ занятостью GPU, а отсутствием рабочей GPU-модели
-  с attn_factor≠1. Разблокируется после gap #4 (Q4_0 GPU) ИЛИ появления
-  Q4_K_M LongRoPE-модели. Не патчить вслепую — правило подтверждено.
+- **Сделано (`39e795c`):** attn_factor (af²) применён на GPU decode+prefill
+  attention-scale. Для attn_factor=1 (qwen/gemma/llama/mistral) — no-op (проверено
+  регрессом). Валидировано на phi3 (af=1.19) — выход связный, совпадает с Ollama.
+- **Статус:** ЗАКРЫТО в отдельной сборке build_cudnn_q40 вместе с gap #4.
 
-## 4. phi3 (Q4_0) не работает на GPU-пути + вырождение на CPU (НОВОЕ, 2026-07-21)
-- **GPU:** phi3:3.8b = **Q4_0** (129 тензоров Q4_0, 1 Q6_K, 67 F32). GPU
-  quant-загрузчик (`gguf_model.h:1190 upload_quant`) обрабатывает только
-  Q4_K/Q5_K/Q6_K/F16; для Q4_0 → `else return` с `valid=false`. В quant-only
-  GPU-режиме веса никуда не грузятся → forward **зависает** на «[Quant] Loading
-  quantized weights to GPU…». Класс бага H1 (молчаливый неподдержанный тип), но
-  проявление — hang, не silent-zero.
-- **CPU:** phi3 на CPU грузится и генерит, но **вырождается**: 1-й токен верный
-  («Paris»), дальше повтор «capital capital France…» + `<unk>`. Отдельный баг
-  качества (Q4_0 CPU dequant / LongRoPE factors / rep_pen — не локализовано).
-- **Не чинил намеренно:** полноценный Q4_0 GPU-путь — новая фича (kernel), а
-  fail-fast/fallback трогает загрузчик inference, которым идут 3 рабочие модели
-  (qwen3/gemma3/deepseek, только что замерены). Риск регрессии рабочего пути ради
-  одной extra-модели не оправдан без отдельной валидации. Диагноз точный —
-  фиксить прицельно в отдельной сессии.
-- **Обходной путь сейчас:** phi3 через `--device cpu` (работает, но вырождение);
-  либо переквантовать phi3 в Q4_K_M (тогда заработает и GPU, и разблокирует gap #1).
+## 4. phi3 (Q4_0) на GPU — ✅ ЗАКРЫТО 2026-07-21 (build_cudnn_q40, `39e795c`)
+- **Было:** phi3:3.8b = Q4_0 + merged (attn_qkv, ffn_up=[gate;up]). GPU не имел
+  (а) Q4_0-загрузчика/kernel, (б) merged-split на GPU (был только CPU) → веса не
+  попадали в VRAM → зависание/мусор.
+- **Сделано:** q4_0_gemv_kernel (numeric-тест vs CPU diff 1e-7) + Q4_0 в 4 путях
+  загрузки/GEMV + `split_quant_rows_gpu` (device-to-device разрез merged в VRAM) +
+  attn_factor на GPU (gap #1). Всё — чистое добавление, Q4_K/Q6_K/Q5_K не тронуты.
+- **Результат:** phi3 на GPU — hang → **связный вывод, ~86 tok/s** (≈ Ollama).
+  Регресс qwen3:4b/gemma3:4b — связны, без деградации.
+- **Осталось (LOW, не блокер):** CPU-путь phi3 всё ещё вырождается (rope_factors
+  не грузятся в quant-load; GPU работает т.к. использует прямой Q4_0 GEMV). Фиксить
+  при необходимости CPU-инференса phi3.
+- **Сборка:** изменения в общих исходниках, но собраны в отдельную build_cudnn_q40;
+  рабочий build_cudnn бинарь не пересобирался. Мерж в основную сборку — по решению.
 
 ## 2. Формальный re-замер RESULTS.md (LOW) — ✅ ЗАКРЫТО 2026-07-21
 - **Что:** канон RESULTS.md = qwen3:4b 82.6 tok/s (2026-04-20).

@@ -22,6 +22,12 @@ NeoX RoPE `d25b95b`, gemma3 GeGLU `85eccc0`/`e25a4ba`). Ollama baseline заме
 | **qwen3:4b**      | **100.6 tok/s** | 189.5 tok/s | **53 %** | 82.6 (+22 %) |
 | **gemma3:4b**     | **87.7 tok/s**  | 116.9 tok/s | **75 %** | 81.4 (+8 %) |
 | **deepseek-r1:8b** | **57.4 tok/s** | 120.0 tok/s | **48 %** | 51.1 (+12 %) |
+| **phi3:3.8b** (Q4_0)† | **~86 tok/s** | 217.9 tok/s | **39 %** | — (новая) |
+
+† phi3:3.8b — формат **Q4_0** + merged (attn_qkv, ffn_up=[gate;up]) + LongRoPE.
+Раньше на GPU зависал (не было Q4_0-kernel и merged-split на GPU). Реализовано в
+`39e795c` (Q4_0 GEMV + `split_quant_rows_gpu` + attn_factor на GPU), собрано в
+отдельную `build_cudnn_q40`. Выход связный (≈ Ollama), 3-run стабильно 85.4–86.4.
 
 - PromeTorch: 5-run median (deepseek 3-run, разброс 0.1 tok/s), greedy, prompt
   «Once upon a time», `test_gguf_inference.exe … --device cuda --greedy --max-tokens 200`.

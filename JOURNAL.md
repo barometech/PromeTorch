@@ -35,20 +35,34 @@ gemma3 GeGLU `85eccc0`/`e25a4ba`), не от железа. Все выходы �
 деградации. qwen3:4b greedy стабилен ±0.2 tok/s. Попутно: Ollama держит модели
 в VRAM после замера (3 llama-server = 33 ГБ) — выгрузка штатным `ollama stop`.
 
-**phi3 — НОВЫЕ баги (диагноз точный, фикс отложен обоснованно):**
-- GPU: phi3:3.8b = **Q4_0**, GPU quant-загрузчик поддерживает только K-кванты →
-  `upload_quant` делает `else return` (valid=false) → в quant-only режиме forward
-  **зависает**. Полный фикс = Q4_0 GPU-kernel (новая фича) либо fail-fast в
-  загрузчике — трогает inference-путь 3 рабочих моделей, риск регрессии не
-  оправдан без отдельной валидации. Обходной путь: `--device cpu` или Q4_K_M.
-- CPU: phi3 генерит, но вырождается после 1-го верного токена (Q4_0 CPU /
-  LongRoPE — не локализовано).
-- **Gap #1 (YaRN attn_factor GPU) уточнён:** attn_factor phi3 = **1.19** (баг
-  реален), но валидировать GPU-фикс не на чем — phi3 (единственная LongRoPE) на
-  GPU не грузится (Q4_0), GigaChat3-модели нет. Заблокировано отсутствием рабочей
-  GPU-модели, не занятостью GPU. Не патчим вслепую.
+**phi3 Q4_0 на GPU — ПОЧИНЕНО end-to-end (`39e795c`, отдельная сборка build_cudnn_q40):**
 
-Детали отложенного — `docs/audit/KNOWN_GAPS_deferred.md` (Gap #1/#4).
+Было: phi3:3.8b на GPU зависал/мусорил. Диагностика вскрыла ТРИ независимых слоя
+(каждый маскировал следующий), чинились по очереди с проверкой:
+1. **Q4_0 не поддержан GPU** — загрузчик/GEMV знали только K-кванты. Написал
+   `q4_0_gemv_kernel` (warp-cooperative, 32 lane) + `launch_q4_0_gemv`, добавил
+   Q4_0 в 4 пути (upload_quant GPU, upload_quant_cpu merged, matmul_q prefill,
+   gemv_scratch decode). Изолированный numeric-тест vs CPU dequant: diff 1e-7 → OK.
+   → hang исчез, но выход мусор.
+2. **attn_factor (YaRN mscale) не на GPU (Gap #1)** — phi3 af=1.19, CPU применяет
+   через rope, GPU — нет. Домножил attention-scale на af² в GPU decode+prefill.
+   Для af=1 (qwen/gemma) — no-op. → всё ещё мусор (не главная причина).
+3. **ROOT CAUSE: merged-split был только CPU.** phi3 хранит Q/K/V как merged
+   `attn_qkv` и gate+up как `ffn_up`. GPU-загрузчик грузил по именам
+   `attn_q.weight` и т.д. — которых у phi3 НЕТ → веса не попадали в VRAM → мусор.
+   `split_quant_rows_gpu`: device-to-device разрез merged на q/k/v и gate/up прямо
+   в VRAM (аналог CPU `split_quant_rows`). → **phi3 связный, ≈ Ollama, ~86 tok/s.**
+
+Урок: не поверил «kernel корректен по коду» — написал numeric-тест, он подтвердил
+kernel и увёл диагностику в загрузку весов (merged-split), где и была причина.
+Регресс qwen3:4b/gemma3:4b на build_cudnn_q40 — связны, без деградации (merged-
+ветка активна только когда `attn_q.weight` отсутствует).
+
+Осталось (LOW): CPU-путь phi3 вырождается (rope_factors не грузятся в quant-load) —
+не блокер, GPU работает через прямой Q4_0 GEMV. Сборка — отдельная build_cudnn_q40,
+рабочий build_cudnn бинарь не тронут; мерж в основную — по решению.
+
+Детали — `docs/audit/KNOWN_GAPS_deferred.md` (Gap #1/#4 закрыты).
 
 ## 2026-06-11: PromeServe «мусор на длинной генерации» — ДВА root cause (CPU + GPU)
 
