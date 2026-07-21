@@ -66,7 +66,10 @@
 - **Отвергнуто по ncu (задокументировано):** grid*8 −10% (tail), launch_bounds(256,8)
   −5% (reg spill), loads-ahead −5% (reg 40→48). FP32-ядро register-bound на 23% dram;
   occupancy-трюки вредят — dp4a (меньше регистров) обходит это.
-- **Осталось (доп. выигрыш):** gate_up (N=19456, 22% времени) на FP32 — dp4a там
-  проигрывает; ускорить его = отдельная задача (возможно split-K или tensor-core
-  prefill). flash_decode softmax сериализован (tid==0) — Phase 3.
+- **gate_up (N=19456) — ЗАКРЫТ как bandwidth-bound (`486b517`):** сделал
+  `q4km_q8_fused_gate_up_kernel` (grid-stride dp4a, 76us vs наивный 85us), но
+  end-to-end −4% (108.8→104.6). gate_up читает 28MB весов на HBM-пределе — dp4a не
+  сокращает байты → не помогает; FP32-fused (с бесплатным RMSNorm) оптимален.
+  Ядро сохранено за `PT_DP4A_GATEUP=1` (off). Ускорить = меньше байт (уже 4-bit).
+- **Осталось:** flash_decode softmax сериализован (tid==0) — Phase 3.
 - Phase 4 (on-device sampler) — argmax уже на GPU (`launch_argmax`, D2H 4 байта).

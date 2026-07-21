@@ -96,6 +96,19 @@ dram ~24% → latency-bound (не bandwidth).
   loads-ahead −5% (reg 40→48). Дисциплина плана соблюдена: ncu-судья + bit-exact.
 - ncu — dev-инструмент замера, в PromeTorch не тянется (никаких новых зависимостей).
 
+**fused-dp4a gate+up (`486b517`) — попытка ускорить последний FP32-кусок:**
+- Написал `q4km_q8_fused_gate_up_kernel`: 1 warp/row grid-stride (структура
+  FP32-fused, не grid=N как наивный dp4a) + dp4a + пред-квант Q8_1.
+- Микробенч N=19456: fused-dp4a **76.3us** vs наивный grid=N dp4a 85.3us (−11%,
+  структура FP32 сильно лучше) vs FP32-fused 75.6us. End-to-end qwen: FP32 108.8
+  vs dp4a-gateup 104.6 (−4%).
+- **Вывод: gate_up bandwidth-bound.** dp4a НЕ сокращает читаемые байты весов (28MB)
+  → его compute-преимущество там обнуляется (в отличие от малых N, где FP32
+  grid-starved и dp4a выигрывает 2-4×). FP32-fused ещё и RMSNorm фьюзит бесплатно.
+  Ускорить gate_up = читать меньше байт, но веса уже Q4_K 4-bit → упёрлись в HBM.
+- Итог: gate_up остаётся FP32 (оптимум). Ядро сохранено как примитив за
+  `PT_DP4A_GATEUP=1` (bit-exact, но −4% → off). Малые/средние N — dp4a (2-4×).
+
 ## 2026-06-11: PromeServe «мусор на длинной генерации» — ДВА root cause (CPU + GPU)
 
 Жалоба: PromeServe на qwen3:4b выдаёт мусор. Диагностика показала **два
