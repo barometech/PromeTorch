@@ -64,6 +64,24 @@ kernel и увёл диагностику в загрузку весов (merged
 
 Детали — `docs/audit/KNOWN_GAPS_deferred.md` (Gap #1/#4 закрыты).
 
+**GEMV-оптимизации (Gap #3, частично) — ILP + эмпирический потолок без ncu:**
+
+Профиль qwen3:4b decode (PT_NO_GRAPH=1 --profile): GEMV доминирует —
+fused_norm_gate_up 22.5%, qkv 12.3%, ffn_down 8.7%, output_proj (497us/call).
+dram ~24% → latency-bound (не bandwidth).
+- **ILP split-accumulators** (`75867c5`+`a7976cf`): горячие Q4_K/Q6_K GEMV копили
+  8 FMA в один аккумулятор (зависимая цепочка). Разбил на 2 (sum_lo/sum_hi) →
+  скрытие FMA-латентности. qwen3:4b 100→102.5 (+2.5%), deepseek 57.4→58.5 (+1.9%),
+  gemma3/phi3 ~0% (иной hot-path). Bit-exact top-1, регресса нет.
+- **grid `sm_count*4→*8`** (гипотеза: occupancy 50%→100%): **регресс −10%**
+  (103→93). Вывод: kernel НЕ occupancy-bound, тонко оттюнен — слепые правки
+  occupancy/register вредят. Откатил. Совпадает с историей плана (NROWS-рерайт
+  тоже регрессил).
+- **Честный потолок:** оставшийся 2× до Ollama (189) требует quantize-x-once +
+  dp4a (Phase 1/2 плана). В этом окружении НЕ взять вслепую — ncu (Nsight
+  Compute) недоступен, а план (и прошлые регрессы) требуют ncu как судью. Реально
+  безопасно добытый выигрыш здесь — ILP (+2%). Больше — только с ncu.
+
 ## 2026-06-11: PromeServe «мусор на длинной генерации» — ДВА root cause (CPU + GPU)
 
 Жалоба: PromeServe на qwen3:4b выдаёт мусор. Диагностика показала **два
