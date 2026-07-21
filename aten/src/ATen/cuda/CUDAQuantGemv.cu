@@ -349,7 +349,7 @@ ATEN_CUDA_API void launch_q4km_persistent_gemv(
     const int WARPS = 8;
     const int BLOCK_SIZE = WARPS * 32;  // 256 threads per block
     // Launch 2 blocks per SM for latency hiding
-    int grid = sm_count * 4;
+    int grid = sm_count * 6;  // ncu: 1.0 wave @ reg-limit 6 blk/SM
     int num_q8 = K / 32;
     int smem_bytes = K * 1 + num_q8 * 4 + num_q8 * 4;  // Q8 int8[K] + scales[K/32] + sums[K/32]
 
@@ -672,7 +672,7 @@ ATEN_CUDA_API void launch_q4km_fused_gate_up_gemv(
 
     const int WARPS = 8;
     const int BLOCK_SIZE = WARPS * 32;
-    int grid = sm_count * 4;  // 4x occupancy for A100 bandwidth saturation
+    int grid = sm_count * 6;  // ncu: 1.0 wave @ reg-limit 6 blk/SM  // 4x occupancy for A100 bandwidth saturation
     int smem_bytes = K * sizeof(float);
 
     q4km_fused_gate_up_kernel<<<grid, BLOCK_SIZE, smem_bytes, stream>>>(
@@ -1521,7 +1521,7 @@ ATEN_CUDA_API void launch_q4km_fused_qkv_gemv(
 
     const int WARPS = 8;
     const int BLOCK_SIZE = WARPS * 32;
-    int grid = sm_count * 4;  // 4x occupancy for A100 bandwidth saturation
+    int grid = sm_count * 6;  // ncu: 1.0 wave @ reg-limit 6 blk/SM  // 4x occupancy for A100 bandwidth saturation
     int smem_bytes = K * sizeof(float);
 
     q4km_fused_qkv_gemv_kernel<<<grid, BLOCK_SIZE, smem_bytes, stream>>>(
@@ -1657,7 +1657,7 @@ ATEN_CUDA_API void launch_q4km_fused_rmsnorm_gemv(
 
     const int WARPS = 8;
     const int BLOCK_SIZE = WARPS * 32;
-    int grid = sm_count * 4;  // 4x occupancy for A100 bandwidth saturation
+    int grid = sm_count * 6;  // ncu: 1.0 wave @ reg-limit 6 blk/SM  // 4x occupancy for A100 bandwidth saturation
     // Shared: K floats for x + BLOCK_SIZE floats for reduction
     int smem_bytes = (K + BLOCK_SIZE) * sizeof(float);
 
@@ -1809,7 +1809,7 @@ ATEN_CUDA_API void launch_q4km_fused_rmsnorm_qkv_gemv(
 
     const int WARPS = 8;
     const int BLOCK_SIZE = WARPS * 32;
-    int grid = sm_count * 4;  // 4x occupancy for A100 bandwidth saturation
+    int grid = sm_count * 6;  // ncu: 1.0 wave @ reg-limit 6 blk/SM  // 4x occupancy for A100 bandwidth saturation
     int smem_bytes = (K + BLOCK_SIZE) * sizeof(float);
 
     q4km_fused_rmsnorm_qkv_gemv_kernel<<<grid, BLOCK_SIZE, smem_bytes, stream>>>(
@@ -1915,7 +1915,7 @@ ATEN_CUDA_API void launch_q4km_persistent_gemv_accumulate(
 
     const int WARPS = 8;
     const int BLOCK_SIZE = WARPS * 32;
-    int grid = sm_count * 4;  // 4x occupancy for A100 bandwidth saturation
+    int grid = sm_count * 6;  // ncu: 1.0 wave @ reg-limit 6 blk/SM  // 4x occupancy for A100 bandwidth saturation
     int smem_bytes = K * sizeof(float);
 
     q4km_persistent_gemv_accumulate_kernel<<<grid, BLOCK_SIZE, smem_bytes, stream>>>(
@@ -2059,7 +2059,7 @@ ATEN_CUDA_API void launch_q4km_fused_rmsnorm_gate_up_gemv(
 
     const int WARPS = 8;
     const int BLOCK_SIZE = WARPS * 32;
-    int grid = sm_count * 4;  // 4x occupancy for A100 bandwidth saturation
+    int grid = sm_count * 6;  // ncu: 1.0 wave @ reg-limit 6 blk/SM  // 4x occupancy for A100 bandwidth saturation
     int smem_bytes = (K + BLOCK_SIZE) * sizeof(float);
 
     q4km_fused_rmsnorm_gate_up_kernel<<<grid, BLOCK_SIZE, smem_bytes, stream>>>(

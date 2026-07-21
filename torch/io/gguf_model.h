@@ -609,6 +609,11 @@ struct InferenceScratchPool {
         cudaMalloc(&x_fp16_buf, max_K * 2);  // sizeof(half) = 2
         cudaMalloc(&y_fp16_buf, max_N * 2);
 
+        // Q8_1 pre-quantized x для dp4a GEMV (Phase 1/2): 36 B / 32 значений.
+        // +1 блок запаса на невыровненный K. Используется в gemv_scratch для
+        // малых/средних N (ncu-proven dp4a 2-4× vs FP32 на N≤~10000).
+        cudaMalloc(&q8_buf, ((max_K / 32) + 1) * 36);
+
         // Flash-decode scratch buffers
         // Max context = max_seq_len, splits = ceil(max_seq / 256)
         int64_t max_seq = config.context_length > 0 ? config.context_length : 8192;
@@ -3205,6 +3210,17 @@ public:
         if (use_quant_gemv_ && qw.valid) {
             int K = static_cast<int>(qw.cols);
             int Nr = static_cast<int>(qw.rows);
+            // Phase 1/2: dp4a на малом/среднем N (ncu-proven 2-4× vs FP32 при
+            // N≤~10000; на N=19456 gate_up FP32 быстрее → порог 12288). Квантуем
+            // x→Q8_1 один раз в q8_buf, затем dp4a GEMV. Q8_1 x — приближение
+            // (8-bit), НЕ bit-exact FP32: top-1 проверен на реальном тексте.
+            // Отключаемо: PT_NO_DP4A=1.
+            static const bool no_dp4a = []{ const char* e=std::getenv("PT_NO_DP4A"); return e && e[0]=='1'; }();
+            if (!no_dp4a && qw.is_q4k() && qw.gpu_data && scratch_.q8_buf && Nr <= 12288 && (K % 256) == 0) {
+                at::cuda::launch_quantize_q8_1(x, scratch_.q8_buf, K, stream);
+                at::cuda::launch_q4km_q8_gemv(qw.gpu_data, scratch_.q8_buf, y, K, Nr, qw.row_stride_bytes, stream);
+                return;
+            }
             if (use_llama_gemv_ && qw.is_q4k() && qw.gpu_data) {
                 at::cuda::launch_q4km_persistent_gemv_v2(qw.gpu_data, x, y, K, Nr, qw.row_stride_bytes, stream);
                 handled = true;
