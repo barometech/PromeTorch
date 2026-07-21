@@ -1748,7 +1748,9 @@ __global__ void q4km_fused_rmsnorm_qkv_gemv_kernel(
         }
 
         const uint8_t* row_data = w_ptr + (int64_t)row_idx * row_stride_bytes;
-        float sum = 0.0f;
+        // Split accumulators (lo/hi) → 2 независимые FMA-цепочки: скрывает
+        // латентность FMA на latency-bound decode-GEMV (ILP, Intel-вердикт).
+        float sum_lo = 0.0f, sum_hi = 0.0f;
 
         for (int blk = 0; blk < num_blocks_per_row; ++blk) {
             const uint8_t* bp = row_data + blk * 144;
@@ -1772,16 +1774,17 @@ __global__ void q4km_fused_rmsnorm_qkv_gemv_kernel(
             const float4 x_lo = *reinterpret_cast<const float4*>(&x_shared[k_base]);
             const float4 x_hi = *reinterpret_cast<const float4*>(&x_shared[k_base + 32]);
 
-            sum += (dl * (float)( qs4        & 0xF) - ml) * x_lo.x;
-            sum += (dl * (float)((qs4 >>  8) & 0xF) - ml) * x_lo.y;
-            sum += (dl * (float)((qs4 >> 16) & 0xF) - ml) * x_lo.z;
-            sum += (dl * (float)((qs4 >> 24) & 0xF) - ml) * x_lo.w;
-            sum += (dh * (float)((qs4 >>  4) & 0xF) - mh) * x_hi.x;
-            sum += (dh * (float)((qs4 >> 12) & 0xF) - mh) * x_hi.y;
-            sum += (dh * (float)((qs4 >> 20) & 0xF) - mh) * x_hi.z;
-            sum += (dh * (float)((qs4 >> 28) & 0xF) - mh) * x_hi.w;
+            sum_lo += (dl * (float)( qs4        & 0xF) - ml) * x_lo.x;
+            sum_lo += (dl * (float)((qs4 >>  8) & 0xF) - ml) * x_lo.y;
+            sum_lo += (dl * (float)((qs4 >> 16) & 0xF) - ml) * x_lo.z;
+            sum_lo += (dl * (float)((qs4 >> 24) & 0xF) - ml) * x_lo.w;
+            sum_hi += (dh * (float)((qs4 >>  4) & 0xF) - mh) * x_hi.x;
+            sum_hi += (dh * (float)((qs4 >> 12) & 0xF) - mh) * x_hi.y;
+            sum_hi += (dh * (float)((qs4 >> 20) & 0xF) - mh) * x_hi.z;
+            sum_hi += (dh * (float)((qs4 >> 28) & 0xF) - mh) * x_hi.w;
         }
 
+        float sum = sum_lo + sum_hi;
         #pragma unroll
         for (int offset = 16; offset > 0; offset >>= 1) {
             sum += __shfl_down_sync(WARP_MASK, sum, offset);
@@ -1856,7 +1859,8 @@ __global__ void q4km_persistent_gemv_accumulate_kernel(
         if (n >= N) continue;
 
         const uint8_t* row_data = weights + (int64_t)n * row_stride_bytes;
-        float sum = 0.0f;
+        // Split accumulators (lo/hi) → ILP, скрывает FMA-латентность (Intel-вердикт).
+        float sum_lo = 0.0f, sum_hi = 0.0f;
 
         for (int blk = 0; blk < num_blocks_per_row; ++blk) {
             const uint8_t* bp = row_data + blk * 144;
@@ -1880,16 +1884,17 @@ __global__ void q4km_persistent_gemv_accumulate_kernel(
             const float4 x_lo = *reinterpret_cast<const float4*>(&x_shared[k_base]);
             const float4 x_hi = *reinterpret_cast<const float4*>(&x_shared[k_base + 32]);
 
-            sum += (dl * (float)( qs4        & 0xF) - ml) * x_lo.x;
-            sum += (dl * (float)((qs4 >>  8) & 0xF) - ml) * x_lo.y;
-            sum += (dl * (float)((qs4 >> 16) & 0xF) - ml) * x_lo.z;
-            sum += (dl * (float)((qs4 >> 24) & 0xF) - ml) * x_lo.w;
-            sum += (dh * (float)((qs4 >>  4) & 0xF) - mh) * x_hi.x;
-            sum += (dh * (float)((qs4 >> 12) & 0xF) - mh) * x_hi.y;
-            sum += (dh * (float)((qs4 >> 20) & 0xF) - mh) * x_hi.z;
-            sum += (dh * (float)((qs4 >> 28) & 0xF) - mh) * x_hi.w;
+            sum_lo += (dl * (float)( qs4        & 0xF) - ml) * x_lo.x;
+            sum_lo += (dl * (float)((qs4 >>  8) & 0xF) - ml) * x_lo.y;
+            sum_lo += (dl * (float)((qs4 >> 16) & 0xF) - ml) * x_lo.z;
+            sum_lo += (dl * (float)((qs4 >> 24) & 0xF) - ml) * x_lo.w;
+            sum_hi += (dh * (float)((qs4 >>  4) & 0xF) - mh) * x_hi.x;
+            sum_hi += (dh * (float)((qs4 >> 12) & 0xF) - mh) * x_hi.y;
+            sum_hi += (dh * (float)((qs4 >> 20) & 0xF) - mh) * x_hi.z;
+            sum_hi += (dh * (float)((qs4 >> 28) & 0xF) - mh) * x_hi.w;
         }
 
+        float sum = sum_lo + sum_hi;
         #pragma unroll
         for (int offset = 16; offset > 0; offset >>= 1) {
             sum += __shfl_down_sync(WARP_MASK, sum, offset);
@@ -1993,7 +1998,9 @@ __global__ void q4km_fused_rmsnorm_gate_up_kernel(
         }
 
         const uint8_t* row_data = w_ptr + (int64_t)row_idx * row_stride_bytes;
-        float sum = 0.0f;
+        // Split accumulators (lo/hi) → 2 независимые FMA-цепочки: скрывает
+        // латентность FMA на latency-bound decode-GEMV (ILP, Intel-вердикт).
+        float sum_lo = 0.0f, sum_hi = 0.0f;
 
         for (int blk = 0; blk < num_blocks_per_row; ++blk) {
             const uint8_t* bp = row_data + blk * 144;
@@ -2017,16 +2024,17 @@ __global__ void q4km_fused_rmsnorm_gate_up_kernel(
             const float4 x_lo = *reinterpret_cast<const float4*>(&x_shared[k_base]);
             const float4 x_hi = *reinterpret_cast<const float4*>(&x_shared[k_base + 32]);
 
-            sum += (dl * (float)( qs4        & 0xF) - ml) * x_lo.x;
-            sum += (dl * (float)((qs4 >>  8) & 0xF) - ml) * x_lo.y;
-            sum += (dl * (float)((qs4 >> 16) & 0xF) - ml) * x_lo.z;
-            sum += (dl * (float)((qs4 >> 24) & 0xF) - ml) * x_lo.w;
-            sum += (dh * (float)((qs4 >>  4) & 0xF) - mh) * x_hi.x;
-            sum += (dh * (float)((qs4 >> 12) & 0xF) - mh) * x_hi.y;
-            sum += (dh * (float)((qs4 >> 20) & 0xF) - mh) * x_hi.z;
-            sum += (dh * (float)((qs4 >> 28) & 0xF) - mh) * x_hi.w;
+            sum_lo += (dl * (float)( qs4        & 0xF) - ml) * x_lo.x;
+            sum_lo += (dl * (float)((qs4 >>  8) & 0xF) - ml) * x_lo.y;
+            sum_lo += (dl * (float)((qs4 >> 16) & 0xF) - ml) * x_lo.z;
+            sum_lo += (dl * (float)((qs4 >> 24) & 0xF) - ml) * x_lo.w;
+            sum_hi += (dh * (float)((qs4 >>  4) & 0xF) - mh) * x_hi.x;
+            sum_hi += (dh * (float)((qs4 >> 12) & 0xF) - mh) * x_hi.y;
+            sum_hi += (dh * (float)((qs4 >> 20) & 0xF) - mh) * x_hi.z;
+            sum_hi += (dh * (float)((qs4 >> 28) & 0xF) - mh) * x_hi.w;
         }
 
+        float sum = sum_lo + sum_hi;
         #pragma unroll
         for (int offset = 16; offset > 0; offset >>= 1) {
             sum += __shfl_down_sync(WARP_MASK, sum, offset);
