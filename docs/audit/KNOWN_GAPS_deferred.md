@@ -50,18 +50,23 @@
   обновлён. Прирост — от per-token фиксов F16/NeoX/GeGLU, не от железа.
 - **Статус:** ЗАКРЫТО. RESULTS.md — единый источник, «pending ~90» снято.
 
-## 3. GEMV 2× refactor (см. PLAN_gemv_2x_refactor.md) — ЧАСТИЧНО (2026-07-21)
-- Phase 0 baseline снят (gate+up FP32-fused: dram 22.4%, occ 47%, 80 мкс).
-- **Сделано (build_cudnn_q40, `75867c5`+`a7976cf`):** ILP split-accumulators в
-  горячих Q4_K/Q6_K decode-GEMV (gate_up, attn_output/ffn_down, q6k). qkv уже был
-  split. Эффект: qwen3:4b 100→102.5 (+2.5%), deepseek-r1:8b 57.4→58.5 (+1.9%),
-  gemma3/phi3 ~0% (иной hot-path). Bit-exact top-1, без регресса.
-- **Потолок без ncu подтверждён эмпирически:** grid `sm_count*4→*8` (удвоение
-  резидентных warps) дал **регресс −10%** (103→93) — kernel НЕ occupancy-bound,
-  а тонко оттюнен; слепые правки occupancy/register вредят (совпадает с историей
-  плана: NROWS-рерайт регрессил 75/60 vs 89).
-- **Оставшийся 2× (до Ollama 189):** требует Phase 1 (quantize-x-once-per-layer)
-  + Phase 2 (dp4a-примитив), которые в этом окружении НЕ взять вслепую: ncu
-  (Nsight Compute) недоступен, а план требует ncu как единственного судью
-  (dram%/occ/лимитер) — иначе повтор прошлых регрессов. Ждёт окружения с ncu.
+## 3. GEMV 2× refactor (см. PLAN_gemv_2x_refactor.md) — БОЛЬШЕЙ ЧАСТЬЮ СДЕЛАНО (2026-07-21, ncu)
+- **ncu найден в системе** (`Nsight Compute 2024.1.0`) — не пришлось ставить. ncu =
+  dev-инструмент замера, НЕ зависимость PromeTorch.
+- **Phase 0 (`7e8c967`):** микробенч `examples/gguf/bench_gemv.cu` (CUDA-events +
+  эфф. полоса) — гоняет ОДНО ядро изолированно. Профиль под ncu.
+- **Ключевая находка ncu:** dp4a vs FP32 зависит от N. dp4a быстрее на малых/средних
+  N (N=1024: 4.1×, 2560: 2.7×, 4096: 2.1×, 9728: 1.36×), FP32 быстрее только на
+  N=19456 (gate_up fused). Прошлые наскоки били dp4a по gate_up → −10%. Правильно —
+  dp4a для малых N, FP32 для gate_up.
+- **Phase 1/2 (`7e8c967`):** quantize-x-once (q8_buf) + `gemv_scratch` маршрутизирует
+  Q4_K с N≤12288 через dp4a (`launch_q4km_q8_gemv`). grid `*4→*6` (ncu: 0.67→1.0 wave).
+  **qwen3:4b 100→109 (+9%), gemma3:4b 87.7→102.9 (+17%), deepseek 57.4→68.3 (+19%)**,
+  top-1 bit-exact. gemma3 = 88% Ollama. `PT_NO_DP4A=1` — откат.
+- **Отвергнуто по ncu (задокументировано):** grid*8 −10% (tail), launch_bounds(256,8)
+  −5% (reg spill), loads-ahead −5% (reg 40→48). FP32-ядро register-bound на 23% dram;
+  occupancy-трюки вредят — dp4a (меньше регистров) обходит это.
+- **Осталось (доп. выигрыш):** gate_up (N=19456, 22% времени) на FP32 — dp4a там
+  проигрывает; ускорить его = отдельная задача (возможно split-K или tensor-core
+  prefill). flash_decode softmax сериализован (tid==0) — Phase 3.
 - Phase 4 (on-device sampler) — argmax уже на GPU (`launch_argmax`, D2H 4 байта).

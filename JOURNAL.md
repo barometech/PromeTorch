@@ -77,10 +77,24 @@ dram ~24% → latency-bound (не bandwidth).
   (103→93). Вывод: kernel НЕ occupancy-bound, тонко оттюнен — слепые правки
   occupancy/register вредят. Откатил. Совпадает с историей плана (NROWS-рерайт
   тоже регрессил).
-- **Честный потолок:** оставшийся 2× до Ollama (189) требует quantize-x-once +
-  dp4a (Phase 1/2 плана). В этом окружении НЕ взять вслепую — ncu (Nsight
-  Compute) недоступен, а план (и прошлые регрессы) требуют ncu как судью. Реально
-  безопасно добытый выигрыш здесь — ILP (+2%). Больше — только с ncu.
+- **ncu НАЙДЕН в системе** (`Nsight Compute 2024.1.0`, `C:\Program Files\NVIDIA
+  Corporation\...`) — ставить не пришлось. Взял Phase 1/2 по-настоящему, под ncu.
+
+**GEMV Phase 1/2 — dp4a по данным ncu (`7e8c967`):**
+- Phase 0: микробенч `examples/gguf/bench_gemv.cu` (CUDA-events, часть репо) —
+  ОДНО ядро изолированно, профиль под ncu.
+- **Прорыв:** dp4a vs FP32 зависит от N. dp4a быстрее на малых/средних N (N=1024
+  4.1×, 2560 2.7×, 4096 2.1×, 9728 1.36×), FP32 быстрее ТОЛЬКО на N=19456 (gate_up
+  fused). Вот почему прошлые наскоки (dp4a по gate_up) давали −10% — били по
+  единственному месту где FP32 лучше. FP32-ядро register-bound на 23% dram
+  (ncu: 40 reg → 6 blk/SM); dp4a использует меньше регистров → headroom.
+- **Сделано:** Phase 1 (quantize-x-once в q8_buf) + Phase 2 (gemv_scratch → dp4a
+  для Q4_K N≤12288, gate_up на FP32) + grid *4→*6 (ncu: 0.67→1.0 wave). Итог:
+  **qwen 100→109 (+9%), gemma3 87.7→102.9 (+17%), deepseek 57.4→68.3 (+19%)**,
+  top-1 bit-exact к FP32. gemma3 = 88% Ollama. `PT_NO_DP4A=1` — откат.
+- **Отвергнуто по ncu:** grid*8 −10% (tail), launch_bounds(256,8) −5% (spill),
+  loads-ahead −5% (reg 40→48). Дисциплина плана соблюдена: ncu-судья + bit-exact.
+- ncu — dev-инструмент замера, в PromeTorch не тянется (никаких новых зависимостей).
 
 ## 2026-06-11: PromeServe «мусор на длинной генерации» — ДВА root cause (CPU + GPU)
 

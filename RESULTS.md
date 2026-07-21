@@ -17,12 +17,18 @@ Re-замер **2026-07-21** на актуальном коде (после фи
 NeoX RoPE `d25b95b`, gemma3 GeGLU `85eccc0`/`e25a4ba`). Ollama baseline замерен
 в тот же день на той же машине. Все выходы связные, без деградации.
 
-| Model | PromeTorch greedy | Ollama greedy | Ratio (greedy) | Было (2026-04-20) |
+| Model | PromeTorch greedy‡ | Ollama greedy | Ratio (greedy) | Было (2026-04-20) |
 |-------|------------------:|--------------:|---------------:|------------------:|
-| **qwen3:4b**      | **100.6 tok/s** | 189.5 tok/s | **53 %** | 82.6 (+22 %) |
-| **gemma3:4b**     | **87.7 tok/s**  | 116.9 tok/s | **75 %** | 81.4 (+8 %) |
-| **deepseek-r1:8b** | **57.4 tok/s** | 120.0 tok/s | **48 %** | 51.1 (+12 %) |
+| **qwen3:4b**      | **109 tok/s** | 189.5 tok/s | **58 %** | 82.6 (+32 %) |
+| **gemma3:4b**     | **102.9 tok/s** | 116.9 tok/s | **88 %** | 81.4 (+26 %) |
+| **deepseek-r1:8b** | **68.3 tok/s** | 120.0 tok/s | **57 %** | 51.1 (+34 %) |
 | **phi3:3.8b** (Q4_0)† | **~86 tok/s** | 217.9 tok/s | **39 %** | — (новая) |
+
+‡ Числа Q4_K-моделей — сборка **build_cudnn_q40** с dp4a Phase 1/2 (`7e8c967`):
+quantize-x-once + dp4a для малых/средних N GEMV (q/k/v/attn_out/ffn_down), gate_up
+на FP32. ncu-guided (микробенч `examples/gguf/bench_gemv.cu`). top-1 bit-exact к
+FP32. Прирост vs FP32-канона (2026-07-21): qwen 100→109, gemma3 87.7→102.9,
+deepseek 57.4→68.3. gemma3 — уже 88 % Ollama.
 
 † phi3:3.8b — формат **Q4_0** + merged (attn_qkv, ffn_up=[gate;up]) + LongRoPE.
 Раньше на GPU зависал (не было Q4_0-kernel и merged-split на GPU). Реализовано в
