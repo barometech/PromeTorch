@@ -976,6 +976,85 @@ ATEN_CUDA_API void launch_q6k_gemv(
 }
 
 // ============================================================================
+// Q4_0 GEMV — Warp-cooperative (phi3 и др. legacy-quant модели)
+// Q4_0 block (18 bytes = 32 values): fp16 d + qs[16]; symmetric, offset -8.
+//   dst[j]    = d*((qs[j] & 0xF) - 8)  for j in 0..15  (low nibbles)
+//   dst[j+16] = d*((qs[j] >> 4)  - 8)  for j in 0..15  (high nibbles)
+// One warp per output row; all 32 lanes active (one dequant value each).
+// ============================================================================
+__global__ void q4_0_gemv_kernel(
+    const uint8_t* __restrict__ weights,
+    const float* __restrict__ x,
+    float* __restrict__ y,
+    int K, int N,
+    int64_t row_stride_bytes)
+{
+    extern __shared__ float x_shared[];
+
+    const int tid = threadIdx.x;
+    const int block_size = blockDim.x;
+    const int warps_per_block = block_size / 32;
+    const int warp_id = tid / 32;
+    const int lane = tid & 31;
+    const int n = blockIdx.x * warps_per_block + warp_id;
+
+    for (int k = tid; k < K; k += block_size) {
+        x_shared[k] = x[k];
+    }
+    __syncthreads();
+
+    if (n >= N) return;
+
+    const uint8_t* row_data = weights + (int64_t)n * row_stride_bytes;
+    const int num_blocks_per_row = K / 32;
+
+    float sum = 0.0f;
+
+    for (int blk = 0; blk < num_blocks_per_row; ++blk) {
+        const uint8_t* block_ptr = row_data + (int64_t)blk * 18;
+
+        uint16_t d_bits;
+        memcpy(&d_bits, block_ptr, 2);
+        float d = fp16_to_fp32_device(d_bits);
+
+        const uint8_t* qs = block_ptr + 2;
+        int base_k = blk * 32;
+
+        // lane<16 → low nibble of qs[lane]; lane>=16 → high nibble of qs[lane-16].
+        // dst index == lane, so it maps 1:1 to x_shared[base_k + lane].
+        int q;
+        if (lane < 16) q = (int)(qs[lane] & 0x0F) - 8;
+        else           q = (int)(qs[lane - 16] >> 4) - 8;
+
+        sum += d * (float)q * x_shared[base_k + lane];
+    }
+
+    #pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        sum += __shfl_down_sync(WARP_MASK, sum, offset);
+    }
+    if (lane == 0) y[n] = sum;
+}
+
+ATEN_CUDA_API void launch_q4_0_gemv(
+    const void* weights,
+    const float* x,
+    float* y,
+    int K, int N,
+    int64_t row_stride_bytes,
+    cudaStream_t stream)
+{
+    const int WARPS = 8;
+    const int BLOCK_SIZE = WARPS * 32;
+    int grid = (N + WARPS - 1) / WARPS;
+    int smem_bytes = K * sizeof(float);
+
+    q4_0_gemv_kernel<<<grid, BLOCK_SIZE, smem_bytes, stream>>>(
+        static_cast<const uint8_t*>(weights), x, y,
+        K, N, row_stride_bytes);
+}
+
+// ============================================================================
 // Q5_K GEMV — Warp-cooperative with coalesced access
 // ============================================================================
 // Q5_K block (176 bytes = 256 values):

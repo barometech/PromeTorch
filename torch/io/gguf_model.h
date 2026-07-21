@@ -349,6 +349,7 @@ struct QuantizedWeight {
     bool is_q5k() const { return quant_type == 13; }  // GGML_TYPE_Q5_K
     bool is_f16() const { return quant_type == 1; }   // GGML_TYPE_F16
     bool is_q8_0() const { return quant_type == 8; }  // GGML_TYPE_Q8_0
+    bool is_q4_0() const { return quant_type == 2; }  // GGML_TYPE_Q4_0
 
     bool mmap_owned = false;  // true if cpu_data points into mmap region (don't free!)
     bool owns_cpu_data = true; // false for split-views into a parent QuantizedWeight (Phi-3 attn_qkv → q/k/v).
@@ -1213,6 +1214,25 @@ public:
                 }
                 return;
             }
+            else if (type == gguf::GGML_TYPE_Q4_0) {
+                // Q4_0: 32-элементные блоки по 18 байт (fp16 d + qs[16]), НЕ
+                // 256-superblock как K-кванты — поэтому row_stride особый.
+                // Идёт через generic gemv_scratch (не fused-путь Q4_K).
+                auto raw = reader.load_raw_tensor(name);
+                auto shape = raw.shape;
+                qw.rows = shape[0];
+                qw.cols = shape[1];
+                qw.row_stride_bytes = (qw.cols / 32) * 18;
+                qw.total_bytes = static_cast<int64_t>(raw.data.size());
+                qw.quant_type = type;
+
+                cudaError_t err = cudaMalloc(&qw.gpu_data, qw.total_bytes);
+                if (err == cudaSuccess) {
+                    cudaMemcpy(qw.gpu_data, raw.data.data(), qw.total_bytes, cudaMemcpyHostToDevice);
+                    qw.valid = true;
+                }
+                return;
+            }
             else return;  // F32/other → handled via float32 fallback
 
             auto raw = reader.load_raw_tensor(name);
@@ -1252,18 +1272,73 @@ public:
             }
         };
 
+        // GPU-эквивалент split_quant_rows: разрезает merged (attn_qkv / gate+up)
+        // на строковые слайсы прямо в VRAM (device-to-device copy). Без этого
+        // Phi-3/StarCoder2 (merged) не имели gpu_data для Q/K/V/gate/up → мусор.
+        auto split_quant_rows_gpu = [&](QuantizedWeight& merged,
+                                        const std::vector<int64_t>& row_counts,
+                                        const std::vector<QuantizedWeight*>& outs) {
+            if (!merged.valid || !merged.gpu_data) return;
+            int64_t row_off = 0;
+            for (size_t i = 0; i < outs.size(); ++i) {
+                int64_t n_rows = row_counts[i];
+                QuantizedWeight& slice = *outs[i];
+                slice.rows = n_rows;
+                slice.cols = merged.cols;
+                slice.row_stride_bytes = merged.row_stride_bytes;
+                slice.total_bytes = n_rows * merged.row_stride_bytes;
+                slice.quant_type = merged.quant_type;
+                if (cudaMalloc(&slice.gpu_data, slice.total_bytes) != cudaSuccess) {
+                    slice.gpu_data = nullptr; slice.valid = false; return;
+                }
+                cudaMemcpy(slice.gpu_data,
+                           static_cast<const char*>(merged.gpu_data)
+                             + row_off * merged.row_stride_bytes,
+                           slice.total_bytes, cudaMemcpyDeviceToDevice);
+                slice.valid = true;
+                row_off += n_rows;
+            }
+            if (merged.gpu_data) {
+                cudaFree(merged.gpu_data);
+                merged.gpu_data = nullptr; merged.valid = false;
+            }
+        };
+        const int64_t q_dim_total  = config.num_heads * config.head_dim;
+        const int64_t kv_dim_total = config.num_kv_heads * config.head_dim;
+
         // Load per-layer weights + finalize
         int64_t freed_count = 0, gpu_count = 0;
         for (int64_t i = 0; i < config.num_layers; ++i) {
             std::string prefix = "blk." + std::to_string(i) + ".";
             auto& layer = layers[i];
 
-            upload_quant(prefix + "attn_q.weight", layer.q_attn_q);
-            upload_quant(prefix + "attn_k.weight", layer.q_attn_k);
-            upload_quant(prefix + "attn_v.weight", layer.q_attn_v);
+            // QKV: отдельные тензоры предпочтительнее; иначе split merged attn_qkv на GPU.
+            if (reader.has_tensor(prefix + "attn_q.weight")) {
+                upload_quant(prefix + "attn_q.weight", layer.q_attn_q);
+                upload_quant(prefix + "attn_k.weight", layer.q_attn_k);
+                upload_quant(prefix + "attn_v.weight", layer.q_attn_v);
+            } else if (reader.has_tensor(prefix + "attn_qkv.weight")) {
+                upload_quant(prefix + "attn_qkv.weight", layer.q_attn_qkv);
+                split_quant_rows_gpu(layer.q_attn_qkv,
+                    {q_dim_total, kv_dim_total, kv_dim_total},
+                    {&layer.q_attn_q, &layer.q_attn_k, &layer.q_attn_v});
+            }
             upload_quant(prefix + "attn_output.weight", layer.q_attn_output);
-            upload_quant(prefix + "ffn_gate.weight", layer.q_ffn_gate);
-            upload_quant(prefix + "ffn_up.weight", layer.q_ffn_up);
+            // gate+up: отдельные предпочтительнее; иначе split merged ffn_up (=[gate;up]).
+            if (reader.has_tensor(prefix + "ffn_gate.weight")) {
+                upload_quant(prefix + "ffn_gate.weight", layer.q_ffn_gate);
+                upload_quant(prefix + "ffn_up.weight", layer.q_ffn_up);
+            } else if (reader.has_tensor(prefix + "ffn_up.weight")) {
+                upload_quant(prefix + "ffn_up.weight", layer.q_ffn_gate_up);
+                if (layer.q_ffn_gate_up.valid &&
+                    layer.q_ffn_gate_up.rows == 2 * config.intermediate_size) {
+                    split_quant_rows_gpu(layer.q_ffn_gate_up,
+                        {config.intermediate_size, config.intermediate_size},
+                        {&layer.q_ffn_gate, &layer.q_ffn_up});
+                } else {
+                    layer.q_ffn_up = std::move(layer.q_ffn_gate_up);
+                }
+            }
             upload_quant(prefix + "ffn_down.weight", layer.q_ffn_down);
 
             // For each weight: Q4_K_M → free float32, else → move float32 to GPU
@@ -1514,6 +1589,7 @@ public:
             else if (type == gguf::GGML_TYPE_Q5_K) block_bytes = 176;
             else if (type == gguf::GGML_TYPE_Q8_0) { block_bytes = 34; group_size = 32; }
             else if (type == gguf::GGML_TYPE_Q5_0) { block_bytes = 22; group_size = 32; }
+            else if (type == gguf::GGML_TYPE_Q4_0) { block_bytes = 18; group_size = 32; }
             else return;
 
             auto raw = reader.load_raw_tensor(name);
@@ -2820,6 +2896,10 @@ public:
             // The FP16 KV cache is still used for PREFILL (via kv_cache.append()).
 
             float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+            // YaRN/LongRoPE attn_factor на GPU (Gap #1): CPU применяет af через
+            // rope (rope_precompute), GPU rope — нет. Компенсируем в attention
+            // scale (score ×af²). Для attn_factor=1 (qwen/gemma/llama) — no-op.
+            scale *= config.rope_attn_factor * config.rope_attn_factor;
 
             // -- Flash-Decode attention (graph-compatible FP32: reads d_past_len from GPU) --
             PROF_BEGIN(profiler, "flash_decode");
@@ -3136,6 +3216,9 @@ public:
                 handled = true;
             } else if (qw.is_q5k() && qw.gpu_data) {
                 at::cuda::launch_q5k_gemv(qw.gpu_data, x, y, K, Nr, qw.row_stride_bytes, stream);
+                handled = true;
+            } else if (qw.is_q4_0() && qw.gpu_data) {
+                at::cuda::launch_q4_0_gemv(qw.gpu_data, x, y, K, Nr, qw.row_stride_bytes, stream);
                 handled = true;
             } else if (qw.is_f16() && qw.gpu_data) {
                 // FP16 weight: use simple FP16→FP32 dequant GEMV
@@ -7113,6 +7196,9 @@ public:
                 } else if (qw.is_q5k()) {
                     at::cuda::launch_q5k_gemv(qw.gpu_data, x_ptr, y_ptr,
                         K, N, qw.row_stride_bytes, nullptr);
+                } else if (qw.is_q4_0()) {
+                    at::cuda::launch_q4_0_gemv(qw.gpu_data, x_ptr, y_ptr,
+                        K, N, qw.row_stride_bytes, nullptr);
                 } else if (qw.is_f16()) {
                     at::cuda::launch_fp16_gemv(qw.gpu_data, x_ptr, y_ptr, K, N, nullptr);
                 }
@@ -7489,6 +7575,11 @@ public:
 
         int64_t total_seq = use_cache ? (kv_cache.seq_len + seq_len) : k.size(0);
         float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
+        // YaRN/LongRoPE attn_factor на GPU prefill (Gap #1): GPU rope не
+        // применяет af — компенсируем в scale. attn_factor=1 → no-op.
+        if (use_cuda_ && q.is_cuda()) {
+            scale *= config.rope_attn_factor * config.rope_attn_factor;
+        }
 
 #ifdef PT_USE_CUDA
         if (use_cuda_ && q.is_cuda()) {

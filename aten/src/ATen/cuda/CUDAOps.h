@@ -500,6 +500,12 @@ ATEN_CUDA_API void launch_q6k_gemv(
     int K, int N, int64_t row_stride_bytes,
     cudaStream_t stream = nullptr);
 
+// Fused Q4_0 dequant-GEMV: y[n] = sum_k dequant(W_q4_0[n,k]) * x[k]
+ATEN_CUDA_API void launch_q4_0_gemv(
+    const void* weights, const float* x, float* y,
+    int K, int N, int64_t row_stride_bytes,
+    cudaStream_t stream = nullptr);
+
 // Fused Q5_K dequant-GEMV: y[n] = sum_k dequant(W_q5k[n,k]) * x[k]
 ATEN_CUDA_API void launch_q5k_gemv(
     const void* weights, const float* x, float* y,
