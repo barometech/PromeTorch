@@ -1,4 +1,4 @@
-# PromeTorch — Results (2026-04-20)
+# PromeTorch — Results (2026-04-20; inference re-замер 2026-07-21)
 
 Canonical numbers from runs on this hardware. All reproducers + raw logs
 committed. No cherry-picking, no tuning, defaults of each framework.
@@ -13,12 +13,21 @@ committed. No cherry-picking, no tuning, defaults of each framework.
 
 ## Inference on A100 (GGUF Q4_K_M, 200 tokens, 5-run median)
 
-| Model | PromeTorch greedy | PromeTorch T=0.7 | Ollama greedy | Ratio (greedy) |
-|-------|------------------:|-----------------:|--------------:|---------------:|
-| **qwen3:4b**      | **82.6 tok/s** | 46.5 tok/s | 164.7 tok/s | **50 %** |
-| **gemma3:4b**     | **81.4 tok/s** | — | 145.4 tok/s | **56 %** |
-| **deepseek-r1:8b** | **51.1 tok/s** | — | 127.8 tok/s | **40 %** |
+Re-замер **2026-07-21** на актуальном коде (после фиксов F16 attn_v `a42d2ac`,
+NeoX RoPE `d25b95b`, gemma3 GeGLU `85eccc0`/`e25a4ba`). Ollama baseline замерен
+в тот же день на той же машине. Все выходы связные, без деградации.
 
+| Model | PromeTorch greedy | Ollama greedy | Ratio (greedy) | Было (2026-04-20) |
+|-------|------------------:|--------------:|---------------:|------------------:|
+| **qwen3:4b**      | **100.6 tok/s** | 189.5 tok/s | **53 %** | 82.6 (+22 %) |
+| **gemma3:4b**     | **87.7 tok/s**  | 116.9 tok/s | **75 %** | 81.4 (+8 %) |
+| **deepseek-r1:8b** | **57.4 tok/s** | 120.0 tok/s | **48 %** | 51.1 (+12 %) |
+
+- PromeTorch: 5-run median (deepseek 3-run, разброс 0.1 tok/s), greedy, prompt
+  «Once upon a time», `test_gguf_inference.exe … --device cuda --greedy --max-tokens 200`.
+- Ollama: `/api/generate` warm, `num_predict 200`, `temperature 0`, тот же промпт.
+- Прирост vs апрельского канона — от per-token фиксов (F16 attn_v V=0, NeoX RoPE
+  деградация, gemma3 GeGLU), не от смены железа. qwen3:4b greedy стабилен ±0.2 tok/s.
 - 10-min stress at T=0.7: **46.5 ± 0.19 tok/s** stable, peak 25.4 GB VRAM / 135 W, no crashes.
 - Sampling-path overhead: **~1.84× slowdown** vs greedy — per-token CPU-GPU sync on random draws + unfused top-k/top-p. Live bug, on roadmap.
 - Concurrent A100 training (13.78 GB held by PIR) does **not** disturb inference (std 0.4 %).
