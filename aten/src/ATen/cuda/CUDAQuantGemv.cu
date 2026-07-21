@@ -867,6 +867,100 @@ ATEN_CUDA_API void launch_q4km_q8_gemv(
 }
 
 // ============================================================================
+// Fused dp4a gate+up — 1 warp/row grid-stride (структура FP32-fused) + dp4a.
+// Для БОЛЬШОГО N (gate_up=19456): grid=N dp4a (q4km_q8_gemv) проигрывает FP32
+// из-за overhead 19456 блоков×4 варпа. Здесь: grid=sm*6, 8 варпов, каждый варп
+// обрабатывает много строк grid-stride'ом — как FP32, но с dp4a-compute (быстрее
+// выдаёт загрузки → выше dram на latency-bound). x_q8 — пред-квантованный Q8_1.
+// ============================================================================
+__global__ void q4km_q8_fused_gate_up_kernel(
+    const block_q8_1* __restrict__ x_q8,
+    const uint8_t* __restrict__ w_gate,
+    const uint8_t* __restrict__ w_up,
+    float* __restrict__ y_gate,
+    float* __restrict__ y_up,
+    int K, int N_gate, int N_up,
+    int64_t row_stride_bytes)
+{
+    const int tid = threadIdx.x;
+    const int warps_per_block = blockDim.x / 32;
+    const int warp_id = tid / 32;
+    const int lane = tid & 31;
+    const int group = lane / 8;
+    const int pos = (lane & 7) * 4;
+    const int num_blocks = K / 256;
+    const int N_total = N_gate + N_up;
+
+    for (int base_n = blockIdx.x * warps_per_block; base_n < N_total;
+         base_n += gridDim.x * warps_per_block)
+    {
+        int n = base_n + warp_id;
+        if (n >= N_total) continue;
+        const uint8_t* w_ptr; float* y_out; int row_idx;
+        if (n < N_gate) { w_ptr = w_gate; y_out = y_gate; row_idx = n; }
+        else            { w_ptr = w_up;   y_out = y_up;   row_idx = n - N_gate; }
+        const uint8_t* row_data = w_ptr + (int64_t)row_idx * row_stride_bytes;
+
+        float sum = 0.0f;
+        for (int blk = 0; blk < num_blocks; ++blk) {
+            const uint8_t* bp = row_data + blk * 144;
+            uint32_t qs4; memcpy(&qs4, bp + 16 + lane * 4, 4);
+
+            uint16_t d_bits, dmin_bits;
+            memcpy(&d_bits, bp, 2); memcpy(&dmin_bits, bp + 2, 2);
+            float d_q4 = fp16_to_fp32_device(d_bits);
+            float dm_q4 = fp16_to_fp32_device(dmin_bits);
+
+            uint8_t sc_lo, m_lo, sc_hi, m_hi;
+            get_scale_min_k4_device(group * 2, bp + 4, &sc_lo, &m_lo);
+            get_scale_min_k4_device(group * 2 + 1, bp + 4, &sc_hi, &m_hi);
+
+            int v_lo = (int)(qs4 & 0x0F0F0F0F);
+            int v_hi = (int)((qs4 >> 4) & 0x0F0F0F0F);
+
+            const int q8_lo = blk * 8 + group * 2;
+            const int q8_hi = q8_lo + 1;
+            float d8_lo = __half2float(*reinterpret_cast<const __half*>(&x_q8[q8_lo].ds));
+            float d8_hi = __half2float(*reinterpret_cast<const __half*>(&x_q8[q8_hi].ds));
+            int u_lo, u_hi;
+            memcpy(&u_lo, &x_q8[q8_lo].qs[pos], 4);
+            memcpy(&u_hi, &x_q8[q8_hi].qs[pos], 4);
+
+            int dot_lo = __dp4a(v_lo, u_lo, 0);
+            int dot_hi = __dp4a(v_hi, u_hi, 0);
+            int s_lo = __dp4a(0x01010101, u_lo, 0);
+            int s_hi = __dp4a(0x01010101, u_hi, 0);
+
+            sum += d_q4 * (float)sc_lo * d8_lo * (float)dot_lo - dm_q4 * (float)m_lo * d8_lo * (float)s_lo;
+            sum += d_q4 * (float)sc_hi * d8_hi * (float)dot_hi - dm_q4 * (float)m_hi * d8_hi * (float)s_hi;
+        }
+        #pragma unroll
+        for (int offset = 16; offset > 0; offset >>= 1)
+            sum += __shfl_down_sync(WARP_MASK, sum, offset);
+        if (lane == 0) y_out[row_idx] = sum;
+    }
+}
+
+ATEN_CUDA_API void launch_q4km_q8_fused_gate_up(
+    const void* x_q8,
+    const void* w_gate, const void* w_up,
+    float* y_gate, float* y_up,
+    int K, int N_gate, int N_up,
+    int64_t row_stride_bytes,
+    cudaStream_t stream)
+{
+    static int sm_count = 0;
+    if (!sm_count) { int dev=0; cudaGetDevice(&dev); cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, dev); }
+    const int BLOCK_SIZE = 256;  // 8 warps
+    int grid = sm_count * 6;
+    q4km_q8_fused_gate_up_kernel<<<grid, BLOCK_SIZE, 0, stream>>>(
+        static_cast<const block_q8_1*>(x_q8),
+        static_cast<const uint8_t*>(w_gate),
+        static_cast<const uint8_t*>(w_up),
+        y_gate, y_up, K, N_gate, N_up, row_stride_bytes);
+}
+
+// ============================================================================
 // Q6_K GEMV — Warp-cooperative with coalesced access
 // ============================================================================
 // Q6_K block (210 bytes = 256 values):

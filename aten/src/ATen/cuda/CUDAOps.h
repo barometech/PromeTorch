@@ -469,6 +469,13 @@ ATEN_CUDA_API void launch_q4km_q8_gemv(
     int K, int N, int64_t row_stride_bytes,
     cudaStream_t stream = nullptr);
 
+// Fused dp4a gate+up: 1 warp/row grid-stride + dp4a (для большого N=gate_up).
+ATEN_CUDA_API void launch_q4km_q8_fused_gate_up(
+    const void* x_q8, const void* w_gate, const void* w_up,
+    float* y_gate, float* y_up,
+    int K, int N_gate, int N_up, int64_t row_stride_bytes,
+    cudaStream_t stream = nullptr);
+
 // Pre-initialize kernel shared memory attributes for CUDA Graph compatibility.
 // Must be called ONCE before any graph capture. Pass model's max hidden and intermediate dims.
 ATEN_CUDA_API void init_cuda_kernel_smem_attributes(int max_K, int max_inter);

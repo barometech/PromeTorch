@@ -3038,6 +3038,26 @@ public:
                     sp.x_fp16_buf, sp.y_fp16_buf, s);
                 PROF_END(profiler, "fp16_norm_gate_up");
             } else if (can_fuse_ffn) {
+                // gate_up (большой N): по данным ncu FP32-fused и dp4a оба
+                // bandwidth-bound (~370 GB/s) → dp4a не выигрывает (не сокращает
+                // байты весов), а FP32 фьюзит RMSNorm бесплатно. Экспериментальный
+                // dp4a-путь за PT_DP4A_GATEUP=1 (rmsnorm+quantize+fused-dp4a).
+                static const bool dp4a_gu = []{ const char* e=std::getenv("PT_DP4A_GATEUP"); return e && e[0]=='1'; }();
+                if (dp4a_gu && sp.q8_buf) {
+                    PROF_BEGIN(profiler, "dp4a_norm_gate_up");
+                    at::cuda::launch_rms_norm(
+                        sp.buf_h.data_ptr<float>(), layer.ffn_norm.data_ptr<float>(),
+                        sp.buf_normed.mutable_data_ptr<float>(),
+                        1, static_cast<int>(H), eps, add_one, s);
+                    at::cuda::launch_quantize_q8_1(sp.buf_normed.data_ptr<float>(), sp.q8_buf, static_cast<int>(H), s);
+                    at::cuda::launch_q4km_q8_fused_gate_up(
+                        sp.q8_buf, layer.q_ffn_gate.gpu_data, layer.q_ffn_up.gpu_data,
+                        sp.buf_gate.mutable_data_ptr<float>(), sp.buf_up.mutable_data_ptr<float>(),
+                        static_cast<int>(H),
+                        static_cast<int>(layer.q_ffn_gate.rows), static_cast<int>(layer.q_ffn_up.rows),
+                        layer.q_ffn_gate.row_stride_bytes, s);
+                    PROF_END(profiler, "dp4a_norm_gate_up");
+                } else {
                 // -- FUSED: ffn_norm + gate+up projections (1 kernel instead of 3) --
                 PROF_BEGIN(profiler, "fused_norm_gate_up");
                 at::cuda::launch_q4km_fused_rmsnorm_gate_up_gemv(
@@ -3052,6 +3072,7 @@ public:
                     layer.q_ffn_gate.row_stride_bytes,
                     eps, add_one, s);
                 PROF_END(profiler, "fused_norm_gate_up");
+                }
             } else {
                 // Fallback: separate ffn_norm + gate/up GEMVs
                 PROF_BEGIN(profiler, "ffn_norm");

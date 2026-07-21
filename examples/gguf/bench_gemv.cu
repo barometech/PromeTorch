@@ -30,6 +30,10 @@ void launch_quantize_q8_1(const float* x, void* y_q8, int K, cudaStream_t stream
 void launch_q4km_q8_gemv(
     const void* weights, const void* x_q8, float* y,
     int K, int N, int64_t row_stride_bytes, cudaStream_t stream);
+void launch_q4km_q8_fused_gate_up(
+    const void* x_q8, const void* w_gate, const void* w_up,
+    float* y_gate, float* y_up,
+    int K, int N_gate, int N_up, int64_t row_stride_bytes, cudaStream_t stream);
 }}
 
 #define CK(call) do { cudaError_t e=(call); if(e!=cudaSuccess){ \
@@ -76,6 +80,9 @@ int main(int argc, char** argv) {
         } else if (kern == "dp4a") {
             // Phase 2: dp4a GEMV на пред-квантованном x (x уже в Q8_1, НЕ реквантим)
             at::cuda::launch_q4km_q8_gemv(dW, dxq8, dy, K, N, row_stride, nullptr);
+        } else if (kern == "fdp4a") {
+            // Fused dp4a gate+up: N делим пополам (gate+up), grid-stride
+            at::cuda::launch_q4km_q8_fused_gate_up(dxq8, dW, dW2, dy, dy2, K, N/2, N/2, row_stride, nullptr);
         } else {
             at::cuda::launch_q4km_persistent_gemv(dW, dx, dy, K, N, row_stride, nullptr);
         }
