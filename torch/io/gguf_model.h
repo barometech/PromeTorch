@@ -929,6 +929,9 @@ public:
     }
     bool use_fp16_weights_ = false;  // Dequant-at-load FP16 weights + cuBLAS HGEMV decode path
     bool use_llama_gemv_ = false;  // Route Q4_K GEMV through launch_q4km_persistent_gemv_v2 (llama.cpp-style)
+    // Phase 5: временные FP16-буферы для prefill (dequant Q4_K→FP16 + HGEMM tensor cores).
+    void* prefill_w_fp16_ = nullptr; int64_t prefill_w_fp16_cap_ = 0;
+    void* prefill_x_fp16_ = nullptr; int64_t prefill_x_fp16_cap_ = 0;
     size_t fp16_weights_bytes_ = 0;  // Total FP16 weight VRAM (for reporting)
     bool output_weight_needs_float32_ = false;  // true if output.weight has no Q4_K_M
 
@@ -2654,6 +2657,10 @@ public:
 
 #ifdef PT_USE_CUDA
     Tensor forward_decode(int64_t token_id) {
+        // Phase 5: prefill завершён — освободить FP16-temp буферы (dequant вес +
+        // x), чтобы не фрагментировать VRAM перед decode-scratch (иначе −7% decode).
+        if (prefill_w_fp16_) { cudaFree(prefill_w_fp16_); prefill_w_fp16_ = nullptr; prefill_w_fp16_cap_ = 0; }
+        if (prefill_x_fp16_) { cudaFree(prefill_x_fp16_); prefill_x_fp16_ = nullptr; prefill_x_fp16_cap_ = 0; }
         if (!scratch_.allocated) {
             scratch_.allocate(config);
         }
@@ -7246,7 +7253,33 @@ public:
                 launch_gemv(a.data_ptr<float>(), output.mutable_data_ptr<float>());
                 return output;
             } else {
-                // Prefill (M>1): batch GEMV — one per input row
+                // Phase 5: prefill (M>1) — Q4_K через dequant→FP16 + cublasGemmEx
+                // HGEMM (tensor cores). Заменяет M отдельных GEMV (было ~12ms/ток
+                // TTFT: каждый вес читался M раз). PT_NO_HGEMM_PREFILL=1 — откат.
+                // Порог M≥16: HGEMM dequant'ит весь вес в FP16 (~5× трафик веса),
+                // batch GEMV = M× трафик. HGEMM выигрывает только при большом M
+                // (крупный промпт). Для коротких промптов (M<16) batch GEMV дешевле
+                // и не греет GPU лишним dequant → без регресса decode.
+                static const bool no_hgemm = []{ const char* e=std::getenv("PT_NO_HGEMM_PREFILL"); return e && e[0]=='1'; }();
+                if (!no_hgemm && M >= 16 && qw.is_q4k() && qw.gpu_data) {
+                    auto output = at::empty_cuda({M, N}, a.dtype(), a.device().index());
+                    int64_t wneed = (int64_t)N * K * 2;   // FP16 вес [N,K]
+                    if (prefill_w_fp16_cap_ < wneed) {
+                        if (prefill_w_fp16_) cudaFree(prefill_w_fp16_);
+                        cudaMalloc(&prefill_w_fp16_, wneed); prefill_w_fp16_cap_ = wneed;
+                    }
+                    int64_t xneed = M * (int64_t)K * 2;   // FP16 x [M,K]
+                    if (prefill_x_fp16_cap_ < xneed) {
+                        if (prefill_x_fp16_) cudaFree(prefill_x_fp16_);
+                        cudaMalloc(&prefill_x_fp16_, xneed); prefill_x_fp16_cap_ = xneed;
+                    }
+                    at::cuda::launch_dequant_q4k_to_fp16(qw.gpu_data, prefill_w_fp16_,
+                        K, N, qw.row_stride_bytes, nullptr);
+                    at::cuda::launch_cublas_hgemm(prefill_w_fp16_, a.data_ptr<float>(),
+                        output.mutable_data_ptr<float>(), (int)M, K, N, prefill_x_fp16_, nullptr);
+                    return output;
+                }
+                // Fallback (Q6_K/Q5_K/F16/Q4_0): batch GEMV — one per input row
                 auto output = at::empty_cuda({M, N}, a.dtype(), a.device().index());
                 const float* a_ptr = a.data_ptr<float>();
                 float* out_ptr = output.mutable_data_ptr<float>();

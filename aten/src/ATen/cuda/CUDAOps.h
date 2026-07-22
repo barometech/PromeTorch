@@ -495,6 +495,12 @@ ATEN_CUDA_API void launch_cublas_hgemv(
     cudaStream_t stream = nullptr,
     bool row_major = false);
 
+// Phase 5: cuBLAS HGEMM для prefill (M>1) — tensor cores. FP16 W × FP16 x → FP32.
+ATEN_CUDA_API void launch_cublas_hgemm(
+    const void* W_fp16, const float* x, float* y,
+    int M, int K, int N,
+    void* x_fp16_buf, cudaStream_t stream = nullptr);
+
 // FP16 dequant GEMV: y[n] = sum_k fp16_to_fp32(W[n,k]) * x[k]
 // W is [N, K] row-major FP16 (GGML layout: ne[0]=K contiguous)
 ATEN_CUDA_API void launch_fp16_gemv(

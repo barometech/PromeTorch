@@ -26,6 +26,7 @@ EXPORTS
 ?launch_cos@cuda@at@@YAXPEBMPEAM_JPEAUCUstream_st@@@Z
 ?launch_cross_entropy_loss@cuda@at@@YAXPEBM0PEAMHHHPEAUCUstream_st@@@Z
 ?launch_cublas_hgemv@cuda@at@@YAXPEBXPEBMPEAMHHPEAX3PEAUCUstream_st@@_N@Z
+?launch_cublas_hgemm@cuda@at@@YAXPEBXPEBMPEAMHHHPEAXPEAUCUstream_st@@@Z
 ?launch_dequant_q4k_to_fp16@cuda@at@@YAXPEBXPEAXHH_JPEAUCUstream_st@@@Z
 ?launch_div@cuda@at@@YAXPEBM0PEAM_JPEAUCUstream_st@@@Z
 ?launch_div_fp16@cuda@at@@YAXPEBU__half@@0PEAU3@_JPEAUCUstream_st@@@Z

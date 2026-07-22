@@ -1444,6 +1444,43 @@ ATEN_CUDA_API void launch_cublas_hgemv(
 }
 
 // ============================================================================
+// Phase 5: cuBLAS HGEMM для prefill (M>1) — tensor cores.
+// FP16 веса [N,K] × FP16 x [M,K] → FP32 y [M,N]. Заменяет M отдельных GEMV.
+// x конвертируется в FP16 внутри (x_fp16_buf ≥ M*K half).
+// ============================================================================
+ATEN_CUDA_API void launch_cublas_hgemm(
+    const void* W_fp16,   // [N,K] row-major FP16 (GGUF)
+    const float* x,       // [M,K] FP32
+    float* y,             // [M,N] FP32
+    int M, int K, int N,
+    void* x_fp16_buf,     // scratch: ≥ M*K half
+    cudaStream_t stream)
+{
+    const int total = M * K;
+    const int threads = 256;
+    f32_to_f16_kernel<<<(total + threads - 1) / threads, threads, 0, stream>>>(
+        x, static_cast<__half*>(x_fp16_buf), total);
+
+    cublasHandle_t handle = CuBLASHandle::get();
+    cublasSetStream(handle, stream);
+    float alpha = 1.0f, beta = 0.0f;
+
+    // W_fp16 от dequant_q4k_to_fp16 = col-major [N,K] (out[k*N+n], lda=N).
+    // x row-major [M,K] = col-major [K,M] (ldb=K).
+    // C[N,M] = A[N,K]·B[K,M], op_a=N op_b=N: C[n,m]=sum_k W[n,k]·x[m,k]=y[m,n].
+    // C col-major [N,M] (ldc=N) = y[M,N] row-major. Tensor cores (FP16 in, FP32 acc).
+    cublasGemmEx(
+        handle, CUBLAS_OP_N, CUBLAS_OP_N,
+        N, M, K,
+        &alpha,
+        W_fp16, CUDA_R_16F, N,
+        x_fp16_buf, CUDA_R_16F, K,
+        &beta,
+        y, CUDA_R_32F, N,
+        CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+}
+
+// ============================================================================
 // FP16 dequant GEMV — y[n] = sum_k fp16_to_fp32(W[n,k]) * x[k]
 // ============================================================================
 // Simple warp-per-row GEMV for FP16 weights. Dequants on-the-fly.
