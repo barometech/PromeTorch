@@ -71,5 +71,9 @@
   end-to-end −4% (108.8→104.6). gate_up читает 28MB весов на HBM-пределе — dp4a не
   сокращает байты → не помогает; FP32-fused (с бесплатным RMSNorm) оптимален.
   Ядро сохранено за `PT_DP4A_GATEUP=1` (off). Ускорить = меньше байт (уже 4-bit).
-- **Осталось:** flash_decode softmax сериализован (tid==0) — Phase 3.
+- **Phase 3 СДЕЛАНО (`cf7ff95`):** flash_decode softmax max/sum был серийным
+  (tid==0 цикл по chunk_len≤256). Заменил на warp-shuffle блочную редукцию в 3
+  ядрах (partial обычное+graph, reduce). qwen 109→109.5, gemma3 102.9→103.7,
+  deepseek 68.3→68.6, top-1 bit-exact. Урок: лишние __syncthreads дали −1.3% →
+  убрал хвостовые в хелперах. Выигрыш растёт с длиной контекста.
 - Phase 4 (on-device sampler) — argmax уже на GPU (`launch_argmax`, D2H 4 байта).
