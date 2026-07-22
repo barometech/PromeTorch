@@ -513,18 +513,21 @@ struct FusedPIRTrainer {
             fused::linear_bwd_input(dx, bw.W_ffn2, dh, BT, H, D);
 
             // mul: ffn_gated = ffn1_silu * ffn3  ->  d_silu, d_ffn3
-            // mul_bwd has __restrict on all args — must use distinct buffers
-            fused::mul_bwd(dh, la.ffn1_silu, la.ffn3_out, dh_tmp, dh, BT * H);
-            // dh_tmp = d_silu, dh = d_ffn3
+            // mul_bwd has __restrict on all args — must use distinct buffers.
+            // db → la.ffn_gated (свободен: dW_ffn2 уже посчитан выше); раньше
+            // db==grad==dh — нарушение __restrict (латентный UB на LCC/VLIW).
+            float* d_ffn3 = la.ffn_gated;  // [BT, H]
+            fused::mul_bwd(dh, la.ffn1_silu, la.ffn3_out, dh_tmp, d_ffn3, BT * H);
+            // dh_tmp = d_silu, d_ffn3 = d(ffn3_out); dh свободен
 
             // ffn3 weight + input: d_norm2 (part from ffn3 path)
-            fused::linear_bwd_weight(dh, la.norm2_out, bg.dW_ffn3, BT, D, H);
+            fused::linear_bwd_weight(d_ffn3, la.norm2_out, bg.dW_ffn3, BT, D, H);
             float* d_norm2 = dx_tmp;  // [BT, D]
-            fused::linear_bwd_input(dh, bw.W_ffn3, d_norm2, BT, D, H);
+            fused::linear_bwd_input(d_ffn3, bw.W_ffn3, d_norm2, BT, D, H);
 
             // silu: d_silu -> d_ffn1 (need pre-silu ffn1_out as x).
-            // silu_bwd has __restrict — grad != dx required. Put d_ffn1 into dh (it's free now,
-            // dh just held d_ffn3 which is consumed). dh_tmp (d_silu) and dh are distinct.
+            // silu_bwd has __restrict — grad != dx required. Put d_ffn1 into dh
+            // (свободен сразу после mul_bwd — d_ffn3 теперь в la.ffn_gated).
             fused::silu_bwd(dh_tmp, la.ffn1_out, dh, BT * H);
             // dh = d_ffn1
 

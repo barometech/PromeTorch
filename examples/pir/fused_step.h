@@ -133,10 +133,12 @@ static void add_fwd(const float* __restrict a, const float* __restrict b, float*
 
 // RMSNorm: out = x * rsqrt(mean(x²) + eps) * weight
 // IMPORTANT: x and out MUST be distinct buffers (UB on VLIW/LCC with __restrict + aliasing).
-// D must be divisible by 6.
+// Любое D: 6-wide основной цикл + хвост (раньше требовалось D%6==0; при D=256
+// шло чтение/запись за границу строки — 2 элемента соседней строки + OOB weight).
 static void rmsnorm_fwd(const float* __restrict x, const float* __restrict weight, float* __restrict out,
                         float* __restrict rms_cache,
                         int64_t BT, int64_t D, float eps = 1e-6f) {
+    const int64_t D6 = D - (D % 6);
     #pragma omp parallel for schedule(static)
     for (int64_t i = 0; i < BT; i++) {
         const float* __restrict xi = x + i * D;
@@ -144,18 +146,21 @@ static void rmsnorm_fwd(const float* __restrict x, const float* __restrict weigh
         // 6-wide accumulation for VLIW (6 FPU channels)
         float s0=0,s1=0,s2=0,s3=0,s4=0,s5=0;
         #pragma loop count(768)
-        for (int64_t d = 0; d < D; d += 6) {
+        for (int64_t d = 0; d < D6; d += 6) {
             s0 += xi[d]*xi[d]; s1 += xi[d+1]*xi[d+1]; s2 += xi[d+2]*xi[d+2];
             s3 += xi[d+3]*xi[d+3]; s4 += xi[d+4]*xi[d+4]; s5 += xi[d+5]*xi[d+5];
         }
-        float inv_rms = 1.0f / std::sqrt((s0+s1+s2+s3+s4+s5) / D + eps);
+        float ssum = s0+s1+s2+s3+s4+s5;
+        for (int64_t d = D6; d < D; d++) ssum += xi[d]*xi[d];
+        float inv_rms = 1.0f / std::sqrt(ssum / D + eps);
         rms_cache[i] = inv_rms;
         #pragma loop count(768)
-        for (int64_t d = 0; d < D; d += 6) {
+        for (int64_t d = 0; d < D6; d += 6) {
             oi[d]=xi[d]*inv_rms*weight[d]; oi[d+1]=xi[d+1]*inv_rms*weight[d+1];
             oi[d+2]=xi[d+2]*inv_rms*weight[d+2]; oi[d+3]=xi[d+3]*inv_rms*weight[d+3];
             oi[d+4]=xi[d+4]*inv_rms*weight[d+4]; oi[d+5]=xi[d+5]*inv_rms*weight[d+5];
         }
+        for (int64_t d = D6; d < D; d++) oi[d] = xi[d]*inv_rms*weight[d];
     }
 }
 
@@ -179,8 +184,11 @@ static void rmsnorm_bwd(const float* grad, const float* x, const float* weight,
                 dot += gi[d] * weight[d] * xi[d];
             dot *= inv_rms * inv_rms / D;
             for (int64_t d = 0; d < D; d++) {
-                dxi[d] = inv_rms * (gi[d] * weight[d] - xi[d] * dot);
+                // dw ДО записи dxi: при in-place вызове (grad==dx, см. norm2 bwd)
+                // обратный порядок читал уже перезаписанный gi[d] → dweight был
+                // неверным (считался от преобразованного градиента).
                 dw_local[d] += gi[d] * xi[d] * inv_rms;
+                dxi[d] = inv_rms * (gi[d] * weight[d] - xi[d] * dot);
             }
         }
         #pragma omp critical
@@ -296,6 +304,10 @@ static float cross_entropy_fwd_bwd(const float* logits, const float* targets,
         const float* li = logits + i * V;
         float* di = dlogits + i * V;
         int target = (int)targets[i];
+        // Кламп как в embed_forward: токен ≥ V (битый файл / неверный
+        // --vocab_size) иначе даёт запись за границу di → порча кучи.
+        if (target < 0) target = 0;
+        if (target >= (int)V) target = (int)V - 1;
 
         // Stable softmax
         float max_val = li[0];
