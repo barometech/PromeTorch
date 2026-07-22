@@ -138,6 +138,15 @@ dram ~24% → latency-bound (не bandwidth).
 - Decode (M=1) не затронут. top-1 сохранён (FP16 prefill = стандарт llama.cpp),
   текст связный. `PT_NO_HGEMM_PREFILL=1` — откат.
 
+**Мерж build_cudnn_q40 → build_cudnn (2026-07-22):**
+- Все оптимизации сессии (Q4_0 GPU `39e795c`, dp4a Phase 1/2 `7e8c967`, Phase 3
+  `cf7ff95`, Phase 5 `c739698`) были в общих исходниках — пересобрал основную
+  сборку build_cudnn из текущего дерева (aten_cuda + test_gguf_inference +
+  promeserve). Верификация: qwen3:4b 109 tok/s (dp4a), phi3 работает (Q4_0 GPU,
+  exit 0). phi3 на build_cudnn и build_cudnn_q40 идентичны (57.5/57.7 под чужой
+  GPU-нагрузкой — доказывает, что сборки равны). promeserve стартует. build_cudnn
+  теперь канонический; build_cudnn_q40 избыточна.
+
 ## 2026-06-11: PromeServe «мусор на длинной генерации» — ДВА root cause (CPU + GPU)
 
 Жалоба: PromeServe на qwen3:4b выдаёт мусор. Диагностика показала **два

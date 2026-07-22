@@ -24,7 +24,9 @@ NeoX RoPE `d25b95b`, gemma3 GeGLU `85eccc0`/`e25a4ba`). Ollama baseline заме
 | **deepseek-r1:8b** | **68.3 tok/s** | 120.0 tok/s | **57 %** | 51.1 (+34 %) |
 | **phi3:3.8b** (Q4_0)† | **~86 tok/s** | 217.9 tok/s | **39 %** | — (новая) |
 
-‡ Числа Q4_K-моделей — сборка **build_cudnn_q40** с dp4a Phase 1/2 (`7e8c967`):
+‡ Числа Q4_K-моделей — с dp4a Phase 1/2 (`7e8c967`). Оптимизации (Q4_0 GPU, dp4a,
+Phase 3/5) смёржены в основную сборку **build_cudnn** (2026-07-22, пересборка из
+исходников; build_cudnn_q40 теперь идентична и избыточна):
 quantize-x-once + dp4a для малых/средних N GEMV (q/k/v/attn_out/ffn_down), gate_up
 на FP32. ncu-guided (микробенч `examples/gguf/bench_gemv.cu`). top-1 bit-exact к
 FP32. Прирост vs FP32-канона (2026-07-21): qwen 100→109, gemma3 87.7→102.9,
