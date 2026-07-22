@@ -348,8 +348,12 @@ struct PackBuffers {
     float* a;
     float* b;
     PackBuffers() {
-        a = aligned_alloc_f32(MC * KC);
-        b = aligned_alloc_f32(KC * NC);
+        // pack_b_trans округляет nc ВВЕРХ до кратного NR (pack_a — mc до MR).
+        // Если NC не кратно NR, при полном тайле (nc=NC) запись выходит за буфер
+        // KC*NC → heap overflow → segfault. E2K: NC=2048, NR=6 → нужно 2052; на
+        // маленьком N (char vocab<NC) не проявлялось, на большом N (BPE) падало.
+        a = aligned_alloc_f32(((MC + MR - 1) / MR * MR) * KC);
+        b = aligned_alloc_f32(KC * ((NC + NR - 1) / NR * NR));
     }
     ~PackBuffers() {
         aligned_free(a);
