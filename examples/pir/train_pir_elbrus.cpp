@@ -123,6 +123,7 @@ struct TrainConfig {
     int rank = -1;   // -1 = no sync, 0-3 = data-parallel rank
     int nprocs = 4;  // Number of data-parallel processes
     int grad_accum = 1; // Gradient accumulation steps (sync every N steps)
+    int64_t start_step = 0; // --start_step: resume offset (LR schedule + ckpt numbering)
 };
 
 // Include fused trainer AFTER config structs are defined
@@ -1151,6 +1152,8 @@ void parse_args(int argc, char** argv, PIRConfig& model_cfg, TrainConfig& train_
             train_cfg.save_dir = argv[++i];
         } else if (arg == "--load" && i + 1 < argc) {
             train_cfg.load_path = argv[++i];
+        } else if (arg == "--start_step" && i + 1 < argc) {
+            train_cfg.start_step = std::atoll(argv[++i]);
         } else if (arg == "--threads" && i + 1 < argc) {
             setup_numa_threads(std::atoi(argv[++i]));
         } else if (arg == "--seed" && i + 1 < argc) {
@@ -1256,6 +1259,27 @@ int main(int argc, char** argv) {
         trainer.allocate(model_cfg, train_cfg.batch_size);
         trainer.init_random(model_cfg);
 
+        // Fused checkpoint resume: raw float32-дамп all_params (тот же порядок, что save).
+        // Adam moments (m,v) в чекпоинт не пишутся → сбрасываются в 0 (короткий transient).
+        // LR-график и нумерацию чекпоинтов смещает --start_step.
+        if (!train_cfg.load_path.empty()) {
+            FILE* lf = fopen(train_cfg.load_path.c_str(), "rb");
+            if (lf) {
+                size_t got = 0, want = 0;
+                for (size_t i = 0; i < trainer.all_params.size(); i++) {
+                    got  += fread(trainer.all_params[i], sizeof(float), trainer.all_sizes[i], lf);
+                    want += trainer.all_sizes[i];
+                }
+                fclose(lf);
+                std::cout << "Fused checkpoint loaded: " << train_cfg.load_path
+                          << " (" << got << "/" << want << " floats"
+                          << (got == want ? ", OK" : ", MISMATCH!") << ")" << std::endl;
+            } else {
+                std::cerr << "WARN: не открыть fused-чекпоинт " << train_cfg.load_path
+                          << " — старт с random init" << std::endl;
+            }
+        }
+
         // Data-parallel gradient sync (--rank 0..3)
         GradSync grad_sync;
         bool use_sync = (train_cfg.rank >= 0);
@@ -1304,7 +1328,7 @@ int main(int argc, char** argv) {
         std::vector<float> inp_buf(tokens_per_step);
         std::vector<float> tgt_buf(tokens_per_step);
 
-        for (int64_t step = 1; step <= train_cfg.max_steps; step++) {
+        for (int64_t step = train_cfg.start_step + 1; step <= train_cfg.max_steps; step++) {
             float lr = get_lr(step, train_cfg);
 
             // Get batch
