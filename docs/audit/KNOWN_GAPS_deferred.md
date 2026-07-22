@@ -76,4 +76,12 @@
   ядрах (partial обычное+graph, reduce). qwen 109→109.5, gemma3 102.9→103.7,
   deepseek 68.3→68.6, top-1 bit-exact. Урок: лишние __syncthreads дали −1.3% →
   убрал хвостовые в хелперах. Выигрыш растёт с длиной контекста.
+- **Phase 5 СДЕЛАНО (`c739698`) — TTFT:** prefill (M>1) делал M отдельных GEMV
+  (каждый вес читался M раз) → TTFT 11.1s на 921 ток. Сделал `launch_cublas_hgemm`
+  (cublasGemmEx, FP16, tensor cores) + dequant Q4_K→FP16; matmul_q для M≥16 идёт
+  через HGEMM. **TTFT 11.1s → 1.6s (7×).** Порог M≥16 (HGEMM dequant'ит весь вес
+  ~5× трафик, batch GEMV = M× — HGEMM выигрывает только при большом M; короткий
+  промпт M<16 → batch GEMV, иначе лишний dequant грел GPU → −7% decode). Decode
+  (M=1) не затронут. top-1 сохранён (FP16 prefill = стандарт llama.cpp).
+- **Осталось:** gate_up bandwidth-bound (закрыт), нечего.
 - Phase 4 (on-device sampler) — argmax уже на GPU (`launch_argmax`, D2H 4 байта).

@@ -40,6 +40,9 @@ deepseek 57.4→68.3. gemma3 — уже 88 % Ollama.
 - Ollama: `/api/generate` warm, `num_predict 200`, `temperature 0`, тот же промпт.
 - Прирост vs апрельского канона — от per-token фиксов (F16 attn_v V=0, NeoX RoPE
   деградация, gemma3 GeGLU), не от смены железа. qwen3:4b greedy стабилен ±0.2 tok/s.
+- **TTFT (prefill, Phase 5 `c739698`):** промпт 921 ток — prefill **11.1s → 1.6s
+  (7×)** через dequant Q4_K→FP16 + cublasGemmEx HGEMM (tensor cores) для M≥16.
+  Раньше M отдельных GEMV читали каждый вес M раз. Decode (M=1) не затронут.
 - 10-min stress at T=0.7: **46.5 ± 0.19 tok/s** stable, peak 25.4 GB VRAM / 135 W, no crashes.
 - Sampling-path overhead: **~1.84× slowdown** vs greedy — per-token CPU-GPU sync on random draws + unfused top-k/top-p. Live bug, on roadmap.
 - Concurrent A100 training (13.78 GB held by PIR) does **not** disturb inference (std 0.4 %).

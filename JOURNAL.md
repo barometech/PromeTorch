@@ -121,6 +121,23 @@ dram ~24% → latency-bound (не bandwidth).
 - Итог: qwen 109→109.5, gemma3 102.9→103.7, deepseek 68.3→68.6, top-1 bit-exact.
   Выигрыш растёт с длиной контекста (серийный цикл 256 устранён).
 
+**Phase 5 — prefill на tensor cores (HGEMM) для TTFT (`c739698`):**
+- Prefill (M>1 токенов промпта) делал M отдельных GEMV на каждый вес — каждый вес
+  читался M раз. Замер: промпт 921 ток → TTFT **11.1 секунды**.
+- Сделал `launch_cublas_hgemm` (cublasGemmEx, FP16 in / FP32 acc → tensor cores).
+  matmul_q для M≥16 и Q4_K: dequant вес → FP16 (`launch_dequant_q4k_to_fp16`, дал
+  **col-major [N,K]** — важно для layout HGEMM) + HGEMM [M,K]@[K,N]. **TTFT 11.1s
+  → 1.6s (7×)**, в диапазоне плана ×5-10.
+- **Урок про порог M:** первая версия (HGEMM для любого M>1) дала −7% decode
+  (109→101) на коротком бенче (M=4). Причина: HGEMM dequant'ит ВЕСЬ вес в FP16
+  (~5× трафик веса) — для M=4 это дороже batch GEMV (4× трафик) и грело GPU.
+  Free буферов не помог (не персистентность). Порог M≥16 (HGEMM выигрывает по
+  трафику только при большом M) убрал регресс: короткий M<16 → batch GEMV (decode
+  109), длинный M≥16 → HGEMM (TTFT 7×). Оптимизация должна включаться там, где
+  реально выигрывает — иначе вредит.
+- Decode (M=1) не затронут. top-1 сохранён (FP16 prefill = стандарт llama.cpp),
+  текст связный. `PT_NO_HGEMM_PREFILL=1` — откат.
+
 ## 2026-06-11: PromeServe «мусор на длинной генерации» — ДВА root cause (CPU + GPU)
 
 Жалоба: PromeServe на qwen3:4b выдаёт мусор. Диагностика показала **два
