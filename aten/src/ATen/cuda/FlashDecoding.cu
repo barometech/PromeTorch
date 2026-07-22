@@ -30,6 +30,42 @@ namespace cuda {
 
 static constexpr int KV_CHUNK_SIZE = 256;
 
+// ============================================================================
+// Phase 3: warp-shuffle блочные редукции softmax (замена серийного tid==0).
+// wr — shared[32] scratch. Все потоки блока ДОЛЖНЫ вызывать (есть __syncthreads).
+// Результат валиден в потоке 0.
+// ============================================================================
+// Одна __syncthreads (после записи wr). Вызывающий ДОЛЖЕН __syncthreads() после
+// (для видимости результата + освобождения wr перед след. редукцией).
+__device__ __forceinline__ float block_reduce_max(float v, float* wr) {
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+    #pragma unroll
+    for (int o = 16; o > 0; o >>= 1) v = fmaxf(v, __shfl_down_sync(0xFFFFFFFFu, v, o));
+    if (lane == 0) wr[warp] = v;
+    __syncthreads();
+    if (warp == 0) {
+        const int nw = (blockDim.x + 31) >> 5;
+        v = (lane < nw) ? wr[lane] : -FLT_MAX;
+        #pragma unroll
+        for (int o = 16; o > 0; o >>= 1) v = fmaxf(v, __shfl_down_sync(0xFFFFFFFFu, v, o));
+    }
+    return v;  // валиден в потоке 0
+}
+__device__ __forceinline__ float block_reduce_sum(float v, float* wr) {
+    const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
+    #pragma unroll
+    for (int o = 16; o > 0; o >>= 1) v += __shfl_down_sync(0xFFFFFFFFu, v, o);
+    if (lane == 0) wr[warp] = v;
+    __syncthreads();
+    if (warp == 0) {
+        const int nw = (blockDim.x + 31) >> 5;
+        v = (lane < nw) ? wr[lane] : 0.0f;
+        #pragma unroll
+        for (int o = 16; o > 0; o >>= 1) v += __shfl_down_sync(0xFFFFFFFFu, v, o);
+    }
+    return v;  // валиден в потоке 0
+}
+
 __global__ void flash_decode_partial_kernel(
     const float* __restrict__ Q,          // [n_heads * head_dim]
     const float* __restrict__ K_cache,    // [total_seq, n_kv_heads * head_dim]
@@ -92,31 +128,31 @@ __global__ void flash_decode_partial_kernel(
     }
     __syncthreads();
 
-    // Step 2: Find max for numerical stability (parallel reduction)
-    // Use thread 0 for simplicity — chunk_len <= KV_CHUNK_SIZE = 256
+    // Step 2: max для численной стабильности — warp-shuffle блочная редукция
+    // (Phase 3: было серийным tid==0 циклом по chunk_len≤256).
     __shared__ float s_max;
     __shared__ float s_sum;
-    if (tid == 0) {
-        float m = -FLT_MAX;
-        for (int t = 0; t < chunk_len; t++) {
-            if (scores[t] > m) m = scores[t];
-        }
-        s_max = m;
+    __shared__ float wr[32];
+    {
+        float local = -FLT_MAX;
+        for (int t = tid; t < chunk_len; t += blockDim.x) local = fmaxf(local, scores[t]);
+        float m = block_reduce_max(local, wr);
+        if (tid == 0) s_max = m;
     }
     __syncthreads();
 
-    // Step 3: exp(score - max) and sum
+    // Step 3: exp(score - max) (уже параллельно)
     for (int t = tid; t < chunk_len; t += blockDim.x) {
         scores[t] = expf(scores[t] - s_max);
     }
     __syncthreads();
 
-    if (tid == 0) {
-        float sum = 0.0f;
-        for (int t = 0; t < chunk_len; t++) {
-            sum += scores[t];
-        }
-        s_sum = sum;
+    // Step 3b: sum — warp-shuffle блочная редукция (было серийным tid==0)
+    {
+        float local = 0.0f;
+        for (int t = tid; t < chunk_len; t += blockDim.x) local += scores[t];
+        float sm = block_reduce_sum(local, wr);
+        if (tid == 0) s_sum = sm;
     }
     __syncthreads();
 
@@ -156,33 +192,37 @@ __global__ void flash_decode_reduce_kernel(
     int head_idx = blockIdx.x;
     int tid = threadIdx.x;
 
-    // Step 1: Find global max across all splits (thread 0)
+    // Step 1: global max по всем splits — warp-shuffle блочная редукция
+    // (Phase 3: было серийным tid==0 циклом по num_splits).
     __shared__ float global_max;
     __shared__ float total_sum;
+    __shared__ float wr[32];
     // Scratch for per-split rescaled sums
     extern __shared__ float smem[];
     // smem[0..num_splits-1]: rescaled sums
 
-    if (tid == 0) {
-        float gm = -FLT_MAX;
-        for (int s = 0; s < num_splits; s++) {
-            float m = partial_max[s * n_heads + head_idx];
-            if (m > gm) gm = m;
-        }
-        global_max = gm;
+    {
+        float local = -FLT_MAX;
+        for (int s = tid; s < num_splits; s += blockDim.x)
+            local = fmaxf(local, partial_max[s * n_heads + head_idx]);
+        float gm = block_reduce_max(local, wr);
+        if (tid == 0) global_max = gm;
+    }
+    __syncthreads();
 
-        // Step 2: Compute per-split correction factors and denominator
-        // correction[s] = exp(max[s] - global_max)  (for numerator)
-        // denominator = sum(correction[s] * partial_lse[s])
-        float ts = 0.0f;
-        for (int s = 0; s < num_splits; s++) {
+    // Step 2: correction[s] = exp(max[s]-gmax) в smem + denominator = sum(corr*lse).
+    // Параллельно: каждый поток пишет свои smem[s] и копит local_ts, затем редукция.
+    {
+        float local_ts = 0.0f;
+        for (int s = tid; s < num_splits; s += blockDim.x) {
             float m = partial_max[s * n_heads + head_idx];
             float sum_s = partial_lse[s * n_heads + head_idx];
-            float correction = expf(m - gm);
-            smem[s] = correction;     // JUST exp correction (NOT * sum_s)
-            ts += correction * sum_s;  // denominator includes sum_s
+            float correction = expf(m - global_max);
+            smem[s] = correction;          // JUST exp correction (NOT * sum_s)
+            local_ts += correction * sum_s; // denominator includes sum_s
         }
-        total_sum = ts;
+        float ts = block_reduce_sum(local_ts, wr);
+        if (tid == 0) total_sum = ts;
     }
     __syncthreads();
 
@@ -804,21 +844,25 @@ __global__ void flash_decode_partial_graph_kernel(
     }
     __syncthreads();
 
+    // Phase 3: max/sum через warp-shuffle блочную редукцию (было серийным tid==0).
     __shared__ float s_max, s_sum;
-    if (tid == 0) {
-        float m = -FLT_MAX;
-        for (int t = 0; t < chunk_len; t++) if (scores[t] > m) m = scores[t];
-        s_max = m;
+    __shared__ float wr[32];
+    {
+        float local = -FLT_MAX;
+        for (int t = tid; t < chunk_len; t += blockDim.x) local = fmaxf(local, scores[t]);
+        float m = block_reduce_max(local, wr);
+        if (tid == 0) s_max = m;
     }
     __syncthreads();
 
     for (int t = tid; t < chunk_len; t += blockDim.x) scores[t] = expf(scores[t] - s_max);
     __syncthreads();
 
-    if (tid == 0) {
-        float sum = 0.0f;
-        for (int t = 0; t < chunk_len; t++) sum += scores[t];
-        s_sum = sum;
+    {
+        float local = 0.0f;
+        for (int t = tid; t < chunk_len; t += blockDim.x) local += scores[t];
+        float sm = block_reduce_sum(local, wr);
+        if (tid == 0) s_sum = sm;
     }
     __syncthreads();
 
