@@ -50,9 +50,9 @@ data/cifar-100-*/
 !promeserve/web/preview/**/*.png
 output.txt
 
-# Unused directories
-PIR/
-tools/
+# Unused directories (root-anchored: НЕ хватать examples/pir/ на case-insensitive FS)
+/PIR/
+/tools/
 
 # Temporary build/debug logs (root directory)
 *.txt
