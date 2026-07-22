@@ -4024,3 +4024,58 @@ Sync-тюнинг (Option F, futex) исчерпан (sync всего 6%). Kerne
 тоже net 0 (skew перекрывает выигрыш). **Оставшиеся ветки только
 algorithm-level или hardware-level.**
 
+---
+
+## 2026-07-22 — PIR на Эльбрусе: 2 root cause + BPE-тренировка ассистента
+
+Задача: PIR не вставал и не бежал на Эльбрусе; нужно обучить простейший
+русский ассистент на BPE (не char-level).
+
+### Root cause #1 — сборка падала: diagnostics.h под .gitignore
+
+`examples/pir/train_pir_elbrus.cpp` включает `diagnostics.h` (DiffStats,
+LogitProbe). Файл был **untracked** — правило `.gitignore` `PIR/` на
+case-insensitive Windows FS хватало `examples/pir/`, и `git add` его
+молча игнорировал. На Эльбрусе (после `git pull`) файла не было →
+`error: 'DiffStats' undefined`. Фикс: якорь `/PIR/` + `/tools/` (только
+корневые каталоги) и `git add -f diagnostics.h train_mlp_char.cpp`.
+Коммит `d073bf3`.
+
+### Root cause #2 — BPE (vocab 16000) SIGSEGV в forward
+
+Char-level (vocab=256) обучался, BPE (vocab=16000) падал сегфолтом в
+`FusedPIRTrainer::forward` на head-matmul. gdb показал переполнение в
+`TudaBLAS.h::PackBuffers`.
+
+Причина: `pack_b_trans` округляет `nc` **вверх** до кратного `NR`, а
+буфер `b` аллоцировался ровно `KC*NC`. Для E2K `NC=2048`, `NR=6` →
+2048 не кратно 6 → при полном тайле пишется 2052 float × KC → heap
+overflow. Проявляется только когда `N ≥ NC`, т.е. большой словарь
+(LM head N=vocab=16000 ≥ 2048). Char-level N=256 < 2048 → тайл один,
+`nc=256`, overflow не доходил. Фикс: аллоцировать буферы с округлением
+вверх — `a = MC↑MR × KC`, `b = KC × NC↑NR`. Коммит `78b0613`.
+
+Проверка после пересборки: `FUSED step 1 | loss=9.6886` = ln(16000)
+≈ 9.68 (корректный random-init для 16k), шаги идут, сегфолта нет.
+
+### BPE-токенизатор + тренировка
+
+`~/make_ru_16k.py`: sentencepiece BPE 16k на `russian_all.txt` →
+`data/russian_16k.tokens` (16.67M токенов uint32), `data/ru_bpe_16k.model`.
+
+Запуск: 4-процессный Local SGD (по NUMA-узлу, 8 потоков каждый),
+`loginctl enable-linger` (обязательно), embd256/L4/block256/batch2,
+16k vocab, grad_accum 10, lr 6e-4, 10000 шагов, checkpoints/500.
+GradSync подтверждён: after-hash всех 4 рангов совпадает
+(`b351444646ef6fac`). Loss 9.68→9.61 к шагу 50, ~78 tok/s/проц.
+
+### Инструмент оценки — `pir_infer.py`
+
+Встроенная генерация `generate_text` char-level (`result += (char)id`)
+→ для BPE даёт мусор. Написал numpy-инференс (развязан от C++, без
+пересборки): читает сырой float32-дамп `all_params`, реконструирует
+`base_decay` из формулы init (в чекпоинт не пишется), повторяет forward
+1-в-1 (rmsnorm eps 1e-6, linear Y=X·Wᵀ, scan h[t]=g·h[t-1]+x[t]),
+декодит через sentencepiece. Режим `--val_tokens` считает CE на срезе
+для сверки forward с C++.
+
