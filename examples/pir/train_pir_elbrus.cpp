@@ -1073,14 +1073,26 @@ public:
 // ============================================================================
 
 float get_lr(int64_t step, const TrainConfig& cfg) {
+    float base;
     if (step < cfg.warmup_steps) {
-        return cfg.learning_rate * static_cast<float>(step) / cfg.warmup_steps;
+        base = cfg.learning_rate * static_cast<float>(step) / cfg.warmup_steps;
+    } else {
+        float progress = static_cast<float>(step - cfg.warmup_steps) /
+                         static_cast<float>(cfg.max_steps - cfg.warmup_steps);
+        progress = std::min(progress, 1.0f);
+        float cosine = 0.5f * (1.0f + std::cos(M_PI * progress));
+        base = cfg.min_lr + (cfg.learning_rate - cfg.min_lr) * cosine;
     }
-    float progress = static_cast<float>(step - cfg.warmup_steps) /
-                     static_cast<float>(cfg.max_steps - cfg.warmup_steps);
-    progress = std::min(progress, 1.0f);
-    float cosine = 0.5f * (1.0f + std::cos(M_PI * progress));
-    return cfg.min_lr + (cfg.learning_rate - cfg.min_lr) * cosine;
+    // Resume-warmup: после --start_step Adam moments (m,v) сброшены в 0 (в
+    // чекпоинт не пишутся). На полном LR это даёт буйный transient (loss
+    // спайк 6→8.5, gnorm 40+). Линейно разгоняем LR первые warmup_steps
+    // шагов после резюма, чтобы moments отстроились мягко.
+    if (cfg.start_step > 0) {
+        int64_t since = step - cfg.start_step;
+        if (since >= 0 && since < cfg.warmup_steps)
+            base *= static_cast<float>(since + 1) / static_cast<float>(cfg.warmup_steps);
+    }
+    return base;
 }
 
 // ============================================================================
