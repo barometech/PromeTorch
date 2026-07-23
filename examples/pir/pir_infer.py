@@ -144,6 +144,99 @@ def forward_step(W, cfg, tok, state):
         x = x + ly['W_ffn2'] @ (silu(ly['W_ffn1'] @ n2) * (ly['W_ffn3'] @ n2))
     return W['W_lm_head'] @ rmsnorm(x[None, :], W['norm_out_w'])[0]
 
+# ----------------------------------------------------------------------------
+# Спекулятивный декод (draft-модель ~5% FLOP + батч-верификация target'ом).
+# Для рекуррентной сети верификация K токенов = ОДИН батч-прогон из текущего
+# состояния (скан с начальным h0): GEMV→GEMM амортизирует чтение весов, так
+# что K токенов верифицируются почти по цене одного. Draft (крошечный PIR)
+# предлагает K токенов, target принимает совпавший префикс + 1 свой токен.
+# Жадный режим (temp=0): выход бит-в-бит равен обычной жадной генерации.
+# ----------------------------------------------------------------------------
+def scan_with_init(gate, x, h0):
+    # как scan(), но h стартует с h0; возвращает все промежуточные h (S,D)
+    S, D = x.shape
+    out = np.empty_like(x)
+    h = h0.astype(x.dtype).copy()
+    for t in range(S):
+        h = gate[t] * h + x[t]
+        out[t] = h
+    return out
+
+def forward_batch_from_state(W, cfg, ids, state):
+    """Прогон S токенов из состояния state (НЕ мутирует его).
+       Возвращает (logits (S,V), states_pp[l][p] = (S,D) — h после каждой позиции)."""
+    L, NP = cfg['L'], cfg['NP']
+    x = W['W_emb'][np.asarray(ids, dtype=np.int64)].astype(np.float32)
+    states_pp = [[None] * NP for _ in range(L)]
+    for l, ly in enumerate(W['layers']):
+        s = rmsnorm(x, ly['norm1_w'])
+        for p, pw in enumerate(ly['pir']):
+            sig = sigmoid(s @ pw['W_gate'].T)
+            v = s @ pw['W_value'].T
+            hs = scan_with_init(sig * W['base_decay'][p], sig * v, state[l][p])
+            states_pp[l][p] = hs
+            s = s + rmsnorm(hs @ pw['W_out'].T, pw['norm_w'])
+        x = x + rmsnorm(s @ ly['W_mix'].T, ly['norm_pir_w'])
+        n2 = rmsnorm(x, ly['norm2_w'])
+        x = x + (silu(n2 @ ly['W_ffn1'].T) * (n2 @ ly['W_ffn3'].T)) @ ly['W_ffn2'].T
+    fin = rmsnorm(x, W['norm_out_w'])
+    return fin @ W['W_lm_head'].T, states_pp
+
+def set_state_from(states_pp, state, idx):
+    # state[l][p] ← h после позиции idx верификационного прогона
+    for l in range(len(state)):
+        for p in range(len(state[l])):
+            state[l][p] = states_pp[l][p][idx].copy()
+
+def generate_speculative(W, cfg, Wd, cfgd, prompt_ids, max_tokens, spec_k):
+    """Жадная спекулятивная генерация. Возвращает (ids, статистика)."""
+    st_t = init_state(cfg)    # target state
+    st_d = init_state(cfgd)   # draft state
+    ids = list(prompt_ids)
+    lg_t = lg_d = None
+    for t in ids:
+        lg_t = forward_step(W, cfg, t, st_t)
+        lg_d = forward_step(Wd, cfgd, t, st_d)
+    produced, rounds, accepted_total = 0, 0, 0
+    while produced < max_tokens:
+        rounds += 1
+        # t1 — собственный жадный токен target'а, бесплатен из lg_t
+        t1 = int(np.argmax(lg_t))
+        # draft продолжает ПОСЛЕ t1: k предложений (сохраняем его состояния)
+        props = []
+        d_states_snapshot = [[h.copy() for h in row] for row in st_d]
+        lg_d_cur = forward_step(Wd, cfgd, t1, st_d)
+        for _ in range(spec_k):
+            d_tok = int(np.argmax(lg_d_cur))
+            props.append(d_tok)
+            lg_d_cur = forward_step(Wd, cfgd, d_tok, st_d)
+        # верификация: ОДИН батч-прогон target'а по [t1, props...]
+        batch = [t1] + props
+        lgs, states_pp = forward_batch_from_state(W, cfg, batch, st_t)
+        # приёмка префикса совпадений
+        m = 0
+        for i in range(spec_k):
+            if int(np.argmax(lgs[i])) == props[i]:
+                m += 1
+            else:
+                break
+        emit = [t1] + props[:m]
+        ids.extend(emit)
+        produced += len(emit)
+        accepted_total += m
+        # target-состояние: после последнего принятого = позиция len(emit)-1
+        set_state_from(states_pp, st_t, len(emit) - 1)
+        lg_t = lgs[len(emit) - 1]
+        # draft-состояние: откат к снапшоту и прокрутка по фактически принятым
+        st_d = d_states_snapshot
+        lg_d = None
+        for t in emit:
+            lg_d = forward_step(Wd, cfgd, t, st_d)
+    stats = dict(rounds=rounds, accepted=accepted_total,
+                 acc_rate=accepted_total / max(1, rounds * spec_k),
+                 tokens_per_round=produced / max(1, rounds))
+    return ids, stats
+
 def sample(logits, temp, top_k, rng):
     if temp <= 0:
         return int(np.argmax(logits))
@@ -177,6 +270,12 @@ def main():
                          '(O(T) на токен; для сравнения со stateful)')
     ap.add_argument('--check-stateful', action='store_true', dest='check_stateful',
                     help='сверка: логиты stateful-шага vs полного forward на промпте')
+    ap.add_argument('--draft-ckpt', default='', dest='draft_ckpt',
+                    help='чекпоинт draft-модели → спекулятивная ЖАДНАЯ генерация')
+    ap.add_argument('--draft-n-embd', type=int, default=64, dest='draft_n_embd')
+    ap.add_argument('--draft-n-layers', type=int, default=2, dest='draft_n_layers')
+    ap.add_argument('--spec-k', type=int, default=4, dest='spec_k',
+                    help='сколько токенов предлагает draft за раунд')
     args = ap.parse_args()
 
     import sentencepiece as spm
@@ -214,6 +313,23 @@ def main():
     rng = np.random.default_rng(args.seed)
     ids = sp.encode(args.prompt, out_type=int)
     t0 = time.time()
+    if args.draft_ckpt:
+        # спекулятивная жадная генерация (temp игнорируется — greedy)
+        dargs = argparse.Namespace(**{**vars(args),
+                                      'n_embd': args.draft_n_embd,
+                                      'n_layers': args.draft_n_layers})
+        cfgd = build_cfg(dargs)
+        Wd = load_ckpt(args.draft_ckpt, cfgd)
+        ids, stats = generate_speculative(W, cfg, Wd, cfgd, ids,
+                                          args.max_tokens, args.spec_k)
+        dt = time.time() - t0
+        produced = stats['rounds'] * stats['tokens_per_round']
+        print(f"[speculative k={args.spec_k}] {produced:.0f} токенов за {dt:.2f}s = "
+              f"{produced/dt:.1f} tok/s | acc_rate={stats['acc_rate']:.2f} "
+              f"| ток/раунд={stats['tokens_per_round']:.2f}")
+        print("=== PROMPT ===");   print(args.prompt)
+        print("=== GENERATED ==="); print(sp.decode(ids))
+        return
     if args.full_rescan:
         # старый путь: O(len(ctx)) работы на каждый токен
         for _ in range(args.max_tokens):
