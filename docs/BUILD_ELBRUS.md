@@ -94,6 +94,34 @@ apt-get install -y eml-devel libomp-devel libnuma-devel cmake git
 не туда. Проверь `find /opt/mcst -name "cblas.h"` (для EML) и
 `find / -name "omp.h" 2>/dev/null` (для OpenMP).
 
+### ⚠️ EML не линкуется молча (закэшированная проба) — проверять ldd
+
+CMake проверяет EML через `try_run`, и результат пробы **кэшируется**:
+если она хоть раз зафейлилась, все последующие `cmake` в этом
+build-каталоге молча собирают с сериальным TudaBLAS-фолбэком (~10-25×
+медленнее GEMM), хотя `PT_USE_EML_BLAS:BOOL=ON` в кэше выглядит
+включённым.
+
+**После каждого configure проверяй:**
+
+```bash
+ldd build_elbrus/examples/pir/train_pir_elbrus | grep eml
+# libeml_mt.so → OK.  Пусто → фолбэк!
+```
+
+**Фикс** (сброс кэша пробы + принудительное включение):
+
+```bash
+cd build_elbrus
+cmake -U '_PT_EML*' -DPT_EML_RUNTIME_OK=ON .
+make -j8
+```
+
+Симптомы фолбэка в рантайме: время шага не зависит от `OMP_NUM_THREADS`,
+`mpstat -P ALL 1 1` показывает 1 загруженное ядро на процесс, GEMM
+~5 GFLOPS вместо 120-240. Реальный случай: тренировка PIR шла в 14×
+медленнее, пока фолбэк не заметили (2026-07-23).
+
 ---
 
 > ⚠️ **Никакого PyTorch не нужно.** Namespace `torch::` в нашем коде —

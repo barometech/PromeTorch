@@ -764,8 +764,15 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "e2k|elbrus")
         target_compile_definitions(aten_cpu PUBLIC PT_USE_EML_BLAS PT_USE_OPENBLAS_BLAS)
         message(STATUS "  BLAS provider: OpenBLAS (link=${_PT_OPENBLAS_LIB})")
     else()
-        message(STATUS "  BLAS provider: TUDA 6×6 микроядро (~30× медленнее GEMM, "
-                       "но не зависит от внешних libs).")
+        # На e2k сериальный TUDA-фолбэк = катастрофа производительности
+        # (реальный случай 2026-07-23: тренировка PIR шла 14× медленнее из-за
+        # закэшированной неудачной try_run пробы EML). Орём WARNING, не STATUS.
+        message(WARNING "BLAS provider: TUDA 6×6 микроядро — СЕРИАЛЬНЫЙ фолбэк, "
+                        "~10-25× медленнее EML на GEMM! Если EML установлен, но "
+                        "проба закэшировала старый фейл: "
+                        "cmake -U '_PT_EML*' -DPT_EML_RUNTIME_OK=ON . "
+                        "После сборки проверь: ldd <бинарник> | grep eml_mt. "
+                        "Подробно: docs/BUILD_ELBRUS.md.")
     endif()
 
 endif()

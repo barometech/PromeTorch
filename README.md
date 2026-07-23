@@ -48,6 +48,7 @@
 - [Почему PromeTorch](#почему-prometorch)
 - [Результаты](#результаты)
   - [Эльбрус E8C2](#эльбрус-e8c2)
+  - [PIR — своя LM-архитектура](#pir--своя-lm-архитектура-тренировка-на-эльбрусе)
   - [NVIDIA A100](#nvidia-a100)
   - [CPU x86_64 (PyTorch parity)](#cpu-x86_64-pytorch-parity)
   - [NM Card Mini](#nm-card-mini)
@@ -275,6 +276,23 @@ PT_Q8_SOA=1 PT_LAYER_SKIP="12,14,16,18,20,22,24,26,28,30,32,34" \
 | + Direct EML | 43.7 с | 2.6x | Прямые cblas вызовы, zero-copy backward |
 | + Manual backward | 22.0 с | 1.3x | Bypass autograd, pre-allocated буферы |
 | **Финал** | **15.2 с** | **0.90x** | Убран неиспользуемый grad clipping |
+
+### PIR — своя LM-архитектура (тренировка на Эльбрусе)
+
+Собственная языковая модель без attention: диагональный selective scan
+(родственник Mamba/HGRN/RWKV), O(T) вместо O(T²), спроектирована под VLIW
+и NUMA E8C2. Полный цикл на Эльбрусе: BPE-токенизатор → 4-процессный
+**Local SGD** по NUMA-узлам (усреднение весов через /dev/shm, без
+NCCL/gloo — их на Эльбрусе нет) → чекпоинты/resume → генерация.
+
+Проверено (2026-07): русская LM 13.5M параметров, BPE 16k, русская
+Википедия — **~4450 tok/s** суммарно на 32 ядрах E8C2 (~360 GFLOPS,
+0.46 с/шаг), loss 9.68 → 5.89 за 5000 шагов, связные русские фразы
+в генерации. Ранее: PIR-342M char-level, loss → 1.04.
+
+📐 **Архитектура и математика:** [docs/PIR_ARCHITECTURE.md](docs/PIR_ARCHITECTURE.md)
+🚀 **Запуск end-to-end (сборка → данные → распределённая тренировка → инференс):**
+[examples/pir/README.md](examples/pir/README.md)
 
 ### NVIDIA GPU — GGUF inference
 
