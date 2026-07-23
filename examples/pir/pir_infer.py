@@ -115,6 +115,35 @@ def forward(W, cfg, ids, all_pos=False):
         return fin @ W['W_lm_head'].T           # (S,V)
     return fin[-1] @ W['W_lm_head'].T           # (V,)
 
+# ----------------------------------------------------------------------------
+# Stateful O(1)-декод (contraction-взгляд, arXiv:2607.14885 Popovich).
+# PIR-скан h_t = a⊙h_{t-1} + u_t (a<1) — контракция: состояние h и есть вся
+# память о префиксе. Вместо перепрогона полного контекста на каждый токен
+# (O(T) на токен, как в «методе аналогов») несём h между токенами → O(1) на
+# токен, ~T× меньше вычислений. Математически ТОЧНО (та же рекуррентность),
+# а состояние не обрезается по block_size — бесконечный контекст с
+# экспоненциальным забыванием.
+# ----------------------------------------------------------------------------
+def init_state(cfg):
+    return [[np.zeros(cfg['D'], np.float32) for _ in range(cfg['NP'])]
+            for _ in range(cfg['L'])]
+
+def forward_step(W, cfg, tok, state):
+    # один токен: обновляет state in-place, возвращает logits (V,)
+    x = W['W_emb'][tok].astype(np.float32).copy()          # (D,)
+    for l, ly in enumerate(W['layers']):
+        s = rmsnorm(x[None, :], ly['norm1_w'])[0]
+        for p, pw in enumerate(ly['pir']):
+            sig = sigmoid(pw['W_gate'] @ s)
+            v   = pw['W_value'] @ s
+            h = (sig * W['base_decay'][p]) * state[l][p] + sig * v
+            state[l][p] = h
+            s = s + rmsnorm((pw['W_out'] @ h)[None, :], pw['norm_w'])[0]
+        x = x + rmsnorm((ly['W_mix'] @ s)[None, :], ly['norm_pir_w'])[0]
+        n2 = rmsnorm(x[None, :], ly['norm2_w'])[0]
+        x = x + ly['W_ffn2'] @ (silu(ly['W_ffn1'] @ n2) * (ly['W_ffn3'] @ n2))
+    return W['W_lm_head'] @ rmsnorm(x[None, :], W['norm_out_w'])[0]
+
 def sample(logits, temp, top_k, rng):
     if temp <= 0:
         return int(np.argmax(logits))
@@ -143,6 +172,11 @@ def main():
     ap.add_argument('--seed', type=int, default=42)
     ap.add_argument('--val_tokens', default='', help='.tokens file → печатает CE loss (валидация forward)')
     ap.add_argument('--val_n', type=int, default=256)
+    ap.add_argument('--full-rescan', action='store_true', dest='full_rescan',
+                    help='старый путь: полный перепрогон контекста на каждый токен '
+                         '(O(T) на токен; для сравнения со stateful)')
+    ap.add_argument('--check-stateful', action='store_true', dest='check_stateful',
+                    help='сверка: логиты stateful-шага vs полного forward на промпте')
     args = ap.parse_args()
 
     import sentencepiece as spm
@@ -163,14 +197,45 @@ def main():
         print(f"[val] CE loss on {S} tokens = {ce:.4f}  (ppl={np.exp(ce):.1f}; "
               f"random init≈{np.log(cfg['V']):.2f})")
 
+    # --- сверка stateful vs full forward (точность контракционного декода) ---
+    if args.check_stateful:
+        ids0 = sp.encode(args.prompt, out_type=int)[:cfg['T']]
+        lg_full = forward(W, cfg, ids0)                    # (V,) последняя позиция
+        st = init_state(cfg)
+        lg_step = None
+        for t in ids0:
+            lg_step = forward_step(W, cfg, t, st)
+        diff = float(np.abs(lg_full - lg_step).max())
+        print(f"[check] max|logits_full - logits_stateful| = {diff:.2e} "
+              f"({'OK' if diff < 1e-3 else 'MISMATCH!'})")
+
     # --- generation ---
+    import time
     rng = np.random.default_rng(args.seed)
     ids = sp.encode(args.prompt, out_type=int)
-    for _ in range(args.max_tokens):
-        ctx = ids[-cfg['T']:]
-        logits = forward(W, cfg, ctx)
-        nxt = sample(logits, args.temp, args.top_k, rng)
-        ids.append(nxt)
+    t0 = time.time()
+    if args.full_rescan:
+        # старый путь: O(len(ctx)) работы на каждый токен
+        for _ in range(args.max_tokens):
+            ctx = ids[-cfg['T']:]
+            logits = forward(W, cfg, ctx)
+            nxt = sample(logits, args.temp, args.top_k, rng)
+            ids.append(nxt)
+    else:
+        # stateful: префилл промпта пошагово, дальше O(1) на токен;
+        # контекст НЕ обрезается (экспоненциальная память скана)
+        state = init_state(cfg)
+        logits = None
+        for t in ids:
+            logits = forward_step(W, cfg, t, state)
+        for _ in range(args.max_tokens):
+            nxt = sample(logits, args.temp, args.top_k, rng)
+            ids.append(nxt)
+            logits = forward_step(W, cfg, nxt, state)
+    dt = time.time() - t0
+    mode = 'full-rescan' if args.full_rescan else 'stateful'
+    print(f"[{mode}] {args.max_tokens} токенов за {dt:.2f}s = "
+          f"{args.max_tokens/dt:.1f} tok/s")
     text = sp.decode(ids)
     print("=== PROMPT ===");   print(args.prompt)
     print("=== GENERATED ==="); print(text)

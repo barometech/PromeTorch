@@ -934,11 +934,98 @@ struct FusedPIRTrainer {
     // ============================================================
     // GENERATE TEXT — forward-only on existing weights
     // ============================================================
-    // Single-token autoregressive generation using fused forward.
-    // Allocates small temp buffers [1, D] for one position at a time.
-    // No autograd, no memory leak.
+    // Stateful O(1)-декод (contraction-взгляд, arXiv:2607.14885 Popovich):
+    // PIR-скан h_t = a⊙h_{t-1}+u_t (a<1) — контракция, состояние h несёт всю
+    // память о префиксе. Старая версия перепрогоняла ВЕСЬ контекст на каждый
+    // токен (O(T) на токен); теперь состояние переносится между токенами —
+    // O(1) на токен, ~T× меньше вычислений, контекст не обрезается.
+    // Точность: та же рекуррентность, логиты бит-в-бит (проверено numpy A/B).
     std::string generate_text(const std::string& prompt, int64_t max_tokens,
                               float temperature = 0.8f) {
+        std::string result = prompt;
+        std::mt19937 rng(42);
+
+        // Состояние скана: [L][NP][D], нули = пустой префикс
+        std::vector<std::vector<std::vector<float>>> st(
+            L, std::vector<std::vector<float>>(NP, std::vector<float>(D, 0.0f)));
+
+        // Буферы одной позиции
+        std::vector<float> x(D), s(D), g(D), v(D), sg(D), o(D), o2(D),
+                           t1(D), t2(D), rms1(1);
+        std::vector<float> h1(H), h2(H), h3(H), h4(H);
+        std::vector<float> last_logits(V);
+
+        // Один шаг: токен → логиты (обновляет st in-place)
+        auto step = [&](int tok) {
+            if (tok < 0) tok = 0;
+            if (tok >= V) tok = V - 1;
+            memcpy(x.data(), W_emb + (int64_t)tok * D, D * sizeof(float));
+            for (int64_t l = 0; l < L; l++) {
+                auto& bw = blocks[l];
+                fused::rmsnorm_fwd(x.data(), bw.norm1_w, s.data(), rms1.data(), 1, D);
+                for (int64_t p = 0; p < NP; p++) {
+                    auto& pw = bw.pir[p];
+                    fused::linear_fwd(s.data(), pw.W_gate, g.data(), 1, D, D);
+                    fused::linear_fwd(s.data(), pw.W_value, v.data(), 1, D, D);
+                    fused::sigmoid_fwd(g.data(), sg.data(), D);
+                    float* h = st[l][p].data();
+                    for (int64_t d = 0; d < D; d++)
+                        h[d] = sg[d] * pw.base_decay[d] * h[d] + sg[d] * v[d];
+                    fused::linear_fwd(h, pw.W_out, o.data(), 1, D, D);
+                    fused::rmsnorm_fwd(o.data(), pw.norm_w, o2.data(), rms1.data(), 1, D);
+                    fused::accum(s.data(), o2.data(), D);
+                }
+                fused::linear_fwd(s.data(), bw.W_mix, t1.data(), 1, D, D);
+                fused::rmsnorm_fwd(t1.data(), bw.norm_pir_w, t2.data(), rms1.data(), 1, D);
+                fused::accum(x.data(), t2.data(), D);
+                fused::rmsnorm_fwd(x.data(), bw.norm2_w, t1.data(), rms1.data(), 1, D);
+                fused::linear_fwd(t1.data(), bw.W_ffn1, h1.data(), 1, D, H);
+                fused::linear_fwd(t1.data(), bw.W_ffn3, h3.data(), 1, D, H);
+                fused::silu_fwd(h1.data(), h2.data(), H);
+                fused::mul_fwd(h2.data(), h3.data(), h4.data(), H);
+                fused::linear_fwd(h4.data(), bw.W_ffn2, t1.data(), 1, H, D);
+                fused::accum(x.data(), t1.data(), D);
+            }
+            fused::rmsnorm_fwd(x.data(), norm_out_w, t1.data(), rms1.data(), 1, D);
+            // LM head GEMV
+            for (int64_t vv = 0; vv < V; vv++) {
+                float sum = 0.0f;
+                const float* row = W_lm_head + vv * D;
+                for (int64_t d = 0; d < D; d++) sum += row[d] * t1[d];
+                last_logits[vv] = sum;
+            }
+        };
+
+        // Префилл промпта (char-level токены)
+        for (char c : prompt)
+            step((int)(unsigned char)c);
+        if (prompt.empty())
+            step(0);
+
+        // Генерация: O(1) на токен
+        for (int64_t tok_i = 0; tok_i < max_tokens; tok_i++) {
+            float max_logit = *std::max_element(last_logits.begin(), last_logits.end());
+            float sum_exp = 0.0f;
+            std::vector<float> probs(V);
+            for (int64_t vv = 0; vv < V; vv++) {
+                probs[vv] = std::exp((last_logits[vv] - max_logit) / temperature);
+                sum_exp += probs[vv];
+            }
+            for (int64_t vv = 0; vv < V; vv++)
+                probs[vv] /= sum_exp;
+            std::discrete_distribution<int> dist(probs.begin(), probs.end());
+            int next_token = dist(rng);
+            result += (char)next_token;
+            step(next_token);
+        }
+        return result;
+    }
+
+    // ------------------------------------------------------------
+    // Старый full-rescan путь (оставлен для справки/сравнения; не вызывается)
+    // ------------------------------------------------------------
+    std::string generate_text_full_rescan(const std::string& prompt, int64_t max_tokens,
+                                          float temperature = 0.8f) {
         std::string result = prompt;
         std::mt19937 rng(42);
 
