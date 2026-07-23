@@ -690,19 +690,25 @@ struct FusedPIRTrainer {
         backward();
         auto t2 = std::chrono::high_resolution_clock::now();
 
-        // Gradient clipping
-        float grad_norm = 0.0f;
+        // Gradient clipping — OMP-параллельно (сериальная версия на 13.5M
+        // параметрах стоила ~110мс/шаг = ~24% шага после EML-фикса).
+        // Аккумуляция в double: и точнее, и годится для omp reduction.
+        double gn2 = 0.0;
         for (size_t i = 0; i < all_grads.size(); i++) {
-            float* g = all_grads[i];
-            for (int64_t j = 0; j < all_sizes[i]; j++)
-                grad_norm += g[j] * g[j];
+            const float* g = all_grads[i];
+            const int64_t n = all_sizes[i];
+            #pragma omp parallel for schedule(static) reduction(+:gn2)
+            for (int64_t j = 0; j < n; j++)
+                gn2 += (double)g[j] * (double)g[j];
         }
-        grad_norm = std::sqrt(grad_norm);
+        float grad_norm = (float)std::sqrt(gn2);
         if (grad_norm > 1.0f) {
             float scale = 1.0f / grad_norm;
             for (size_t i = 0; i < all_grads.size(); i++) {
                 float* g = all_grads[i];
-                for (int64_t j = 0; j < all_sizes[i]; j++)
+                const int64_t n = all_sizes[i];
+                #pragma omp parallel for schedule(static)
+                for (int64_t j = 0; j < n; j++)
                     g[j] *= scale;
             }
         }
