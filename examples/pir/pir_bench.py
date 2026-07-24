@@ -109,19 +109,26 @@ def bench_parus(W, cfg, rows):
     return ok / len(rows)
 
 
-def bench_yesno(W, cfg, rows, passage_key, q_key, label_key):
-    ok = 0
+def bench_yesno(W, cfg, rows, passage_key, q_key, label_key, max_ctx=220):
+    ok = n = 0
     da, net = enc(' Да'), enc(' Нет')
-    for r in rows:
-        ctx = (r.get(passage_key, '') + '\n' + r.get(q_key, '')).strip()
-        pre = enc(ctx + ' Ответ:')
-        s_da = ll_cont(W, cfg, pre, da)
-        s_net = ll_cont(W, cfg, pre, net)
-        pred = 0 if s_da >= s_net else 1     # 0=Да(true/entail), 1=Нет
+    tail = enc(' Ответ:')
+    for i, r in enumerate(rows):
         lab = norm_label(r.get(label_key))
-        if lab is not None and pred == lab:
+        if lab is None:
+            continue
+        # обрезаем пассаж до последних max_ctx токенов (скорость; хвост+вопрос
+        # несёт ответ) — вопрос кодируем отдельно, всегда целиком
+        q = enc('\n' + r.get(q_key, ''))
+        ctx = enc(r.get(passage_key, ''))[-max_ctx:]
+        pre = ctx + q + tail
+        pred = 0 if ll_cont(W, cfg, pre, da) >= ll_cont(W, cfg, pre, net) else 1
+        n += 1
+        if pred == lab:
             ok += 1
-    return ok / len(rows)
+        if (i + 1) % 50 == 0:
+            print(f"  DaNetQA {i+1}/{len(rows)}...", flush=True)
+    return ok / max(1, n)
 
 
 def bench_terra(W, cfg, rows):
@@ -147,7 +154,11 @@ def main():
     ap.add_argument('--block_size', type=int, default=512)
     ap.add_argument('--ffn_mult', type=float, default=3.5)
     ap.add_argument('--bench-dir', default='bench', dest='bench_dir')
+    ap.add_argument('--limit', type=int, default=0, help='кап примеров на задачу (0=все)')
     args = ap.parse_args()
+
+    def cap(rows):
+        return rows[:args.limit] if args.limit else rows
 
     global SP
     import sentencepiece as spm
@@ -161,24 +172,24 @@ def main():
     if dq:
         rows = load_jsonl(dq)
         pk = 'passage' if 'passage' in rows[0] else ('paragraph' if 'paragraph' in rows[0] else 'text')
-        text = '\n'.join(r.get(pk, '') for r in rows[:400])
-        ppl, n = ppl_on_text(W, cfg, text)
-        print(f"[held-out ppl] DaNetQA-пассажи ({n} токенов): ppl = {ppl:.1f}")
+        text = '\n'.join(r.get(pk, '') for r in rows[:200])
+        ppl, n = ppl_on_text(W, cfg, text, max_tokens=6000)
+        print(f"[held-out ppl] DaNetQA-пассажи ({n} токенов): ppl = {ppl:.1f}", flush=True)
 
-    print("\n=== Zero-shot (log-likelihood, база без инструкт-тюна) ===")
+    print("\n=== Zero-shot (log-likelihood, база без инструкт-тюна) ===", flush=True)
     # PARus
     p = find_val(args.bench_dir, 'PARus')
     if p:
-        rows = [r for r in load_jsonl(p) if 'label' in r]
-        print(f"PARus   (n={len(rows)}, chance 50%): acc = {bench_parus(W, cfg, rows)*100:.1f}%")
+        rows = cap([r for r in load_jsonl(p) if 'label' in r])
+        print(f"PARus   (n={len(rows)}, chance 50%): acc = {bench_parus(W, cfg, rows)*100:.1f}%", flush=True)
     # TERRa
     t = find_val(args.bench_dir, 'TERRa')
     if t:
-        rows = [r for r in load_jsonl(t) if 'label' in r]
-        print(f"TERRa   (n={len(rows)}, chance 50%): acc = {bench_terra(W, cfg, rows)*100:.1f}%")
+        rows = cap([r for r in load_jsonl(t) if 'label' in r])
+        print(f"TERRa   (n={len(rows)}, chance 50%): acc = {bench_terra(W, cfg, rows)*100:.1f}%", flush=True)
     # DaNetQA
     if dq:
-        rows = [r for r in load_jsonl(dq) if 'label' in r]
+        rows = cap([r for r in load_jsonl(dq) if 'label' in r])
         pk = 'passage' if 'passage' in rows[0] else ('paragraph' if 'paragraph' in rows[0] else 'text')
         acc = bench_yesno(W, cfg, rows, pk, 'question', 'label')
         base = max(np.mean([norm_label(r['label']) for r in rows]),
