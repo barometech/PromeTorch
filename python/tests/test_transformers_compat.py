@@ -1,5 +1,5 @@
 """
-Self-test for promethorch.transformers_compat.
+Self-test for prometorch.transformers_compat.
 
 We synthesize a tiny safetensors checkpoint on disk (so the test is fully
 self-contained — no HuggingFace download required) for each of the three
@@ -7,7 +7,7 @@ supported architectures (BERT, GPT-2, Llama). Then we load it via
 ``AutoModel.from_pretrained`` and run inference on a short prompt.
 
 Verifies:
-    1. ``import promethorch.transformers_compat`` works
+    1. ``import prometorch.transformers_compat`` works
     2. ``safetensors_reader`` round-trips arrays
     3. Each architecture produces output with the expected shape
     4. Tokenizer fallback works
@@ -27,8 +27,8 @@ THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 PKG_DIR = os.path.normpath(os.path.join(THIS_DIR, "..", ".."))
 sys.path.insert(0, os.path.join(PKG_DIR, "python"))
 
-from promethorch.safetensors_reader import SafeTensorsFile, load_file  # noqa: E402
-from promethorch.transformers_compat import AutoModel, AutoTokenizer  # noqa: E402
+from prometorch.safetensors_reader import SafeTensorsFile, load_file  # noqa: E402
+from prometorch.transformers_compat import AutoModel, AutoTokenizer  # noqa: E402
 
 
 # ---------------------------------------------------------------------------

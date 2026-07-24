@@ -72,7 +72,17 @@ TEST(IntArrayRefTest, FromVector) {
 }
 
 TEST(IntArrayRefTest, FromInitializerList) {
-    IntArrayRef ref{2, 3, 4};
+    // ArrayRef НЕ владеет данными (как c10::ArrayRef в PyTorch). Именованный
+    // `IntArrayRef ref{2,3,4}` — UB: backing array initializer_list'а умирает
+    // после `;`, ref.data_ становится висячим (в Release gcc13 слот
+    // переиспользуется → мусор). Аудит P1-4. Тест дефектен, не библиотека:
+    // (а) initializer_list — только в пределах full-expression (temporary),
+    EXPECT_EQ(IntArrayRef({2, 3, 4}).size(), 3);
+    EXPECT_EQ(IntArrayRef({2, 3, 4}).front(), 2);
+    EXPECT_EQ(IntArrayRef({2, 3, 4}).back(), 4);
+    // (б) для персистентного ref — backing-хранилище, переживающее ref.
+    std::vector<int64_t> data{2, 3, 4};
+    IntArrayRef ref(data);
     EXPECT_EQ(ref.size(), 3);
     EXPECT_EQ(ref.front(), 2);
     EXPECT_EQ(ref.back(), 4);
@@ -87,7 +97,8 @@ TEST(IntArrayRefTest, FromSmallVector) {
 }
 
 TEST(IntArrayRefTest, ToVector) {
-    IntArrayRef ref{1, 2, 3};
+    std::vector<int64_t> data{1, 2, 3};   // персистентное хранилище (P1-4)
+    IntArrayRef ref(data);
     std::vector<int64_t> vec = ref.vec();
 
     EXPECT_EQ(vec.size(), 3);
@@ -95,10 +106,11 @@ TEST(IntArrayRefTest, ToVector) {
 }
 
 TEST(IntArrayRefTest, Comparison) {
-    IntArrayRef ref1{1, 2, 3};
-    IntArrayRef ref2{1, 2, 3};
-    IntArrayRef ref3{1, 2, 4};
-    IntArrayRef ref4{1, 2};
+    std::vector<int64_t> a{1, 2, 3}, b{1, 2, 3}, c{1, 2, 4}, d{1, 2};  // P1-4
+    IntArrayRef ref1(a);
+    IntArrayRef ref2(b);
+    IntArrayRef ref3(c);
+    IntArrayRef ref4(d);
 
     EXPECT_EQ(ref1, ref2);
     EXPECT_NE(ref1, ref3);

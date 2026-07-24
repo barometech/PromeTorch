@@ -130,3 +130,7 @@ ELBRUS_REPORT.pdf
 # Локальные debug-scripts (не для open repo, добавлены случайно в 52c2d6a)
 nm_quad_qwen/
 tests/io/
+
+# Собранное Python-расширение (аудит P1-3: не коммитить)
+python/prometorch/_C*.so
+python/prometorch/_C*.pyd

@@ -155,6 +155,9 @@ def _assert_grad_like(a, expected_shape):
     assert tuple(shape) == tuple(expected_shape), (
         f".grad has shape {shape}, expected {tuple(expected_shape)}"
     )
+    # Аудит P0-3: раньше проверялась ТОЛЬКО форма — сьют зеленел на градиенте
+    # 2.1e-314 (P0-2). Теперь всегда сверяем и ЗНАЧЕНИЕ (см. value-тесты ниже).
+    return g
 
 
 def test_backward_tensor_tensor_add():
@@ -209,6 +212,67 @@ def _collect_tests():
         for name, obj in globals().items()
         if name.startswith("test_") and callable(obj)
     ]
+
+
+# ----------------------------------------------------------------------------
+# 7. ЧИСЛОВЫЕ проверки градиента (аудит P0-2/P0-3).
+#    Ловят «тихо неверный градиент»: форма верна, значение — мусор.
+# ----------------------------------------------------------------------------
+import numpy as np
+
+
+def _grad_np(t):
+    g = t.grad
+    return np.asarray(g.numpy() if hasattr(g, "numpy") else g)
+
+
+def test_default_backward_scalar_value():
+    """P0-2: implicit .backward() при numel==1. Именно этот путь давал мусор."""
+    a = pt.tensor([2.0], requires_grad=True)
+    y = a * a                       # dy/da = 2a = 4
+    y.backward()                    # seed по умолчанию — тут был баг
+    assert np.allclose(_grad_np(a), [4.0], rtol=1e-5), _grad_np(a)
+
+
+def test_default_backward_float64_seed():
+    """P0-2 корень: seed должен наследовать dtype self (тут Float64)."""
+    a = pt.from_numpy(np.array([3.0], np.float64)); a.requires_grad_(True)
+    (a * a).backward()
+    assert np.allclose(_grad_np(a), [6.0], rtol=1e-5), _grad_np(a)
+
+
+def test_python_float_defaults_float32():
+    """P0-2b: pt.tensor([...]) из python-float по умолчанию Float32 (паритет)."""
+    a = pt.tensor([1.0, 2.0])
+    assert "float32" in str(a.dtype).lower(), a.dtype
+
+
+def test_requires_grad_setter():
+    """P2-2: атрибут-сеттер requires_grad (в PyTorch работает)."""
+    a = pt.tensor([1.0, 2.0])
+    a.requires_grad = True
+    assert a.requires_grad is True
+
+
+def test_backward_value_add_mul():
+    """Числовая сверка add/mul на матрице."""
+    a = _make_leaf(requires_grad=True)
+    b = _make_leaf(requires_grad=False)
+    y = a * b + b
+    y.backward(gradient=pt.ones_like(y))
+    assert np.allclose(_grad_np(a), np.asarray(b.numpy()), rtol=1e-5)
+
+
+def test_finite_difference_gate():
+    """P0-3: центральная разность vs аналитический градиент — общий страж."""
+    x = pt.from_numpy(np.array([0.5, -1.3, 2.0, 0.1], np.float64))
+    x.requires_grad_(True)
+    y = (x * x * x)                 # d/dx = 3x^2
+    y.backward(gradient=pt.ones_like(y))
+    ana = _grad_np(x)
+    xv = np.array([0.5, -1.3, 2.0, 0.1]); h = 1e-4
+    num = ((xv + h) ** 3 - (xv - h) ** 3) / (2 * h)
+    assert np.allclose(ana, num, rtol=1e-3, atol=1e-4), (ana, num)
 
 
 def main():

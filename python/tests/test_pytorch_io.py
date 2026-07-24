@@ -1,4 +1,4 @@
-"""Round-trip tests for promethorch.save_pytorch / load_pytorch.
+"""Round-trip tests for prometorch.save_pytorch / load_pytorch.
 
 1. Save a PromeTorch Linear's state_dict → reopen via upstream ``torch.load``
    (if installed) and assert element-wise equality.
@@ -15,7 +15,7 @@ import tempfile
 import numpy as np
 import pytest
 
-import promethorch as pt
+import prometorch as pt
 
 
 def _arr(t):

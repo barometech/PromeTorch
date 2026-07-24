@@ -205,6 +205,11 @@ public:
     IntArrayRef(std::initializer_list<int64_t> list)
         : data_(list.begin()), size_(list.size()) {}
 
+    // Как в PyTorch c10::ArrayRef: запрещаем присваивание из временного
+    // initializer_list — backing array умирает после full-expression, ref
+    // остаётся висячим. Ловится на компиляции, а не в проде (аудит P1-4).
+    IntArrayRef& operator=(std::initializer_list<int64_t>) = delete;
+
     template<size_t N>
     IntArrayRef(const SmallVector<int64_t, N>& vec)
         : data_(vec.data()), size_(vec.size()) {}

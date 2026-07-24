@@ -1588,11 +1588,17 @@ if(PT_BUILD_PYTHON)
         target_compile_definitions(_C PRIVATE PT_USE_CUDA PT_USE_ROCM)
     endif()
 
-    # Development build: output directly into python/prometorch для in-place testing.
-    set_target_properties(_C PROPERTIES
-        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/python/prometorch
-        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/python/prometorch
-    )
+    # Dev-сборка: класть _C прямо в python/prometorch для in-place-тестов.
+    # ТОЛЬКО когда собираем НЕ через scikit-build-core (аудит P1-3): иначе
+    # _C.so оседал в дереве исходников и утекал в sdist (3.3 МБ бинарник под
+    # конкретный CPython уезжал в source-дистрибутив). При wheel-сборке
+    # (SKBUILD задан) полагаемся на install-правила ниже.
+    if(NOT SKBUILD)
+        set_target_properties(_C PROPERTIES
+            LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/python/prometorch
+            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/python/prometorch
+        )
+    endif()
 
     # Install rules для scikit-build-core wheel packaging.
     # При `pip install .` scikit-build-core зовёт cmake --install,

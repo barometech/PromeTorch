@@ -1438,9 +1438,12 @@ inline void tensor_backward(const Tensor& self, const Tensor& gradient = Tensor(
                              bool retain_graph = false, bool create_graph = false) {
     Tensor grad = gradient;
     if (!grad.defined()) {
-        // Default gradient is ones for scalar, error for non-scalar
+        // Default gradient is ones for scalar, error for non-scalar.
+        // ones_like(self) — seed наследует dtype И форму self. at::ones({})
+        // давал 0-dim Float32 seed: при self=Float64 граф читал буфер не тем
+        // типом → тихо неверный градиент (аудит P0-2).
         if (self.numel() == 1) {
-            grad = at::ones({});
+            grad = at::ones_like(self);
         } else {
             throw std::runtime_error(
                 "grad can be implicitly created only for scalar outputs"

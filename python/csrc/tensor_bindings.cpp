@@ -157,7 +157,9 @@ void init_tensor_bindings(py::module& m) {
         .def_property_readonly("dim", &at::Tensor::dim)
         .def_property_readonly("numel", &at::Tensor::numel)
         .def_property_readonly("is_contiguous", [](const at::Tensor& t) { return t.is_contiguous(); })
-        .def_property_readonly("requires_grad", [](const at::Tensor& t) { return t.requires_grad(); })
+        .def_property("requires_grad",
+                      [](const at::Tensor& t) { return t.requires_grad(); },
+                      [](at::Tensor& t, bool r) { t.requires_grad_(r); })  // PyTorch-паритет: сеттер (аудит P2-2)
         .def_property_readonly("grad", [](const at::Tensor& t) { return t.grad(); })
         .def_property_readonly("is_leaf", [](const at::Tensor& t) { return t.is_leaf(); })
 
@@ -704,20 +706,33 @@ void init_tensor_bindings(py::module& m) {
         // Универсальный путь: всё → numpy.asarray → numpy_to_tensor.
         // Поддерживает: list, tuple, scalar (int/float/bool), numpy array.
         py::array arr;
+        bool was_numpy = true;
         try {
             // Если уже numpy — без копии
             arr = py::cast<py::array>(data);
         } catch (const py::cast_error&) {
             // list/tuple/scalar → np.asarray
+            was_numpy = false;
             py::module np = py::module::import("numpy");
             arr = py::cast<py::array>(np.attr("asarray")(data));
         }
-        at::Tensor t = numpy_to_tensor(arr, requires_grad);
+        // requires_grad ставим В КОНЦЕ: иначе .to(dtype/device) делает тензор
+        // не-листом и градиент не копится (аудит P0-2b).
+        at::Tensor t = numpy_to_tensor(arr, /*requires_grad=*/false);
+        // PyTorch-паритет: python-скаляр/список по умолчанию Float32 (numpy
+        // asarray даёт Float64 → терялись 2× память и AVX2/EML-скорость).
+        // Явный numpy-массив сохраняет свой dtype.
+        if (dtype.is_none() && !was_numpy && t.scalar_type() == c10::ScalarType::Double) {
+            t = t.to(c10::ScalarType::Float);
+        }
         if (!dtype.is_none()) {
             t = t.to(dtype.cast<c10::ScalarType>());
         }
         if (!device.is_none()) {
             t = t.to(device.cast<c10::Device>());
+        }
+        if (requires_grad) {
+            t.requires_grad_(true);
         }
         return t;
     }, py::arg("data"), py::arg("dtype") = py::none(),

@@ -1,5 +1,5 @@
 """
-Tests for promethorch.no_grad / promethorch.enable_grad (BUG-C9 fix).
+Tests for prometorch.no_grad / prometorch.enable_grad (BUG-C9 fix).
 
 Verifies that the Python context managers correctly toggle the C++
 torch::autograd::GradMode singleton, so operations inside a no_grad block
@@ -20,7 +20,7 @@ _ROOT = os.path.abspath(os.path.join(_HERE, ".."))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-import promethorch as pt
+import prometorch as pt
 
 
 # ----------------------------------------------------------------------------

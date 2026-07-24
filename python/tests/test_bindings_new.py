@@ -26,20 +26,20 @@ def _has_attr(obj, name: str) -> bool:
 # 1. Top-level import
 # ---------------------------------------------------------------------------
 def test_toplevel_import():
-    import promethorch as pt
+    import prometorch as pt
     assert pt.__version__
     # Expected submodules attached to the root package.
     for name in ("nn", "distributed", "trainer", "onnx", "mlir",
                  "mobile", "jit", "vision", "quantization",
                  "autograd", "serve"):
-        assert hasattr(pt, name), f"promethorch.{name} is missing"
+        assert hasattr(pt, name), f"prometorch.{name} is missing"
 
 
 # ---------------------------------------------------------------------------
 # 2. nn.parallel
 # ---------------------------------------------------------------------------
 def test_nn_parallel():
-    from promethorch.nn import parallel
+    from prometorch.nn import parallel
     cfg = parallel.TPConfig()
     cfg.rank = 0
     cfg.world_size = 1
@@ -55,7 +55,7 @@ def test_nn_parallel():
 # 3. distributed
 # ---------------------------------------------------------------------------
 def test_distributed():
-    from promethorch import distributed as d
+    from prometorch import distributed as d
     pg = d.init_process_group(backend="shared_memory", rank=0, world_size=1)
     assert pg is not None
     assert d.get_rank() == 0
@@ -72,7 +72,7 @@ def test_distributed():
 # 4. trainer
 # ---------------------------------------------------------------------------
 def test_trainer():
-    from promethorch.trainer import Trainer, TrainerConfig, LightningModule
+    from prometorch.trainer import Trainer, TrainerConfig, LightningModule
     cfg = TrainerConfig(max_epochs=1, log_every_n_steps=1,
                         save_every_n_epochs=0, enable_progress_bar=False)
     t = Trainer(cfg)
@@ -91,7 +91,7 @@ def test_trainer():
 # 5. onnx / mlir / mobile / jit
 # ---------------------------------------------------------------------------
 def test_export_modules():
-    from promethorch import onnx, mlir, mobile, jit
+    from prometorch import onnx, mlir, mobile, jit
     assert callable(onnx.export)
     assert callable(mlir.export)
     assert callable(mobile.export)
@@ -105,7 +105,7 @@ def test_export_modules():
 # 6. vision
 # ---------------------------------------------------------------------------
 def test_vision():
-    from promethorch import vision
+    from prometorch import vision
     # Compose with empty transforms must be constructible.
     compose = vision.transforms.Compose([])
     assert compose is not None
@@ -118,7 +118,7 @@ def test_vision():
 # 7. quantization
 # ---------------------------------------------------------------------------
 def test_quantization():
-    from promethorch import quantization as q
+    from prometorch import quantization as q
     assert callable(q.prepare_qat)
     assert callable(q.convert)
     assert callable(q.fake_quantize)
@@ -129,7 +129,7 @@ def test_quantization():
 # 8. autograd.jvp / vmap
 # ---------------------------------------------------------------------------
 def test_autograd_extra():
-    from promethorch import autograd
+    from prometorch import autograd
     assert callable(autograd.jvp)
     assert callable(autograd.vmap)
     assert autograd.DualLevel is not None
@@ -142,7 +142,7 @@ def test_autograd_extra():
 # 9. serve
 # ---------------------------------------------------------------------------
 def test_serve():
-    from promethorch import serve
+    from prometorch import serve
     # LLMEngine is constructible with an empty temp dir; generate without a
     # forward_fn must raise a clear error.
     with tempfile.TemporaryDirectory() as tmp:
