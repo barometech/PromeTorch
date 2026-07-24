@@ -5,9 +5,25 @@ produces files that follow the on-disk formats and packing conventions of
 several third-party projects. This document records those projects, their
 licenses, and the scope of use within this codebase.
 
-No third-party source code is vendored in this repository — only format
-constants, bit layouts and a handful of well-documented helper conventions are
-reproduced so that PromeTorch can read / write binary-compatible weights.
+No third-party **source code** is vendored — only format constants, bit
+layouts and a handful of well-documented helper conventions are reproduced so
+that PromeTorch can read / write binary-compatible weights.
+
+> **Vendored non-source artifacts (аудит 2026-07-24, P1-1).** В отличие от
+> исходников, репозиторий на данный момент содержит несколько **чужих
+> нетекстовых артефактов**, требующих отдельного разрешения на редистрибуцию:
+>
+> - Скомпилированные статические библиотеки партнёра (НТЦ «Модуль», NeuroMatrix):
+>   `aten/src/ATen/nmcard/nmc_programs/libnmpps-nmc4.a`,
+>   `libnm6408load_nmc.a`, `libgcc_float.a`. Используются при сборке NMCard-бэкенда.
+> - Официальная документация МЦСТ / партнёра (PDF) в `docs/elbrus/`,
+>   `docs/nmquad/`, `docs/elbrus_isa/` (~28 МБ) — справочные, не результат проекта.
+>
+> Статус: разрешение на редистрибуцию под лицензией PromeTorch **не
+> подтверждено публично**. До подтверждения эти файлы планируется вынести из
+> репозитория (заменив PDF на ссылки в `docs/REFERENCES.md`, а `.a` — на
+> загрузчик из SDK партнёра) и вычистить из истории (`git filter-repo`).
+> Если письменное разрешение есть — сюда добавляется ссылка на него.
 
 ---
 
