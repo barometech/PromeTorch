@@ -43,7 +43,7 @@ def test_tool_call_list_dir(promeserve_url, tool_root):
     (d / "alpha.txt").write_text("a")
     (d / "beta.bin").write_bytes(b"\x00\x01")
 
-    payload = {"name": "list_dir", "args": {"path": rel}}  # относительно tool root
+    payload = {"name": "list_dir", "arguments": {"path": rel}}  # относительно tool root
     try:
         with _post_json(promeserve_url + "/api/mcp/call", payload) as resp:
             body = json.loads(resp.read())
@@ -64,7 +64,7 @@ def test_tool_call_read_file(promeserve_url, tool_root):
     d, rel = tool_root
     (d / "hello.txt").write_text("Hello, PromeServe!\n")
 
-    payload = {"name": "read_file", "args": {"path": rel + "/hello.txt"}}
+    payload = {"name": "read_file", "arguments": {"path": rel + "/hello.txt"}}
     try:
         with _post_json(promeserve_url + "/api/mcp/call", payload) as resp:
             body = json.loads(resp.read())
@@ -87,9 +87,9 @@ def test_tool_call_path_traversal_blocked(promeserve_url):
     """
     # Пытаемся прочитать system file через ../ traversal
     payloads = [
-        {"name": "read_file", "args": {"path": "../../../../etc/passwd"}},
-        {"name": "read_file", "args": {"path": "/etc/passwd"}},
-        {"name": "list_dir",  "args": {"path": "../../"}},
+        {"name": "read_file", "arguments": {"path": "../../../../etc/passwd"}},
+        {"name": "read_file", "arguments": {"path": "/etc/passwd"}},
+        {"name": "list_dir",  "arguments": {"path": "../../"}},
     ]
     leaked = False
     for p in payloads:
@@ -115,7 +115,7 @@ def test_audit_log_entries(promeserve_url, tmp_path):
     """После вызова tool'а в audit log должна появиться запись."""
     # Делаем 1 tool call чтобы audit log не был пустой
     (tmp_path / "probe.txt").write_text("p")
-    payload = {"name": "list_dir", "args": {"path": str(tmp_path)}}
+    payload = {"name": "list_dir", "arguments": {"path": str(tmp_path)}}
     try:
         _post_json(promeserve_url + "/api/mcp/call", payload).close()
     except urllib.error.HTTPError:

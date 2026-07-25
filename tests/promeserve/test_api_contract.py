@@ -123,7 +123,7 @@ def test_mcp_call_unknown_tool(promeserve_url):
     """POST /api/mcp/call с несуществующим инструментом — должен вернуть error, не crash."""
     try:
         with _post_json(promeserve_url + "/api/mcp/call",
-                        {"name": "definitely_not_a_real_tool_xyz", "args": {}},
+                        {"name": "definitely_not_a_real_tool_xyz", "arguments": {}},
                         timeout=10) as resp:
             body = json.loads(resp.read())
             # Ошибка может быть на верхнем уровне ИЛИ вложена в result
