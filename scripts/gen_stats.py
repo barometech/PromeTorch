@@ -109,7 +109,11 @@ def count_lines():
         total = 0
         for p in _iter_files(exts):
             try:
-                total += sum(1 for _ in p.open("rb"))
+                # Чистый счёт \n-байтов (как wc -l): CRLF/LF дают одинаковое
+                # число \n, а вот `sum(1 for _ in open)` добавлял финальную
+                # строку без \n по-разному на Windows-checkout vs чистом Linux
+                # (git трогает финальный перевод) → STATS drift между dev и CI.
+                total += p.read_bytes().count(b"\n")
             except OSError:
                 pass
         out[name] = total

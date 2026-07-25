@@ -4,7 +4,7 @@
 исходников. README/docs должны ссылаться на эти числа, не хардкодить их.
 CI-гейт: `python scripts/gen_stats.py --check`.
 
-HEAD: `7be371d`
+HEAD: `513b002`
 
 | Метрика | Значение |
 |---------|---------:|
@@ -13,6 +13,6 @@ HEAD: `7be371d`
 | Optimizers | 15 |
 | LR schedulers | 16 |
 | Tests (`TEST`/`TEST_F`) | 833 |
-| Строк C++/headers | 161,193 |
+| Строк C++/headers | 161,190 |
 | Строк CUDA | 7,951 |
-| Строк Python | 17,485 |
+| Строк Python | 17,489 |
