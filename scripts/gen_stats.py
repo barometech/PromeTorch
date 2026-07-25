@@ -47,21 +47,24 @@ def _iter_files(exts):
 
 
 def count_backward_functions():
-    """struct/class *Backward в torch/csrc/autograd/functions/."""
-    d = REPO / "torch" / "csrc" / "autograd" / "functions"
+    """struct/class *Backward в torch/csrc/autograd/functions/.
+    По git-tracked (rglob по ФС ловил untracked/локальные файлы → дрейф
+    между dev-деревом и чистым CI-checkout'ом)."""
+    sub = "torch/csrc/autograd/functions/"
     pat = re.compile(r"^\s*(?:struct|class)\s+([A-Za-z_]\w*Backward)\b", re.M)
     names = set()
-    for p in d.rglob("*.h"):
-        names.update(pat.findall(p.read_text(encoding="utf-8", errors="replace")))
+    for p in _iter_files({".h"}):
+        if p.relative_to(REPO).as_posix().startswith(sub):
+            names.update(pat.findall(p.read_text(encoding="utf-8", errors="replace")))
     return len(names)
 
 
 def count_cuda_kernels():
-    """__global__ kernel definitions в aten/src/ATen/cuda/."""
-    d = REPO / "aten" / "src" / "ATen" / "cuda"
+    """__global__ kernel definitions в aten/src/ATen/cuda/ (git-tracked)."""
+    sub = "aten/src/ATen/cuda/"
     n = 0
-    if d.exists():
-        for p in d.rglob("*.cu"):
+    for p in _iter_files({".cu"}):
+        if p.relative_to(REPO).as_posix().startswith(sub):
             txt = p.read_text(encoding="utf-8", errors="replace")
             n += len(re.findall(r"__global__\s+\w", txt))
     return n
