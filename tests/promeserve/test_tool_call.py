@@ -27,6 +27,16 @@ def _get(url, timeout=5):
     return urllib.request.urlopen(url, timeout=timeout)
 
 
+def _skip_if_tool_unavailable(body, name):
+    """Сервер отвечает 200 с вложенной {"result":{"error":"tool not found"}},
+    если инструмент не собран в этой сборке. Это недоступность, не падение —
+    скипаем так же, как при HTTP 4xx/5xx (был необработанный случай → red CI)."""
+    res = body.get("result")
+    err = (res.get("error") if isinstance(res, dict) else None) or body.get("error")
+    if err and ("not found" in str(err).lower() or "unavailable" in str(err).lower()):
+        pytest.skip(f"{name} tool unavailable: {err}")
+
+
 def test_tool_call_list_dir(promeserve_url, tmp_path):
     """list_dir на временную папку — должен вернуть список файлов."""
     (tmp_path / "alpha.txt").write_text("a")
@@ -39,6 +49,7 @@ def test_tool_call_list_dir(promeserve_url, tmp_path):
     except urllib.error.HTTPError as e:
         pytest.skip(f"list_dir tool unavailable: HTTP {e.code}")
 
+    _skip_if_tool_unavailable(body, "list_dir")
     # Result может быть {"content":..., "is_error":false} или {"result":...}
     content = (body.get("content") or body.get("result") or
                body.get("text") or json.dumps(body))
@@ -59,6 +70,7 @@ def test_tool_call_read_file(promeserve_url, tmp_path):
     except urllib.error.HTTPError as e:
         pytest.skip(f"read_file tool unavailable: HTTP {e.code}")
 
+    _skip_if_tool_unavailable(body, "read_file")
     content = (body.get("content") or body.get("result") or
                body.get("text") or json.dumps(body))
     text = content if isinstance(content, str) else json.dumps(content)

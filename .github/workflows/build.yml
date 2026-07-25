@@ -27,8 +27,11 @@ jobs:
             -DPT_USE_AVX2=ON \
             -DPT_BUILD_TESTS=ON
 
-      - name: Build c10 + aten_cpu + torch_autograd
-        run: cmake --build build --target torch_autograd -j $(nproc)
+      - name: Build core + test binaries
+        # Собираем САМИ test-таргеты (c10_tests/aten_tests), иначе ctest ниже
+        # получал c10_tests_NOT_BUILT — тесты не строились и «падали» без
+        # запуска. torch_autograd подтянется транзитивно как зависимость.
+        run: cmake --build build --target c10_tests aten_tests torch_autograd -j $(nproc)
 
       # Core unit tests — БЕЗ `|| true`. Это контракт: ядро обязано проходить
       # тесты, иначе badge краснеет (audit 2026-05-20 _build_ci #6 / 2026-06-02).
@@ -69,7 +72,10 @@ jobs:
           done
 
   build-windows-cpu:
-    runs-on: windows-latest
+    # windows-latest уехал на Server 2025, где generator "Visual Studio 17
+    # 2022" не находит инстанс VS → CMake Error at project(). Пин на
+    # windows-2022 (образ с VS 2022 и рабочим генератором).
+    runs-on: windows-2022
     name: Windows CPU build (MSVC)
     steps:
       - uses: actions/checkout@v4

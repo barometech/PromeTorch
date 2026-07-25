@@ -126,7 +126,10 @@ def test_mcp_call_unknown_tool(promeserve_url):
                         {"name": "definitely_not_a_real_tool_xyz", "args": {}},
                         timeout=10) as resp:
             body = json.loads(resp.read())
-            assert "error" in body or resp.status in (400, 404)
+            # Ошибка может быть на верхнем уровне ИЛИ вложена в result
+            # (MCP-стиль: RPC успешен со статусом 200, инструмент вернул error).
+            nested = isinstance(body.get("result"), dict) and "error" in body["result"]
+            assert "error" in body or nested or resp.status in (400, 404)
     except urllib.error.HTTPError as e:
         assert e.code in (400, 404, 500)
 

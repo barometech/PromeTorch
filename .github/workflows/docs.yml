@@ -40,6 +40,12 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    # Деплой best-effort: пока GitHub Pages не включён в Settings репозитория
+    # (Settings → Pages → Source: GitHub Actions), deploy-pages падает с 404
+    # «Ensure GitHub Pages has been enabled». Гейтом остаётся сборка docs выше;
+    # деплой не должен краснить бейдж из-за настройки репо. Включишь Pages —
+    # деплой заработает и станет зелёным. Убрать continue-on-error после этого.
+    continue-on-error: true
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

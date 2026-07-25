@@ -68,7 +68,9 @@ compare_*.py
 debug_*.py
 exact_grad_compare.py
 verify_dequant*.py
-/test_*.py            # только корневые scratch тесты, не tests/promeserve/...
+# только корневые scratch тесты, не tests/promeserve/... (инлайн-коммент в
+# gitignore делает строку буквальным паттерном — раньше правило не работало)
+/test_*.py
 pytorch_*.py
 benchmark_*.py
 fix_*.py
