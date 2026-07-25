@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:   # для ручного запуска macOS-джобы (см. ниже)
 
 jobs:
   build-linux-cpu:
@@ -100,7 +101,11 @@ jobs:
     # advisory: не валит бейдж из-за scarcity/arm64. Виден в списке проверок.
     runs-on: macos-13
     continue-on-error: true
-    name: macOS CPU build (clang, advisory)
+    # Только по ручному запуску: Intel-раннеры macos-13 дефицитны и держали
+    # push-триггерный Build в очереди 60+ мин. macOS не целевая платформа —
+    # гоняем по требованию (workflow_dispatch), а не на каждый push.
+    if: github.event_name == 'workflow_dispatch'
+    name: macOS CPU build (clang, manual)
     steps:
       - uses: actions/checkout@v4
 
