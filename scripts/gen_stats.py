@@ -181,7 +181,15 @@ def main():
     if args.check:
         old_md = md_path.read_text(encoding="utf-8") if md_path.exists() else ""
         old_json = json_path.read_text(encoding="utf-8") if json_path.exists() else ""
-        if old_md != new_md or old_json != new_json:
+        # Поле `head` (git-хэш) исключаем из сравнения: оно ПРИНЦИПИАЛЬНО
+        # не может совпасть — хэш коммита неизвестен до самого коммита, значит
+        # committed STATS всегда содержит head предыдущего коммита, а CI на
+        # checkout считает свой. Это chicken-and-egg, а не реальный drift.
+        def _nh_json(s):
+            return re.sub(r'"head":\s*"[^"]*"', '"head": "*"', s)
+        def _nh_md(s):
+            return re.sub(r'HEAD: `[^`]*`', 'HEAD: `*`', s)
+        if _nh_md(old_md) != _nh_md(new_md) or _nh_json(old_json) != _nh_json(new_json):
             print("STATS drift detected. Run: python scripts/gen_stats.py",
                   file=sys.stderr)
             print("--- current ---", file=sys.stderr)
