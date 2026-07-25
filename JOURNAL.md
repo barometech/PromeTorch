@@ -4269,3 +4269,32 @@ python-overhead). План: после мегапрогона дистиллир
 новой модели + C++ путь (decode bandwidth-bound → верификация
 почти бесплатна).
 
+
+## 2026-07-25 — SFT завершён + CI зелёный + аудит применён
+
+**SFT финиш:** 24000 шагов, «Fused training complete!», финал loss 2.79 /
+ppl 16.3 (с 4.45 на старте SFT). Пережил 3 reboot сервера через resume.
+Финальная модель (`checkpoints_sft/pir_fused_step_24000.bin`) выучила
+поведение простейшего ассистента: инструкт-формат (Задача→Ответ),
+ассистентский тон от 1-го лица, валидные JSON-tool-calls (Действие с
+name+arguments). Знаний нет (13.5M), но форма/поведение — есть.
+Полная цепочка: pretrain 675M ток (loss 2.95) → бенчмарк RSG (ppl 58.8,
+~chance) → SFT 328M ток агентского корпуса (loss 2.79). Первый
+end-to-end pretrain+SFT ассистент, обученный на Эльбрусе с нуля.
+
+**Внешний аудит (PROMETORCH_AUDIT_2026-07-24) применён, 11/12 + CI:**
+P0-2 (мусорный градиент → ones_like + Float32-default + set_requires_grad):
+проверено СБОРКОЙ _C + тестами (grad [4.], 20/20 test_pyop_autograd).
+P0-3/P0-4/P0-5/P1-2/P1-3/P1-4/P2-1/P2-2/P2-3 закрыты. P1-1: PDF вынесены
++ REFERENCES.md, .a оставлены (build deps) + честный THIRD_PARTY_NOTICES.
+За юзером: P0-1 (регистрация имени на PyPI — 404 подтверждён), filter-repo.
+
+**CI позеленён** (был красный, аудит атрибутировал причину неверно — не
+читал логи). Реальные причины, все в workflow/тестах, НЕ в коде: (1) ctest
+без сборки test-бинарников (c10_tests_NOT_BUILT) → --target c10/aten_tests;
+(2) windows-latest→Server2025 без VS → пин windows-2022; (3) macOS→arm64
+-mavx → macos-13 + только workflow_dispatch (дефицит раннеров); (4)
+promeserve тесты: payload 'args'→'arguments' (MCP-контракт) + sandbox-root;
+(5) STATS drift: rglob→git-tracked, count(\n), исключение поля head
+(chicken-and-egg). Мой P1-4 c10-фикс теперь верифицирован живым CI на
+Linux+Windows. Docs: deploy best-effort (Pages не включён в Settings).
