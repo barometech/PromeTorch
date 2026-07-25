@@ -37,12 +37,13 @@ def _skip_if_tool_unavailable(body, name):
         pytest.skip(f"{name} tool unavailable: {err}")
 
 
-def test_tool_call_list_dir(promeserve_url, tmp_path):
-    """list_dir на временную папку — должен вернуть список файлов."""
-    (tmp_path / "alpha.txt").write_text("a")
-    (tmp_path / "beta.bin").write_bytes(b"\x00\x01")
+def test_tool_call_list_dir(promeserve_url, tool_root):
+    """list_dir на папку ВНУТРИ sandbox-корня — должен вернуть список файлов."""
+    d, rel = tool_root
+    (d / "alpha.txt").write_text("a")
+    (d / "beta.bin").write_bytes(b"\x00\x01")
 
-    payload = {"name": "list_dir", "args": {"path": str(tmp_path)}}
+    payload = {"name": "list_dir", "args": {"path": rel}}  # относительно tool root
     try:
         with _post_json(promeserve_url + "/api/mcp/call", payload) as resp:
             body = json.loads(resp.read())
@@ -58,12 +59,12 @@ def test_tool_call_list_dir(promeserve_url, tmp_path):
     assert "beta.bin" in text, f"beta.bin not found in output: {text[:300]}"
 
 
-def test_tool_call_read_file(promeserve_url, tmp_path):
-    """read_file — содержимое известного файла должно вернуться."""
-    test_file = tmp_path / "hello.txt"
-    test_file.write_text("Hello, PromeServe!\n")
+def test_tool_call_read_file(promeserve_url, tool_root):
+    """read_file — содержимое известного файла (внутри sandbox) должно вернуться."""
+    d, rel = tool_root
+    (d / "hello.txt").write_text("Hello, PromeServe!\n")
 
-    payload = {"name": "read_file", "args": {"path": str(test_file)}}
+    payload = {"name": "read_file", "args": {"path": rel + "/hello.txt"}}
     try:
         with _post_json(promeserve_url + "/api/mcp/call", payload) as resp:
             body = json.loads(resp.read())

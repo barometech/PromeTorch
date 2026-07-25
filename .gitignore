@@ -136,3 +136,6 @@ tests/io/
 # Собранное Python-расширение (аудит P1-3: не коммитить)
 python/prometorch/_C*.so
 python/prometorch/_C*.pyd
+
+tests/promeserve/_toolroot/
+tests/promeserve/_logs/

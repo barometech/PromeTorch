@@ -19,6 +19,12 @@ import urllib.error
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
+# Sandbox-корень tool-инструментов (list_dir/read_file/write_file). Сервер
+# джойнит user_path к нему и запрещает выход наружу (path traversal). Тесты
+# пишут файлы СЮДА и обращаются относительным путём — иначе list_dir на
+# внешний pytest-tmp (вне sandbox) возвращает {"files":[]} и тест падал.
+TOOL_ROOT = REPO_ROOT / "tests" / "promeserve" / "_toolroot"
+
 # По умолчанию слушаем на 18434 (Ollama 11434 + offset 7000) чтобы не конфликтовать
 # с реальным Ollama если он запущен у разработчика.
 TEST_PORT = int(os.environ.get("PROMESERVE_TEST_PORT", "18434"))
@@ -85,12 +91,15 @@ def promeserve_url() -> str:
     log_file = log_dir / "promeserve_test.log"
 
     # CPU-only для tests — мы тестируем API, не GPU инференс.
+    TOOL_ROOT.mkdir(parents=True, exist_ok=True)
+    server_env = dict(os.environ, PROMESERVE_TOOL_ROOT=str(TOOL_ROOT))
     args = [str(bin_path), "--port", str(TEST_PORT), "--device", "cpu"]
     proc = subprocess.Popen(
         args,
         stdout=open(log_file, "w"),
         stderr=subprocess.STDOUT,
         cwd=str(REPO_ROOT),
+        env=server_env,
     )
 
     try:
@@ -105,6 +114,17 @@ def promeserve_url() -> str:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
+
+
+@pytest.fixture
+def tool_root(tmp_path_factory):
+    """Папка ВНУТРИ sandbox-корня сервера, куда тест кладёт файлы и обращается
+    относительным путём. Уникальная на тест, чистится после."""
+    import uuid
+    d = TOOL_ROOT / f"t_{uuid.uuid4().hex[:8]}"
+    d.mkdir(parents=True, exist_ok=True)
+    yield d, d.relative_to(TOOL_ROOT).as_posix()  # (абсолютный путь, относительный к root)
+    shutil.rmtree(d, ignore_errors=True)
 
 
 @pytest.fixture(scope="session")
