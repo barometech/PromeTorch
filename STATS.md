@@ -4,15 +4,15 @@
 исходников. README/docs должны ссылаться на эти числа, не хардкодить их.
 CI-гейт: `python scripts/gen_stats.py --check`.
 
-HEAD: `59822c7`
+HEAD: `e94e9b2`
 
 | Метрика | Значение |
 |---------|---------:|
 | Backward functions | 119 |
-| CUDA kernels (`__global__`) | 149 |
+| CUDA kernels (`__global__`) | 151 |
 | Optimizers | 15 |
 | LR schedulers | 16 |
 | Tests (`TEST`/`TEST_F`) | 833 |
-| Строк C++/headers | 159,862 |
-| Строк CUDA | 7,553 |
-| Строк Python | 15,829 |
+| Строк C++/headers | 161,193 |
+| Строк CUDA | 7,951 |
+| Строк Python | 17,482 |
