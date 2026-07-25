@@ -13,11 +13,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        # windows-2022, НЕ windows-latest: latest уехал на Server 2025, где
+        # generator "Visual Studio 17 2022" не находит инстанс VS.
+        os: [ubuntu-latest, windows-2022]
         include:
           - os: ubuntu-latest
             cmake_gen: "Unix Makefiles"
-          - os: windows-latest
+          - os: windows-2022
             cmake_gen: "Visual Studio 17 2022"
 
     steps:
@@ -42,15 +44,22 @@ jobs:
     # `if(EXISTS ...)` blocks but may still fail on different runner toolchains.
     # The core stack is the contract — if it builds and tests pass, badge stays
     # green even if a peripheral example is broken on a particular platform.
-    - name: Build core
-      run: cmake --build build --config Release --target torch_autograd -j 4
+    - name: Build core + test binaries
+      # Собираем сами core test-бинарники. Backend-специфичные тесты
+      # (ddp/fsdp/linq/nmcard/deepspeed) требуют железа/сетапа и НЕ гейтят
+      # CPU-CI — их не строим и не гоняем (ctest ниже фильтрует по -R).
+      run: cmake --build build --config Release --target c10_tests aten_tests autograd_full_tests optimizer_tests torch_autograd -j 4
 
     # Tests must really pass — раньше тут стоял continue-on-error: true,
     # из-за чего зелёный badge ничего не гарантировал (audit 2026-05-20
     # _build_ci #6). Если ядро не проходит тесты — CI обязан краснеть.
-    - name: Run C++ Tests
+    - name: Run C++ Tests (core suites)
       working-directory: build
-      run: ctest --output-on-failure -C Release
+      # Только core-сьюты (совпадает с build.yml). Bare `ctest` гонял ВСЕ 13
+      # зарегистрированных тестов, включая несобранные backend-специфичные →
+      # «13 of 13 failed». Эти четыре аудит верифицировал как проходящие
+      # (c10 — после фикса ArrayRef-тестов P1-4).
+      run: ctest --output-on-failure -C Release -R "c10_tests|aten_tests|autograd_full_tests|optimizer_tests"
 
   # STATS drift gate — STATS.md/json должны совпадать с реальным кодом.
   # Ловит расхождения числовых claim'ов (audit 2026-06-02 _claims_drift:

@@ -93,7 +93,10 @@ jobs:
         run: cmake --build build --config Release --target torch_autograd -j
 
   build-macos-cpu:
-    runs-on: macos-latest
+    # macos-latest уехал на Apple Silicon (arm64), где clang не принимает
+    # x86-флаг -mavx (просачивается несмотря на PT_USE_AVX2=OFF) → build fail.
+    # Пин на macos-13 (Intel x86) до вычистки -mavx из AVX-детекта под arm64.
+    runs-on: macos-13
     name: macOS CPU build (clang)
     steps:
       - uses: actions/checkout@v4
