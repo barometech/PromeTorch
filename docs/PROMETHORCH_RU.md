@@ -1212,7 +1212,7 @@ PromeTorch **быстрее** PyTorch на 15 из 50 бенчмарков, вк
 
 Python-биндинги (_C.so) собраны и работают на Эльбрус E8C2 (32 ядра, LCC 1.29). Подтверждены операции: `randn`, `zeros`, `mm`, `Linear`.
 
-NUMA scaling: 4x node-local EML = 1840 GFLOPS (92% пика). NUMA-aware = 5.7x ускорение.
+NUMA scaling: 4x node-local EML = 1840 GFLOPS (80% расчётного пика 2304). NUMA-aware = 5.7x ускорение.
 
 ---
 

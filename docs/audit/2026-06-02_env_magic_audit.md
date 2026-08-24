@@ -165,7 +165,7 @@ path / dispatch / IO).
 
 | Число | Где | Реалистичность |
 |---|---|---|
-| `1840 GFLOPS` | `BENCH_ELBRUS.md:188`, `docs/BUILD_ELBRUS.md:174`, `docs/PROMETHORCH_RU.md:1215`, `MEMORY.md` reference | Замерено `benchmarks/sgemm_peak_probe.c`. 92% от `2304 = 6ch × 128b × 1.5 GHz × 32c`. **Воспроизводимо.** |
+| `1840 GFLOPS` | `BENCH_ELBRUS.md:188`, `docs/BUILD_ELBRUS.md:174`, `docs/PROMETHORCH_RU.md:1215`, `MEMORY.md` reference | Замерено `benchmarks/sgemm_peak_probe.c`. **80%** от `2304 = 6ch × 128b × 1.5 GHz × 32c` (92% — только от округлённых «2 TFLOPS» МЦСТ; прежняя запись «92% от 2304» была арифметической ошибкой). **Воспроизводимо.** |
 | `2304 GFLOPS` (peak) | `benchmarks/sgemm_peak_probe.c:12,76`, `docs/BUILD_ELBRUS.md:32` | Теоретический peak. |
 | `11.4 tok/s` (qwen3-4B TP-4 baseline) | `CLAUDE.md`, `MEMORY.md`, `feedback_speed_first.md` | Sacred number, любое падение >0.2 → откат. |
 | `10.9 tok/s` | `CLAUDE.md` (после Russian fix) | Post-`0ba114a`. |

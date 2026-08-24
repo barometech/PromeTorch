@@ -159,8 +159,13 @@ numa_free(A, size_bytes);
 4. Каждый поток: numa_run_on_node + cblas_sgemm на своём тайле
 5. B — read-only, расшарен (в L3 кэше)
 
-**Результат: 1840 GFLOPS (80% пика)** — но только через pthread (SIGILL!).
-Через OMP: пока 360 GFLOPS (16%). Нужна доработка.
+**Результат: 1840 GFLOPS (80% расчётного пика 2304)** — достигается
+**четырьмя отдельными процессами**, по одному на NUMA-узел
+(`numactl --cpunodebind=N --preferred=N`), а не потоками внутри одного
+процесса. Через pthread вызывать `cblas_sgemm` нельзя вовсе — SIGILL;
+через OMP внутри одного процесса получается лишь ~360 GFLOPS из-за
+кросс-NUMA трафика. Схема прогона — `benchmarks/sgemm_peak_probe.c`
+и `scripts/run_tp_elbrus.sh`.
 
 ---
 

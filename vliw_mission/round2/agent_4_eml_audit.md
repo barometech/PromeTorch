@@ -86,7 +86,7 @@ This matches our MEMORY.md entry (`feedback_eml_pthread_sigill.md`, 2026-04-02):
 ### 2.5 Best measured throughput (BLAS_GUIDE section 5 + MEMORY NUMA scaling entry)
 
 - Default eml_mt 32-core: 324 GFLOPS
-- 4× OMP outer × ST EML inner + NUMA pinning: **1840 GFLOPS (92% of peak)**
+- 4× node-local процесса + ST EML inner + NUMA pinning: **1840 GFLOPS (80% of the 2304 GFLOPS peak)**
 - But this is **FP32 GEMM**, compute-bound. Decode is memory-bound — irrelevant absolute number.
 
 ---

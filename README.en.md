@@ -81,8 +81,10 @@ ready out of the box.
 
 **2. MNIST MLP faster than PyTorch on Эльбрус.** On MNIST MLP-4
 (784→512→256→128→10, SGD, batch=64, 1 epoch) — 2.76 s vs PyTorch 2.7.1 16.8 s
-(**6.1× on this narrow task**). 1840 GFLOPS via node-local EML_MT (92% of
-E8C2 2 TFLOPS peak). On other tasks (general / real transformers) PyTorch's
+(**6.1× on this narrow task**). 1840 GFLOPS via node-local EML_MT — 80% of
+the computed E8C2 peak of 2304 GFLOPS (6 channels × 128 bit × 1.5 GHz × 32
+cores); that is 92% if measured against the rounded "2 TFLOPS" MCST quotes.
+On other tasks (general / real transformers) PyTorch's
 advantage holds.
 
 **3. Universal build.** One codebase — CPU (AVX2+FMA/NEON/E2K), CUDA (Turing+),
@@ -139,7 +141,7 @@ pin workers of ranks 1-3 to CPUs outside their cpuset (set by `numactl
 | **Time** | **15.2 s** | **2.76 s** | 16.8 s |
 | **Accuracy** | **88.71%** | **88.94%** | 88.14% |
 | **Ratio** | **1.1× faster** | **6.1× faster** | 1.0× |
-| EML GFLOPS | 330 | **1840 (92% peak)** | 68 (generic BLAS) |
+| EML GFLOPS | 330 | **1840 (80% of 2304 peak)** | 68 (generic BLAS) |
 | Allocations | 179 | 179 | ~50,000+ |
 
 Optimization path (126.3 s → 15.2 s = 8.3× speedup):

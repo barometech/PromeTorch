@@ -113,7 +113,7 @@ aten/src/ATen/                 Тензорные операции
       TudaMath.h               Vectorized exp/log/sin/cos/tanh/sigmoid/relu/silu/gelu
       kernels/avx2/            (inline в TudaBLAS.h) 6×16 micro-kernel
       kernels/neon/            MicroKernel_4x8.h (A57), MicroKernel_8x12.h (A75)
-      kernels/e2k/             MicroKernel_4x4.h (Elbrus VLIW)
+      kernels/e2k/             MicroKernel_6x6.h (Elbrus VLIW, 36 аккумуляторов)
       kernels/scalar/          MicroKernel_Scalar.h (fallback)
   cuda/                        CUDA kernels
     CUDAKernels.cu             Element-wise, unary, comparison, fused ops
@@ -263,7 +263,7 @@ __e2k__ / __elbrus__     → E2K (Эльбрус)
 | AVX2 6×16 | 12 YMM | 12 FMA | L2 72KB | 96 |
 | NEON_A75 8×12 | 24 V | 24 FMLA | L1d 64KB | 48 |
 | NEON_A57 4×8 | 8 V | 8 FMLA | L1d 32KB | 16 |
-| E2K 4×4 | 16 scalar | 16 FMA | L1d 64KB | 16 |
+| E2K 6×6 | 36 scalar | 6 FMA-каналов | L1d 64KB | 36 |
 | Scalar 4×4 | 16 scalar | — | — | 4 |
 
 ### Goto BLAS алгоритм

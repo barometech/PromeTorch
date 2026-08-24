@@ -6,7 +6,7 @@
 ## Текущее состояние (на начало миссии)
 - 1-proc best: **4.7 tok/s** (24-thread, numactl --interleave=all, Q4_K AVX2 prefetch)
 - 4-proc TP best: **5.5 tok/s** (split output_proj + SHM AllReduce + NUMA-pinned)
-- Peak E8C2: ~2300 GFLOPS/chip × 4 = ~9200 GFLOPS, nodelocal EML_MT достигает 1840 GFLOPS (92% одного chip'а)
+- Peak E8C2: 72 GFLOPS/ядро × 8 = 576 GFLOPS на чип, ×4 чипа = **2304 GFLOPS** на все 32 ядра; node-local EML_MT достигает 1840 GFLOPS = **80% этого пика** (прежняя запись «2300 на чип × 4 = 9200» завышала пик вчетверо)
 - Bottleneck: неизвестен точно. Подозреваем memory bandwidth (Q4_K 2.5 GB/pass × 5.5 tok/s = 13.75 GB/s против ~20 GB/s/chip DRAM).
 - Ранее доказано: native E2K intrinsics (qpmaddubsh) **-23% slower** чем LCC auto-translation из AVX2 (probe в `examples/benchmarks/q4k_e2k_kernel_probe.cpp`).
 

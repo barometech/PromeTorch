@@ -50,7 +50,7 @@ Single-dev PyTorch-совместимый обучающий фреймворк 
   tanh/sigmoid, im2col conv. Production.
 - **CUDA (NVIDIA)** — cuBLAS, custom Q4_K GEMV (HBM-saturation-optimal
   для N=1 decode), CUDA Graph capture, FP16 kernels (7 ops A100-verified).
-- **Эльбрус 8C2** — E2K VLIW + EML_MT BLAS, 1840 GFLOPS (92% пика),
+- **Эльбрус 8C2** — E2K VLIW + EML_MT BLAS, 1840 GFLOPS (80% пика 2304),
   MNIST MLP 6.1× быстрее PyTorch 2.7.1 на той же задаче.
 - **NM Card Mini** — Q16.16 fixed-point эмулятор, 32/32 backend tests,
   MNIST 88.94% на 16 virtual cores.
@@ -104,7 +104,7 @@ Single-dev PyTorch-совместимый обучающий фреймворк 
 
 ### Эльбрус 8C2 (исторический, 2026-04-16)
 - MNIST MLP: **2.76 s vs PyTorch 2.7.1 16.8 s = 6.1× faster**
-- NUMA-aware EML_MT: **1840 GFLOPS (92% пика)**
+- NUMA-aware EML_MT: **1840 GFLOPS (80% пика 2304)**
 
 ### NM Card Mini эмулятор
 - MNIST MLP: **88.94%** test accuracy в 3 epochs (53 s)

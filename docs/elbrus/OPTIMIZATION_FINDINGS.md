@@ -1,7 +1,12 @@
 # E2K / LCC optimization findings — distilled from downloaded sources
 
-**Sources (all in this folder):**
-- `mcst_official/elbrus_prog_2020-05-30.pdf` — MCST official programming guide
+**Sources.** Ни один из перечисленных ниже файлов **не хранится в репозитории**:
+это чужие материалы под своими лицензиями (см. `.gitignore`), а официальное
+руководство МЦСТ распространяется по NDA. Ниже — только ссылки на то, откуда
+взяты выводы; сами выводы изложены в этом файле своими словами.
+
+- `elbrus_prog_2020-05-30.pdf` — официальное руководство МЦСТ по программированию
+  (по NDA, в репозитории отсутствует)
 - `ports/` — ilyakurdyukov's performance patches for 30+ libraries (ffmpeg, openblas, x264, zstd, fftw, etc.)
 - `ports/README.md` — compact porting cheat sheet
 - `littlecc/` — minimal LCC backend for E2K (reference)
