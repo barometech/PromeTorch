@@ -11,6 +11,9 @@
 #include <cstring>
 #include <vector>
 
+// Этот include обязан оставаться под старым условием: именно CuDNNRNN.h
+// определяет PT_CUDNN_RNN_UNAVAILABLE (cuDNN 9 удалил legacy RNN API),
+// на который опираются четыре блока ниже.
 #if defined(PT_USE_CUDA) && defined(PT_USE_CUDNN)
 #include "aten/src/ATen/cudnn/CuDNNRNN.h"
 #include <cuda_runtime.h>
@@ -23,7 +26,7 @@ using at::Tensor;
 // Note: Do NOT use 'using' for autograd functions here — pir.h defines
 // duplicate names in torch::nn, which causes ambiguity. Use fully qualified calls.
 
-#if defined(PT_USE_CUDA) && defined(PT_USE_CUDNN)
+#if defined(PT_USE_CUDA) && defined(PT_USE_CUDNN) && !defined(PT_CUDNN_RNN_UNAVAILABLE)
 namespace detail {
 
 // Copy a host-side (or CUDA-side) weight tensor into a cuDNN flat-params slot.
@@ -436,7 +439,7 @@ public:
             hx = at::zeros({num_layers_ * num_directions, batch, hidden_size_});
         }
 
-#if defined(PT_USE_CUDA) && defined(PT_USE_CUDNN)
+#if defined(PT_USE_CUDA) && defined(PT_USE_CUDNN) && !defined(PT_CUDNN_RNN_UNAVAILABLE)
         if (x.is_cuda() && !torch::autograd::GradMode::is_enabled()
             && x.dtype() == c10::ScalarType::Float) {
             at::cudnn::CuDNNRNNConfig cfg;
@@ -593,7 +596,7 @@ public:
         Tensor hx = h0.defined() ? h0 : at::zeros({num_layers_ * num_directions, batch, hidden_size_});
         Tensor cx = c0.defined() ? c0 : at::zeros({num_layers_ * num_directions, batch, hidden_size_});
 
-#if defined(PT_USE_CUDA) && defined(PT_USE_CUDNN)
+#if defined(PT_USE_CUDA) && defined(PT_USE_CUDNN) && !defined(PT_CUDNN_RNN_UNAVAILABLE)
         // ================================================================
         // CUDA + cuDNN fast path (inference only for now; no grad_fn wired).
         // ================================================================
@@ -794,7 +797,7 @@ public:
 
         Tensor hx = h0.defined() ? h0 : at::zeros({num_layers_ * num_directions, batch, hidden_size_});
 
-#if defined(PT_USE_CUDA) && defined(PT_USE_CUDNN)
+#if defined(PT_USE_CUDA) && defined(PT_USE_CUDNN) && !defined(PT_CUDNN_RNN_UNAVAILABLE)
         if (x.is_cuda() && !torch::autograd::GradMode::is_enabled()
             && x.dtype() == c10::ScalarType::Float) {
             at::cudnn::CuDNNRNNConfig cfg;

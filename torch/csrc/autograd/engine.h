@@ -30,8 +30,13 @@ struct GraphTask {
     bool retain_graph = false;
     bool create_graph = false;
 
-    // All nodes visited during this backward pass (for cleanup)
-    std::vector<Node*> all_nodes;
+    // All nodes visited during this backward pass (for cleanup).
+    // FIX (CUDA use-after-free): hold shared_ptr, not raw Node*. Node::release()
+    // clears next_edges_ during the backward loop, which can drop the last
+    // shared_ptr to a child node and free it; a raw pointer here would then
+    // dangle when reset() touches it. Holding shared_ptr keeps nodes alive
+    // until reset() clears the vector.
+    std::vector<std::shared_ptr<Node>> all_nodes;
 
     void reset() {
         output_edges.clear();
@@ -39,7 +44,7 @@ struct GraphTask {
         retain_graph = false;
         create_graph = false;
         // Reset graph state on all visited nodes
-        for (Node* n : all_nodes) {
+        for (auto& n : all_nodes) {
             n->reset_graph_state();
         }
         all_nodes.clear();
@@ -131,7 +136,10 @@ private:
     // параллельный backward (как per-GraphTask state в PyTorch), но делает
     // конкурентный backward КОРРЕКТНЫМ. Для нас обучение single-thread на
     // процесс (multi-process через Local SGD) — сериализация безопасна.
-    std::mutex execute_mutex_;
+    // Recursive: allows same-thread nested backward (e.g. gradient checkpointing
+    // recomputes a block and backprops through it from inside the outer backward).
+    // Cross-thread concurrent backward is still serialized.
+    std::recursive_mutex execute_mutex_;
 
     // Count dependencies for all nodes
     void compute_dependencies(
@@ -182,7 +190,7 @@ inline void Engine::compute_dependencies(
                 n->visited_ = true;
                 n->dependency_count_ = 0;
                 n->accumulated_grad_.clear();
-                task.all_nodes.push_back(n);
+                task.all_nodes.push_back(root.function);
                 queue.push(n);
             }
         }
@@ -200,7 +208,7 @@ inline void Engine::compute_dependencies(
                 if (!next->visited_) {
                     next->visited_ = true;
                     next->accumulated_grad_.clear();
-                    task.all_nodes.push_back(next);
+                    task.all_nodes.push_back(edge.function);
                     queue.push(next);
                 }
             }
@@ -255,8 +263,11 @@ inline void Engine::accumulate_grad(
         const int64_t n = existing.numel();
         if (n == grad.numel() && existing.is_contiguous() && grad.is_contiguous()
             && existing.dtype() == c10::ScalarType::Float
-            && grad.dtype() == c10::ScalarType::Float) {
+            && grad.dtype() == c10::ScalarType::Float
+            && existing.is_cpu() && grad.is_cpu()) {
             // FIX Bug3: only float32 fast-path
+            // FIX (CUDA): CPU-only raw-pointer path — device tensors must dispatch
+            // to add_() (device pointers can't be dereferenced on host).
             at::native::hot::add_inplace(
                 existing.mutable_data_ptr<float>(),
                 grad.data_ptr<float>(), n);
@@ -354,7 +365,7 @@ inline variable_list Engine::execute(
     // потока ПОСЛЕ освобождения (execute не вызывает execute рекурсивно под
     // локом — double-backward идёт отдельным top-level вызовом), поэтому
     // не-рекурсивный mutex корректен.
-    std::lock_guard<std::mutex> _engine_lock(execute_mutex_);
+    std::lock_guard<std::recursive_mutex> _engine_lock(execute_mutex_);
 
     validate_inputs(roots, grad_outputs);
 

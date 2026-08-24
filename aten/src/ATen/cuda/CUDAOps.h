@@ -552,6 +552,63 @@ ATEN_CUDA_API void launch_rotary_embedding(
 );
 
 // ============================================================================
+// Training backward kernels (device-side replacements for the CPU round-trip
+// paths in MathBackward.h — see PIR GPU training)
+// ============================================================================
+
+ATEN_CUDA_API void launch_parallel_scan_backward(
+    const float* grad_out, const float* gates, const float* gate_logits,
+    const float* base_decay, const float* hidden,
+    float* grad_x, float* grad_gate_logits,
+    int64_t B, int64_t T, int64_t D, cudaStream_t stream = nullptr);
+
+// Fused sigmoid-gating scan: input is RAW values; kernel computes v*sigmoid(gl)
+// inline (removes 2 elementwise kernels + 2 autograd nodes per PIR layer).
+ATEN_CUDA_API void launch_parallel_scan_fused(
+    const float* values, const float* gate_logits, const float* base_decay,
+    float* output, float* gates,
+    int64_t B, int64_t T, int64_t D, cudaStream_t stream = nullptr,
+    const float* resets = nullptr);
+
+ATEN_CUDA_API void launch_parallel_scan_backward_fused(
+    const float* grad_out, const float* gates, const float* gate_logits,
+    const float* base_decay, const float* hidden, const float* values,
+    float* grad_values, float* grad_gate_logits,
+    int64_t B, int64_t T, int64_t D, cudaStream_t stream = nullptr);
+
+ATEN_CUDA_API void launch_silu_backward(
+    const float* grad_out, const float* input, const float* sigmoid_saved,
+    float* grad_in, int64_t n, cudaStream_t stream = nullptr);
+
+ATEN_CUDA_API void launch_rmsnorm_backward(
+    const float* grad_out, const float* input, const float* weight,
+    const float* inv_rms, float* grad_in, float* grad_w,
+    int64_t outer, int64_t D, cudaStream_t stream = nullptr);
+
+ATEN_CUDA_API void launch_rotary_backward(
+    const float* grad_out, const float* cos_cache, const float* sin_cache,
+    float* grad_in, int64_t B, int64_t S, int64_t D, int64_t cache_dim,
+    cudaStream_t stream = nullptr);
+
+ATEN_CUDA_API void launch_embedding_backward(
+    const float* grad_out, const float* indices, float* grad_weight,
+    int64_t N, int64_t D, int64_t V, int64_t padding_idx, int has_padding,
+    cudaStream_t stream = nullptr);
+
+ATEN_CUDA_API void launch_cross_entropy_forward(
+    const float* logits, const float* targets, float* softmax_out,
+    float* losses, float* valid, int64_t N, int64_t V,
+    cudaStream_t stream = nullptr);
+
+ATEN_CUDA_API void launch_cross_entropy_backward(
+    const float* softmax_saved, const float* targets, float* grad_in,
+    float scale, int64_t N, int64_t V, int64_t ignore_index,
+    cudaStream_t stream = nullptr);
+
+ATEN_CUDA_API void launch_sumsq_accumulate(
+    const float* x, float* result, int64_t n, cudaStream_t stream = nullptr);
+
+// ============================================================================
 // Flash-Decoding (parallel decode attention across KV splits)
 // ============================================================================
 

@@ -372,7 +372,8 @@ struct FusedPIRTrainer {
     // ============================================================
     // FORWARD PASS — returns loss
     // ============================================================
-    float forward(const float* input_tokens, const float* targets) {
+    float forward(const float* input_tokens, const float* targets,
+                  const float* loss_mask = nullptr) {
         embed_forward(input_tokens);
         memcpy(act_x, act_emb, BT * D * sizeof(float));
 
@@ -455,8 +456,8 @@ struct FusedPIRTrainer {
         // LM head: [BT, D] @ [V, D]^T → [BT, V]
         fused::linear_fwd(act_norm_out, W_lm_head, logits, BT, D, V);
 
-        // Cross-entropy loss + gradient
-        float loss = fused::cross_entropy_fwd_bwd(logits, targets, dlogits, BT, V);
+        // Cross-entropy loss + gradient (loss_mask: учить только ответ ассистента)
+        float loss = fused::cross_entropy_fwd_bwd(logits, targets, dlogits, BT, V, loss_mask);
         return loss;
     }
 
@@ -680,12 +681,12 @@ struct FusedPIRTrainer {
     // TRAIN STEP: forward + backward + adam
     // ============================================================
     float train_step(const float* input_tokens, const float* targets,
-                     float lr, float wd = 0.01f) {
+                     float lr, float wd = 0.01f, const float* loss_mask = nullptr) {
         step_count++;
         zero_grad();
 
         auto t0 = std::chrono::high_resolution_clock::now();
-        float loss = forward(input_tokens, targets);
+        float loss = forward(input_tokens, targets, loss_mask);
         auto t1 = std::chrono::high_resolution_clock::now();
         backward();
         auto t2 = std::chrono::high_resolution_clock::now();

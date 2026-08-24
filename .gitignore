@@ -139,3 +139,10 @@ python/prometorch/_C*.pyd
 
 tests/promeserve/_toolroot/
 tests/promeserve/_logs/
+
+# Крупные derived-данные — НЕ коммитить (GitHub 100MB лимит; инцидент 2026-08-05)
+data/*.tokens
+data/*.mask
+data/*.docidx
+data/*.gz
+data/sft_corpus.txt

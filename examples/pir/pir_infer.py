@@ -276,7 +276,13 @@ def main():
     ap.add_argument('--draft-n-layers', type=int, default=2, dest='draft_n_layers')
     ap.add_argument('--spec-k', type=int, default=4, dest='spec_k',
                     help='сколько токенов предлагает draft за раунд')
+    ap.add_argument('--chat', action='store_true',
+                    help='инструкт-режим: обернуть prompt в [USER]..[ASST], '
+                         'генерировать ответ ассистента до [EOS] (vocab_size=16004)')
     args = ap.parse_args()
+
+    # Спец-токены инструкт-SFT (см. tokenize_sft_chat.py)
+    SYS_T, USER_T, ASST_T, EOS_T = 16000, 16001, 16002, 16003
 
     import sentencepiece as spm
     sp = spm.SentencePieceProcessor(model_file=args.spm)
@@ -307,6 +313,28 @@ def main():
         diff = float(np.abs(lg_full - lg_step).max())
         print(f"[check] max|logits_full - logits_stateful| = {diff:.2e} "
               f"({'OK' if diff < 1e-3 else 'MISMATCH!'})")
+
+    # --- chat: инструкт-режим со спец-токенами + остановка по EOS ---
+    if args.chat:
+        rng = np.random.default_rng(args.seed)
+        ids = [USER_T] + sp.encode(args.prompt, out_type=int) + [ASST_T]
+        st = init_state(cfg)
+        logits = None
+        for t in ids:
+            logits = forward_step(W, cfg, t, st)      # префилл промпта
+        gen = []
+        for _ in range(args.max_tokens):
+            nxt = sample(logits, args.temp, args.top_k, rng)
+            if nxt == EOS_T:
+                break
+            gen.append(nxt)
+            logits = forward_step(W, cfg, nxt, st)
+        answer = sp.decode([t for t in gen if t < 16000])   # убрать спец-токены
+        print("=== USER ==="); print(args.prompt)
+        print("=== ASSISTANT ===")
+        print(answer)
+        print(f"[chat] {len(gen)} токенов, {'EOS' if len(gen)<args.max_tokens else 'лимит'}")
+        return
 
     # --- generation ---
     import time

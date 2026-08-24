@@ -446,6 +446,45 @@ __global__ void transpose_kernel(
 // Launch Wrappers
 // ============================================================================
 
+// ============================================================================
+// BF16 mixed-precision GEMM path (A100+): convert inputs to bf16 on the fly,
+// run cublasGemmEx on bf16 tensor cores (312 TFLOPS vs 156 TF32), accumulate
+// and output in FP32 — numerically the torch-autocast recipe, so the rest of
+// the framework (autograd, kernels) is untouched. PT_NO_BF16=1 reverts.
+// ============================================================================
+
+__global__ void f32_to_bf16_kernel(const float* __restrict__ in,
+                                   __nv_bfloat16* __restrict__ out, int64_t n) {
+    for (int64_t i = blockIdx.x * blockDim.x + threadIdx.x; i < n;
+         i += (int64_t)blockDim.x * gridDim.x) {
+        out[i] = __float2bfloat16(in[i]);
+    }
+}
+
+static __nv_bfloat16* bf16_scratch(int slot, size_t elems) {
+    static __nv_bfloat16* bufs[2] = {nullptr, nullptr};
+    static size_t sizes[2] = {0, 0};
+    if (sizes[slot] < elems) {
+        if (bufs[slot]) cudaFree(bufs[slot]);
+        cudaMalloc(&bufs[slot], elems * sizeof(__nv_bfloat16));
+        sizes[slot] = elems;
+    }
+    return bufs[slot];
+}
+
+static bool bf16_gemm_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        if (getenv("PT_NO_BF16")) { v = 0; }
+        else {
+            int dev = 0; cudaGetDevice(&dev);
+            cudaDeviceProp prop; cudaGetDeviceProperties(&prop, dev);
+            v = (prop.major >= 8) ? 1 : 0;   // Ampere+ has bf16 tensor cores
+        }
+    }
+    return v == 1;
+}
+
 // launch_gemm — primary matmul dispatch.
 // Uses cuBLAS sgemm when available (tensor cores, tuned kernels). This is what the
 // README's "CUDA GEMM" claim really means in this repo. The hand-written tiled
@@ -469,6 +508,33 @@ void launch_gemm(
     int lda = trans_b ? K : N;
     int ldb = trans_a ? M : K;
     int ldc = N;
+
+    // BF16 tensor-core path for compute-heavy shapes. Conversion cost is 3 memory
+    // sweeps of the inputs; only worth it when the GEMM itself dominates.
+    // Measured on A100 (PIR-107M): small 640x640 GEMMs are FASTER on plain TF32
+    // (conversion overhead loses); bf16 wins only on large shapes (lm_head-class,
+    // >= ~8 GFLOP per GEMM). Threshold keeps bf16 exactly where it pays.
+    if (bf16_gemm_enabled() && (long long)M * N * K >= (4LL << 30) && K >= 64) {
+        int64_t nA = (int64_t)M * K;
+        int64_t nB = (int64_t)K * N;
+        __nv_bfloat16* A16 = bf16_scratch(0, nA);
+        __nv_bfloat16* B16 = bf16_scratch(1, nB);
+        int ba = static_cast<int>((nA + 255) / 256); if (ba > 65535) ba = 65535;
+        int bb = static_cast<int>((nB + 255) / 256); if (bb > 65535) bb = 65535;
+        f32_to_bf16_kernel<<<ba, 256, 0, stream>>>(A, A16, nA);
+        f32_to_bf16_kernel<<<bb, 256, 0, stream>>>(B, B16, nB);
+        cublasStatus_t st = cublasGemmEx(
+            handle, op_a, op_b,
+            N, M, K,
+            &alpha,
+            B16, CUDA_R_16BF, lda,
+            A16, CUDA_R_16BF, ldb,
+            &beta,
+            C, CUDA_R_32F, ldc,
+            CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT);
+        if (st == CUBLAS_STATUS_SUCCESS) return;
+        // fall through to FP32 sgemm on any failure
+    }
 
     cublasSgemm(handle, op_a, op_b,
                 N, M, K,

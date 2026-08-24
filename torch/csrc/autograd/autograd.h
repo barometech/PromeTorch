@@ -124,8 +124,10 @@ inline variable_list AccumulateGrad::apply(variable_list&& grads) {
         const int64_t n = existing_grad.numel();
         if (n == grad_contig.numel() && existing_grad.is_contiguous()
             && existing_grad.dtype() == c10::ScalarType::Float
-            && grad_contig.dtype() == c10::ScalarType::Float) {
+            && grad_contig.dtype() == c10::ScalarType::Float
+            && existing_grad.is_cpu() && grad_contig.is_cpu()) {
             // FIX Bug3: only use float fast-path when both are float32
+            // FIX (CUDA): host-only raw-pointer path — device tensors dispatch to add_()
             at::native::hot::add_inplace(
                 existing_grad.mutable_data_ptr<float>(),
                 grad_contig.data_ptr<float>(), n);

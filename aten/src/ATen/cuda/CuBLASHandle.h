@@ -29,8 +29,10 @@ private:
         if (status != CUBLAS_STATUS_SUCCESS) {
             throw std::runtime_error("cuBLAS create failed: " + std::to_string(static_cast<int>(status)));
         }
-        // Allow cuBLAS to use tensor cores for FP16 operations
-        cublasSetMathMode(handle_, CUBLAS_DEFAULT_MATH);
+        // Enable TF32 tensor cores for FP32 (cublasSgemm) matmuls. On A100 this
+        // uses the tensor-core units for ~8x GEMM throughput vs plain FP32, with
+        // negligible accuracy loss (10-bit mantissa) — no data/dtype change needed.
+        cublasSetMathMode(handle_, CUBLAS_TF32_TENSOR_OP_MATH);
     }
 
     cublasHandle_t handle_;

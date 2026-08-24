@@ -25,6 +25,10 @@
 #include "parameter.h"
 #include "module.h"
 #include "init.h"
+#ifdef PT_USE_CUDA
+#include "aten/src/ATen/cuda/CUDAOps.h"
+#include "aten/src/ATen/cuda/CUDADispatch.h"
+#endif
 
 // Container modules
 #include "modules/container.h"
@@ -195,14 +199,29 @@ inline double clip_grad_norm_(Module& module, double max_norm, double norm_type 
         }
     } else if (norm_type == 2.0) {
         // L2 norm fast path: x*x instead of pow(abs(x), 2.0)
+#ifdef PT_USE_CUDA
+        // Device-side accumulation for CUDA grads: only a 4-byte scalar crosses
+        // PCIe instead of every gradient tensor (~params-size per step).
+        Tensor sumsq_dev;
+        bool have_dev = false;
+#endif
         for (auto* param : params) {
             if (param->grad().defined()) {
-                Tensor grad_cpu = param->grad();
 #ifdef PT_USE_CUDA
-                if (grad_cpu.is_cuda()) {
-                    grad_cpu = at::to_cpu(grad_cpu);
+                if (param->grad().is_cuda()) {
+                    if (!have_dev) {
+                        sumsq_dev = at::empty_cuda({1});
+                        at::cuda::launch_fill(sumsq_dev.mutable_data_ptr<float>(), 0.0f, 1, nullptr);
+                        have_dev = true;
+                    }
+                    at::cuda::launch_sumsq_accumulate(
+                        param->grad().data_ptr<float>(),
+                        sumsq_dev.mutable_data_ptr<float>(),
+                        param->grad().numel(), nullptr);
+                    continue;
                 }
 #endif
+                Tensor grad_cpu = param->grad();
                 const float* grad_data = grad_cpu.data_ptr<float>();
                 int64_t numel = grad_cpu.numel();
                 for (int64_t i = 0; i < numel; ++i) {
@@ -211,6 +230,11 @@ inline double clip_grad_norm_(Module& module, double max_norm, double norm_type 
                 }
             }
         }
+#ifdef PT_USE_CUDA
+        if (have_dev) {
+            total_norm += static_cast<double>(at::to_cpu(sumsq_dev).data_ptr<float>()[0]);
+        }
+#endif
         total_norm = std::sqrt(total_norm);
     } else {
         // General Lp norm

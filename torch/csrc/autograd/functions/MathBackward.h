@@ -3,6 +3,10 @@
 #include "torch/csrc/autograd/node.h"
 #include "torch/csrc/autograd/autograd_meta.h"
 #include "aten/src/ATen/ATen.h"
+#ifdef PT_USE_CUDA
+#include "aten/src/ATen/cuda/CUDAOps.h"
+#include "aten/src/ATen/cuda/CUDADispatch.h"
+#endif
 #include <cmath>
 
 namespace torch {
@@ -1232,6 +1236,28 @@ struct CrossEntropyBackward : public Node {
         // Use saved flag for output device (softmax_ is always on CPU for computation)
         bool output_cuda = output_cuda_;
 
+#ifdef PT_USE_CUDA
+        // Device-side fast path: softmax saved on GPU (CUDA CE forward) —
+        // grad = (softmax - onehot) * scale entirely on device.
+        if (softmax_.is_cuda()) {
+            int64_t total_cu = softmax_.numel() / num_classes_;
+            Tensor tgt_cu = targets_.is_cuda() ? targets_ : at::to_cuda(targets_);
+            float scale_cu = 1.0f;
+            if (grad.defined() && grad.numel() == 1) {
+                Tensor g_cpu = grad.is_cuda() ? at::to_cpu(grad) : grad;
+                scale_cu = g_cpu.data_ptr<float>()[0];
+            }
+            scale_cu /= static_cast<float>(num_valid_ > 0 ? num_valid_ : 1);
+            Tensor grad_input_cu = at::empty_cuda(softmax_.sizes().vec());
+            at::cuda::launch_cross_entropy_backward(
+                softmax_.data_ptr<float>(), tgt_cu.data_ptr<float>(),
+                grad_input_cu.mutable_data_ptr<float>(),
+                scale_cu, total_cu, num_classes_, ignore_index_, nullptr);
+            softmax_ = Tensor(); targets_ = Tensor();
+            return {grad_input_cu};
+        }
+#endif
+
         // Move saved tensors to CPU for computation
         Tensor softmax_cpu = softmax_;
         Tensor targets_cpu = targets_;
@@ -1370,6 +1396,19 @@ struct SiLUBackward : public Node {
 
         bool is_cuda = grad.is_cuda();
 
+#ifdef PT_USE_CUDA
+        // Device-side fast path: elementwise SiLU backward on GPU.
+        if (is_cuda && input_.is_cuda() && sigmoid_.is_cuda()) {
+            Tensor gi = at::empty_cuda(input_.sizes().vec());
+            at::cuda::launch_silu_backward(
+                grad.data_ptr<float>(), input_.data_ptr<float>(),
+                sigmoid_.data_ptr<float>(), gi.mutable_data_ptr<float>(),
+                input_.numel(), nullptr);
+            input_ = Tensor(); sigmoid_ = Tensor();
+            return {gi};
+        }
+#endif
+
         // Move all tensors to CPU for computation
         Tensor grad_cpu = grad;
         Tensor input_cpu = input_;
@@ -1439,6 +1478,33 @@ struct RMSNormBackward : public Node {
         if (!grad_output.defined()) return {Tensor()};
 
         bool is_cuda = grad_output.is_cuda();
+
+#ifdef PT_USE_CUDA
+        // Device-side fast path: dx + dw kernels on GPU, dw accumulates in place.
+        if (is_cuda && input_.is_cuda() && weight_.is_cuda() && inv_rms_.is_cuda()) {
+            auto szs = input_.sizes().vec();
+            int64_t Dn = szs.back();
+            int64_t outer = input_.numel() / Dn;
+            Tensor grad_input_cu = at::empty_cuda(szs);
+            auto* meta_cu = ensure_autograd_meta_impl(const_cast<Tensor&>(weight_));
+            Tensor grad_w_cu;
+            if (meta_cu->grad_) {
+                grad_w_cu = Tensor(meta_cu->grad_);
+                if (!grad_w_cu.is_cuda()) grad_w_cu = at::to_cuda(grad_w_cu);
+            } else {
+                grad_w_cu = at::empty_cuda({Dn});
+                at::cuda::launch_fill(grad_w_cu.mutable_data_ptr<float>(), 0.0f, Dn, nullptr);
+            }
+            at::cuda::launch_rmsnorm_backward(
+                grad_output.data_ptr<float>(), input_.data_ptr<float>(),
+                weight_.data_ptr<float>(), inv_rms_.data_ptr<float>(),
+                grad_input_cu.mutable_data_ptr<float>(),
+                grad_w_cu.mutable_data_ptr<float>(), outer, Dn, nullptr);
+            meta_cu->grad_ = grad_w_cu.getIntrusivePtr();
+            input_ = Tensor(); weight_ = Tensor(); inv_rms_ = Tensor();
+            return {grad_input_cu};
+        }
+#endif
 
         // Move all tensors to CPU for computation
         Tensor grad_out_cpu = grad_output;
@@ -1530,13 +1596,14 @@ struct RMSNormBackward : public Node {
 // Backward requires reverse scan
 
 struct ParallelScanBackward : public Node {
-    Tensor input_;       // x
+    Tensor input_;       // x (or RAW values in fused mode)
     Tensor gates_;       // gate values (after modulation)
     Tensor gate_logits_; // Original gate logits
     Tensor base_decay_;
     Tensor hidden_;      // h (scan output)
     bool input_requires_grad_;
     bool gate_logits_requires_grad_;
+    bool fused_;         // fused v*sigmoid(gl) gating (CUDA only)
 
     ParallelScanBackward(
         const Tensor& input,
@@ -1545,10 +1612,12 @@ struct ParallelScanBackward : public Node {
         const Tensor& base_decay,
         const Tensor& hidden,
         bool input_rg,
-        bool gate_logits_rg
+        bool gate_logits_rg,
+        bool fused = false
     ) : input_(input), gates_(gates), gate_logits_(gate_logits),
         base_decay_(base_decay), hidden_(hidden),
-        input_requires_grad_(input_rg), gate_logits_requires_grad_(gate_logits_rg) {}
+        input_requires_grad_(input_rg), gate_logits_requires_grad_(gate_logits_rg),
+        fused_(fused) {}
 
     void release_saved_tensors() override {
         input_ = Tensor();
@@ -1569,6 +1638,44 @@ struct ParallelScanBackward : public Node {
         }
 
         bool is_cuda = grad_output.is_cuda();
+
+#ifdef PT_USE_CUDA
+        // Device-side fast path: reverse scan entirely on GPU (no PCIe round-trip).
+        // Kernel mirrors the CPU loop below 1:1.
+        if (is_cuda && gates_.is_cuda() && gate_logits_.is_cuda() && hidden_.is_cuda()) {
+            auto szs = gates_.sizes().vec();
+            int64_t Bc = szs[0], Tc = szs[1], Dc = szs[2];
+            Tensor bd_cuda = base_decay_.is_cuda() ? base_decay_ : at::to_cuda(base_decay_);
+            Tensor grad_x_cu = at::empty_cuda(szs);
+            Tensor grad_gl_cu = at::empty_cuda(szs);
+            if (fused_) {
+                // input_ holds RAW values; emits d_values + full d_gate_logits
+                at::cuda::launch_parallel_scan_backward_fused(
+                    grad_output.data_ptr<float>(), gates_.data_ptr<float>(),
+                    gate_logits_.data_ptr<float>(), bd_cuda.data_ptr<float>(),
+                    hidden_.data_ptr<float>(), input_.data_ptr<float>(),
+                    grad_x_cu.mutable_data_ptr<float>(),
+                    grad_gl_cu.mutable_data_ptr<float>(),
+                    Bc, Tc, Dc, nullptr);
+            } else {
+                at::cuda::launch_parallel_scan_backward(
+                    grad_output.data_ptr<float>(), gates_.data_ptr<float>(),
+                    gate_logits_.data_ptr<float>(), bd_cuda.data_ptr<float>(),
+                    hidden_.data_ptr<float>(),
+                    grad_x_cu.mutable_data_ptr<float>(),
+                    grad_gl_cu.mutable_data_ptr<float>(),
+                    Bc, Tc, Dc, nullptr);
+            }
+            if (input_requires_grad_) result.push_back(grad_x_cu);
+            if (gate_logits_requires_grad_) result.push_back(grad_gl_cu);
+            input_ = Tensor(); gates_ = Tensor(); gate_logits_ = Tensor();
+            base_decay_ = Tensor(); hidden_ = Tensor();
+            return result;
+        }
+        if (fused_) {
+            throw std::runtime_error("fused ParallelScanBackward requires CUDA tensors");
+        }
+#endif
 
         // Move all tensors to CPU for computation
         Tensor grad_out_cpu = grad_output;
@@ -1697,6 +1804,24 @@ struct RotaryEmbeddingBackward : public Node {
 
         // Track if output should be CUDA
         bool output_cuda = grad.is_cuda();
+
+#ifdef PT_USE_CUDA
+        // Device-side fast path (batch_first layout, matches PIR usage).
+        if (output_cuda && batch_first_) {
+            auto szs = grad.sizes().vec();
+            int64_t Bc = szs[0];
+            int64_t Dc = szs.back();
+            Tensor cos_cu = cos_cache_.is_cuda() ? cos_cache_ : at::to_cuda(cos_cache_);
+            Tensor sin_cu = sin_cache_.is_cuda() ? sin_cache_ : at::to_cuda(sin_cache_);
+            Tensor gi_cu = at::empty_cuda(szs);
+            at::cuda::launch_rotary_backward(
+                grad.data_ptr<float>(), cos_cu.data_ptr<float>(),
+                sin_cu.data_ptr<float>(), gi_cu.mutable_data_ptr<float>(),
+                Bc, seq_len_, Dc, dim_, nullptr);
+            cos_cache_ = Tensor(); sin_cache_ = Tensor();
+            return {gi_cu};
+        }
+#endif
 
         // Move to CPU for computation
         Tensor grad_cpu = grad;
@@ -1842,6 +1967,31 @@ struct EmbeddingBackward : public Node {
 
         // Track if weight is on CUDA
         bool weight_cuda = weight_.is_cuda();
+
+#ifdef PT_USE_CUDA
+        // Device-side fast path: atomicAdd scatter into GPU grad_weight.
+        if (grad_output.is_cuda() && weight_cuda) {
+            Tensor idx_cu = indices_.is_cuda() ? indices_ : at::to_cuda(indices_);
+            int64_t N_cu = idx_cu.numel();
+            auto* meta_cu = ensure_autograd_meta_impl(const_cast<Tensor&>(weight_));
+            Tensor gw_cu;
+            if (meta_cu->grad_) {
+                gw_cu = Tensor(meta_cu->grad_);
+                if (!gw_cu.is_cuda()) gw_cu = at::to_cuda(gw_cu);
+            } else {
+                gw_cu = at::empty_cuda({num_embeddings_, embedding_dim_});
+                at::cuda::launch_fill(gw_cu.mutable_data_ptr<float>(), 0.0f,
+                                      num_embeddings_ * embedding_dim_, nullptr);
+            }
+            at::cuda::launch_embedding_backward(
+                grad_output.data_ptr<float>(), idx_cu.data_ptr<float>(),
+                gw_cu.mutable_data_ptr<float>(), N_cu, embedding_dim_,
+                num_embeddings_, padding_idx_, has_padding_idx_ ? 1 : 0, nullptr);
+            meta_cu->grad_ = gw_cu.getIntrusivePtr();
+            indices_ = Tensor(); weight_ = Tensor();
+            return {};
+        }
+#endif
 
         // Move tensors to CPU for computation
         Tensor grad_out_cpu = grad_output;

@@ -27,6 +27,7 @@
 #include <fstream>
 #include <iostream>
 #include <vector>
+#include <tuple>
 #include <chrono>
 #include <random>
 #include <algorithm>
@@ -962,6 +963,11 @@ class TextDataset {
     int64_t block_size_;
     std::mt19937 rng_;
     bool is_tokens_ = false;   // true: file is uint32 BPE tokens; false: raw bytes
+    // Loss-mask (инструкт-SFT): uint8 файл <data>.mask, 1 байт на токен —
+    // 1=обучать (ответ ассистента), 0=не обучать (промпт/инструмент).
+    uint8_t* mask_ptr_ = nullptr;
+    size_t mask_size_ = 0;
+    bool has_mask_ = false;
 
 public:
     TextDataset(const std::string& path, int64_t block_size, int seed = 42)
@@ -991,6 +997,24 @@ public:
         data_size_ = mmap_size_;
         std::cout << "mmap'd " << data_size_ << " bytes from " << path
                   << (is_tokens_ ? " [uint32 BPE tokens]" : " [byte chars]") << std::endl;
+        // Компаньон-маска: <path>.mask (uint8, 1 байт/токен) для инструкт-SFT.
+        if (is_tokens_) {
+            std::string mpath = path + ".mask";
+            int mfd = open(mpath.c_str(), O_RDONLY);
+            if (mfd >= 0) {
+                struct stat mst; fstat(mfd, &mst);
+                mask_size_ = mst.st_size;
+                mask_ptr_ = (uint8_t*)mmap(nullptr, mask_size_, PROT_READ,
+                                           MAP_PRIVATE | MAP_POPULATE, mfd, 0);
+                close(mfd);
+                if (mask_ptr_ == MAP_FAILED) { mask_ptr_ = nullptr; }
+                else {
+                    has_mask_ = true;
+                    std::cout << "mmap'd loss-mask " << mask_size_ << " bytes from "
+                              << mpath << std::endl;
+                }
+            }
+        }
 #else
         std::ifstream file(path, std::ios::binary);
         if (!file) {
@@ -1010,26 +1034,32 @@ public:
     ~TextDataset() {
 #ifdef __linux__
         if (mmap_ptr_) munmap(mmap_ptr_, mmap_size_);
+        if (mask_ptr_) munmap(mask_ptr_, mask_size_);
 #endif
     }
 
     bool empty() const { return data_size_ == 0; }
     size_t size() const { return data_size_; }
     bool is_tokens() const { return is_tokens_; }
+    bool has_mask() const { return has_mask_; }
 
-    std::pair<Tensor, Tensor> get_batch(int64_t batch_size) {
+    // Возвращает (input, target, mask). mask[b,t] соответствует target[b,t]:
+    // 1=обучать, 0=нет. Без .mask-файла — всё 1 (обычный LM).
+    std::tuple<Tensor, Tensor, Tensor> get_batch(int64_t batch_size) {
         int64_t T = block_size_;
         Tensor input = at::empty({batch_size, T});
         Tensor target = at::empty({batch_size, T});
+        Tensor maskT = at::empty({batch_size, T});
         float* inp = input.mutable_data_ptr<float>();
         float* tgt = target.mutable_data_ptr<float>();
+        float* msk = maskT.mutable_data_ptr<float>();
 
         // For uint32 token files: total tokens = data_size / 4
         int64_t n_units = is_tokens_ ? (int64_t)(data_size_ / 4) : (int64_t)data_size_;
         int64_t max_start = n_units - T - 1;
         if (max_start <= 0) {
             std::cerr << "Data too short for block_size=" << T << std::endl;
-            return {input, target};
+            return {input, target, maskT};
         }
 
         std::uniform_int_distribution<int64_t> dist(0, max_start);
@@ -1049,6 +1079,8 @@ public:
                 for (int64_t t = 0; t < T; t++) {
                     inp[b * T + t] = static_cast<float>(tokens[start + t]);
                     tgt[b * T + t] = static_cast<float>(tokens[start + t + 1]);
+                    // mask позиции = маска ЦЕЛЕВОГО токена (start+t+1)
+                    msk[b * T + t] = has_mask_ ? (float)mask_ptr_[start + t + 1] : 1.0f;
                 }
             }
         } else {
@@ -1060,11 +1092,12 @@ public:
                 for (int64_t t = 0; t < T; t++) {
                     inp[b * T + t] = static_cast<float>(data_ptr_[start + t]);
                     tgt[b * T + t] = static_cast<float>(data_ptr_[start + t + 1]);
+                    msk[b * T + t] = 1.0f;
                 }
             }
         }
 
-        return {input, target};
+        return {input, target, maskT};
     }
 };
 
@@ -1336,24 +1369,30 @@ int main(int argc, char** argv) {
         float running_loss = 0.0f;
         int running_count = 0;
 
-        // Input/target buffers (reused)
+        // Input/target/mask buffers (reused). mask_buf=nullptr при отсутствии
+        // .mask — тогда train_step обучает по всем токенам (обычный LM).
         std::vector<float> inp_buf(tokens_per_step);
         std::vector<float> tgt_buf(tokens_per_step);
+        std::vector<float> mask_buf(tokens_per_step);
+        const bool use_mask = dataset.has_mask();
 
         for (int64_t step = train_cfg.start_step + 1; step <= train_cfg.max_steps; step++) {
             float lr = get_lr(step, train_cfg);
 
             // Get batch
-            auto [input, target] = dataset.get_batch(train_cfg.batch_size);
+            auto [input, target, maskt] = dataset.get_batch(train_cfg.batch_size);
             memcpy(inp_buf.data(), input.data_ptr<float>(), tokens_per_step * sizeof(float));
             memcpy(tgt_buf.data(), target.data_ptr<float>(), tokens_per_step * sizeof(float));
+            if (use_mask)
+                memcpy(mask_buf.data(), maskt.data_ptr<float>(), tokens_per_step * sizeof(float));
+            const float* mask_ptr = use_mask ? mask_buf.data() : nullptr;
 
             float loss;
             if (use_sync) {
                 // Local SGD: each process trains independently at full speed.
                 // Every grad_accum steps, average WEIGHTS across all processes.
                 // This gives ~968 tok/s (4×242) with minimal sync overhead.
-                loss = trainer.train_step(inp_buf.data(), tgt_buf.data(), lr, train_cfg.weight_decay);
+                loss = trainer.train_step(inp_buf.data(), tgt_buf.data(), lr, train_cfg.weight_decay, mask_ptr);
 
                 if (step % train_cfg.grad_accum == 0) {
                     // Sync weights: flatten → shared memory average → scatter
@@ -1373,7 +1412,7 @@ int main(int argc, char** argv) {
                 }
             } else {
                 // Single-process: original train_step
-                loss = trainer.train_step(inp_buf.data(), tgt_buf.data(), lr, train_cfg.weight_decay);
+                loss = trainer.train_step(inp_buf.data(), tgt_buf.data(), lr, train_cfg.weight_decay, mask_ptr);
             }
 
             running_loss += loss;
@@ -1503,8 +1542,9 @@ int main(int argc, char** argv) {
         auto t_start = std::chrono::high_resolution_clock::now();
         long rss_before = debug ? get_rss_mb() : 0;
 
-        // Get batch
-        auto [input, target] = dataset.get_batch(train_cfg.batch_size);
+        // Get batch (non-fused autograd путь — маска не используется)
+        auto [input, target, mask_unused] = dataset.get_batch(train_cfg.batch_size);
+        (void)mask_unused;
         auto t_batch = std::chrono::high_resolution_clock::now();
 
         // Forward pass

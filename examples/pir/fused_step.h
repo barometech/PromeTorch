@@ -294,15 +294,29 @@ static void adam_update(float* param, const float* grad,
 // ============================================================================
 // Softmax cross-entropy loss + backward (fused)
 // ============================================================================
+// mask (опционально): mask[i]==0 → позиция НЕ обучается (loss+grad=0).
+// Инструкт-SFT: маскируем токены промпта/инструмента, учим только ответ
+// ассистента. Нормировка — по числу ОБУЧАЕМЫХ позиций, не по BT.
 static float cross_entropy_fwd_bwd(const float* logits, const float* targets,
                                     float* dlogits,
-                                    int64_t BT, int64_t V) {
+                                    int64_t BT, int64_t V,
+                                    const float* mask = nullptr) {
     double total_loss = 0.0;
+    int64_t n_train = 0;
+    if (mask) { for (int64_t i = 0; i < BT; i++) if (mask[i] != 0.0f) n_train++; }
+    else n_train = BT;
+    if (n_train == 0) n_train = 1;
+    const float scale = 1.0f / (float)n_train;
 
     #pragma omp parallel for schedule(static) reduction(+:total_loss)
     for (int64_t i = 0; i < BT; i++) {
         const float* li = logits + i * V;
         float* di = dlogits + i * V;
+        // Маскированная позиция: нулевой градиент, в loss не входит.
+        if (mask && mask[i] == 0.0f) {
+            for (int64_t v = 0; v < V; v++) di[v] = 0.0f;
+            continue;
+        }
         int target = (int)targets[i];
         // Кламп как в embed_forward: токен ≥ V (битый файл / неверный
         // --vocab_size) иначе даёт запись за границу di → порча кучи.
@@ -326,16 +340,13 @@ static float cross_entropy_fwd_bwd(const float* logits, const float* targets,
         // FIX 4.1: log-sum-exp trick — more numerically stable than -log(softmax+eps)
         total_loss += (max_val - li[target] + std::log(sum_exp));
 
-        // Gradient: softmax - one_hot
+        // Gradient: softmax - one_hot, нормировка по числу обучаемых позиций
         di[target] -= 1.0f;
-
-        // Normalize by batch
-        float scale = 1.0f / BT;
         for (int64_t v = 0; v < V; v++)
             di[v] *= scale;
     }
 
-    return (float)(total_loss / BT);
+    return (float)(total_loss / (double)n_train);
 }
 
 } // namespace fused
