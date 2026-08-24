@@ -39,8 +39,8 @@ strong { color: #1a3a8a; }
 <table>
 <tr><th>Метрика</th><th>Значение</th></tr>
 <tr><td><strong>Lossless TP-4 baseline</strong> (qwen3-4B Q4_K_M)</td><td><strong>11.4 tok/s</strong></td></tr>
-<tr><td>llama.cpp upstream на этой же модели и железе</td><td>1.64 tok/s (32t single-proc, raw)</td></tr>
-<tr><td><strong>Ускорение PromeTorch / llama.cpp</strong></td><td><strong>×6.95</strong></td></tr>
+<tr><td>llama.cpp upstream на этой же модели и железе</td><td>1.82 tok/s (32t single-proc, tg64; см. llama_cpp_bench_log.txt)</td></tr>
+<tr><td><strong>Ускорение PromeTorch / llama.cpp</strong></td><td><strong>×6.3</strong></td></tr>
 <tr><td>Lossy режим (PT_LAYER_SKIP=12 alt слоёв)</td><td>15.5 tok/s</td></tr>
 <tr><td>Качество русского после BUG-12 fix (per-block scale + lm_head FP)</td><td>работает на mistral-7b/qwen2.5-7b/qwen3-8b; qwen3-4B частично</td></tr>
 <tr><td>Прогноз для Эльбрус-16С (DDR4-3200 ×8 каналов)</td><td><strong>~30 tok/s</strong> (×2.66 от ПСП)</td></tr>
@@ -62,10 +62,10 @@ strong { color: #1a3a8a; }
 <p>Теоретический предел: 76.8 / 2.4 ≈ <strong>32 tok/s</strong> при идеальном ПСП-utilization.</p>
 <p>Практически удалось достичь <strong>11.4 tok/s = 35.6 % от пика</strong>.</p>
 
-<p>Это на <strong>×6.95</strong> быстрее llama.cpp (1.64 tok/s = 5.1 % от пика) — главное достижение</p>
+<p>Это на <strong>×6.3</strong> быстрее llama.cpp (1.82 tok/s = 5.7 % от пика) — главное достижение</p>
 <p>работы. Время одной decode-итерации:</p>
 <ul>
-<li>llama.cpp: ~610 мс / токен (один процесс на 32 ядрах не утилизирует ПСП)</li>
+<li>llama.cpp: ~550 мс / токен (один процесс на 32 ядрах не утилизирует ПСП)</li>
 <li>PromeTorch TP-4: <strong>88 мс / токен</strong> (4 процесса на 4 NUMA, локальная ПСП на ядро)</li>
 </ul>
 
@@ -424,7 +424,7 @@ numactl --interleave=all ~/llama.cpp/build/bin/llama-bench \
 <h2>8. Заключение</h2>
 
 <p>PromeTorch на Эльбрус 8C2 достиг <strong>11.4 tok/s lossless</strong> на qwen3-4B Q4_K_M, что</p>
-<p>на <strong>×6.95</strong> быстрее официального llama.cpp upstream на этой же машине. Это</p>
+<p>на <strong>×6.3</strong> быстрее официального llama.cpp upstream на этой же машине. Это</p>
 <p>делает Эльбрус 8C2 практически пригодным для interactive LLM inference на</p>
 <p>российском железе.</p>
 
